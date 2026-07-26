@@ -238,11 +238,19 @@ class APIClient:
 
 ## Using Swagger UI (/docs)
 
-1. Open `http://localhost/docs`
+**Development only.** `/docs`, `/redoc` and `/openapi.json` return 404 in
+production: they publish the entire API surface, including every admin route,
+to anyone who can reach the port. Startup refuses to proceed if
+`ENABLE_API_DOCS` is left on with `ENVIRONMENT=production`.
+
+1. Open `http://localhost/docs` (development stack)
 2. Click **"Authorize"** button (🔓 lock icon)
 3. Enter: `Bearer YOUR_TOKEN_HERE` (include "Bearer" and space)
 4. Click **"Authorize"**
 5. All endpoints will now use your token automatically
+
+To explore the API against production, read the endpoint reference in
+`Docs/50_API_DOCUMENTATION.md` instead.
 
 ## Token Expiration
 
@@ -3500,7 +3508,7 @@ MULTI_CAMERA_MIN_CO_APPEARANCES=2
             },
             {
                 "title": "Platform Hardening: What Changed",
-                "description": "Required reading for anyone calling the API or reviewing admin pages: CSRF, background jobs, versioned lifecycles, structured errors and safe defaults",
+                "description": "Required reading for anyone calling the API or reviewing admin pages: CSRF, background jobs, versioned lifecycles, structured errors, safe defaults and production deployment",
                 "content": """
 # Platform Hardening: What Changed
 
@@ -3510,6 +3518,42 @@ Model Management) were overhauled for security, correctness and scale.
 
 If you write scripts against this API, **sections 1 and 2 below are required
 reading** — some request shapes changed.
+
+---
+
+## 0. Deployment differences you will notice immediately
+
+The deployment layer was hardened separately from the application code. If you
+are moving from the development stack to production, these change what works:
+
+| | Development | Production |
+|---|---|---|
+| URL | `http://localhost` | `https://<your-host>` (HTTP redirects, 308) |
+| `/docs`, `/redoc` | available | **404** |
+| `/metrics` | available | restricted to the monitoring network |
+| Session cookie | `access_token` | `__Host-access_token`, `Secure`, `SameSite=Strict` |
+| Admin credential | seeded `admin` | created once from a secret file, must be rotated on first login |
+| Database role | `postgres` superuser | `fr_app`, cannot create roles, extensions or databases |
+| Redis | unauthenticated | ACL user with a password |
+| Postgres / Redis / Ollama ports | published | not published — only nginx is |
+
+**Production fails closed.** If the configuration is unsafe the container exits
+with code `78` and prints every problem it found, each with its fix, without
+ever printing a secret value. That is not a bug to work around — each check
+corresponds to a hole that was demonstrated, not theorised. Setting
+`ENVIRONMENT=development` disables all of them and must never be used to run a
+real deployment.
+
+Browsers must trust the internal CA before HTTPS works. See
+`Docs/61_DEPLOYMENT_RUNBOOK.md` for the per-platform commands, and
+`Docs/60_BACKUP_AND_RESTORE.md` for backup and restore.
+
+One operational constraint worth knowing: **`WORKERS` must stay 1.** Runtime
+settings, the SQL-agent cancellation registry, the single-flight job guards,
+webhook dedup and FAISS autosave all live in one process. Raising it does not
+crash anything — admin settings would reach one worker in N, "single-flight"
+jobs could run N times at once, and cancelling a running query would usually
+hit a worker that never saw it.
 
 ---
 
