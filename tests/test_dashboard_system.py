@@ -280,7 +280,31 @@ def test_unknown_display_window_and_show_all_toggle(token):
     hidden until show_all=true. Both stay stored (this never deletes)."""
     import random
     from datetime import datetime, timedelta
-    page_size = random.randint(50, 99)  # unique-ish cache key per test run
+    page_size = random.randint(50, 99)
+
+    def _drop_unknown_cache():
+        """Seeding goes straight to SQL, so the application never gets the
+        chance to invalidate its unknown-page cache. Only 50 page_size values
+        exist, so relying on a random one to miss the cache collides across
+        runs and serves a page from a previous run whose rows were deleted.
+
+        Connects to Redis directly: this test runs in its own process, so the
+        application's cache_manager singleton is uninitialized here and its
+        invalidate_prefix would silently no-op.
+        """
+        async def _run():
+            import redis.asyncio as aioredis
+            from config import settings
+            client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+            try:
+                batch = []
+                async for key in client.scan_iter(match="cache:unknown*", count=500):
+                    batch.append(key)
+                if batch:
+                    await client.delete(*batch)
+            finally:
+                await client.aclose()
+        run_async(_run())
 
     def _seed(days_old, name):
         async def _run():
@@ -306,6 +330,7 @@ def test_unknown_display_window_and_show_all_toggle(token):
 
     fresh_id = _seed(0, "pytest-udw-fresh")
     old_id = _seed(10, "pytest-udw-old")
+    _drop_unknown_cache()
     try:
         status, dflt, _ = _http(
             "GET", f"/api/admin/unknown?page=1&page_size={page_size}", token=token)

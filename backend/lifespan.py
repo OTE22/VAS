@@ -113,20 +113,47 @@ async def lifespan(app: FastAPI):
         logger.info("  🔄 Running database migrations...")
         logger.info("  " + "=" * 60)
         try:
-            from backend.utils.migrations import run_migrations_async
-            migration_success = await run_migrations_async()
-            if migration_success:
-                logger.info("  ✅ Database migrations completed successfully")
+            from backend.utils.migrations import (
+                run_migrations_async_detailed,
+                should_fail_startup,
+            )
+
+            migration_result = await run_migrations_async_detailed(settings.MIGRATIONS_MODE)
+            if migration_result.ok:
+                logger.info(
+                    "  ✅ Database migrations OK (%s, revision=%s)",
+                    migration_result.outcome.value, migration_result.current_revision,
+                )
                 initialized_components.append("migrations")
+            elif should_fail_startup(
+                migration_result,
+                environment=settings.ENVIRONMENT,
+                fail_closed=settings.MIGRATIONS_FAIL_CLOSED,
+            ):
+                # Serving against an unverified schema silently corrupts data
+                # and returns wrong answers. Refuse instead.
+                logger.error(
+                    "  ❌ Database migrations not satisfied: %s — %s",
+                    migration_result.outcome.value, migration_result.detail,
+                )
+                raise RuntimeError(
+                    f"database migrations not satisfied: {migration_result.outcome.value}"
+                )
             else:
-                logger.error("  ❌ Database migrations failed!")
-                logger.error("  ⚠️  Continuing startup, but database schema may be incomplete")
-                logger.error("  ⚠️  Please check migration logs above and fix any issues")
-                logger.error("  ⚠️  You may need to run migrations manually: alembic upgrade head")
+                logger.warning(
+                    "  ⚠️  Migrations not satisfied (%s: %s) — continuing because "
+                    "ENVIRONMENT=%s and MIGRATIONS_FAIL_CLOSED is off",
+                    migration_result.outcome.value, migration_result.detail,
+                    settings.ENVIRONMENT,
+                )
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"  ❌ Exception during migration check: {type(e).__name__}: {e}")
             logger.exception("  Migration exception details:")
-            logger.warning("  ⚠️  Continuing startup (migrations may be applied manually)")
+            if settings.is_production or settings.MIGRATIONS_FAIL_CLOSED:
+                raise
+            logger.warning("  ⚠️  Continuing startup (development)")
         logger.info("  " + "=" * 60)
         logger.info("")
 
@@ -783,33 +810,24 @@ async def lifespan(app: FastAPI):
             health_status["queue"] = False
             logger.error(f"  ❌ Queue health check failed: {e}")
 
-        # Create default admin user if no users exist
+        # Create the first administrator, if the deployment has none yet.
+        # The credential comes from configuration (preferably a Docker secret
+        # file) and is never logged.
         try:
-            from db_models import User
-            from sqlalchemy import select
-            from backend.auth.password import hash_password
-            
-            async with db_manager.get_session() as db:
-                user_result = await db.execute(select(User))
-                users = user_result.scalars().all()
-                
-                if len(users) == 0:
-                    # Create default admin user
-                    default_admin = User(
-                        username="admin",
-                        email="admin@example.com",
-                        password_hash=hash_password("admin123"),  # Change this in production!
-                        full_name="System Administrator",
-                        role="admin",
-                        can_use_chatbot=True,
-                        is_active=True
-                    )
-                    db.add(default_admin)
-                    await db.commit()
-                    logger.info("✅ Created default admin user (username: admin, password: admin123)")
-                    logger.warning("⚠️  PLEASE CHANGE THE DEFAULT ADMIN PASSWORD IN PRODUCTION!")
+            from backend.services.bootstrap_admin import (
+                BootstrapAdminError,
+                ensure_bootstrap_admin,
+            )
+
+            outcome = await ensure_bootstrap_admin(db_manager)
+            logger.info("  ✅ Bootstrap administrator: %s", outcome.value)
+        except BootstrapAdminError as e:
+            logger.error("  ❌ Bootstrap administrator requirement not satisfied: %s", e)
+            raise
         except Exception as e:
-            logger.warning(f"⚠️  Could not create default admin user: {e}")
+            logger.error("  ❌ Bootstrap administrator check failed: %s: %s", type(e).__name__, e)
+            if settings.is_production:
+                raise
 
         # SQL Agent initialization
         global sql_agent_instance, SQL_AGENT_AVAILABLE, SQL_AGENT_ROUTER_AVAILABLE, set_sql_agent_instance

@@ -4,7 +4,7 @@ Stores detection results in PostgreSQL for persistence
 """
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, Boolean, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, Boolean, Enum as SQLEnum, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
@@ -225,6 +225,13 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
+    # Set on a bootstrapped administrator so the seeded credential cannot become
+    # a permanent one. server_default matters: older code paths still INSERT
+    # without naming this column.
+    must_change_password = Column(
+        Boolean, default=False, nullable=False, server_default=text("false")
+    )
+    password_changed_at = Column(DateTime, nullable=True)
 
     # Relationships
     pipeline_access = relationship("UserPipelineAccess", back_populates="user", cascade="all, delete-orphan")

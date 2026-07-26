@@ -4,14 +4,23 @@ Database Migration Utilities
 Automatic Alembic migration runner for startup
 """
 
-import os
-import sys
+import argparse
 import logging
+import os
+import re
 import subprocess
+import sys
 import time
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# sysexits.h
+EX_CONFIG = 78
+EX_TEMPFAIL = 75
 
 
 def _get_sync_database_url() -> str:
@@ -110,15 +119,116 @@ def _wait_for_database(max_wait_seconds: float = 60.0, retry_interval: float = 2
                 engine.dispose()
 
 
-def run_alembic_migrations():
+class MigrationOutcome(str, Enum):
+    """What actually happened, as opposed to a bare True/False.
+
+    The old boolean contract reported a missing alembic.ini and a missing
+    alembic binary as success, so the application would serve traffic against
+    a schema it had never verified.
     """
-    Run Alembic migrations automatically at startup.
-    Detects and applies any pending database schema changes.
-    Enhanced with detailed logging.
-    
-    Returns:
-        bool: True if migrations succeeded or were not needed, False on error
+
+    UP_TO_DATE = "up_to_date"
+    APPLIED = "applied"
+    CONFIG_MISSING = "config_missing"
+    TOOLING_MISSING = "tooling_missing"
+    DB_UNREACHABLE = "db_unreachable"
+    REVISION_MISMATCH = "revision_mismatch"
+    MULTIPLE_HEADS = "multiple_heads"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    outcome: MigrationOutcome
+    current_revision: Optional[str] = None
+    head_revision: Optional[str] = None
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome in (MigrationOutcome.UP_TO_DATE, MigrationOutcome.APPLIED)
+
+
+_REVISION_RE = re.compile(r"\b([0-9a-f]{8,32})\b")
+
+
+def _parse_revision_ids(output: str) -> List[str]:
+    """Extract revision ids from `alembic current` / `alembic heads` output.
+
+    Alembic interleaves INFO lines and annotates heads, e.g.
+    'a5c6d7e8f9b0 (head)', so a naive split produces junk.
     """
+    revisions: List[str] = []
+    for line in (output or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("INFO") or line.startswith("WARN"):
+            continue
+        match = _REVISION_RE.match(line)
+        if match and match.group(1) not in revisions:
+            revisions.append(match.group(1))
+    return revisions
+
+
+def _compare_revisions(
+    current: List[str],
+    heads: List[str],
+    expected: str = "",
+) -> MigrationResult:
+    """Decide whether the live schema is the one this code expects."""
+    current_repr = ",".join(current) or None
+    head_repr = ",".join(heads) or None
+
+    if len(heads) > 1:
+        return MigrationResult(
+            MigrationOutcome.MULTIPLE_HEADS, current_repr, head_repr,
+            f"branched migration history: {heads}",
+        )
+
+    if expected and heads and heads[0] != expected:
+        return MigrationResult(
+            MigrationOutcome.REVISION_MISMATCH, current_repr, head_repr,
+            f"head {heads[0]} does not match the pinned MIGRATIONS_EXPECTED_HEAD {expected}",
+        )
+
+    if set(current) != set(heads):
+        return MigrationResult(
+            MigrationOutcome.REVISION_MISMATCH, current_repr, head_repr,
+            f"database is at {current_repr or 'no revision'} but code expects {head_repr}",
+        )
+
+    return MigrationResult(MigrationOutcome.UP_TO_DATE, current_repr, head_repr)
+
+
+def should_fail_startup(
+    result: MigrationResult,
+    *,
+    environment: str,
+    fail_closed: bool = False,
+) -> bool:
+    """Whether an unsatisfied migration state must abort startup.
+
+    Pure, so the policy is testable without a database or a container.
+    """
+    if result.ok:
+        return False
+    is_production = str(environment or "").strip().lower() in ("production", "prod")
+    return bool(is_production or fail_closed)
+
+
+def run_alembic_migrations_detailed(mode: str = "run") -> MigrationResult:
+    """
+    Run or verify Alembic migrations.
+
+    mode:
+        run    - wait for the database, `upgrade head`, then verify
+        verify - verify the current revision only; never writes
+        skip   - do nothing (the entrypoint already verified)
+    """
+    if str(mode).strip().lower() == "skip":
+        logger.info("🔄 Migrations skipped (MIGRATIONS_MODE=skip)")
+        return MigrationResult(MigrationOutcome.UP_TO_DATE, detail="skipped by configuration")
+
+    verify_only = str(mode).strip().lower() == "verify"
     logger.info("=" * 70)
     logger.info("🔄 DATABASE MIGRATION CHECK - Starting...")
     logger.info("=" * 70)
@@ -135,15 +245,21 @@ def run_alembic_migrations():
         logger.info(f"📁 Alembic config: {alembic_ini}")
         logger.info(f"📁 Versions directory: {versions_dir}")
         
+        # A missing config is NOT success: reporting it as such let the
+        # application serve requests against an unverified schema.
         if not alembic_ini.exists():
-            logger.warning("⚠️  alembic.ini not found, skipping migrations")
-            logger.warning(f"   Expected location: {alembic_ini}")
-            return True
-        
+            logger.error("❌ alembic.ini not found — cannot verify the database schema")
+            logger.error(f"   Expected location: {alembic_ini}")
+            return MigrationResult(
+                MigrationOutcome.CONFIG_MISSING, detail=f"alembic.ini missing at {alembic_ini}"
+            )
+
         if not alembic_dir.exists():
-            logger.warning("⚠️  alembic directory not found, skipping migrations")
-            logger.warning(f"   Expected location: {alembic_dir}")
-            return True
+            logger.error("❌ alembic directory not found — cannot verify the database schema")
+            logger.error(f"   Expected location: {alembic_dir}")
+            return MigrationResult(
+                MigrationOutcome.CONFIG_MISSING, detail=f"alembic dir missing at {alembic_dir}"
+            )
         
         # Check for migration files
         if versions_dir.exists():
@@ -165,7 +281,10 @@ def run_alembic_migrations():
         wait_seconds = float(os.getenv("MIGRATION_DB_WAIT_SECONDS", "60"))
         retry_interval = float(os.getenv("MIGRATION_DB_RETRY_INTERVAL_SECONDS", "2"))
         if not _wait_for_database(wait_seconds, retry_interval):
-            return False
+            return MigrationResult(
+                MigrationOutcome.DB_UNREACHABLE,
+                detail=f"database unreachable after {wait_seconds}s",
+            )
         
         # Change to alembic directory for Alembic commands
         original_cwd = os.getcwd()
@@ -260,11 +379,23 @@ def run_alembic_migrations():
                 else:
                     logger.info("   ℹ️  No migration history (no migrations created yet)")
             
-            # Step 5: Run migrations (upgrade to head)
+            # Step 5: Run migrations (upgrade to head), unless verifying only
+            expected_head = os.getenv("MIGRATIONS_EXPECTED_HEAD", "") or ""
+
+            if verify_only:
+                logger.info("")
+                logger.info("📍 Step 5: Verifying revision (MIGRATIONS_MODE=verify, no writes)...")
+                verdict = _verify_revision(alembic_cmd, alembic_dir, expected_head)
+                if verdict.ok:
+                    logger.info(f"   ✅ Schema verified at revision {verdict.current_revision}")
+                else:
+                    logger.error(f"   ❌ Schema verification failed: {verdict.detail}")
+                return verdict
+
             logger.info("")
             logger.info("📍 Step 5: Applying migrations (upgrade to head)...")
             logger.info("   This may take a moment...")
-            
+
             result = subprocess.run(
                 alembic_cmd + ["upgrade", "head"],
                 capture_output=True,
@@ -303,11 +434,25 @@ def run_alembic_migrations():
                 else:
                     logger.info("   ✅ Database is up to date (no migrations needed)")
                 
+                # Applying without confirming leaves the same blind spot the
+                # boolean contract had: verify the resulting revision.
+                verdict = _verify_revision(alembic_cmd, alembic_dir, expected_head)
+                if not verdict.ok:
+                    logger.error("")
+                    logger.error("=" * 70)
+                    logger.error(f"❌ POST-MIGRATION VERIFICATION FAILED: {verdict.detail}")
+                    logger.error("=" * 70)
+                    return verdict
+
                 logger.info("")
                 logger.info("=" * 70)
                 logger.info("✅ DATABASE MIGRATION CHECK - Completed Successfully")
                 logger.info("=" * 70)
-                return True
+                return MigrationResult(
+                    MigrationOutcome.APPLIED if migrations_applied else MigrationOutcome.UP_TO_DATE,
+                    verdict.current_revision,
+                    verdict.head_revision,
+                )
             else:
                 logger.error("")
                 logger.error("❌ MIGRATION FAILED!")
@@ -324,8 +469,11 @@ def run_alembic_migrations():
                 logger.error("=" * 70)
                 logger.error("❌ DATABASE MIGRATION CHECK - Failed")
                 logger.error("=" * 70)
-                return False
-                
+                return MigrationResult(
+                    MigrationOutcome.FAILED,
+                    detail=_summarize_stderr(result.stderr) or "alembic upgrade returned non-zero",
+                )
+
         finally:
             # Restore original working directory
             os.chdir(original_cwd)
@@ -337,15 +485,17 @@ def run_alembic_migrations():
         logger.error("❌ Migration timeout (exceeded 5 minutes)")
         logger.error("   This may indicate a database connection issue or very large migration")
         logger.error("=" * 70)
-        return False
+        return MigrationResult(MigrationOutcome.FAILED, detail="alembic timed out")
     except FileNotFoundError as e:
-        logger.warning("")
-        logger.warning("=" * 70)
-        logger.warning("⚠️  Alembic not found, skipping migrations")
-        logger.warning(f"   Error: {e}")
-        logger.warning("   Install with: pip install alembic")
-        logger.warning("=" * 70)
-        return True  # Non-critical, continue startup
+        # Missing tooling is NOT success: without alembic the schema cannot be
+        # verified at all, which is exactly when serving is most dangerous.
+        logger.error("")
+        logger.error("=" * 70)
+        logger.error("❌ Alembic not found — the database schema cannot be verified")
+        logger.error(f"   Error: {e}")
+        logger.error("   Install with: pip install alembic")
+        logger.error("=" * 70)
+        return MigrationResult(MigrationOutcome.TOOLING_MISSING, detail=str(e))
     except Exception as e:
         logger.error("")
         logger.error("=" * 70)
@@ -353,21 +503,95 @@ def run_alembic_migrations():
         logger.error("")
         logger.exception("Full exception traceback:")
         logger.error("=" * 70)
-        return False
+        return MigrationResult(
+            MigrationOutcome.FAILED, detail=f"{type(e).__name__}: {e}"
+        )
 
 
-async def run_migrations_async():
-    """
-    Async wrapper for running migrations.
-    Runs migrations in a thread pool to avoid blocking.
-    """
-    import asyncio
-    from fastapi.concurrency import run_in_threadpool
-    
+def _verify_revision(alembic_cmd, alembic_dir, expected_head: str = "") -> MigrationResult:
+    """Compare the database's current revision against the code's head."""
     try:
-        result = await run_in_threadpool(run_alembic_migrations)
-        return result
+        current_proc = subprocess.run(
+            alembic_cmd + ["current"], capture_output=True, text=True,
+            timeout=30, cwd=str(alembic_dir),
+        )
+        heads_proc = subprocess.run(
+            alembic_cmd + ["heads"], capture_output=True, text=True,
+            timeout=30, cwd=str(alembic_dir),
+        )
+    except subprocess.TimeoutExpired:
+        return MigrationResult(MigrationOutcome.FAILED, detail="alembic current/heads timed out")
+
+    if current_proc.returncode != 0 or heads_proc.returncode != 0:
+        return MigrationResult(
+            MigrationOutcome.FAILED,
+            detail=_summarize_stderr(current_proc.stderr or heads_proc.stderr),
+        )
+
+    return _compare_revisions(
+        _parse_revision_ids(current_proc.stdout),
+        _parse_revision_ids(heads_proc.stdout),
+        expected_head,
+    )
+
+
+def run_alembic_migrations() -> bool:
+    """Backwards-compatible boolean wrapper for existing callers."""
+    return run_alembic_migrations_detailed(
+        os.getenv("MIGRATIONS_MODE", "run")
+    ).ok
+
+
+async def run_migrations_async_detailed(mode: str = "run") -> MigrationResult:
+    """Async wrapper returning the full outcome."""
+    from fastapi.concurrency import run_in_threadpool
+
+    try:
+        return await run_in_threadpool(run_alembic_migrations_detailed, mode)
     except Exception as e:
-        logger.error(f"Failed to run migrations: {e}")
-        return False
+        logger.error(f"Failed to run migrations: {type(e).__name__}: {e}")
+        return MigrationResult(MigrationOutcome.FAILED, detail=f"{type(e).__name__}: {e}")
+
+
+async def run_migrations_async() -> bool:
+    """Backwards-compatible boolean wrapper."""
+    result = await run_migrations_async_detailed(os.getenv("MIGRATIONS_MODE", "run"))
+    return result.ok
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI for the dedicated migration job and the startup preflight.
+
+        python -m backend.utils.migrations --upgrade-head
+        python -m backend.utils.migrations --verify
+
+    Exit codes: 0 ok, 75 (EX_TEMPFAIL) database unreachable — retryable,
+    78 (EX_CONFIG) anything else — do not start the application.
+    """
+    parser = argparse.ArgumentParser(prog="backend.utils.migrations")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--upgrade-head", action="store_true",
+                       help="apply pending migrations, then verify")
+    group.add_argument("--verify", action="store_true",
+                       help="verify the current revision without writing")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    mode = "verify" if args.verify else "run"
+    result = run_alembic_migrations_detailed(mode)
+
+    if result.ok:
+        print(f"migrations: {result.outcome.value} (revision={result.current_revision})")
+        return 0
+
+    sys.stderr.write(
+        f"migrations: {result.outcome.value} — {result.detail}\n"
+        f"  current={result.current_revision} head={result.head_revision}\n"
+    )
+    return EX_TEMPFAIL if result.outcome is MigrationOutcome.DB_UNREACHABLE else EX_CONFIG
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
