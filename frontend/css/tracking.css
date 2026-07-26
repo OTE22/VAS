@@ -1,0 +1,1096 @@
+/* ============================================
+   ChatGPT-STYLE TRACKING PAGE
+   Authentic ChatGPT Dark Mode Design
+   ============================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --main-surface-primary: #212121;
+    --main-surface-secondary: #2f2f2f;
+    --main-surface-tertiary: #424242;
+    --sidebar-surface: #171717;
+    --text-primary: #ececec;
+    --text-secondary: #b4b4b4;
+    --text-tertiary: #8e8e8e;
+    --accent-green: #10a37f;
+    --accent-green-hover: #1a7f64;
+    --border-light: rgba(255, 255, 255, 0.1);
+    --border-medium: rgba(255, 255, 255, 0.15);
+}
+
+html {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: 'Söhne', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif;
+    background: var(--main-surface-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================
+   MAIN CONTAINER
+   ============================================ */
+
+.military-main-container {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    position: relative;
+    z-index: 1;
+    padding: 0;
+    min-height: 0;
+    background: var(--main-surface-primary);
+}
+
+.intelligence-chat-container {
+    flex: 1;
+    position: relative;
+    background: var(--main-surface-primary);
+    border: none;
+    border-radius: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    transition: margin-left 0.2s ease;
+}
+
+/* ChatGPT layout: on desktop the open sidebar pushes content instead of overlaying it */
+@media (min-width: 969px) {
+    .history-sidebar.open ~ .intelligence-chat-container {
+        margin-left: 260px;
+    }
+}
+
+.chat-grid-overlay,
+.chat-scan-line {
+    display: none;
+}
+
+.chat-inner {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    background: var(--main-surface-primary);
+}
+
+/* ============================================
+   CHAT MESSAGES AREA
+   ============================================ */
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-height: 0;
+    background: var(--main-surface-primary);
+    scroll-behavior: smooth;
+    width: 100%;
+}
+
+.chat-messages::-webkit-scrollbar {
+    width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* ============================================
+   WELCOME MESSAGE - Authentic ChatGPT Style
+   ============================================ */
+
+.welcome-message {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1.5rem 3rem;
+    text-align: center;
+    max-width: 768px;
+    margin: auto;
+    width: 100%;
+    min-height: 50vh;
+}
+
+.welcome-message.hidden {
+    display: none;
+}
+
+.welcome-icon {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 52px;
+    margin-bottom: 1.25rem;
+    background: var(--main-surface-primary);
+    border: 2px solid var(--border-light);
+    border-radius: 50%;
+}
+
+.welcome-icon i {
+    font-size: 1.5rem;
+    color: var(--text-primary);
+}
+
+.icon-pulse {
+    display: none;
+}
+
+.welcome-text h3 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+    letter-spacing: -0.01em;
+}
+
+.welcome-text p {
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 0.5rem;
+    font-size: 0.9375rem;
+    font-weight: 400;
+    max-width: 480px;
+}
+
+.security-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--text-tertiary) !important;
+    font-size: 0.8125rem !important;
+    font-weight: 400 !important;
+    margin-top: 0.75rem !important;
+    padding: 0;
+    background: transparent;
+    border-radius: 0;
+}
+
+.security-note i {
+    color: var(--accent-green);
+    font-size: 0.8125rem;
+}
+
+.example-queries {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin-top: 2rem;
+    text-align: center;
+    width: 100%;
+    max-width: 768px;
+}
+
+.example-title {
+    display: none;
+}
+
+.example-queries ul {
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem;
+    padding: 0;
+    margin: 0;
+}
+
+.example-queries li {
+    background: var(--main-surface-secondary);
+    border: 1px solid var(--main-surface-tertiary);
+    padding: 0.875rem 1rem;
+    border-radius: 16px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 400;
+    text-align: center;
+    line-height: 1.4;
+}
+
+.example-queries li:hover {
+    background: var(--main-surface-tertiary);
+}
+
+/* ============================================
+   CHAT INPUT AREA - Authentic ChatGPT Style
+   ============================================ */
+
+.chat-input-area {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5rem 1rem 1.5rem;
+    background: var(--main-surface-primary);
+    width: 100%;
+    position: relative;
+    z-index: 10;
+}
+
+.input-wrapper {
+    display: flex;
+    align-items: flex-end;
+    background: var(--main-surface-secondary);
+    border-radius: 24px;
+    border: 1px solid var(--main-surface-tertiary);
+    padding: 0.625rem 0.75rem 0.625rem 1rem;
+    width: 100%;
+    max-width: 768px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input-wrapper:focus-within {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.input-icon {
+    display: none;
+}
+
+.military-chat-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0.5rem 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+    font-weight: 400;
+    font-family: inherit;
+    outline: none;
+    resize: none;
+    max-height: 200px;
+    min-height: 24px;
+    line-height: 1.5;
+}
+
+.military-chat-input::placeholder {
+    color: var(--text-tertiary);
+    font-weight: 400;
+}
+
+.military-send-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--text-primary);
+    border: none;
+    border-radius: 50%;
+    color: var(--main-surface-primary);
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+    margin-left: 0.5rem;
+    flex-shrink: 0;
+}
+
+.military-send-btn:hover:not(:disabled) {
+    opacity: 0.85;
+}
+
+.military-send-btn:disabled {
+    background: var(--main-surface-tertiary);
+    color: var(--text-tertiary);
+    cursor: not-allowed;
+}
+
+.military-send-btn i {
+    font-size: 0.875rem;
+}
+
+/* Stop-generating mode: red square button (ChatGPT style) */
+.military-send-btn.stop-mode {
+    background: var(--text-primary);
+    color: var(--main-surface-primary);
+}
+
+.military-send-btn.stop-mode:hover {
+    opacity: 0.85;
+    background: #ef4444;
+    color: #ffffff;
+}
+
+.military-send-btn span,
+.military-send-btn .btn-glow {
+    display: none;
+}
+
+.input-footer {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+    width: 100%;
+    max-width: 768px;
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+    font-weight: 400;
+}
+
+.status-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-green);
+}
+
+.status-indicator.active {
+    background: var(--accent-green);
+}
+
+.instructions-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    padding: 0.375rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 400;
+    transition: color 0.15s ease;
+}
+
+.instructions-btn:hover {
+    color: var(--text-secondary);
+}
+
+/* ============================================
+   CHAT MESSAGES - Authentic ChatGPT Style
+   ============================================ */
+
+.chat-message {
+    display: flex;
+    justify-content: center;
+    padding: 1.5rem 1rem;
+    width: 100%;
+    animation: messageSlideIn 0.2s ease-out;
+}
+
+@keyframes messageSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* User Messages - No distinct background */
+.chat-message.user {
+    background: transparent;
+}
+
+/* Assistant Messages - No distinct background (ChatGPT style - uniform background) */
+.chat-message.assistant,
+.chat-message.bot {
+    background: transparent;
+}
+
+/* Message Inner Container - both user and assistant share one centered column
+   (ChatGPT: same left/right bounds for every message) */
+.message-inner {
+    display: flex;
+    max-width: 768px;
+    width: 100%;
+    margin: 0 auto;
+}
+
+/* User row: bubble aligned to the right edge of the shared column */
+.chat-message.user .message-inner {
+    justify-content: flex-end;
+}
+
+/* Avatars removed to match current ChatGPT (no per-message avatars) */
+.message-avatar {
+    display: none;
+}
+
+/* Message Content */
+.message-content {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+/* User content hugs the right; bubble limited to ~70% of the column */
+.message-content.user {
+    align-items: flex-end;
+    align-self: flex-end;
+    max-width: 70%;
+}
+
+/* Assistant content spans the full column width, pinned to the left.
+   align-self/margin-right guarantee left alignment even while streaming. */
+.message-content.assistant,
+.message-content.report-message {
+    max-width: 100%;
+    width: 100%;
+    align-items: flex-start;
+    align-self: flex-start;
+    margin-right: auto;
+    text-align: left;
+}
+
+/* Username Label */
+.message-username {
+    display: none;
+    /* Hidden in ChatGPT style */
+}
+
+/* Message Text */
+.message-text {
+    color: var(--text-primary);
+    line-height: 1.6;
+    font-size: 1rem;
+    font-weight: 400;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+/* User message text - gray rounded bubble (ChatGPT style) */
+.chat-message.user .message-text {
+    background: var(--main-surface-secondary);
+    padding: 0.625rem 1rem;
+    border-radius: 1.5rem;
+    max-width: 100%;
+    display: inline-block;
+    text-align: left;
+}
+
+/* Assistant message text - clean text, no bubble */
+.chat-message.assistant .message-text,
+.chat-message.bot .message-text {
+    background: transparent;
+    padding: 0;
+}
+
+.message-text strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.message-text em {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Code blocks in messages */
+.message-text code {
+    background: var(--main-surface-tertiary);
+    padding: 0.125rem 0.375rem;
+    border-radius: 4px;
+    font-family: 'Söhne Mono', Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+    font-size: 0.875em;
+}
+
+.message-text pre {
+    background: var(--sidebar-surface);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.75rem 0;
+}
+
+.message-text pre code {
+    background: transparent;
+    padding: 0;
+}
+
+/* Markdown tables in assistant messages (SQL results) */
+.table-scroll {
+    overflow-x: auto;
+    margin: 0.75rem 0;
+    border: 1px solid var(--main-surface-tertiary);
+    border-radius: 8px;
+}
+
+.md-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    line-height: 1.4;
+}
+
+.md-table th {
+    background: var(--main-surface-secondary);
+    color: var(--text-primary);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.625rem 0.875rem;
+    border-bottom: 1px solid var(--main-surface-tertiary);
+    white-space: nowrap;
+}
+
+.md-table td {
+    padding: 0.5rem 0.875rem;
+    border-bottom: 1px solid var(--border-light);
+    color: var(--text-primary);
+}
+
+.md-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.md-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+/* Note shown when the user stops generation mid-stream */
+.stopped-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-top: 0.75rem;
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--main-surface-tertiary);
+    border-radius: 12px;
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+}
+
+/* Message Header - for reports */
+.message-header {
+    display: none;
+    /* Hidden by default */
+}
+
+/* Message action buttons - borderless subtle icons below the reply (ChatGPT style) */
+.export-buttons {
+    display: flex;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+}
+
+.export-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    padding: 0.375rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.export-btn:hover {
+    background: var(--main-surface-secondary);
+    color: var(--text-primary);
+}
+
+.export-pdf:hover {
+    color: #ef4444;
+}
+
+.export-word:hover {
+    color: #3b82f6;
+}
+
+/* ============================================
+   TYPING INDICATOR - ChatGPT Style
+   ============================================ */
+
+.typing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1.5rem;
+    background: var(--main-surface-secondary);
+}
+
+.typing-indicator::before {
+    content: '';
+    width: 28px;
+    height: 28px;
+    background: var(--accent-green);
+    border-radius: 4px;
+    margin-right: 1rem;
+    flex-shrink: 0;
+}
+
+.typing-indicator span {
+    width: 6px;
+    height: 6px;
+    background: var(--text-tertiary);
+    border-radius: 50%;
+    animation: typingBounce 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) {
+    animation-delay: 0s;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes typingBounce {
+
+    0%,
+    60%,
+    100% {
+        transform: translateY(0);
+    }
+
+    30% {
+        transform: translateY(-4px);
+    }
+}
+
+/* ============================================
+   HISTORY SIDEBAR - ChatGPT Style
+   ============================================ */
+
+.history-sidebar {
+    position: fixed;
+    left: 0;
+    /* Position below navbar - navbar is typically ~60-70px tall */
+    top: 60px;
+    width: 260px;
+    /* Adjust height to account for navbar */
+    height: calc(100vh - 60px);
+    /* ChatGPT sidebar surface */
+    background: var(--sidebar-surface);
+    border-right: 1px solid var(--border-light);
+    /* Lower z-index than navbar (1000) but above content */
+    z-index: 999;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+}
+
+.history-sidebar.open {
+    transform: translateX(0);
+}
+
+.sidebar-header {
+    padding: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.new-chat-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0.625rem 0.75rem;
+    background: transparent;
+    border: 1px solid var(--border-medium);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 400;
+    transition: background 0.15s ease;
+}
+
+.new-chat-btn:hover {
+    background: var(--main-surface-primary);
+}
+
+.new-chat-btn i {
+    font-size: 0.875rem;
+}
+
+.sidebar-close-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.sidebar-close-btn:hover {
+    color: var(--text-primary);
+    background: var(--main-surface-primary);
+}
+
+.sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0.25rem 0.5rem;
+}
+
+.sidebar-content::-webkit-scrollbar {
+    width: 4px;
+}
+
+.sidebar-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.sidebar-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+}
+
+.history-loading,
+.history-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+    text-align: center;
+    color: var(--text-tertiary);
+}
+
+.history-loading i,
+.history-empty i {
+    font-size: 1.5rem;
+    margin-bottom: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.history-empty p {
+    font-size: 0.875rem;
+    margin-bottom: 0.25rem;
+    color: var(--text-secondary);
+}
+
+.history-empty small {
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+
+.history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.history-day-group {
+    margin-bottom: 0.25rem;
+}
+
+.history-day-header {
+    padding: 0.5rem 0.75rem 0.25rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-tertiary);
+}
+
+.history-item {
+    position: relative;
+    padding: 0.625rem 2.25rem 0.625rem 0.75rem;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.1s ease;
+    color: var(--text-primary);
+}
+
+/* Delete button - appears on hover (ChatGPT style) */
+.history-item-delete {
+    position: absolute;
+    right: 0.375rem;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 26px;
+    height: 26px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    font-size: 0.75rem;
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.history-item:hover .history-item-delete {
+    display: flex;
+}
+
+.history-item-delete:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.12);
+}
+
+.history-item-delete:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+.history-item::before {
+    display: none;
+}
+
+.history-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.history-item.active {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.history-item-query {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.history-item-meta {
+    display: none;
+    /* Cleaner look */
+}
+
+/* ============================================
+   SIDEBAR TOGGLE BUTTON
+   ============================================ */
+
+.sidebar-toggle-btn {
+    position: fixed;
+    left: 0.75rem;
+    /* Position below navbar */
+    top: 75px;
+    width: 36px;
+    height: 36px;
+    background: var(--main-surface-secondary);
+    border: 1px solid var(--border-medium);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    cursor: pointer;
+    /* Below navbar (1000) but above sidebar (999) */
+    z-index: 998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.sidebar-toggle-btn:hover {
+    background: var(--main-surface-tertiary);
+    color: var(--text-primary);
+}
+
+.sidebar-toggle-btn.hidden {
+    display: none;
+}
+
+/* ============================================
+   FOOTER - Minimal ChatGPT Style
+   ============================================ */
+
+.military-footer {
+    background: var(--main-surface-primary);
+    padding: 0.5rem 1rem;
+    border-top: 1px solid var(--border-light);
+    flex-shrink: 0;
+}
+
+.footer-content {
+    max-width: 768px;
+    margin: 0 auto;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.footer-credits {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+    font-weight: 400;
+}
+
+.footer-credits i {
+    color: var(--accent-green);
+    font-size: 0.75rem;
+}
+
+.department-name {
+    color: var(--accent-green);
+}
+
+.footer-copyright {
+    display: none;
+    /* Cleaner footer */
+}
+
+/* ============================================
+   RESPONSIVE DESIGN
+   ============================================ */
+
+@media (max-width: 768px) {
+    .welcome-message {
+        padding: 1.5rem 1rem 2rem;
+        min-height: 40vh;
+    }
+
+    .welcome-icon {
+        width: 44px;
+        height: 44px;
+    }
+
+    .welcome-icon i {
+        font-size: 1.25rem;
+    }
+
+    .welcome-text h3 {
+        font-size: 1.25rem;
+    }
+
+    .example-queries ul {
+        grid-template-columns: 1fr;
+    }
+
+    .example-queries li {
+        padding: 0.75rem;
+    }
+
+    .input-wrapper {
+        padding: 0.5rem;
+    }
+
+    .chat-message {
+        padding: 1rem;
+    }
+
+    .chat-message.user .message-text {
+        max-width: 85%;
+    }
+
+    .history-sidebar {
+        width: 280px;
+    }
+
+    .sidebar-toggle-btn {
+        left: 0.5rem;
+        top: 4.5rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .welcome-text h3 {
+        font-size: 1.125rem;
+    }
+
+    .welcome-text p {
+        font-size: 0.875rem;
+    }
+
+    .example-queries li {
+        font-size: 0.8125rem;
+    }
+
+    .military-chat-input {
+        font-size: 0.9375rem;
+    }
+
+    .chat-message.user .message-text {
+        max-width: 90%;
+    }
+
+    .message-avatar {
+        width: 24px;
+        height: 24px;
+        font-size: 0.625rem;
+    }
+}
+
+/* ============================================
+   HEADER OVERRIDES
+   ============================================ */
+
+.military-header,
+.header-overlay,
+.header-content,
+.military-badge,
+.arabic-title,
+.header-divider,
+.english-subtitle {
+    display: none;
+}
+
+/* Ensure navbar uses admin.css styling - don't hide it */
+.military-navbar {
+    display: flex !important;
+    /* Use admin.css colors - ensure it's visible with proper styling */
+    position: relative;
+    z-index: 1000;
+}

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Advanced Search Intelligence - Search for faces with multi-face detection, watchlists, and analytics">
+    <meta name="keywords" content="admin panel, face search, watchlist, intelligence">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>Advanced Search - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-search.css">
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-search-plus" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">Advanced Search Intelligence</h1>
+                        <p class="page-description">Multi-face detection • Watchlist checking • Intelligence analytics</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <a href="/admin/search-history" class="intelligence-admin-btn" title="View Search History">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-history" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">SEARCH HISTORY</span>
+                        </div>
+                    </a>
+                    <a href="/admin/intelligence" class="intelligence-admin-btn" title="Intelligence Analysis">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-brain" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">INTELLIGENCE</span>
+                        </div>
+                    </a>
+                    <a href="/admin/watchlists" class="intelligence-admin-btn" title="Manage Watchlists">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-list-alt" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">WATCHLISTS</span>
+                        </div>
+                    </a>
+                    <a href="/admin/live-alerts" class="intelligence-admin-btn" title="Live Alerts">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-bell" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">LIVE ALERTS</span>
+                        </div>
+                    </a>
+                </div>
+            </header>
+
+            <div class="search-container">
+                <!-- Left Panel: Search Controls -->
+                <div class="search-panel">
+                    <!-- Image Upload -->
+                    <div class="search-section">
+                        <h3><i class="fas fa-image"></i> Upload Image</h3>
+                        <div class="upload-area" id="upload-area">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <p>Drag & drop image here</p>
+                            <small>or click to browse</small>
+                        </div>
+                        <input type="file" id="image-input" accept="image/*" style="display: none;">
+                        <div class="image-preview" id="image-preview">
+                            <img id="preview-img" src="" alt="Preview">
+                            <button class="remove-image" id="remove-image" title="Remove image">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        
+                        <!-- Batch Upload Toggle -->
+                        <div class="toggle-container" style="margin-top: 0.75rem;">
+                            <span><i class="fas fa-layer-group"></i> Batch Mode</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="batch-mode-toggle">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div id="batch-files-container" style="display: none;">
+                            <input type="file" id="batch-input" accept="image/*" multiple style="display: none;">
+                            <div class="batch-files-list" id="batch-files-list"></div>
+                        </div>
+                    </div>
+
+                    <!-- Search Options -->
+                    <div class="search-section">
+                        <h3><i class="fas fa-sliders-h"></i> Search Options</h3>
+                        
+                        <div class="form-group">
+                            <label>Search Scope</label>
+                            <select class="form-control" id="search-scope">
+                                <option value="both">All Identities (Known + Unknown)</option>
+                                <option value="known">Known Identities Only</option>
+                                <option value="unknown">Unknown Faces Only</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Max Results Per Face</label>
+                            <select class="form-control" id="top-k">
+                                <option value="5">5 matches</option>
+                                <option value="10" selected>10 matches</option>
+                                <option value="20">20 matches</option>
+                                <option value="50">50 matches</option>
+                            </select>
+                        </div>
+
+                        <div class="toggle-container">
+                            <span><i class="fas fa-shield-alt"></i> Check Watchlists</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="check-watchlist" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Filters -->
+                    <div class="search-section">
+                        <h3><i class="fas fa-filter"></i> Filters</h3>
+                        
+                        <div class="form-group">
+                            <label>Date From</label>
+                            <input type="date" class="form-control" id="date-from">
+                        </div>
+
+                        <div class="form-group">
+                            <label>Date To</label>
+                            <input type="date" class="form-control" id="date-to">
+                        </div>
+
+                        <div class="form-group">
+                            <label>Pipeline / Camera</label>
+                            <select class="form-control" id="pipeline-filter">
+                                <option value="">All Cameras</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Negative Search (Exclude) -->
+                    <div class="search-section exclude-section">
+                        <div class="section-header-enhanced">
+                            <div class="section-icon">
+                                <i class="fas fa-ban"></i>
+                            </div>
+                            <div class="section-title-group">
+                                <h3>Exclude from Results</h3>
+                                <p class="section-subtitle">Filter out specific identities or watchlists</p>
+                            </div>
+                        </div>
+                        
+                        <!-- Exclude Identities -->
+                        <div class="exclude-group">
+                            <label class="exclude-label">
+                                <i class="fas fa-user-slash"></i>
+                                <span>Exclude Identities</span>
+                                <span class="exclude-count" id="exclude-identities-count">0</span>
+                            </label>
+                            
+                            <div class="exclude-input-wrapper">
+                                <input 
+                                    type="text" 
+                                    class="exclude-search-input" 
+                                    id="exclude-identities-search" 
+                                    placeholder="Search identities to exclude..."
+                                    autocomplete="off"
+                                >
+                                <i class="fas fa-search exclude-search-icon"></i>
+                            </div>
+                            
+                            <div class="exclude-dropdown" id="exclude-identities-dropdown">
+                                <div class="exclude-dropdown-content" id="exclude-identities-list">
+                                    <div class="exclude-loading">Loading identities...</div>
+                                </div>
+                            </div>
+                            
+                            <div class="exclude-selected-chips" id="exclude-identities-chips"></div>
+                        </div>
+
+                        <!-- Exclude Watchlists -->
+                        <div class="exclude-group">
+                            <label class="exclude-label">
+                                <i class="fas fa-list-alt"></i>
+                                <span>Exclude Watchlists</span>
+                                <span class="exclude-count" id="exclude-watchlists-count">0</span>
+                            </label>
+                            
+                            <div class="exclude-input-wrapper">
+                                <input 
+                                    type="text" 
+                                    class="exclude-search-input" 
+                                    id="exclude-watchlists-search" 
+                                    placeholder="Search watchlists to exclude..."
+                                    autocomplete="off"
+                                >
+                                <i class="fas fa-search exclude-search-icon"></i>
+                            </div>
+                            
+                            <div class="exclude-dropdown" id="exclude-watchlists-dropdown">
+                                <div class="exclude-dropdown-content" id="exclude-watchlists-list">
+                                    <div class="exclude-loading">Loading watchlists...</div>
+                                </div>
+                            </div>
+                            
+                            <div class="exclude-selected-chips" id="exclude-watchlists-chips"></div>
+                        </div>
+                        
+                        <!-- Hidden selects for form submission -->
+                        <select class="form-control" id="exclude-identities" multiple style="display: none;"></select>
+                        <select class="form-control" id="exclude-watchlists" multiple style="display: none;"></select>
+                    </div>
+
+                    <!-- Search Button -->
+                    <button class="search-btn" id="search-btn" disabled>
+                        <i class="fas fa-search"></i>
+                        <span>Search</span>
+                    </button>
+
+                    <!-- Quick Actions -->
+                    <div class="quick-actions">
+                        <button class="quick-action" id="quality-check-btn" title="Check image quality without searching">
+                            <i class="fas fa-check-circle"></i> Quality Check
+                        </button>
+                        <button class="quick-action" id="clear-results-btn" title="Clear search results">
+                            <i class="fas fa-trash"></i> Clear
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Right Panel: Results -->
+                <div class="results-panel" id="results-panel">
+                    <div class="results-header">
+                        <h2><i class="fas fa-poll-h"></i> Search Results</h2>
+                        <div class="results-actions">
+                            <button class="results-action-btn" id="export-btn" title="Export Results" style="display: none;">
+                                <i class="fas fa-download"></i> Export
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="results-tabs" id="results-tabs" style="display: none;">
+                        <button class="results-tab active" data-tab="matches">
+                            <i class="fas fa-users"></i> Matches
+                            <span class="badge" id="matches-count">0</span>
+                        </button>
+                        <button class="results-tab" data-tab="alerts">
+                            <i class="fas fa-exclamation-triangle"></i> Alerts
+                            <span class="badge" id="alerts-count">0</span>
+                        </button>
+                        <button class="results-tab" data-tab="summary">
+                            <i class="fas fa-chart-bar"></i> Summary
+                        </button>
+                    </div>
+
+                    <div class="results-content" id="results-content">
+                        <!-- Empty State -->
+                        <div class="empty-state" id="empty-state">
+                            <i class="fas fa-search"></i>
+                            <h3>Upload an image to search</h3>
+                            <p>The system will detect all faces and find matching identities</p>
+                        </div>
+
+                        <!-- Matches Tab -->
+                        <div id="matches-tab" class="tab-content" style="display: none;"></div>
+
+                        <!-- Alerts Tab -->
+                        <div id="alerts-tab" class="tab-content" style="display: none;"></div>
+
+                        <!-- Summary Tab -->
+                        <div id="summary-tab" class="tab-content" style="display: none;"></div>
+                    </div>
+
+                    <!-- Searching Overlay -->
+                    <div class="searching-overlay" id="searching-overlay" style="display: none;">
+                        <div class="searching-spinner"></div>
+                        <div class="searching-text">Analyzing faces...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Export Modal -->
+    <div class="modal" id="export-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Export Search Results</h3>
+                <button class="modal-close" id="close-export-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Export Format:</label>
+                    <select id="export-format" class="form-control">
+                        <option value="csv">CSV (Spreadsheet)</option>
+                        <option value="json">JSON (Structured Data)</option>
+                        <option value="pdf">PDF (Formatted Report)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Options:</label>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <label style="display: flex; align-items: center; gap: 0.5rem; font-weight: normal;">
+                            <input type="checkbox" id="export-include-images">
+                            Include Images (JSON only)
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.5rem; font-weight: normal;">
+                            <input type="checkbox" id="export-include-quality" checked>
+                            Include Quality Scores
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="cancel-export-btn">Cancel</button>
+                <button class="btn-primary" id="confirm-export-btn">
+                    <i class="fas fa-download"></i> Export
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Enhanced Batch Upload Progress Modal -->
+    <div class="modal" id="batch-progress-modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3>Batch Search Progress</h3>
+            </div>
+            <div class="modal-body">
+                <div class="batch-progress-overall">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="batch-overall-progress" style="width: 0%"></div>
+                    </div>
+                    <div class="progress-text">
+                        <span id="batch-progress-text">0 / 0 images processed</span>
+                    </div>
+                </div>
+                <div class="batch-images-list" id="batch-images-list" style="max-height: 400px; overflow-y: auto; margin-top: 1rem;">
+                    <!-- Individual image progress items -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="close-batch-progress-btn" style="display: none;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="intelligence-footer">
+        <div class="footer-content">
+            <div class="footer-brand">
+                <i class="fas fa-shield-alt"></i>
+                <span>ITDIR-AI DEPARTMENT</span>
+            </div>
+            <div class="footer-copyright">
+                © 2025 Face Recognition Service. All rights reserved.
+            </div>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <script src="/frontend/js/admin-navbar.js"></script>
+    <script src="/frontend/js/admin-search.js"></script>
+</body>
+</html>

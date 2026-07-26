@@ -1,0 +1,18 @@
+{
+  "session_id": "session_20260113_202106",
+  "created_at": "2026-01-13T20:21:10.094162",
+  "message_count": 1,
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "Track Joey",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    }
+  ]
+}

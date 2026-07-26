@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="User management admin panel - Control user access, permissions, and system administration">
+    <meta name="keywords" content="admin panel, user management, access control, permissions">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>User Management - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-users-cog" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">User Management</h1>
+                        <p class="page-description">Manage user accounts, roles, permissions, and access control</p>
+                    </div>
+                </div>
+                <button id="create-user-btn" class="intelligence-admin-btn" type="button" aria-label="Create new user account">
+                    <div class="btn-background"></div>
+                    <div class="btn-content">
+                        <div class="btn-icon-wrapper">
+                            <i class="fas fa-user-plus" aria-hidden="true"></i>
+                            <div class="btn-icon-glow"></div>
+                        </div>
+                        <div class="btn-text">
+                            <span class="btn-title">Create New User</span>
+                            <span class="btn-subtitle">Add User Account</span>
+                        </div>
+                        <div class="btn-arrow">
+                            <i class="fas fa-arrow-right"></i>
+                        </div>
+                    </div>
+                </button>
+            </header>
+
+            <!-- User List -->
+            <section class="table-section" aria-labelledby="users-table-heading">
+                <div class="section-header">
+                    <div class="section-icon-wrapper">
+                        <i class="fas fa-table"></i>
+                        <div class="section-icon-glow"></div>
+                    </div>
+                    <div class="section-title-text">
+                        <h2 id="users-table-heading">User Accounts</h2>
+                        <p class="section-subtitle">System User Registry</p>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="intelligence-data-table" role="table" aria-label="User accounts list">
+                    <thead>
+                        <tr role="row">
+                            <th scope="col" role="columnheader">Username</th>
+                            <th scope="col" role="columnheader">Email</th>
+                            <th scope="col" role="columnheader">Full Name</th>
+                            <th scope="col" role="columnheader">Role</th>
+                            <th scope="col" role="columnheader">Chatbot Access</th>
+                            <th scope="col" role="columnheader">Pipelines</th>
+                            <th scope="col" role="columnheader">Status</th>
+                            <th scope="col" role="columnheader">Actions</th>
+                        </tr>
+                    </thead>
+                    <tfoot>
+                        <tr>
+                            <td colspan="8" style="padding: 1.5rem; text-align: center; width: 100%;">
+                                <div style="display: flex; justify-content: center; align-items: center; gap: 1rem; width: 100%;">
+                                    <button class="btn-secondary" onclick="filterBlockedUsers()" id="btn-blocked-only">
+                                        <i class="fas fa-ban"></i> BLOCKED USERS ONLY
+                                    </button>
+                                    <button class="btn-secondary btn-active" onclick="showAllUsers()" id="btn-all-users">
+                                        <i class="fas fa-users"></i> ALL USER
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    </tfoot>
+                    <tbody id="users-table-body" role="rowgroup">
+                        <tr role="row">
+                            <td colspan="8" class="loading" role="cell">
+                                <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                                Loading user accounts...
+                            </td>
+                        </tr>
+                    </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Create/Edit User Modal -->
+    <div id="user-modal" class="modal security-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" style="display: none;">
+        <div class="modal-content security-modal-content">
+            <div class="security-grid-overlay"></div>
+            <div class="security-scan-line"></div>
+            <div class="security-modal-inner">
+                <header class="security-modal-header">
+                    <div class="security-header-left">
+                        <div class="security-status-indicator">
+                            <div class="status-pulse"></div>
+                            <span class="status-text">SYSTEM ACTIVE</span>
+                        </div>
+                        <h2 id="modal-title" class="security-title">
+                            <i class="fas fa-user-shield"></i>
+                            <span class="title-text">USER ACCOUNT MANAGEMENT</span>
+                            <span class="title-subtitle" id="modal-subtitle">CREATE NEW USER PROFILE</span>
+                        </h2>
+                    </div>
+                    <button class="security-modal-close" type="button" onclick="closeModal()" aria-label="Close dialog">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </header>
+                <form id="user-form" class="security-modal-form" method="post" novalidate>
+                    <input type="hidden" id="user-id" name="user_id">
+
+                    <div class="security-form-grid">
+                        <div class="security-form-section">
+                            <div class="section-header">
+                                <i class="fas fa-id-badge"></i>
+                                <span>IDENTITY VERIFICATION</span>
+                            </div>
+                            
+                            <div class="security-form-group">
+                                <label for="modal-username" class="security-label">
+                                    <span class="label-icon"><i class="fas fa-user"></i></span>
+                                    <span class="label-text">USERNAME</span>
+                                    <span class="security-badge required">REQUIRED</span>
+                                </label>
+                                <div class="security-input-wrapper">
+                                    <input
+                                        type="text"
+                                        id="modal-username"
+                                        name="username"
+                                        required
+                                        autocomplete="off"
+                                        autocapitalize="none"
+                                        spellcheck="false"
+                                        aria-required="true"
+                                        placeholder="ENTER_USERNAME"
+                                        class="security-input"
+                                    >
+                                    <div class="input-glow"></div>
+                                    <div class="input-scan"></div>
+                                </div>
+                            </div>
+
+                            <div class="security-form-group">
+                                <label for="modal-email" class="security-label">
+                                    <span class="label-icon"><i class="fas fa-envelope"></i></span>
+                                    <span class="label-text">EMAIL ADDRESS</span>
+                                    <span class="security-badge required">REQUIRED</span>
+                                </label>
+                                <div class="security-input-wrapper">
+                                    <input
+                                        type="email"
+                                        id="modal-email"
+                                        name="email"
+                                        required
+                                        autocomplete="email"
+                                        aria-required="true"
+                                        placeholder="user@domain.com"
+                                        class="security-input"
+                                    >
+                                    <div class="input-glow"></div>
+                                    <div class="input-scan"></div>
+                                </div>
+                            </div>
+
+                            <div class="security-form-group">
+                                <label for="modal-password" class="security-label">
+                                    <span class="label-icon"><i class="fas fa-key"></i></span>
+                                    <span class="label-text">ACCESS CREDENTIALS</span>
+                                    <span class="security-badge required" id="password-badge">REQUIRED</span>
+                                </label>
+                                <div class="security-input-wrapper">
+                                    <input
+                                        type="password"
+                                        id="modal-password"
+                                        name="password"
+                                        autocomplete="new-password"
+                                        aria-describedby="password-help"
+                                        minlength="6"
+                                        placeholder="••••••••"
+                                        class="security-input"
+                                    >
+                                    <div class="input-glow"></div>
+                                    <div class="input-scan"></div>
+                                    <div class="password-strength-indicator">
+                                        <div class="strength-bar"></div>
+                                    </div>
+                                </div>
+                                <small id="password-help" class="security-help">
+                                    <i class="fas fa-info-circle"></i>
+                                    Leave empty to maintain current credentials (edit mode)
+                                </small>
+                            </div>
+
+                            <div class="security-form-group">
+                                <label for="modal-full-name" class="security-label">
+                                    <span class="label-icon"><i class="fas fa-id-card"></i></span>
+                                    <span class="label-text">FULL NAME</span>
+                                    <span class="security-badge optional">OPTIONAL</span>
+                                </label>
+                                <div class="security-input-wrapper">
+                                    <input
+                                        type="text"
+                                        id="modal-full-name"
+                                        name="full_name"
+                                        autocomplete="name"
+                                        placeholder="FIRST_NAME LAST_NAME"
+                                        class="security-input"
+                                    >
+                                    <div class="input-glow"></div>
+                                    <div class="input-scan"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="security-form-section">
+                            <div class="section-header">
+                                <i class="fas fa-user-cog"></i>
+                                <span>ACCESS CONTROL & PERMISSIONS</span>
+                            </div>
+
+                            <div class="security-form-group">
+                                <label for="modal-role" class="security-label">
+                                    <span class="label-icon"><i class="fas fa-user-tag"></i></span>
+                                    <span class="label-text">SECURITY CLEARANCE LEVEL</span>
+                                    <span class="security-badge required">REQUIRED</span>
+                                </label>
+                                <div class="security-select-wrapper">
+                                    <select id="modal-role" name="role" required aria-required="true" class="security-select">
+                                        <option value="user">USER - Standard Access</option>
+                                        <option value="analyzer">ANALYZER - Analysis Access</option>
+                                        <option value="Observer">OBSERVER - Read-Only Access</option>
+                                    </select>
+                                    <div class="select-arrow"><i class="fas fa-chevron-down"></i></div>
+                                    <div class="select-glow"></div>
+                                </div>
+                            </div>
+
+                            <div class="security-permissions-grid">
+                                <div class="security-permission-card">
+                                    <label class="security-checkbox-label">
+                                        <input type="checkbox" id="modal-chatbot-access" name="chatbot_access" aria-label="Grant chatbot access" class="security-checkbox">
+                                        <div class="checkbox-custom">
+                                            <i class="fas fa-check"></i>
+                                        </div>
+                                        <div class="permission-content">
+                                            <div class="permission-icon"><i class="fas fa-robot"></i></div>
+                                            <div class="permission-info">
+                                                <span class="permission-title">AI CHATBOT ACCESS</span>
+                                                <span class="permission-desc">Enable AI assistant for tracking queries</span>
+                                            </div>
+                                        </div>
+                                    </label>
+                                </div>
+
+                                <div class="security-permission-card">
+                                    <label class="security-checkbox-label">
+                                        <input type="checkbox" id="modal-is-active" name="is_active" checked aria-label="Set account as active" class="security-checkbox">
+                                        <div class="checkbox-custom">
+                                            <i class="fas fa-check"></i>
+                                        </div>
+                                        <div class="permission-content">
+                                            <div class="permission-icon active"><i class="fas fa-power-off"></i></div>
+                                            <div class="permission-info">
+                                                <span class="permission-title">ACCOUNT STATUS</span>
+                                                <span class="permission-desc">Activate user account</span>
+                                            </div>
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="security-form-group">
+                                <label for="modal-pipelines" class="security-label">
+                                    <span class="label-icon"><i class="fas fa-video"></i></span>
+                                    <span class="label-text">VIDEO PIPELINE ACCESS</span>
+                                    <span class="security-badge optional">OPTIONAL</span>
+                                </label>
+                                <div id="pipeline-checkboxes" class="security-pipeline-grid" role="group" aria-label="Select accessible pipelines"></div>
+                                <small class="security-help">
+                                    <i class="fas fa-info-circle"></i>
+                                    Select video surveillance pipelines accessible to this user
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="security-form-actions">
+                        <div class="security-action-info">
+                            <i class="fas fa-shield-alt"></i>
+                            <span>All data encrypted and secured</span>
+                        </div>
+                        <div class="security-action-buttons">
+                            <button type="button" class="security-btn-cancel" onclick="closeModal()" aria-label="Cancel and close dialog">
+                                <i class="fas fa-times"></i>
+                                <span>ABORT</span>
+                            </button>
+                            <button type="submit" class="security-btn-submit" aria-label="Save user account">
+                                <span class="btn-glow"></span>
+                                <i class="fas fa-check-double"></i>
+                                <span>EXECUTE</span>
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete User Confirmation Modal -->
+    <div id="delete-user-modal" class="modal delete-confirmation-modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title" style="display: none;">
+        <div class="modal-content delete-modal-content">
+            <div class="delete-modal-backdrop"></div>
+            <div class="delete-modal-inner">
+                <header class="delete-modal-header">
+                    <div class="delete-icon-wrapper">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <div class="pulse-ring"></div>
+                    </div>
+                    <h2 id="delete-modal-title" class="delete-modal-title">⚠️ Delete User Confirmation</h2>
+                </header>
+                <div class="delete-modal-body">
+                    <div class="delete-warning-box">
+                        <p class="delete-user-info">
+                            <strong>You are about to delete:</strong><br>
+                            <span id="delete-user-name" class="delete-user-name"></span>
+                        </p>
+                    </div>
+                    <div class="delete-consequences">
+                        <h3 class="consequences-title">
+                            <i class="fas fa-exclamation-circle"></i>
+                            All data related to this user will be permanently deleted:
+                        </h3>
+                        <ul class="consequences-list">
+                            <li><i class="fas fa-comments"></i> All chatbot logs and conversation history</li>
+                            <li><i class="fas fa-history"></i> All user activity records</li>
+                            <li><i class="fas fa-key"></i> All user access permissions</li>
+                            <li><i class="fas fa-project-diagram"></i> All pipeline access assignments</li>
+                            <li><i class="fas fa-database"></i> All other user-related data</li>
+                        </ul>
+                    </div>
+                    <div class="delete-final-warning">
+                        <i class="fas fa-ban"></i>
+                        <strong>THIS ACTION CANNOT BE UNDONE!</strong>
+                    </div>
+                </div>
+                <div class="delete-modal-actions">
+                    <button type="button" class="btn-cancel-delete" onclick="closeDeleteModal()" aria-label="Cancel deletion">
+                        <i class="fas fa-times"></i>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" class="btn-confirm-delete" id="confirm-delete-btn" aria-label="Confirm deletion">
+                        <i class="fas fa-trash-alt"></i>
+                        <span>Delete User</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reset Password Modal -->
+    <div id="password-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="password-modal-title" style="display: none;">
+        <div class="modal-content">
+            <header class="modal-header">
+                <h2 id="password-modal-title">Reset Password</h2>
+                <button class="modal-close" type="button" onclick="closePasswordModal()" aria-label="Close dialog">&times;</button>
+            </header>
+            <form id="password-form" class="modal-form" method="post" novalidate>
+                <input type="hidden" id="password-user-id" name="user_id">
+
+                <fieldset class="form-fieldset">
+                    <legend class="visually-hidden">Password Reset</legend>
+
+                    <div class="form-group">
+                        <label for="new-password">
+                            <i class="fas fa-key" aria-hidden="true"></i>
+                            <span>New Password</span>
+                            <span class="required-indicator" aria-label="required">*</span>
+                        </label>
+                        <input
+                            type="password"
+                            id="new-password"
+                            name="new_password"
+                            required
+                            autocomplete="new-password"
+                            aria-required="true"
+                            minlength="6"
+                            placeholder="Enter new password"
+                        >
+                        <small class="form-help">Password must be at least 6 characters long</small>
+                    </div>
+                </fieldset>
+
+                <div class="form-actions">
+                    <button type="button" class="btn-secondary" onclick="closePasswordModal()" aria-label="Cancel password reset">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="submit" class="btn-primary" aria-label="Confirm password reset">
+                        <i class="fas fa-check" aria-hidden="true"></i>
+                        <span>Reset Password</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="military-footer" role="contentinfo">
+        <div class="footer-content">
+            <div class="footer-icon">
+                <i class="fas fa-shield-alt" aria-hidden="true"></i>
+            </div>
+            <div class="footer-text">
+                <span class="footer-title">Face Recognition Service</span>
+                <span class="footer-subtitle">Developed and maintained by <strong>ITDIR-AI DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <script src="/frontend/js/admin-users.js" defer></script>
+    <script>
+        // Set current year dynamically
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+    </script>
+</body>
+</html>

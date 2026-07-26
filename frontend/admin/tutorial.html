@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" class="tutorial-page">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Admin Tutorial & Learning Guide - Comprehensive guide to using the Face Recognition System">
+    <meta name="keywords" content="admin tutorial, learning guide, face recognition, system documentation">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#00ff96">
+
+    <title>Admin Tutorial & Learning Guide - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/tutorial.css">
+</head>
+<body class="tutorial-page">
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-graduation-cap" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">Admin Tutorial & Learning Guide</h1>
+                        <p class="page-description">Comprehensive guide to using the Face Recognition System</p>
+                    </div>
+                </div>
+            </header>
+
+            <div class="tutorial-container">
+                <div class="tutorial-nav">
+                    <button class="active" onclick="showSection('quick-start')">Quick Start</button>
+                    <button onclick="showSection('authentication')">API Authentication</button>
+                    <button onclick="showSection('understanding')">Understanding Unknown Faces</button>
+                    <button onclick="showSection('promote')">Promote to Known</button>
+                    <button onclick="showSection('merge')">Merge Identities</button>
+                    <button onclick="showSection('search')">Quick Search</button>
+                    <button onclick="showSection('advanced-search')">Advanced Search</button>
+                    <button onclick="showSection('settings')">System Settings</button>
+                    <button onclick="showSection('workflow')">System Workflow</button>
+                    <button onclick="showSection('advanced-sna')">Advanced SNA Features</button>
+                    <button onclick="showSection('examples')">API Examples</button>
+                </div>
+
+                <div id="loading" class="loading">
+                    <p>Loading tutorial content...</p>
+                </div>
+
+                <div id="error" class="error" style="display: none;"></div>
+
+                <div id="tutorial-content" style="display: none;">
+                    <!-- Content will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/admin-tutorial.js"></script>
+</body>
+</html>
+

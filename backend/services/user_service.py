@@ -1,0 +1,408 @@
+"""
+User Management Service
+=======================
+Admin-only user management operations.
+"""
+
+import os
+import sys
+import asyncio
+import logging
+from datetime import datetime
+from typing import List, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete
+
+# Add parent directory to path
+parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+from db_models import User, UserPipelineAccess, Pipeline, ChatbotAuditLog
+from backend.auth.password import hash_password
+
+logger = logging.getLogger(__name__)
+
+
+async def _hash_password_async(password: str) -> str:
+    """bcrypt hashing off the event loop (~200-300ms of CPU)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, hash_password, password)
+
+
+class UserService:
+    """User management service"""
+
+    @staticmethod
+    async def create_user(
+        username: str,
+        email: str,
+        password: str,
+        full_name: Optional[str] = None,
+        role: str = "user",
+        can_use_chatbot: bool = False,
+        pipeline_ids: Optional[List[str]] = None,
+        db: AsyncSession = None
+    ) -> User:
+        """Create a new user"""
+        logger.info(f"[CREATE_USER] 👤 Starting user creation for username: '{username}'")
+        logger.debug(f"[CREATE_USER]   Email: {email}, Role: {role}, Full name: {full_name}")
+        logger.debug(f"[CREATE_USER]   Password provided: {bool(password)}, Length: {len(password) if password else 0}")
+        
+        # Step 1: Check if username or email already exists
+        logger.info(f"[CREATE_USER] Step 1: Checking if user already exists...")
+        result = await db.execute(
+            select(User).where(
+                (User.username == username) | (User.email == email)
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            logger.error(f"[CREATE_USER] ❌ Step 1 FAILED: User with username '{username}' or email '{email}' already exists")
+            raise ValueError(f"User with username '{username}' or email '{email}' already exists")
+        logger.info(f"[CREATE_USER] ✅ Step 1 SUCCESS: Username and email are available")
+
+        # Step 2: Hash password
+        logger.info(f"[CREATE_USER] Step 2: Hashing password...")
+        try:
+            password_hash = await _hash_password_async(password)
+            logger.info(f"[CREATE_USER] ✅ Step 2 SUCCESS: Password hashed")
+            logger.debug(f"[CREATE_USER]   Password hash: {password_hash[:30]}...")
+        except Exception as e:
+            logger.error(f"[CREATE_USER] ❌ Step 2 FAILED: Password hashing error: {type(e).__name__}: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to hash password: {str(e)}")
+
+        # Step 3: Create user object
+        logger.info(f"[CREATE_USER] Step 3: Creating user object...")
+        user = User(
+            username=username,
+            email=email,
+            password_hash=password_hash,
+            full_name=full_name,
+            role=role,
+            can_use_chatbot=can_use_chatbot,
+            is_active=True
+        )
+        db.add(user)
+        logger.info(f"[CREATE_USER] ✅ Step 3 SUCCESS: User object created and added to session")
+        logger.debug(f"[CREATE_USER]   User data: username={user.username}, email={user.email}, role={user.role}, is_active={user.is_active}")
+
+        # Step 4: Flush to get user ID
+        logger.info(f"[CREATE_USER] Step 4: Flushing to get user ID...")
+        try:
+            await db.flush()
+            logger.info(f"[CREATE_USER] ✅ Step 4 SUCCESS: User ID obtained: {user.id}")
+        except Exception as e:
+            logger.error(f"[CREATE_USER] ❌ Step 4 FAILED: Flush error: {type(e).__name__}: {str(e)}", exc_info=True)
+            await db.rollback()
+            raise
+
+        # Step 5: Grant pipeline access
+        if pipeline_ids:
+            logger.info(f"[CREATE_USER] Step 5: Granting pipeline access...")
+            for pipeline_id in pipeline_ids:
+                # Verify pipeline exists
+                pipeline_result = await db.execute(
+                    select(Pipeline).where(Pipeline.pipeline_id == pipeline_id)
+                )
+                pipeline = pipeline_result.scalar_one_or_none()
+                if pipeline:
+                    access = UserPipelineAccess(
+                        user_id=user.id,
+                        pipeline_id=pipeline_id
+                    )
+                    db.add(access)
+            logger.info(f"[CREATE_USER] ✅ Step 5 SUCCESS: Pipeline access granted ({len(pipeline_ids)} pipelines)")
+        else:
+            logger.debug(f"[CREATE_USER] Step 5: No pipeline access to grant")
+
+        # Note: Commit will be handled by session context manager
+        logger.info(f"[CREATE_USER]   Note: Commit will be handled by session context manager")
+        
+        # Step 6: Verify password works (before commit)
+        logger.info(f"[CREATE_USER] Step 6: Verifying password hash...")
+        try:
+            from backend.auth.password import verify_password
+            is_valid = verify_password(password, password_hash)
+            if is_valid:
+                logger.info(f"[CREATE_USER] ✅ Step 6 SUCCESS: Password hash verified - password will work for login")
+            else:
+                logger.error(f"[CREATE_USER] ❌ Step 6 FAILED: Password hash verification failed - CRITICAL ERROR!")
+        except Exception as e:
+            logger.warning(f"[CREATE_USER] ⚠️  Step 6 WARNING: Verification error (non-critical): {type(e).__name__}: {str(e)}")
+        
+        logger.info(f"[CREATE_USER] ✅✅✅ USER CREATION COMPLETE: {username} (ID: {user.id}, Email: {email}, Role: {role})")
+        return user
+
+    @staticmethod
+    async def update_user(
+        user_id: int,
+        email: Optional[str] = None,
+        password: Optional[str] = None,  # Add password parameter
+        full_name: Optional[str] = None,
+        role: Optional[str] = None,
+        can_use_chatbot: Optional[bool] = None,
+        is_active: Optional[bool] = None,
+        pipeline_ids: Optional[List[str]] = None,
+        db: AsyncSession = None
+    ) -> User:
+        """Update user information"""
+        logger.info(f"[UPDATE_USER] ✏️  Starting user update for user ID: {user_id}")
+        
+        # Step 1: Find user
+        logger.debug(f"[UPDATE_USER] Step 1: Querying database for user ID {user_id}...")
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            logger.error(f"[UPDATE_USER] ❌ Step 1 FAILED: User with ID {user_id} not found")
+            raise ValueError(f"User with ID {user_id} not found")
+        
+        logger.info(f"[UPDATE_USER] ✅ Step 1 SUCCESS: User found - {user.username} (Email: {user.email}, Role: {user.role})")
+
+        # Step 2: Update email if provided
+        if email is not None:
+            logger.info(f"[UPDATE_USER] Step 2: Updating email...")
+            # Check if email is already taken by another user
+            result = await db.execute(
+                select(User).where(User.email == email, User.id != user_id)
+            )
+            if result.scalar_one_or_none():
+                logger.error(f"[UPDATE_USER] ❌ Step 2 FAILED: Email '{email}' is already taken")
+                raise ValueError(f"Email '{email}' is already taken")
+            user.email = email
+            logger.info(f"[UPDATE_USER] ✅ Step 2 SUCCESS: Email updated to {email}")
+
+        # Step 3: Update password if provided
+        if password is not None and password.strip() != "":
+            logger.info(f"[UPDATE_USER] Step 3: Updating password...")
+            logger.debug(f"[UPDATE_USER]   New password length: {len(password)}")
+            try:
+                new_password_hash = await _hash_password_async(password)
+                old_hash = user.password_hash
+                user.password_hash = new_password_hash
+                logger.info(f"[UPDATE_USER] ✅ Step 3 SUCCESS: Password hashed and updated")
+                logger.debug(f"[UPDATE_USER]   Old hash: {old_hash[:30] if old_hash else 'None'}...")
+                logger.debug(f"[UPDATE_USER]   New hash: {user.password_hash[:30]}...")
+            except Exception as e:
+                logger.error(f"[UPDATE_USER] ❌ Step 3 FAILED: Password hashing error: {type(e).__name__}: {str(e)}", exc_info=True)
+                raise ValueError(f"Failed to hash password: {str(e)}")
+        elif password is not None and password.strip() == "":
+            logger.debug(f"[UPDATE_USER] Step 3: Password field provided but empty - keeping current password")
+
+        # Step 4: Update other fields
+        logger.info(f"[UPDATE_USER] Step 4: Updating other fields...")
+        if full_name is not None:
+            user.full_name = full_name
+            logger.debug(f"[UPDATE_USER]   Full name updated: {full_name}")
+        if role is not None:
+            user.role = role
+            logger.debug(f"[UPDATE_USER]   Role updated: {role}")
+        if can_use_chatbot is not None:
+            user.can_use_chatbot = can_use_chatbot
+            logger.debug(f"[UPDATE_USER]   Can use chatbot updated: {can_use_chatbot}")
+        if is_active is not None:
+            user.is_active = is_active
+            logger.debug(f"[UPDATE_USER]   Is active updated: {is_active}")
+        logger.info(f"[UPDATE_USER] ✅ Step 4 SUCCESS: Other fields updated")
+
+        # Step 5: Update pipeline access
+        if pipeline_ids is not None:
+            logger.info(f"[UPDATE_USER] Step 5: Updating pipeline access...")
+            # Remove existing access
+            await db.execute(
+                delete(UserPipelineAccess).where(UserPipelineAccess.user_id == user_id)
+            )
+            # Add new access
+            for pipeline_id in pipeline_ids:
+                pipeline_result = await db.execute(
+                    select(Pipeline).where(Pipeline.pipeline_id == pipeline_id)
+                )
+                pipeline = pipeline_result.scalar_one_or_none()
+                if pipeline:
+                    access = UserPipelineAccess(
+                        user_id=user_id,
+                        pipeline_id=pipeline_id
+                    )
+                    db.add(access)
+            logger.info(f"[UPDATE_USER] ✅ Step 5 SUCCESS: Pipeline access updated ({len(pipeline_ids)} pipelines)")
+
+        # Step 6: Ensure user is tracked by session and flush
+        logger.info(f"[UPDATE_USER] Step 6: Ensuring user is tracked by session...")
+        db.add(user)  # Ensure object is tracked
+        logger.debug(f"[UPDATE_USER]   User object added to session (or already tracked)")
+        
+        logger.info(f"[UPDATE_USER] Step 7: Flushing changes to database...")
+        try:
+            await db.flush()
+            logger.info(f"[UPDATE_USER] ✅ Step 7 SUCCESS: Changes flushed to database")
+        except Exception as e:
+            logger.error(f"[UPDATE_USER] ❌ Step 7 FAILED: Flush error: {type(e).__name__}: {str(e)}", exc_info=True)
+            await db.rollback()
+            raise
+        
+        # Note: Commit will be handled by session context manager
+        logger.info(f"[UPDATE_USER]   Note: Commit will be handled by session context manager")
+        logger.info(f"[UPDATE_USER] ✅✅✅ USER UPDATE COMPLETE for user: {user.username} (ID: {user.id})")
+        return user
+
+    @staticmethod
+    async def reset_password(user_id: int, new_password: str, db: AsyncSession) -> User:
+        """Reset user password (admin only)"""
+        logger.info(f"[PASSWORD_RESET] 🔐 Starting password reset for user ID: {user_id}")
+        
+        # Step 1: Find user
+        logger.debug(f"[PASSWORD_RESET] Step 1: Querying database for user ID {user_id}...")
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            logger.error(f"[PASSWORD_RESET] ❌ Step 1 FAILED: User with ID {user_id} not found")
+            raise ValueError(f"User with ID {user_id} not found")
+        
+        logger.info(f"[PASSWORD_RESET] ✅ Step 1 SUCCESS: User found - {user.username} (Email: {user.email}, Role: {user.role})")
+        logger.debug(f"[PASSWORD_RESET]   Current password hash: {user.password_hash[:30] if user.password_hash else 'None'}...")
+        
+        # Step 2: Hash new password
+        logger.info(f"[PASSWORD_RESET] Step 2: Hashing new password...")
+        logger.debug(f"[PASSWORD_RESET]   New password length: {len(new_password)}")
+        
+        try:
+            new_password_hash = await _hash_password_async(new_password)
+            logger.info(f"[PASSWORD_RESET] ✅ Step 2 SUCCESS: Password hashed")
+            logger.debug(f"[PASSWORD_RESET]   New password hash: {new_password_hash[:30]}...")
+        except Exception as e:
+            logger.error(f"[PASSWORD_RESET] ❌ Step 2 FAILED: Password hashing error: {type(e).__name__}: {str(e)}", exc_info=True)
+            raise
+        
+        # Step 3: Update user object
+        logger.info(f"[PASSWORD_RESET] Step 3: Updating user object in session...")
+        old_hash = user.password_hash
+        user.password_hash = new_password_hash
+        logger.debug(f"[PASSWORD_RESET]   Old hash: {old_hash[:30] if old_hash else 'None'}...")
+        logger.debug(f"[PASSWORD_RESET]   New hash: {user.password_hash[:30]}...")
+        
+        # Step 4: Ensure user is attached to session and flush changes
+        logger.info(f"[PASSWORD_RESET] Step 4: Ensuring user is tracked by session...")
+        # The user is already attached to the session from the query, but let's make sure
+        # SQLAlchemy tracks the change by accessing the object
+        db.add(user)  # This ensures the object is tracked (idempotent if already tracked)
+        logger.debug(f"[PASSWORD_RESET]   User object added to session (or already tracked)")
+        
+        # Flush to ensure changes are sent to database (but don't commit yet - let context manager do it)
+        logger.info(f"[PASSWORD_RESET] Step 5: Flushing changes to database...")
+        try:
+            await db.flush()
+            logger.info(f"[PASSWORD_RESET] ✅ Step 5 SUCCESS: Changes flushed to database")
+            logger.debug(f"[PASSWORD_RESET]   Password hash after flush: {user.password_hash[:30]}...")
+        except Exception as e:
+            logger.error(f"[PASSWORD_RESET] ❌ Step 5 FAILED: Flush error: {type(e).__name__}: {str(e)}", exc_info=True)
+            await db.rollback()
+            raise
+        
+        # Note: We don't commit here - the session context manager will commit when the route completes
+        # This ensures proper transaction handling and rollback on errors
+        logger.info(f"[PASSWORD_RESET]   Note: Commit will be handled by session context manager")
+        
+        # Step 7: Verify the new password works
+        logger.info(f"[PASSWORD_RESET] Step 7: Verifying new password...")
+        try:
+            from backend.auth.password import verify_password
+            is_valid = verify_password(new_password, user.password_hash)
+            if is_valid:
+                logger.info(f"[PASSWORD_RESET] ✅ Step 7 SUCCESS: New password verified successfully")
+            else:
+                logger.error(f"[PASSWORD_RESET] ❌ Step 7 FAILED: New password verification failed - this is a critical error!")
+        except Exception as e:
+            logger.warning(f"[PASSWORD_RESET] ⚠️  Step 7 WARNING: Verification error (non-critical): {type(e).__name__}: {str(e)}")
+        
+        logger.info(f"[PASSWORD_RESET] ✅✅✅ PASSWORD RESET COMPLETE for user: {user.username} (ID: {user.id})")
+        return user
+
+    @staticmethod
+    async def get_all_users(db: AsyncSession) -> List[User]:
+        """Get all users"""
+        result = await db.execute(select(User).order_by(User.created_at.desc()))
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_user_by_id(user_id: int, db: AsyncSession) -> Optional[User]:
+        """Get user by ID"""
+        result = await db.execute(select(User).where(User.id == user_id))
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def delete_user(user_id: int, db: AsyncSession) -> bool:
+        """Delete a user (admin only)"""
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            return False
+
+        try:
+            # Delete related records in order (respecting foreign key constraints)
+            
+            # 1. Delete chatbot audit logs (has foreign key to users.id)
+            await db.execute(
+                delete(ChatbotAuditLog).where(ChatbotAuditLog.user_id == user_id)
+            )
+            logger.debug(f"Deleted audit logs for user {user_id}")
+            
+            # 2. Delete user pipeline access (cascade should handle this, but being explicit)
+            await db.execute(
+                delete(UserPipelineAccess).where(UserPipelineAccess.user_id == user_id)
+            )
+            logger.debug(f"Deleted pipeline access for user {user_id}")
+            
+            # 3. Delete the user
+            await db.delete(user)
+            await db.commit()
+            logger.info(f"Deleted user: {user.username} (ID: {user_id})")
+            return True
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Error deleting user {user_id}: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to delete user: {str(e)}")
+
+    @staticmethod
+    async def block_user(
+        user_id: int,
+        reason: str,
+        db: AsyncSession
+    ) -> User:
+        """Block a user from using the system (sets is_active=False, can_use_chatbot=False)"""
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise ValueError(f"User with ID {user_id} not found")
+
+        user.is_active = False
+        user.can_use_chatbot = False
+        user.blocked_reason = reason
+        user.blocked_at = datetime.utcnow()
+        
+        await db.commit()
+        await db.refresh(user)
+        logger.warning(f"Blocked user: {user.username} - Reason: {reason}")
+        return user
+
+    @staticmethod
+    async def unblock_user(
+        user_id: int,
+        db: AsyncSession
+    ) -> User:
+        """Unblock a user (admin only) - restores access"""
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise ValueError(f"User with ID {user_id} not found")
+
+        user.is_active = True
+        user.blocked_reason = None
+        user.blocked_at = None
+        # Note: can_use_chatbot is not automatically restored - admin must set it explicitly
+        
+        await db.commit()
+        await db.refresh(user)
+        logger.info(f"Unblocked user: {user.username}")
+        return user
+

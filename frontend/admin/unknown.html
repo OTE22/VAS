@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Unknown Faces Management - Admin panel for managing unidentified faces">
+    <meta name="keywords" content="admin panel, unknown faces, identity management">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>Unknown Faces Center - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-user-secret" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">Unknown Faces Center</h1>
+                        <p class="page-description">Manage and identify unknown faces detected by the system</p>
+                        <div id="user-privileges-info" class="user-privileges-info" style="display: none; margin-top: 0.5rem; font-size: 0.85rem; color: #00ff88;">
+                            <i class="fas fa-info-circle" aria-hidden="true"></i>
+                            <span id="privileges-text"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <a href="/admin/live-alerts" class="intelligence-admin-btn" id="your-live-alerts-btn" style="display: none;">
+                        <div class="btn-content">
+                            <i class="fas fa-bell"></i>
+                            <span class="btn-title">YOUR LIVE ALERTS</span>
+                        </div>
+                    </a>
+                    <div style="position: relative; display: inline-block; margin-right: 0.5rem;">
+                        <button id="multi-select-toggle" class="intelligence-admin-btn" type="button" title="💡 Multi-Select Mode: Click to enable, then click identity cards to select them. Select 2+ identities and click 'MERGE SELECTED' to merge them all at once. System automatically finds the best target identity (most appearances, best quality).">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-check-square" aria-hidden="true"></i>
+                                </div>
+                                <span class="btn-title" id="multi-select-label">MULTI-SELECT</span>
+                            </div>
+                        </button>
+                        <div style="position: absolute; top: -8px; right: -8px; background: rgba(0, 255, 150, 0.9); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; cursor: help; border: 2px solid rgba(0, 0, 0, 0.3); z-index: 10;" 
+                             title="💡 How Multi-Select Works: 1) Click MULTI-SELECT to enable. 2) Click identity cards to select them (green highlight). 3) Select 2+ identities. 4) Click 'MERGE SELECTED' button. 5) System auto-selects best target (most appearances, best quality) and merges all into it. Perfect for merging 3+ identities efficiently!">
+                            <i class="fas fa-info" style="font-size: 0.65rem; color: #000;"></i>
+                        </div>
+                    </div>
+                    <div id="merge-multiple-btn-container" style="position: relative; display: none; margin-right: 0.5rem;">
+                        <button id="merge-multiple-btn" class="intelligence-admin-btn" type="button" style="background: rgba(0, 255, 150, 0.2); border-color: rgba(0, 255, 150, 0.5);" title="Merge selected identities">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-code-branch" aria-hidden="true"></i>
+                                </div>
+                                <span class="btn-title" id="merge-multiple-label">MERGE SELECTED (<span id="selected-count-header">0</span>)</span>
+                            </div>
+                        </button>
+                    </div>
+                    <div style="position: relative; display: inline-block;">
+                        <button id="merge-suggestions-btn" class="intelligence-admin-btn" type="button" aria-label="View merge suggestions" title="View automatically generated merge suggestions - The system analyzes faces daily and suggests which identities should be merged">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-object-group" aria-hidden="true"></i>
+                                </div>
+                                <span class="btn-title">MERGE SUGGESTIONS</span>
+                            </div>
+                        </button>
+                        <div style="position: absolute; top: -8px; right: -8px; background: rgba(0, 255, 150, 0.9); border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; cursor: help; border: 2px solid rgba(0, 0, 0, 0.3); z-index: 10;" 
+                             title="💡 Graph-Based Merge Suggestions: The system uses advanced graph clustering to automatically find clusters of 3+ identities that are the same person. It analyzes patterns (cameras, times) and verifies with face recognition. Review suggestions and approve/reject based on confidence scores (70%+ = high confidence).">
+                            <i class="fas fa-info" style="font-size: 0.7rem; color: #000;"></i>
+                        </div>
+                    </div>
+                    <button id="search-by-image-btn" class="intelligence-admin-btn" type="button" aria-label="Quick search">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-search" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">QUICK SEARCH</span>
+                        </div>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Filters Section -->
+            <section class="filter-section">
+                <div class="filter-controls">
+                    <div class="filter-group">
+                        <label for="date-from">Date From:</label>
+                        <input type="date" id="date-from" class="intelligence-input">
+                    </div>
+                    <div class="filter-group">
+                        <label for="date-to">Date To:</label>
+                        <input type="date" id="date-to" class="intelligence-input">
+                    </div>
+                    <div class="filter-group">
+                        <label for="pipeline-filter">Pipeline:</label>
+                        <select id="pipeline-filter" class="intelligence-select">
+                            <option value="">All Pipelines</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="min-appearances">Min Appearances:</label>
+                        <input type="number" id="min-appearances" class="intelligence-input" min="1" value="1">
+                    </div>
+                    <button id="apply-filters-btn" class="intelligence-admin-btn" type="button">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-filter" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">APPLY FILTERS</span>
+                        </div>
+                    </button>
+                    <button id="show-all-toggle-btn" class="intelligence-admin-btn" type="button" aria-pressed="false"
+                            title="By default only unknown faces seen within the configured display window are listed (Settings → UNKNOWN_FACE_DISPLAY_HOURS). Older ones stay stored — toggle to reveal them.">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-eye" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title" id="show-all-label">SHOW ALL</span>
+                        </div>
+                    </button>
+                    <button id="clear-filters-btn" class="intelligence-admin-btn" type="button">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-times" aria-hidden="true"></i>
+                            </div>
+                            <span class="btn-title">CLEAR</span>
+                        </div>
+                    </button>
+                </div>
+            </section>
+
+            <!-- Statistics -->
+            <section class="stats-section">
+                <div class="intelligence-stat-card">
+                    <div class="stat-icon">
+                        <i class="fas fa-user-secret"></i>
+                    </div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-unknown">0</div>
+                        <div class="stat-label">Total Unknown</div>
+                    </div>
+                </div>
+                <div class="intelligence-stat-card">
+                    <div class="stat-icon">
+                        <i class="fas fa-eye"></i>
+                    </div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-appearances">0</div>
+                        <div class="stat-label">Total Appearances</div>
+                    </div>
+                </div>
+                <div class="intelligence-stat-card">
+                    <div class="stat-icon">
+                        <i class="fas fa-video"></i>
+                    </div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="total-cameras">0</div>
+                        <div class="stat-label">Active Cameras</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Unknown Faces Grid -->
+            <section class="unknown-grid-section">
+                <div id="unknown-grid" class="unknown-grid">
+                    <!-- Identity cards will be inserted here -->
+                </div>
+                <div id="loading-indicator" class="loading" style="display: none;">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <span>Loading unknown faces...</span>
+                </div>
+                <div id="no-results" class="no-results" style="display: none;">
+                    <i class="fas fa-inbox"></i>
+                    <p>No unknown faces found</p>
+                </div>
+            </section>
+
+            <!-- Pagination -->
+            <section class="pagination-section">
+                <div class="pagination-controls">
+                    <button id="prev-page-btn" class="intelligence-admin-btn" disabled>
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-chevron-left"></i>
+                            </div>
+                            <span class="btn-title">PREVIOUS</span>
+                        </div>
+                    </button>
+                    <span class="page-info">
+                        Page <span id="current-page">1</span> of <span id="total-pages">1</span>
+                    </span>
+                    <button id="next-page-btn" class="intelligence-admin-btn" disabled>
+                        <div class="btn-content">
+                            <span class="btn-title">NEXT</span>
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-chevron-right"></i>
+                            </div>
+                        </div>
+                    </button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Identity Detail Modal -->
+    <div id="identity-detail-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Identity Details</h2>
+                <button class="modal-close" id="close-detail-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body" id="identity-detail-content">
+                <!-- Content loaded dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Promote Modal -->
+    <!-- Face Detection Error Alert Modal -->
+    <div id="face-detection-alert-modal" class="security-modal" style="display: none; z-index: 99999;">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header" style="background: linear-gradient(135deg, rgba(255, 68, 68, 0.2) 0%, rgba(255, 100, 100, 0.1) 100%); border-bottom-color: rgba(255, 68, 68, 0.4);">
+                <h2 style="color: #ff6b6b; text-shadow: 0 0 10px rgba(255, 107, 107, 0.5);">
+                    <i class="fas fa-exclamation-triangle" style="margin-right: 10px;"></i>
+                    Promotion Failed
+                </h2>
+                <button class="modal-close" id="close-face-alert-modal" style="border-color: rgba(255, 68, 68, 0.3); color: #ff6b6b;">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body" style="text-align: center; padding: 2rem;">
+                <div style="font-size: 4rem; color: #ff6b6b; margin-bottom: 1.5rem; animation: pulse 2s infinite;">
+                    <i class="fas fa-user-slash"></i>
+                </div>
+                <h3 style="color: #ff6b6b; margin-bottom: 1rem; font-size: 1.3rem;">No Face Detected</h3>
+                <p id="face-alert-message" style="color: rgba(255, 255, 255, 0.9); line-height: 1.6; margin-bottom: 2rem;">
+                    The image does not contain a detectable face. This may happen if the image was processed before face detection was enabled.
+                </p>
+                <p style="color: rgba(255, 255, 255, 0.7); font-size: 0.9rem; margin-bottom: 2rem;">
+                    Please choose another image for this identity.
+                </p>
+                <div class="modal-actions" style="justify-content: center;">
+                    <button type="button" class="intelligence-admin-btn" id="face-alert-ok-btn" style="background: linear-gradient(135deg, rgba(255, 68, 68, 0.2) 0%, rgba(255, 100, 100, 0.1) 100%); border-color: rgba(255, 68, 68, 0.4);">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-check"></i>
+                            </div>
+                            <span class="btn-title">OK, I UNDERSTAND</span>
+                        </div>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="promote-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Promote to Known</h2>
+                <button class="modal-close" id="close-promote-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="promote-form">
+                    <div class="form-group">
+                        <label for="promote-name">Display Name *</label>
+                        <input type="text" id="promote-name" class="intelligence-input" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="promote-code">Person Code (Optional)</label>
+                        <input type="text" id="promote-code" class="intelligence-input">
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-promote-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-times"></i>
+                                </div>
+                                <span class="btn-title">CANCEL</span>
+                            </div>
+                        </button>
+                        <button type="submit" class="intelligence-admin-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-arrow-up"></i>
+                                </div>
+                                <span class="btn-title">PROMOTE</span>
+                            </div>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Merge Modal -->
+    <div id="merge-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Merge Identities (Manual)</h2>
+                <button class="modal-close" id="close-merge-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="merge-form">
+                    <div style="background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px; padding: 1rem; margin-bottom: 1rem;">
+                        <p style="margin: 0 0 0.5rem 0; font-size: 0.9rem; color: #00ff96; font-weight: 600;">
+                            <i class="fas fa-info-circle"></i> Manual Merge - When to Use:
+                        </p>
+                        <p style="margin: 0 0 0.75rem 0; color: #ccc; font-size: 0.85rem; line-height: 1.6;">
+                            Use manual merge when you want to combine two identities that the system hasn't suggested yet, 
+                            or when you need to merge identities immediately. <strong style="color: #00ff96;">Important:</strong> 
+                            Always check "Merge Suggestions" first - the system uses <strong>graph-based clustering</strong> to automatically 
+                            find clusters of 3+ identities, so it may have already found your duplicates!
+                        </p>
+                        <p style="margin: 0 0 0.5rem 0; padding: 0.5rem; background: rgba(0, 255, 150, 0.1); border-left: 3px solid #00ff96; border-radius: 4px; font-size: 0.85rem; color: #00ff96;">
+                            <i class="fas fa-lightbulb"></i> <strong>NEW:</strong> Use <strong>MULTI-SELECT</strong> mode to merge 3+ identities at once! 
+                            The system automatically finds the best target identity (most appearances, best quality). 
+                            Or use "Merge Suggestions" for automatic graph-based clustering.
+                        </p>
+                        <p style="margin: 0.75rem 0 0.5rem 0; font-size: 0.85rem; color: #00ff96; font-weight: 600;">
+                            How to Merge (Step-by-Step):
+                        </p>
+                        <ol style="margin: 0; padding-left: 1.5rem; color: #ccc; font-size: 0.85rem; line-height: 1.8;">
+                            <li>The "From" identity is already selected (the one you clicked MERGE on)</li>
+                            <li>Find the "To" identity by clicking VIEW on another identity card, or use SEARCH below</li>
+                            <li>Copy the Identity ID from the details modal or search results</li>
+                            <li>Paste it in the "To Identity ID" field below</li>
+                            <li>Click MERGE to combine the identities</li>
+                        </ol>
+                    </div>
+                    <div id="single-merge-form" style="display: none;">
+                        <div class="form-group">
+                            <label for="merge-from-id">From Identity ID (Source) *</label>
+                            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <input type="text" id="merge-from-id" class="intelligence-input" readonly style="flex: 1; background: rgba(0, 0, 0, 0.3);">
+                                <button type="button" class="intelligence-admin-btn small" onclick="copyIdentityId(document.getElementById('merge-from-id').value)" title="Copy Identity ID" style="padding: 0.5rem;">
+                                    <div class="btn-content" style="padding: 0;">
+                                        <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
+                                            <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
+                                        </div>
+                                    </div>
+                                </button>
+                            </div>
+                            <p style="margin: 0.5rem 0 0 0; font-size: 0.8rem; color: #999; font-style: italic;">
+                                This identity will be merged into the target identity below
+                            </p>
+                        </div>
+                        <div class="form-group">
+                            <label for="merge-to-id">To Identity ID (Target) *</label>
+                            <div style="display: flex; gap: 0.5rem; align-items: flex-start;">
+                                <input type="text" id="merge-to-id" class="intelligence-input" placeholder="Enter target identity ID or search by name..." style="flex: 1;">
+                                <button type="button" class="intelligence-admin-btn small" onclick="copyIdentityId(document.getElementById('merge-to-id').value)" title="Copy current ID" style="padding: 0.5rem;">
+                                    <div class="btn-content" style="padding: 0;">
+                                        <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
+                                            <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
+                                        </div>
+                                    </div>
+                                </button>
+                            </div>
+                            <p style="margin: 0.5rem 0; font-size: 0.8rem; color: #999;">
+                                <i class="fas fa-lightbulb"></i> 
+                                <strong>Tip:</strong> Click VIEW on any identity card to see its ID, or search by name below
+                            </p>
+                            <button type="button" class="intelligence-admin-btn small" onclick="searchIdentityForMerge()" style="margin-top: 0.5rem; width: 100%;">
+                                <div class="btn-content">
+                                    <div class="btn-icon-wrapper">
+                                        <i class="fas fa-search"></i>
+                                    </div>
+                                    <span class="btn-title">SEARCH BY ID OR NAME</span>
+                                </div>
+                            </button>
+                            <div id="merge-search-results" style="margin-top: 1rem; display: none;"></div>
+                        </div>
+                    </div>
+                    <div id="multi-merge-form" style="display: none;">
+                        <div class="form-group">
+                            <label>Selected Identities to Merge (<span id="selected-count">0</span>)</label>
+                            <div id="selected-identities-list" style="background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(0, 255, 150, 0.2); border-radius: 6px; padding: 1rem; max-height: 200px; overflow-y: auto; margin-bottom: 1rem;">
+                                <p style="color: #999; font-style: italic; margin: 0;">No identities selected. Use MULTI-SELECT mode and click on identity cards to select them.</p>
+                            </div>
+                            <p style="margin: 0.5rem 0; font-size: 0.8rem; color: #00ff96;">
+                                <i class="fas fa-magic"></i> 
+                                <strong>Smart Merge:</strong> The system will automatically find the best target identity (most appearances, best quality snapshot) and merge all others into it.
+                            </p>
+                        </div>
+                        <div class="form-group">
+                            <label for="multi-merge-target-id">Target Identity ID (Optional)</label>
+                            <input type="text" id="multi-merge-target-id" class="intelligence-input" placeholder="Leave empty for auto-selection, or specify target identity ID...">
+                            <p style="margin: 0.5rem 0 0 0; font-size: 0.8rem; color: #999; font-style: italic;">
+                                If specified, all selected identities will be merged into this one. Otherwise, the system auto-selects the best identity.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="merge-notes">Notes (Optional)</label>
+                        <textarea id="merge-notes" class="intelligence-input" rows="3" placeholder="Add notes about this merge..."></textarea>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-merge-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-times"></i>
+                                </div>
+                                <span class="btn-title">CANCEL</span>
+                            </div>
+                        </button>
+                        <button type="button" class="intelligence-admin-btn" onclick="openAdvancedMergePreview()" id="preview-merge-btn" style="background: rgba(0, 150, 255, 0.2); border-color: rgba(0, 150, 255, 0.5);" title="Preview merge details before executing">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-eye"></i>
+                                </div>
+                                <span class="btn-title">PREVIEW</span>
+                            </div>
+                        </button>
+                        <button type="submit" class="intelligence-admin-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-code-branch"></i>
+                                </div>
+                                <span class="btn-title">MERGE</span>
+                            </div>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Merge Preview Modal (Production Feature) -->
+    <div id="merge-preview-modal" class="security-modal" style="display: none;">
+        <div class="modal-content" style="max-width: 900px; max-height: 90vh;">
+            <div class="modal-header">
+                <h2><i class="fas fa-eye"></i> Merge Preview</h2>
+                <button class="modal-close" onclick="closeMergePreviewModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body" style="overflow-y: auto; max-height: calc(90vh - 180px);">
+                <!-- Loading State -->
+                <div id="merge-preview-loading" style="text-align: center; padding: 3rem;">
+                    <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: #00ff96;"></i>
+                    <p style="margin-top: 1rem; color: #ccc;">Generating merge preview...</p>
+                </div>
+                
+                <!-- Preview Content -->
+                <div id="merge-preview-content" style="display: none;"></div>
+            </div>
+            <div class="modal-footer" style="padding: 1rem; border-top: 1px solid rgba(0, 255, 150, 0.2); display: flex; gap: 1rem; justify-content: space-between; align-items: center;">
+                <div class="form-group" style="flex: 1; margin: 0;">
+                    <input type="text" id="merge-preview-notes" class="intelligence-input" placeholder="Add notes about this merge (optional)..." style="margin: 0;">
+                </div>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button type="button" class="intelligence-admin-btn" onclick="closeMergePreviewModal()">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-times"></i>
+                            </div>
+                            <span class="btn-title">CANCEL</span>
+                        </div>
+                    </button>
+                    <button type="button" class="intelligence-admin-btn execute-merge-btn" onclick="executeMergeFromPreview()" style="background: rgba(0, 255, 150, 0.3); border-color: rgba(0, 255, 150, 0.6);">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-check"></i>
+                            </div>
+                            <span class="btn-title">EXECUTE MERGE</span>
+                        </div>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Merge Suggestions Modal -->
+    <div id="merge-suggestions-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Merge Suggestions</h2>
+                <button class="modal-close" id="close-suggestions-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div style="background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem;">
+                    <p style="margin: 0 0 0.5rem 0; color: #00ff96; font-weight: 600; font-size: 0.9rem;">
+                        <i class="fas fa-lightbulb"></i> How Merge Suggestions Work (New Graph-Based Approach)
+                    </p>
+                    <p style="margin: 0 0 0.75rem 0; color: #ccc; font-size: 0.85rem; line-height: 1.6;">
+                        The system uses <strong>graph-based clustering</strong> to automatically find clusters of 3+ identities that are the same person. 
+                        It analyzes unknown faces <strong>daily</strong> using:
+                    </p>
+                    <ol style="margin: 0 0 0.75rem 0; padding-left: 1.5rem; color: #ccc; font-size: 0.85rem; line-height: 1.8;">
+                        <li><strong>Pattern Analysis</strong> - Checks if identities appear in same cameras, similar times</li>
+                        <li><strong>Face Recognition</strong> - Verifies actual face similarity using FAISS</li>
+                        <li><strong>Graph Clustering</strong> - Finds connected groups (A=B, B=C → finds A=B=C automatically)</li>
+                    </ol>
+                    <p style="margin: 0; color: #ccc; font-size: 0.85rem; line-height: 1.6;">
+                        Each suggestion shows a <strong>confidence score</strong> (0-95%). 
+                        <strong style="color: #00ff96;">High (70%+)</strong> = usually safe to approve. 
+                        <strong style="color: #ffc107;">Medium (50-69%)</strong> = review carefully. 
+                        <strong style="color: #ff9800;">Low (&lt;50%)</strong> = review very carefully.
+                    </p>
+                </div>
+                <div id="merge-suggestions-list" class="merge-suggestions-list">
+                    <div class="loading">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Loading merge suggestions...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pipeline Merge Suggestions Modal -->
+    <div id="pipeline-merge-suggestions-modal" class="security-modal" style="display: none;">
+        <div class="modal-content" style="max-width: 900px; max-height: 90vh;">
+            <div class="modal-header">
+                <h2><i class="fas fa-object-group"></i> Merge Suggestions for Pipeline: <span id="pipeline-merge-pipeline-id" style="color: #00ff96;"></span></h2>
+                <button class="modal-close" id="close-pipeline-suggestions-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body" style="overflow-y: auto; max-height: calc(90vh - 180px);">
+                <div style="background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem;">
+                    <p style="margin: 0 0 0.5rem 0; color: #00ff96; font-weight: 600; font-size: 0.9rem;">
+                        <i class="fas fa-info-circle"></i> Pipeline-Specific Merge Suggestions
+                    </p>
+                    <p style="margin: 0 0 0.75rem 0; color: #ccc; font-size: 0.85rem; line-height: 1.6;">
+                        These merge suggestions are based on <strong>similarity between images</strong> within this pipeline. 
+                        The system analyzes face embeddings to find identities that likely represent the same person.
+                    </p>
+                    <p style="margin: 0; color: #ccc; font-size: 0.85rem; line-height: 1.6;">
+                        <strong style="color: #00ff96;">High similarity (70%+)</strong> = usually safe to approve. 
+                        <strong style="color: #ffc107;">Medium (50-69%)</strong> = review carefully. 
+                        <strong style="color: #ff9800;">Low (&lt;50%)</strong> = review very carefully.
+                    </p>
+                </div>
+                <div id="pipeline-merge-suggestions-list" class="merge-suggestions-list">
+                    <div class="loading">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Loading merge suggestions for this pipeline...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add to Watchlist Modal -->
+    <div id="add-to-watchlist-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-list-alt"></i> Add to Watchlist</h2>
+                <button class="modal-close" id="close-watchlist-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="add-to-watchlist-form">
+                    <div style="background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem;">
+                        <p style="margin: 0; color: #00ff96; font-size: 0.9rem;">
+                            <i class="fas fa-info-circle"></i> 
+                            <strong>Identity:</strong> <span id="watchlist-identity-name">Unknown</span>
+                        </p>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="watchlist-select">Select Watchlist *</label>
+                        <select id="watchlist-select" class="intelligence-input" required>
+                            <option value="">Loading watchlists...</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="watchlist-priority">Priority</label>
+                        <select id="watchlist-priority" class="intelligence-input">
+                            <option value="low">Low</option>
+                            <option value="normal" selected>Normal</option>
+                            <option value="high">High</option>
+                            <option value="critical">Critical</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="watchlist-notes">Notes (Optional)</label>
+                        <textarea id="watchlist-notes" class="intelligence-input" rows="3" placeholder="Add notes about why this person is on the watchlist..."></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="watchlist-action-instructions">Action Instructions (Optional)</label>
+                        <textarea id="watchlist-action-instructions" class="intelligence-input" rows="3" placeholder="What should be done when this person is detected?"></textarea>
+                    </div>
+                    
+                    <div class="modal-actions">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-watchlist-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-times"></i>
+                                </div>
+                                <span class="btn-title">CANCEL</span>
+                            </div>
+                        </button>
+                        <button type="submit" class="intelligence-admin-btn" style="background: rgba(0, 255, 150, 0.3); border-color: rgba(0, 255, 150, 0.6);">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-list-alt"></i>
+                                </div>
+                                <span class="btn-title">ADD TO WATCHLIST</span>
+                            </div>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Live Alert Modal -->
+    <div id="create-live-alert-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-bell"></i> Create Live Alert</h2>
+                <button class="modal-close" id="close-live-alert-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="create-live-alert-form">
+                    <div style="background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem;">
+                        <p style="margin: 0 0 0.5rem 0; color: #00ff96; font-size: 0.9rem;">
+                            <i class="fas fa-info-circle"></i> 
+                            <strong>Tracking:</strong> <span id="live-alert-identity-name">Unknown</span>
+                        </p>
+                        <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid rgba(0, 255, 150, 0.2);">
+                            <p style="margin: 0 0 0.5rem 0; font-size: 0.8rem; color: rgba(255,255,255,0.6);">
+                                <i class="fas fa-fingerprint"></i> <strong>Identity ID:</strong>
+                            </p>
+                            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                <code id="live-alert-identity-id" style="flex: 1; font-size: 0.85rem; padding: 0.5rem; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 4px; color: #00ff96; word-break: break-all; cursor: pointer; font-family: 'Courier New', monospace;" onclick="copyIdentityIdFromAlert()" title="Click to copy Identity ID">Loading...</code>
+                                <button type="button" class="intelligence-admin-btn small" onclick="copyIdentityIdFromAlert()" style="padding: 0.5rem;" title="Copy Identity ID">
+                                    <div class="btn-content" style="padding: 0;">
+                                        <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
+                                            <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
+                                        </div>
+                                    </div>
+                                </button>
+                            </div>
+                            <p style="margin: 0.5rem 0 0 0; font-size: 0.75rem; color: rgba(255,255,255,0.5); font-style: italic;">
+                                <i class="fas fa-lightbulb"></i> This unique ID links the alert to the specific identity
+                            </p>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="live-alert-name">Alert Name *</label>
+                        <input type="text" id="live-alert-name" class="intelligence-input" required placeholder="e.g., Track John Doe - Investigation #123">
+                        <small style="color: rgba(255,255,255,0.5); font-size: 0.8rem;">A descriptive name for this alert</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="live-alert-min-similarity">Minimum Similarity</label>
+                        <input type="range" id="live-alert-min-similarity" min="0.5" max="1" step="0.05" value="0.75" class="intelligence-input">
+                        <div style="display: flex; justify-content: space-between; margin-top: 0.5rem;">
+                            <span style="color: rgba(255,255,255,0.5); font-size: 0.8rem;">50%</span>
+                            <span id="live-alert-similarity-value" style="color: #00ff96; font-weight: 600;">75%</span>
+                            <span style="color: rgba(255,255,255,0.5); font-size: 0.8rem;">100%</span>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="live-alert-notify-dashboard" checked>
+                            <span style="margin-left: 0.5rem;">Notify on Dashboard</span>
+                        </label>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="live-alert-sound-alert" checked>
+                            <span style="margin-left: 0.5rem;">Sound Alert</span>
+                        </label>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="live-alert-auto-capture" checked>
+                            <span style="margin-left: 0.5rem;">Auto Capture Snapshot</span>
+                        </label>
+                    </div>
+                    
+                    <div class="modal-actions">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-live-alert-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-times"></i>
+                                </div>
+                                <span class="btn-title">CANCEL</span>
+                            </div>
+                        </button>
+                        <button type="submit" class="intelligence-admin-btn" style="background: rgba(0, 255, 150, 0.3); border-color: rgba(0, 255, 150, 0.6);">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-bell"></i>
+                                </div>
+                                <span class="btn-title">CREATE ALERT</span>
+                            </div>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Search Modal -->
+    <div id="search-image-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Quick Search</h2>
+                <button class="modal-close" id="close-search-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="search-image-form">
+                    <div class="form-group">
+                        <label for="search-image-file">Upload Image *</label>
+                        <input type="file" id="search-image-file" accept="image/*" class="intelligence-input" required>
+                        <div id="image-preview" style="margin-top: 1rem; display: none;">
+                            <img id="preview-img" style="max-width: 300px; max-height: 300px; border: 2px solid #00ff96;">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="search-scope">Search Scope</label>
+                        <select id="search-scope" class="intelligence-select">
+                            <option value="both">Both Known & Unknown</option>
+                            <option value="known">Known Only</option>
+                            <option value="unknown">Unknown Only</option>
+                        </select>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-search-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-times"></i>
+                                </div>
+                                <span class="btn-title">CANCEL</span>
+                            </div>
+                        </button>
+                        <button type="submit" class="intelligence-admin-btn">
+                            <div class="btn-content">
+                                <div class="btn-icon-wrapper">
+                                    <i class="fas fa-search"></i>
+                                </div>
+                                <span class="btn-title">SEARCH</span>
+                            </div>
+                        </button>
+                    </div>
+                </form>
+                <div id="search-results" style="margin-top: 2rem; display: none;">
+                    <h3>Search Results</h3>
+                    <div id="search-results-grid" class="unknown-grid">
+                        <!-- Results will be inserted here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="military-footer">
+        <div class="footer-content">
+            <p>&copy; 2025 IT DIRECTORY - Artificial Intelligence Department. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <script src="/frontend/js/admin-unknown.js?v=unknown-7"></script>
+</body>
+</html>
+

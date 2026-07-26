@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="System Settings Management - Admin panel for managing system configuration">
+    <meta name="keywords" content="admin panel, settings, configuration, system management">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>System Settings - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/settings.css">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <!-- Category Filter -->
+            <section class="filter-section" aria-labelledby="filter-heading">
+                <div class="category-filters" id="category-filters">
+                    <button class="category-filter-btn active" data-category="all">
+                        <i class="fas fa-th"></i> All Settings
+                    </button>
+                </div>
+                <!-- Refresh button in filter section -->
+                <button id="refresh-settings-btn" class="refresh-btn-red" type="button" aria-label="Refresh settings" title="Refresh settings">
+                    <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                    <span>Refresh</span>
+                </button>
+            </section>
+
+            <!-- Settings List -->
+            <section class="settings-section" aria-labelledby="settings-heading">
+                <div class="settings-container" id="settings-container">
+                    <div class="loading">
+                        <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                        Loading settings...
+                    </div>
+                </div>
+            </section>
+
+            <!-- Retention Tools -->
+            <section class="retention-tools-section" aria-label="Retention tools" style="margin: 1rem 0; padding: 0.9rem 1rem; border: 1px solid rgba(0,255,150,0.25); border-radius: 8px; background: rgba(0,255,150,0.04);">
+                <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
+                    <span style="color:#00ff96; font-weight:700; font-size:0.9rem;">
+                        <i class="fas fa-broom"></i> RETENTION TOOLS
+                    </span>
+                    <button id="retention-status-btn" class="category-filter-btn" type="button" title="Show retention configuration, last run and next scheduled run">
+                        <i class="fas fa-info-circle"></i> Status
+                    </button>
+                    <button id="retention-dryrun-btn" class="category-filter-btn" type="button" title="Count what WOULD be deleted — deletes nothing">
+                        <i class="fas fa-vial"></i> Dry run
+                    </button>
+                    <button id="retention-run-btn" class="category-filter-btn" type="button" title="Execute retention now (asks for confirmation)" style="border-color: rgba(255,82,82,0.5); color: #ff8a80;">
+                        <i class="fas fa-play"></i> Run now
+                    </button>
+                </div>
+                <pre id="retention-output" style="display:none; margin-top:0.75rem; max-height: 320px; overflow:auto; background: rgba(0,0,0,0.4); color:#cde; padding:0.75rem; border-radius:6px; font-size:0.75rem;"></pre>
+            </section>
+
+            <!-- Audit Log Section -->
+            <section class="audit-section" aria-labelledby="audit-heading">
+                <div class="table-container">
+                    <table class="intelligence-data-table" role="table" aria-label="Settings audit log">
+                        <thead>
+                            <tr role="row">
+                                <th scope="col" role="columnheader" style="min-width: 150px;">Setting</th>
+                                <th scope="col" role="columnheader" style="min-width: 120px;">Old Value</th>
+                                <th scope="col" role="columnheader" style="min-width: 120px;">New Value</th>
+                                <th scope="col" role="columnheader" style="min-width: 100px;">Changed By</th>
+                                <th scope="col" role="columnheader" style="min-width: 150px;">Reason</th>
+                                <th scope="col" role="columnheader" style="min-width: 150px;">Date & Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-log-body" role="rowgroup">
+                            <tr role="row">
+                                <td colspan="6" class="loading" role="cell">
+                                    <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                                    Loading audit log...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Edit Setting Modal -->
+    <div id="setting-modal" class="modal security-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" style="display: none;">
+        <div class="modal-content security-modal-content">
+            <div class="security-grid-overlay"></div>
+            <div class="security-scan-line"></div>
+            <div class="security-modal-inner">
+                <header class="security-modal-header">
+                    <div class="security-header-left">
+                        <div class="security-status-indicator">
+                            <div class="status-pulse"></div>
+                            <span class="status-text">SYSTEM ACTIVE</span>
+                        </div>
+                        <h2 id="modal-title" class="security-title">
+                            <i class="fas fa-edit"></i>
+                            <span class="title-text">EDIT SETTING</span>
+                            <span class="title-subtitle" id="modal-subtitle">Update Configuration Value</span>
+                        </h2>
+                    </div>
+                    <button class="security-modal-close" type="button" onclick="closeSettingModal()" aria-label="Close dialog">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </header>
+                <form id="setting-form" class="security-modal-form" method="post" novalidate>
+                    <input type="hidden" id="setting-key" name="setting_key">
+                    <input type="hidden" id="setting-type" name="setting_type">
+
+                    <div class="security-form-section">
+                        <label class="security-label">
+                            <span class="label-text">Setting Key</span>
+                            <span class="label-required">*</span>
+                        </label>
+                        <div class="security-input-wrapper">
+                            <input type="text" id="setting-key-display" class="security-input" readonly>
+                        </div>
+                    </div>
+
+                    <div class="security-form-section">
+                        <label class="security-label">
+                            <span class="label-text">Current Value</span>
+                        </label>
+                        <div class="security-input-wrapper">
+                            <input type="text" id="setting-old-value" class="security-input" readonly>
+                        </div>
+                    </div>
+
+                    <div class="security-form-section">
+                        <label class="security-label">
+                            <span class="label-text">New Value</span>
+                            <span class="label-required">*</span>
+                        </label>
+                        <div class="security-input-wrapper">
+                            <!-- Typed control injected here per setting metadata:
+                                 select for enums/booleans, number with min/max,
+                                 password for sensitive, text otherwise -->
+                            <div id="setting-input-container"></div>
+                            <div class="input-hint" id="value-hint"></div>
+                        </div>
+                    </div>
+
+                    <div class="security-form-section">
+                        <label class="security-label">
+                            <span class="label-text">Change Reason</span>
+                            <span class="label-optional">(Optional)</span>
+                        </label>
+                        <div class="security-input-wrapper">
+                            <textarea id="change-reason" class="security-textarea" rows="3" placeholder="Explain why you are making this change..."></textarea>
+                        </div>
+                    </div>
+
+                    <div class="security-modal-actions">
+                        <button type="button" class="security-btn-secondary" onclick="closeSettingModal()">
+                            <i class="fas fa-times"></i> Cancel
+                        </button>
+                        <button type="submit" class="security-btn-primary">
+                            <i class="fas fa-save"></i> Save Changes
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script>
+        // Add settings-page class to html element for CSS overrides
+        document.documentElement.classList.add('settings-page');
+        document.body.classList.add('settings-page');
+        const mainContainer = document.querySelector('.intelligence-main-container');
+        const content = document.querySelector('.intelligence-content');
+        if (mainContainer) mainContainer.classList.add('settings-page');
+        if (content) content.classList.add('settings-page');
+    </script>
+    <script src="/frontend/js/admin-settings.js?v=settings-2"></script>
+</body>
+</html>
+

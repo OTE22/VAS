@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Intelligence Command Center - Admin Only</title>
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/vendor/fonts/inter.css"><link rel="stylesheet" href="/frontend/vendor/fonts/cairo.css">
+    <link rel="stylesheet" href="/frontend/css/home.css">
+    <!-- Include admin.css for navbar styles to match other admin pages -->
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <style>
+        /* Ensure navbar styles from admin.css take precedence */
+        .military-navbar {
+            position: relative;
+            width: 100%;
+            padding: 0.75rem 1.5rem;
+            background: linear-gradient(135deg, 
+                rgba(10, 25, 41, 0.95) 0%,
+                rgba(26, 71, 42, 0.95) 100%);
+            border-bottom: 2px solid rgba(0, 255, 150, 0.3);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            flex-shrink: 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+        
+        /* Base military-btn styles for logout button */
+        .military-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: rgba(0, 255, 150, 0.1);
+            border: 2px solid rgba(0, 255, 150, 0.3);
+            border-radius: 6px;
+            color: rgba(0, 255, 150, 0.9);
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            font-family: 'Inter', monospace;
+        }
+        
+        .military-btn:hover {
+            background: rgba(0, 255, 150, 0.2);
+            border-color: rgba(0, 255, 150, 0.5);
+            box-shadow: 0 0 15px rgba(0, 255, 150, 0.3);
+            transform: translateY(-2px);
+        }
+        
+        .military-btn i {
+            font-size: 0.9rem;
+        }
+    </style>
+    <style>
+        /* Hide page content until admin verification - SECURITY MEASURE */
+        body:not(.admin-verified) {
+            visibility: hidden;
+            opacity: 0;
+        }
+        body.admin-verified {
+            visibility: visible;
+            opacity: 1;
+            transition: opacity 0.3s ease;
+        }
+        /* Show loading message while verifying */
+        body:not(.admin-verified)::before {
+            content: 'Verifying access...';
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 9999;
+            color: #00ff96;
+            font-size: 1.2rem;
+            font-weight: 700;
+            visibility: visible;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+        }
+    </style>
+</head>
+<body>
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <!-- Main Container - No Scroll -->
+    <main class="intelligence-main-container">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <!-- Welcome Section -->
+            <div class="welcome-section">
+                <div class="welcome-icon">
+                    <i class="fas fa-user-shield"></i>
+                    <div class="icon-pulse"></div>
+                </div>
+                <h1>Intelligence Command Center</h1>
+                <p class="subtitle">Advanced Surveillance & Recognition System</p>
+            </div>
+
+            <!-- Admin Actions -->
+            <div class="admin-actions-section admin-only" id="admin-section" style="display: none;">
+                <div class="section-header">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-shield-alt"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h2>Administrative Controls</h2>
+                        <p class="header-subtitle">System Management & Configuration</p>
+                    </div>
+                </div>
+                <div class="admin-actions">
+                    <a href="/admin/users" class="intelligence-admin-btn users-btn">
+                        <div class="btn-background"></div>
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-user-cog"></i>
+                                <div class="btn-icon-glow"></div>
+                            </div>
+                            <div class="btn-text">
+                                <span class="btn-title">Manage Users</span>
+                                <span class="btn-subtitle">User Accounts & Permissions</span>
+                            </div>
+                            <div class="btn-arrow">
+                                <i class="fas fa-arrow-right"></i>
+                            </div>
+                        </div>
+                    </a>
+                    <a href="/admin/pipelines" class="intelligence-admin-btn pipelines-btn">
+                        <div class="btn-background"></div>
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-network-wired"></i>
+                                <div class="btn-icon-glow"></div>
+                            </div>
+                            <div class="btn-text">
+                                <span class="btn-title">Manage Pipelines</span>
+                                <span class="btn-subtitle">Video Sources & Configuration</span>
+                            </div>
+                            <div class="btn-arrow">
+                                <i class="fas fa-arrow-right"></i>
+                            </div>
+                        </div>
+                    </a>
+                </div>
+            </div>
+
+            <!-- Quick Stats -->
+            <div class="stats-grid" id="stats-grid">
+                <div class="intelligence-stat-card admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-users"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="total-faces">-</div>
+                    <div class="stat-label">Known Faces</div>
+                </div>
+                <div class="intelligence-stat-card">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-video"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="active-pipelines">-</div>
+                    <div class="stat-label">Active Pipelines</div>
+                </div>
+                <div class="intelligence-stat-card admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-bolt"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="queue-size">-</div>
+                    <div class="stat-label">Queue Size</div>
+                </div>
+                <div class="intelligence-stat-card admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-check-circle"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="system-status">-</div>
+                    <div class="stat-label">System Status</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="military-footer">
+        <div class="footer-content">
+            <div class="footer-credits">
+                <i class="fas fa-brain"></i>
+                <span><strong>Face Recognition Service</strong> - Developed by <strong class="department-name">ITDIR-AI DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
+
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/home.js"></script>
+</body>
+</html>
+

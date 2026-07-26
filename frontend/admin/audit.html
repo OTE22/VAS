@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Chatbot audit log admin panel - Track usage, monitor queries, and analyze system interactions">
+    <meta name="keywords" content="audit log, chatbot tracking, system monitoring, activity log">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>Chatbot Audit Log - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <style>
+        /* Audit Log Specific Styles */
+        .audit-filters {
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(0, 255, 150, 0.2);
+            border-radius: 10px;
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            box-shadow: 
+                0 0 20px rgba(0, 255, 150, 0.1),
+                inset 0 0 30px rgba(0, 255, 150, 0.05);
+        }
+        .audit-filters h2 {
+            font-size: 1rem;
+            font-weight: 800;
+            color: #00ff96;
+            margin-bottom: 0.75rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .audit-filters h2 i {
+            filter: drop-shadow(0 0 8px rgba(0, 255, 150, 0.6));
+        }
+        .filter-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .filter-group label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: rgba(0, 255, 150, 0.9);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .filter-group label i {
+            font-size: 0.75rem;
+            filter: drop-shadow(0 0 6px rgba(0, 255, 150, 0.6));
+        }
+        .filter-group input,
+        .filter-group select {
+            padding: 0.5rem 0.75rem;
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(0, 255, 150, 0.2);
+            border-radius: 6px;
+            font-size: 0.85rem;
+            color: #00ff96;
+            font-family: 'Inter', monospace;
+            transition: all 0.3s ease;
+        }
+        .filter-group input:focus,
+        .filter-group select:focus {
+            outline: none;
+            border-color: rgba(0, 255, 150, 0.5);
+            box-shadow: 0 0 15px rgba(0, 255, 150, 0.2);
+            background: rgba(0, 0, 0, 0.6);
+        }
+        .filter-group input::placeholder {
+            color: rgba(0, 255, 150, 0.4);
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+        .stat-box {
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(0, 255, 150, 0.2);
+            border-radius: 10px;
+            padding: 0.75rem;
+            box-shadow: 
+                0 0 20px rgba(0, 255, 150, 0.1),
+                inset 0 0 30px rgba(0, 255, 150, 0.05);
+            transition: all 0.3s ease;
+        }
+        .stat-box:hover {
+            border-color: rgba(0, 255, 150, 0.4);
+            box-shadow: 
+                0 0 30px rgba(0, 255, 150, 0.2),
+                inset 0 0 40px rgba(0, 255, 150, 0.1);
+            transform: translateY(-2px);
+        }
+        .stat-box .stat-label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: rgba(0, 255, 150, 0.7);
+            margin-bottom: 0.4rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        .stat-box .stat-value {
+            font-size: 1.5rem;
+            font-weight: 900;
+            color: #00ff96;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+            font-family: 'Inter', monospace;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.25rem;
+        }
+        .stat-box small {
+            font-size: 0.65rem;
+            color: rgba(0, 255, 150, 0.6);
+            letter-spacing: 0.03em;
+        }
+        .query-cell {
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .response-cell {
+            max-width: 400px;
+            max-height: 100px;
+            overflow: auto;
+            font-size: 0.85rem;
+        }
+        .view-details {
+            cursor: pointer;
+            color: #00ff96;
+            text-decoration: underline;
+            transition: all 0.3s ease;
+        }
+        .view-details:hover {
+            color: #00ff96;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.6);
+        }
+        .modal-content {
+            max-width: 800px;
+            background: rgba(10, 25, 41, 0.98);
+            border: 2px solid rgba(0, 255, 150, 0.3);
+        }
+        .query-display,
+        .response-display {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 0.5rem 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid rgba(0, 255, 150, 0.2);
+            color: rgba(0, 255, 150, 0.9);
+            font-family: 'Inter', monospace;
+            font-size: 0.85rem;
+        }
+        .query-display::-webkit-scrollbar,
+        .response-display::-webkit-scrollbar {
+            width: 8px;
+        }
+        .query-display::-webkit-scrollbar-track,
+        .response-display::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.2);
+        }
+        .query-display::-webkit-scrollbar-thumb,
+        .response-display::-webkit-scrollbar-thumb {
+            background: rgba(0, 255, 150, 0.3);
+            border-radius: 4px;
+        }
+        .pagination-controls {
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(0, 255, 150, 0.2);
+            border-radius: 10px;
+            padding: 0.75rem 1rem;
+            margin-top: 0.75rem;
+        }
+        .pagination-controls label {
+            color: rgba(0, 255, 150, 0.9);
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        .pagination-controls select {
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(0, 255, 150, 0.2);
+            border-radius: 6px;
+            color: #00ff96;
+            padding: 0.4rem 0.6rem;
+            font-family: 'Inter', monospace;
+        }
+        .pagination-controls span {
+            color: rgba(0, 255, 150, 0.9);
+            font-size: 0.85rem;
+            font-weight: 700;
+        }
+        .pagination-controls strong {
+            color: #00ff96;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+        }
+        /* Audit Action Buttons - More Visible and Clear */
+        .audit-action-btn {
+            padding: 1rem 2rem;
+            border: 2px solid;
+            border-radius: 8px;
+            font-weight: 800;
+            font-size: 0.95rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: inline-flex;
+            align-items: center;
+            gap: 0.75rem;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+            min-width: 180px;
+            justify-content: center;
+        }
+        .audit-action-btn i {
+            font-size: 1.1rem;
+        }
+        .audit-action-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 25px rgba(0, 0, 0, 0.5);
+        }
+        .audit-action-btn:active {
+            transform: translateY(0);
+        }
+        .audit-action-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .audit-btn-apply {
+            background: linear-gradient(135deg, rgba(0, 255, 150, 0.3) 0%, rgba(0, 200, 120, 0.3) 100%);
+            border-color: rgba(0, 255, 150, 0.7);
+            color: #00ff96;
+            text-shadow: 0 0 10px rgba(0, 255, 150, 0.6);
+        }
+        .audit-btn-apply:hover {
+            background: linear-gradient(135deg, rgba(0, 255, 150, 0.4) 0%, rgba(0, 200, 120, 0.4) 100%);
+            border-color: rgba(0, 255, 150, 0.9);
+            box-shadow: 0 6px 30px rgba(0, 255, 150, 0.5);
+        }
+        .audit-btn-clear {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.3) 0%, rgba(109, 40, 217, 0.3) 100%);
+            border-color: rgba(139, 92, 246, 0.7);
+            color: rgba(167, 139, 250, 1);
+            text-shadow: 0 0 10px rgba(139, 92, 246, 0.6);
+        }
+        .audit-btn-clear:hover {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.4) 0%, rgba(109, 40, 217, 0.4) 100%);
+            border-color: rgba(139, 92, 246, 0.9);
+            box-shadow: 0 6px 30px rgba(139, 92, 246, 0.5);
+        }
+        .audit-btn-refresh {
+            background: linear-gradient(135deg, rgba(0, 150, 255, 0.3) 0%, rgba(0, 100, 200, 0.3) 100%);
+            border-color: rgba(0, 150, 255, 0.7);
+            color: rgba(96, 165, 250, 1);
+            text-shadow: 0 0 10px rgba(0, 150, 255, 0.6);
+        }
+        .audit-btn-refresh:hover {
+            background: linear-gradient(135deg, rgba(0, 150, 255, 0.4) 0%, rgba(0, 100, 200, 0.4) 100%);
+            border-color: rgba(0, 150, 255, 0.9);
+            box-shadow: 0 6px 30px rgba(0, 150, 255, 0.5);
+        }
+        .audit-btn-refresh .fa-sync-alt {
+            transition: transform 0.3s ease;
+        }
+        .audit-btn-refresh:active .fa-sync-alt {
+            transform: rotate(180deg);
+        }
+    </style>
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <!-- Statistics -->
+            <section class="stats-section" aria-labelledby="stats-heading">
+                <div class="section-header">
+                    <div class="section-icon-wrapper">
+                        <i class="fas fa-chart-bar"></i>
+                        <div class="section-icon-glow"></div>
+                    </div>
+                    <div class="section-title-text">
+                        <h2 id="stats-heading">Audit Statistics</h2>
+                        <p class="section-subtitle">System Overview</p>
+                    </div>
+                </div>
+                <div class="stats-grid" id="stats-grid">
+
+                <article class="stat-box" role="region" aria-labelledby="total-queries-label">
+                    <div class="stat-label" id="total-queries-label">Total Queries</div>
+                    <div class="stat-value" id="total-queries" aria-live="polite">-</div>
+                    <small>All-time chatbot queries</small>
+                </article>
+
+                <article class="stat-box" role="region" aria-labelledby="successful-queries-label">
+                    <div class="stat-label" id="successful-queries-label">Successful</div>
+                    <div class="stat-value" id="successful-queries" aria-live="polite">-</div>
+                    <small>Completed successfully</small>
+                </article>
+
+                <article class="stat-box" role="region" aria-labelledby="failed-queries-label">
+                    <div class="stat-label" id="failed-queries-label">Failed</div>
+                    <div class="stat-value" id="failed-queries" aria-live="polite">-</div>
+                    <small>Errors encountered</small>
+                </article>
+
+                <article class="stat-box" role="region" aria-labelledby="unique-users-label">
+                    <div class="stat-label" id="unique-users-label">Unique Users</div>
+                    <div class="stat-value" id="unique-users" aria-live="polite">-</div>
+                    <small>Distinct users</small>
+                </article>
+
+                <article class="stat-box" role="region" aria-labelledby="avg-time-label">
+                    <div class="stat-label" id="avg-time-label">Avg Processing Time</div>
+                    <div class="stat-value" id="avg-time" aria-live="polite">-</div>
+                    <small>Response latency</small>
+                </article>
+                </div>
+            </section>
+
+            <!-- Filters -->
+            <section class="audit-filters" aria-labelledby="filters-heading">
+                <h2 id="filters-heading">
+                    <i class="fas fa-filter" aria-hidden="true"></i>
+                    <span>Filter Audit Logs</span>
+                </h2>
+                <form class="filters-form" onsubmit="event.preventDefault(); applyFilters();" aria-label="Audit log filters">
+                    <div class="filter-row">
+                        <div class="filter-group">
+                            <label for="filter-user-id">
+                                <i class="fas fa-hashtag" aria-hidden="true"></i>
+                                User ID
+                            </label>
+                            <input
+                                type="number"
+                                id="filter-user-id"
+                                placeholder="Filter by user ID"
+                                aria-label="Filter by user ID"
+                            >
+                        </div>
+                        <div class="filter-group">
+                            <label for="filter-username">
+                                <i class="fas fa-user" aria-hidden="true"></i>
+                                Username
+                            </label>
+                            <select
+                                id="filter-username"
+                                aria-label="Filter by username"
+                                style="width: 100%;"
+                            >
+                                <option value="">All Usernames</option>
+                                <!-- Options will be populated by JavaScript -->
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="filter-success">
+                                <i class="fas fa-check-circle" aria-hidden="true"></i>
+                                Status
+                            </label>
+                            <select id="filter-success" aria-label="Filter by status">
+                                <option value="">All Statuses</option>
+                                <option value="true">Success Only</option>
+                                <option value="false">Failed Only</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label for="filter-start-date">
+                                <i class="fas fa-calendar-alt" aria-hidden="true"></i>
+                                Start Date
+                            </label>
+                            <input
+                                type="datetime-local"
+                                id="filter-start-date"
+                                aria-label="Filter from date"
+                            >
+                        </div>
+                        <div class="filter-group">
+                            <label for="filter-end-date">
+                                <i class="fas fa-calendar-check" aria-hidden="true"></i>
+                                End Date
+                            </label>
+                            <input
+                                type="datetime-local"
+                                id="filter-end-date"
+                                aria-label="Filter to date"
+                            >
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; margin-top: 1rem;">
+                        <button class="audit-action-btn audit-btn-apply" type="submit" aria-label="Apply selected filters">
+                            <i class="fas fa-check" aria-hidden="true"></i>
+                            <span>APPLY FILTERS</span>
+                        </button>
+                        <button class="audit-action-btn audit-btn-clear" type="button" onclick="clearFilters()" aria-label="Clear all filters">
+                            <i class="fas fa-times" aria-hidden="true"></i>
+                            <span>CLEAR</span>
+                        </button>
+                        <button class="audit-action-btn audit-btn-refresh" type="button" onclick="refreshData()" aria-label="Refresh audit data">
+                            <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                            <span>REFRESH</span>
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- Audit Log Table -->
+            <section class="table-section" aria-labelledby="audit-table-heading">
+                <div class="section-header">
+                    <div class="section-icon-wrapper">
+                        <i class="fas fa-table"></i>
+                        <div class="section-icon-glow"></div>
+                    </div>
+                    <div class="section-title-text">
+                        <h2 id="audit-table-heading">Audit Log Entries</h2>
+                        <p class="section-subtitle">Query History Registry</p>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="intelligence-data-table" role="table" aria-label="Chatbot audit log entries">
+                    <thead>
+                        <tr role="row">
+                            <th scope="col" role="columnheader">ID</th>
+                            <th scope="col" role="columnheader">User</th>
+                            <th scope="col" role="columnheader">Query</th>
+                            <th scope="col" role="columnheader">Response</th>
+                            <th scope="col" role="columnheader">Status</th>
+                            <th scope="col" role="columnheader">Time (ms)</th>
+                            <th scope="col" role="columnheader">Date</th>
+                            <th scope="col" role="columnheader">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="audit-table-body" role="rowgroup">
+                        <tr role="row">
+                            <td colspan="8" class="loading" role="cell">
+                                <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                                Loading audit logs...
+                            </td>
+                        </tr>
+                    </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Pagination -->
+            <nav class="pagination-controls" aria-label="Audit log pagination" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                <div class="pagination-buttons" style="display: flex; align-items: center; gap: 0.75rem;">
+                    <button class="military-btn" type="button" onclick="previousPage()" id="prev-btn" disabled aria-label="Previous page">
+                        <i class="fas fa-chevron-left" aria-hidden="true"></i>
+                        <span>PREVIOUS</span>
+                    </button>
+                    <span style="margin: 0 1rem;" role="status" aria-live="polite">
+                        Page <strong><span id="current-page">1</span></strong>
+                    </span>
+                    <button class="military-btn" type="button" onclick="nextPage()" id="next-btn" aria-label="Next page">
+                        <span>NEXT</span>
+                        <i class="fas fa-chevron-right" aria-hidden="true"></i>
+                    </button>
+                </div>
+                <div class="pagination-limit" style="display: flex; align-items: center; gap: 0.5rem;">
+                    <label for="page-limit">
+                        <i class="fas fa-list-ol" aria-hidden="true"></i>
+                        Results per page:
+                    </label>
+                    <select id="page-limit" onchange="changeLimit()" aria-label="Select results per page">
+                        <option value="50">50</option>
+                        <option value="100" selected>100</option>
+                        <option value="200">200</option>
+                        <option value="500">500</option>
+                    </select>
+                </div>
+            </nav>
+        </div>
+    </main>
+
+    <!-- Details Modal -->
+    <div id="details-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="details-modal-title" style="display: none;">
+        <div class="modal-content">
+            <header class="modal-header">
+                <h2 id="details-modal-title">Audit Log Details</h2>
+                <button class="modal-close" type="button" onclick="closeDetailsModal()" aria-label="Close details dialog">&times;</button>
+            </header>
+            <div class="modal-form" id="details-content" role="document">
+                <!-- Content will be populated by JavaScript -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="military-footer" role="contentinfo">
+        <div class="footer-content">
+            <div class="footer-icon">
+                <i class="fas fa-shield-alt" aria-hidden="true"></i>
+            </div>
+            <div class="footer-text">
+                <span class="footer-title">Face Recognition Service</span>
+                <span class="footer-subtitle">Developed and maintained by <strong>ITDIR-AI DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/admin-audit.js" defer></script>
+    <script>
+        // Set current year dynamically
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+    </script>
+</body>
+</html>

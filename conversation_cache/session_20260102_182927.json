@@ -1,0 +1,18 @@
+{
+  "session_id": "session_20260102_182927",
+  "created_at": "2026-01-02T18:33:18.848829",
+  "message_count": 1,
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "erase all database",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    }
+  ]
+}

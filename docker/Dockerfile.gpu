@@ -1,0 +1,113 @@
+# =====================================================
+# Production Dockerfile (GPU) — Face Recognition Service
+# =====================================================
+# Requires:
+#   - NVIDIA GPU with drivers installed
+#   - NVIDIA Container Toolkit (nvidia-container-toolkit)
+#   - Docker with GPU support enabled
+#
+# Base Image: Official NVIDIA CUDA image from nvcr.io
+# Registry: https://hub.docker.com/r/nvidia/cuda
+# Image: nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 AS base
+
+# Environment
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Install Python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symlinks for python and pip
+RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
+    ln -s /usr/bin/python3.11 /usr/bin/python3
+
+# =====================================================
+# System dependencies (runtime only)
+# =====================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgl1 \
+    postgresql-client \
+    redis-tools \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install gosu separately to ensure it works
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gosu; \
+    rm -rf /var/lib/apt/lists/*; \
+    gosu nobody true
+
+WORKDIR /app
+
+# =====================================================
+# Python dependencies (GPU version)
+# =====================================================
+COPY requirements-gpu.txt requirements.txt
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# =====================================================
+# Application code
+# =====================================================
+COPY . .
+
+# =====================================================
+# Runtime directories & permissions
+# =====================================================
+RUN mkdir -p \
+    /tmp \
+    /app/storage \
+    /app/weights \
+    /app/assets/faces \
+    /app/database/face_database \
+    /app/chromadb_data \
+    /var/log/face-recognition \
+    /app/logs \
+    && chmod 1777 /tmp
+
+# =====================================================
+# Non-root user (security)
+# =====================================================
+RUN useradd -m -u 1000 -s /bin/bash appuser \
+    && chown -R appuser:appuser /app /var/log/face-recognition
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Start as root to fix permissions, then switch to appuser
+USER root
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# =====================================================
+# Networking
+# =====================================================
+EXPOSE 8000
+
+# =====================================================
+# Healthcheck
+# =====================================================
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -fs http://localhost:8000/health || exit 1
+
+# =====================================================
+# Entrypoint
+# =====================================================
+CMD ["gunicorn", "backend.main:app", "-c", "gunicorn.conf.py"]
+

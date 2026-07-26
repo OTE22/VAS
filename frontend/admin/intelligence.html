@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intelligence Analysis - Admin Panel | Face Recognition Service</title>
+    
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css">
+    <style>
+        /* Backend Map Container - Uses Folium-generated maps from server (no frontend Leaflet needed) */
+        .offline-map-container {
+            background: linear-gradient(135deg, #0a1929 0%, #1a1a2e 50%, #16213e 100%);
+            background-size: 400% 400%;
+            animation: gradientShift 15s ease infinite;
+        }
+        
+        @keyframes gradientShift {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        
+        .offline-map-grid {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+            opacity: 0.3;
+            background-image: 
+                linear-gradient(rgba(0, 255, 150, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 255, 150, 0.1) 1px, transparent 1px);
+            background-size: 50px 50px;
+        }
+    </style>
+</head>
+<body>
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main">
+        <header class="page-header">
+            <div class="header-content">
+                <div class="header-icon-wrapper">
+                    <i class="fas fa-brain"></i>
+                </div>
+                <div class="header-text">
+                    <h1>Intelligence Analysis</h1>
+                    <p>Advanced analytics for identity investigation</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Identity Selector -->
+        <div class="identity-selector-section">
+            <div class="form-group">
+                <label class="identity-selector-label">
+                    <i class="fas fa-user-circle"></i>
+                    <span>Select Identity to Analyze</span>
+                </label>
+                <select id="identity-select" class="form-control">
+                    <option value="">-- Select Identity --</option>
+                </select>
+            </div>
+            <div id="selected-identity-info" class="selected-identity-info" style="display: none;">
+                <div class="identity-card">
+                    <img id="identity-snapshot" src="" alt="Identity" class="identity-snapshot">
+                    <div class="identity-details">
+                        <h3 id="identity-name">-</h3>
+                        <p id="identity-type">-</p>
+                        <p id="identity-id">-</p>
+                        <button class="btn-primary" id="analyze-security-btn" type="button" style="margin-top: 1rem; display: none;">
+                            <i class="fas fa-shield-alt"></i> Analyze in Security Intelligence
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Intelligence Tabs -->
+        <!-- Tab clicks are wired in admin-intelligence.js — no inline handlers -->
+        <div class="intelligence-tabs" id="intelligence-tabs" style="display: none;" role="tablist">
+            <button class="intel-tab active" data-tab="related" type="button" role="tab" aria-selected="true">
+                <i class="fas fa-users"></i> Related Identities
+            </button>
+            <button class="intel-tab" data-tab="temporal" type="button" role="tab" aria-selected="false">
+                <i class="fas fa-clock"></i> Temporal Patterns
+            </button>
+            <button class="intel-tab" data-tab="tracking" type="button" role="tab" aria-selected="false">
+                <i class="fas fa-map-marked-alt"></i> Cross-Camera Tracking
+            </button>
+            <button class="intel-tab" data-tab="complete" type="button" role="tab" aria-selected="false">
+                <i class="fas fa-chart-line"></i> Complete Analysis
+            </button>
+        </div>
+
+        <!-- Tab Content -->
+        <div class="intelligence-content">
+            <!-- Related Identities Tab -->
+            <div class="intel-tab-content active" id="tab-related">
+                <div class="tab-header">
+                    <h2>🔗 Related Identities</h2>
+                    <div class="tab-filters">
+                        <label>Min Co-appearances: <input type="number" id="min-co-app" value="3" min="1"></label>
+                        <label>Time Window: <input type="number" id="time-window" value="5" min="1" max="60"> minutes</label>
+                        <button class="btn-primary" id="refresh-related-btn" type="button">
+                            <i class="fas fa-sync"></i> Refresh
+                        </button>
+                        <button class="btn-secondary" id="calc-all-relationships-btn" type="button" title="Calculate and cache relationships for all identities (background task)">
+                            <i class="fas fa-calculator"></i> Calculate All Relationships
+                        </button>
+                    </div>
+                </div>
+                <div class="relationship-strength-groups" id="related-identities-container">
+                    <div class="loading-state">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <p>Loading related identities...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Temporal Patterns Tab -->
+            <div class="intel-tab-content" id="tab-temporal">
+                <div class="tab-header">
+                    <h2>📊 Temporal Patterns</h2>
+                    <div class="tab-filters">
+                        <label>Analysis Period: 
+                            <select id="temporal-days-back" class="form-control">
+                                <option value="30">Last 30 days</option>
+                                <option value="90" selected>Last 90 days</option>
+                                <option value="180">Last 180 days</option>
+                                <option value="365">Last year</option>
+                            </select>
+                        </label>
+                        <button class="btn-primary" id="refresh-temporal-btn" type="button">
+                            <i class="fas fa-sync"></i> Analyze
+                        </button>
+                    </div>
+                </div>
+                <div class="temporal-visualizations" id="temporal-container">
+                    <div class="loading-state">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <p>Analyzing temporal patterns...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cross-Camera Tracking Tab -->
+            <div class="intel-tab-content" id="tab-tracking">
+                <div class="tab-header">
+                    <h2>📍 Cross-Camera Tracking</h2>
+                    <div class="tab-filters">
+                        <label>Date: <input type="date" id="tracking-date" class="form-control"></label>
+                        <label>Days Back: <input type="number" id="tracking-days-back" value="7" min="1" max="30" class="form-control"></label>
+                        <button class="btn-primary" id="refresh-tracking-btn" type="button">
+                            <i class="fas fa-sync"></i> Track Movement
+                        </button>
+                    </div>
+                </div>
+                <div class="tracking-view">
+                    <div class="view-toggle" id="tracking-view-toggle">
+                        <button class="view-btn active" id="timeline-btn" type="button">Timeline</button>
+                        <button class="view-btn" id="map-btn" type="button">Map</button>
+                    </div>
+                    <!-- Map Settings Panel (shown when Map view is active) -->
+                    <div id="map-settings-panel" style="display: none; margin-bottom: 1rem; padding: 1rem; background: rgba(0, 0, 0, 0.3); border-radius: 8px; border: 1px solid rgba(0, 255, 150, 0.2);">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; align-items: end;">
+                            <div>
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #00ff96;">Map Style:</label>
+                                <select id="map-style-select" class="form-control">
+                                    <option value="light" selected>Light</option>
+                                    <option value="dark">Dark</option>
+                                    <option value="satellite">Satellite</option>
+                                    <option value="terrain">Terrain</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #00ff96;">Map Options:</label>
+                                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-show-routes" checked>
+                                        <span>Show Routes</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-cluster-markers" checked>
+                                        <span>Cluster Markers</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-include-popups" checked>
+                                        <span>Show Popups</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div>
+                                <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #00ff96;">Security Features:</label>
+                                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-enable-security" checked>
+                                        <span>Enable Security Features</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-detect-patterns" checked>
+                                        <span>Detect Patterns</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-show-heatmap" checked>
+                                        <span>Risk Heatmap</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                        <input type="checkbox" id="map-show-timeline">
+                                        <span>Timeline Playback</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; padding: 0.25rem; border-radius: 4px; transition: background 0.2s;">
+                                        <input type="checkbox" id="map-show-animated-avatar" style="cursor: pointer;">
+                                        <span style="display: flex; align-items: center; gap: 0.5rem;">
+                                            <i class="fas fa-user-circle" style="color: #00ff96;"></i>
+                                            <strong>Animated Avatar</strong>
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div>
+                                <button class="btn-primary" id="refresh-map-btn" style="width: 100%;">
+                                    <i class="fas fa-sync"></i> Refresh Map
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="tracking-container">
+                        <div class="loading-state">
+                            <i class="fas fa-spinner fa-spin"></i>
+                            <p>Loading movement tracking...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Complete Analysis Tab -->
+            <div class="intel-tab-content" id="tab-complete">
+                <div class="tab-header">
+                    <h2>📈 Complete Analysis</h2>
+                    <button class="btn-primary" id="refresh-complete-btn" type="button">
+                        <i class="fas fa-sync"></i> Refresh All
+                    </button>
+                </div>
+                <div id="complete-analysis-container">
+                    <div class="loading-state">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <p>Loading complete analysis...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Scripts -->
+    <!-- Note: Leaflet removed - using backend map service (Folium) instead -->
+    <script src="/frontend/vendor/chartjs/chart.umd.min.js"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/admin-intelligence.js?v=intel-2"></script>
+</body>
+</html>
+

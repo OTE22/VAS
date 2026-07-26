@@ -1,0 +1,338 @@
+/* ML Model Management Page Styles */
+
+.ml-model-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    gap: 1.5rem;
+    padding: 1.5rem;
+}
+
+.model-status-card,
+.training-card,
+.config-card,
+.stats-card {
+    background: rgba(20, 25, 35, 0.95);
+    border: 1px solid rgba(100, 150, 255, 0.2);
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.model-status-card:hover,
+.training-card:hover,
+.config-card:hover,
+.stats-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(100, 150, 255, 0.3);
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid rgba(100, 150, 255, 0.2);
+}
+
+.card-header h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.card-header h2 i {
+    color: #64a0ff;
+}
+
+.refresh-btn {
+    background: rgba(100, 150, 255, 0.1);
+    border: 1px solid rgba(100, 150, 255, 0.3);
+    color: #64a0ff;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.refresh-btn:hover {
+    background: rgba(100, 150, 255, 0.2);
+    border-color: rgba(100, 150, 255, 0.5);
+}
+
+.refresh-btn:active i {
+    animation: spin 0.5s linear;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.card-body {
+    color: #c0c0c0;
+}
+
+.loading-spinner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    color: #64a0ff;
+}
+
+.loading-spinner i {
+    font-size: 1.25rem;
+}
+
+.status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+}
+
+.status-item {
+    padding: 1rem;
+    background: rgba(100, 150, 255, 0.05);
+    border: 1px solid rgba(100, 150, 255, 0.1);
+    border-radius: 6px;
+}
+
+.status-label {
+    font-size: 0.875rem;
+    color: #888;
+    margin-bottom: 0.5rem;
+}
+
+.status-value {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #64a0ff;
+}
+
+.status-value.true {
+    color: #4caf50;
+}
+
+.status-value.false {
+    color: #f44336;
+}
+
+.training-info {
+    margin-bottom: 1.5rem;
+    line-height: 1.6;
+}
+
+.training-info p {
+    margin-bottom: 0.75rem;
+}
+
+.training-info ul {
+    margin-left: 1.5rem;
+    margin-top: 0.5rem;
+}
+
+.training-info li {
+    margin-bottom: 0.5rem;
+    color: #b0b0b0;
+}
+
+.training-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.train-btn {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.3s;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+.train-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+}
+
+.train-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.train-btn i {
+    font-size: 1.1rem;
+}
+
+.training-params {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.training-params label {
+    color: #c0c0c0;
+    font-size: 0.9rem;
+}
+
+.training-params input {
+    background: rgba(100, 150, 255, 0.1);
+    border: 1px solid rgba(100, 150, 255, 0.3);
+    color: #e0e0e0;
+    padding: 0.5rem;
+    border-radius: 4px;
+    width: 80px;
+}
+
+.training-result {
+    margin-top: 1rem;
+    padding: 1rem;
+    border-radius: 6px;
+    display: none;
+}
+
+.training-result.success {
+    background: rgba(76, 175, 80, 0.1);
+    border: 1px solid rgba(76, 175, 80, 0.3);
+    color: #4caf50;
+    display: block;
+}
+
+.training-result.error {
+    background: rgba(244, 67, 54, 0.1);
+    border: 1px solid rgba(244, 67, 54, 0.3);
+    color: #f44336;
+    display: block;
+}
+
+.training-result.info {
+    background: rgba(100, 150, 255, 0.1);
+    border: 1px solid rgba(100, 150, 255, 0.3);
+    color: #64a0ff;
+    display: block;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.metric-item {
+    padding: 0.75rem;
+    background: rgba(100, 150, 255, 0.05);
+    border: 1px solid rgba(100, 150, 255, 0.1);
+    border-radius: 6px;
+}
+
+.metric-label {
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 0.25rem;
+}
+
+.metric-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #64a0ff;
+}
+
+.settings-link {
+    color: #64a0ff;
+    text-decoration: none;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    transition: color 0.2s;
+}
+
+.settings-link:hover {
+    color: #8bb4ff;
+}
+
+.config-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.config-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    background: rgba(100, 150, 255, 0.05);
+    border: 1px solid rgba(100, 150, 255, 0.1);
+    border-radius: 6px;
+}
+
+.config-label {
+    font-weight: 500;
+    color: #c0c0c0;
+}
+
+.config-value {
+    color: #64a0ff;
+    font-family: 'Courier New', monospace;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+}
+
+.stat-item {
+    padding: 1rem;
+    background: rgba(100, 150, 255, 0.05);
+    border: 1px solid rgba(100, 150, 255, 0.1);
+    border-radius: 6px;
+    text-align: center;
+}
+
+.stat-label {
+    font-size: 0.875rem;
+    color: #888;
+    margin-bottom: 0.5rem;
+}
+
+.stat-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #64a0ff;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .ml-model-container {
+        grid-template-columns: 1fr;
+        padding: 1rem;
+    }
+    
+    .training-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .training-params {
+        width: 100%;
+    }
+}
+

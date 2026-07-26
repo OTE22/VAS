@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Background Tasks Monitor - View and monitor all background task executions">
+    <meta name="keywords" content="admin panel, background tasks, monitoring, system tasks">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>Background Tasks - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-background-tasks.css?v=tasks-2">
+</head>
+<body>
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <!-- Main Content -->
+    <main class="admin-main-content">
+        <div class="admin-container">
+            <!-- Page Header -->
+            <div class="page-header">
+                <div class="header-content">
+                    <h1>
+                        <i class="fas fa-tasks" aria-hidden="true"></i>
+                        Background Tasks Monitor
+                    </h1>
+                    <p class="page-description">
+                        Monitor all background task executions. Admins see all tasks, regular users see tasks that affect their data.
+                    </p>
+                </div>
+                <div class="header-actions">
+                    <button id="enable-alerts-btn" class="military-btn secondary-btn" type="button" aria-pressed="false"
+                            title="Sound alerts need one click to satisfy the browser autoplay policy">
+                        <i class="fas fa-bell" aria-hidden="true"></i>
+                        <span>Enable Task Alerts</span>
+                    </button>
+                    <button id="refresh-btn" class="military-btn primary-btn" type="button">
+                        <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                        <span>REFRESH</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="stats-grid" id="stats-grid" aria-label="Task statistics">
+                <!-- Stats will be populated by JavaScript -->
+            </div>
+
+            <!-- Retention Management (admin only; hidden for other roles) -->
+            <section class="retention-panel" id="retention-panel" aria-labelledby="retention-heading" style="display: none;">
+                <div class="retention-panel-header">
+                    <h2 id="retention-heading">
+                        <i class="fas fa-broom" aria-hidden="true"></i>
+                        Retention Management
+                    </h2>
+                    <div class="retention-panel-actions">
+                        <button id="retention-status-btn" class="military-btn secondary-btn" type="button"
+                                title="Reload retention configuration and last-run report">
+                            <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                            <span>Refresh Retention Status</span>
+                        </button>
+                        <button id="retention-dryrun-btn" class="military-btn secondary-btn" type="button"
+                                title="Count what WOULD be deleted — deletes nothing">
+                            <i class="fas fa-vial" aria-hidden="true"></i>
+                            <span>Run Retention Dry Test</span>
+                        </button>
+                        <button id="retention-run-btn" class="military-btn danger-btn" type="button"
+                                title="Execute retention now (requires typed confirmation)">
+                            <i class="fas fa-play" aria-hidden="true"></i>
+                            <span>Run Retention Now</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="retention-status-grid" id="retention-status-grid">
+                    <!-- Populated by JavaScript -->
+                </div>
+                <div id="retention-errors" class="retention-errors" style="display: none;" role="alert"></div>
+                <div id="retention-job-monitor" class="retention-job-monitor" style="display: none;" role="status" aria-live="polite"></div>
+            </section>
+
+            <!-- Filters -->
+            <div class="filters-section">
+                <div class="filter-group">
+                    <label for="task-type-filter">
+                        <i class="fas fa-filter" aria-hidden="true"></i>
+                        Task Type
+                    </label>
+                    <select id="task-type-filter" class="military-select">
+                        <option value="">All Types</option>
+                        <option value="log_cleanup">Log Cleanup</option>
+                        <option value="data_retention">Data Retention</option>
+                        <option value="identity_clustering">Identity Clustering</option>
+                        <option value="faiss_repair">FAISS Repair</option>
+                        <option value="identity_retention">Identity Retention</option>
+                        <option value="relationship_calculation">Relationship Calculation</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="task-search">
+                        <i class="fas fa-search" aria-hidden="true"></i>
+                        Search
+                    </label>
+                    <input type="search" id="task-search" class="military-select" placeholder="Name, description, job id…" maxlength="100" autocomplete="off">
+                </div>
+                <div class="filter-group">
+                    <label for="date-from">
+                        <i class="fas fa-calendar" aria-hidden="true"></i>
+                        From
+                    </label>
+                    <input type="date" id="date-from" class="military-select">
+                </div>
+                <div class="filter-group">
+                    <label for="date-to">
+                        <i class="fas fa-calendar" aria-hidden="true"></i>
+                        To
+                    </label>
+                    <input type="date" id="date-to" class="military-select">
+                </div>
+                <div class="filter-group">
+                    <button id="clear-filters-btn" class="military-btn secondary-btn" type="button">
+                        <i class="fas fa-times" aria-hidden="true"></i>
+                        Clear Filters
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tabs -->
+            <div class="tabs-container" role="tablist" aria-label="Task status tabs">
+                <button class="tab-btn active" data-tab="all" role="tab" aria-selected="true">
+                    <i class="fas fa-list" aria-hidden="true"></i>
+                    All Tasks
+                </button>
+                <button class="tab-btn" data-tab="upcoming" role="tab" aria-selected="false">
+                    <i class="fas fa-clock" aria-hidden="true"></i>
+                    Upcoming
+                </button>
+                <button class="tab-btn" data-tab="running" role="tab" aria-selected="false">
+                    <i class="fas fa-spinner" aria-hidden="true"></i>
+                    Running
+                </button>
+                <button class="tab-btn" data-tab="completed" role="tab" aria-selected="false">
+                    <i class="fas fa-check-circle" aria-hidden="true"></i>
+                    Completed
+                </button>
+                <button class="tab-btn" data-tab="failed" role="tab" aria-selected="false">
+                    <i class="fas fa-times-circle" aria-hidden="true"></i>
+                    Failed
+                </button>
+                <button class="tab-btn" data-tab="cancelled" role="tab" aria-selected="false">
+                    <i class="fas fa-ban" aria-hidden="true"></i>
+                    Cancelled
+                </button>
+                <button class="tab-btn" data-tab="overdue" role="tab" aria-selected="false">
+                    <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                    Overdue
+                </button>
+            </div>
+
+            <!-- Tasks Table -->
+            <div class="tasks-container">
+                <div id="loading-indicator" class="loading-indicator">
+                    <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                    <span>Loading tasks...</span>
+                </div>
+                <div id="tasks-table-container" class="tasks-table-container" style="display: none;">
+                    <table class="tasks-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">Task Name</th>
+                                <th scope="col">Type</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Scheduled Time</th>
+                                <th scope="col">Started At</th>
+                                <th scope="col">Completed At</th>
+                                <th scope="col">Duration</th>
+                                <th scope="col">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tasks-tbody">
+                            <!-- Tasks will be populated by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="empty-state" class="empty-state" style="display: none;">
+                    <i class="fas fa-inbox" aria-hidden="true"></i>
+                    <h3>No tasks found</h3>
+                    <p>No background tasks match your current filters.</p>
+                </div>
+            </div>
+
+            <!-- Pagination (server-side: only the visible page is downloaded) -->
+            <div class="pagination-container" id="pagination-container" style="display: none;">
+                <button id="prev-page-btn" class="military-btn secondary-btn" type="button" disabled>
+                    <i class="fas fa-chevron-left" aria-hidden="true"></i>
+                    Previous
+                </button>
+                <span class="page-info">
+                    Page <span id="current-page">1</span> of <span id="total-pages">1</span>
+                    (<span id="total-count">0</span> tasks)
+                </span>
+                <button id="next-page-btn" class="military-btn secondary-btn" type="button" disabled>
+                    Next
+                    <i class="fas fa-chevron-right" aria-hidden="true"></i>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Task Details Modal -->
+    <div id="task-modal" class="bt-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title-text" style="display: none;">
+        <div class="bt-modal-content">
+            <header class="bt-modal-header">
+                <h2 class="bt-modal-title">
+                    <i class="fas fa-info-circle" aria-hidden="true"></i>
+                    <span id="task-modal-title-text">Task Details</span>
+                </h2>
+                <button id="task-modal-close" class="bt-modal-close" type="button" aria-label="Close task details">
+                    <i class="fas fa-times" aria-hidden="true"></i>
+                </button>
+            </header>
+            <div class="bt-modal-body" id="task-modal-body">
+                <!-- Populated by JavaScript -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Retention Real-Run Confirmation Modal -->
+    <div id="retention-confirm-modal" class="bt-modal" role="dialog" aria-modal="true" aria-labelledby="retention-confirm-title" style="display: none;">
+        <div class="bt-modal-content bt-modal-danger">
+            <header class="bt-modal-header">
+                <h2 class="bt-modal-title" id="retention-confirm-title">
+                    <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                    Confirm Data Deletion
+                </h2>
+                <button id="retention-confirm-cancel" class="bt-modal-close" type="button" aria-label="Cancel retention run">
+                    <i class="fas fa-times" aria-hidden="true"></i>
+                </button>
+            </header>
+            <div class="bt-modal-body">
+                <p>
+                    This will <strong>permanently delete</strong> all detection records and face images
+                    older than the effective retention period. This cannot be undone.
+                </p>
+                <p>Run a <em>Dry Test</em> first to see exactly what would be removed.</p>
+                <label for="retention-confirm-input">
+                    Type <code>DELETE_EXPIRED_DATA</code> to confirm:
+                </label>
+                <input type="text" id="retention-confirm-input" class="military-select" autocomplete="off" spellcheck="false">
+                <div class="bt-modal-actions">
+                    <button id="retention-confirm-go" class="military-btn danger-btn" type="button" disabled>
+                        <i class="fas fa-play" aria-hidden="true"></i>
+                        Execute Cleanup
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <div id="footer-container"></div>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/footer-loader.js"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <script src="/frontend/js/admin-background-tasks.js?v=tasks-2"></script>
+</body>
+</html>

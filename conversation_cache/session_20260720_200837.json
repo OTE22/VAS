@@ -1,0 +1,18 @@
+{
+  "session_id": "session_20260720_200837",
+  "created_at": "2026-07-20T20:22:57.050344",
+  "message_count": 1,
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "Who was detected at camera\n                                        MD5AL_3EIN_7LWE?",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    }
+  ]
+}

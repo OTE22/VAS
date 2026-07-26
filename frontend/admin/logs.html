@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Error Logs Viewer - Admin panel for viewing system error logs">
+    <meta name="keywords" content="admin panel, error logs, system logs, debugging">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>System Logs Viewer - Admin Panel | Face Recognition Service</title>
+    
+    <!-- Add logs-page class for CSS overrides -->
+    <script>
+        document.documentElement.classList.add('logs-page');
+        document.body.classList.add('logs-page');
+    </script>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/logs.css">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <!-- Header -->
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">System Logs Viewer</h1>
+                        <p class="page-subtitle">View and filter all system logs (DEBUG, INFO, WARNING, ERROR, CRITICAL)</p>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Statistics Bar -->
+            <section class="stats-section" id="stats-section" aria-labelledby="stats-heading">
+                <div class="stats-container">
+                    <div class="stat-card">
+                        <div class="stat-icon debug">
+                            <i class="fas fa-bug"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label">DEBUG</div>
+                            <div class="stat-value" id="stat-total-debug">-</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon info">
+                            <i class="fas fa-info-circle"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label">INFO</div>
+                            <div class="stat-value" id="stat-total-info">-</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label">WARNING</div>
+                            <div class="stat-value" id="stat-total-warning">-</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon error">
+                            <i class="fas fa-exclamation-circle"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label">ERROR</div>
+                            <div class="stat-value" id="stat-total-errors">-</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon critical">
+                            <i class="fas fa-skull"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label">CRITICAL</div>
+                            <div class="stat-value" id="stat-total-critical">-</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-hdd"></i>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-label">File Size</div>
+                            <div class="stat-value" id="stat-file-size">-</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Filters -->
+            <section class="filter-section" aria-labelledby="filter-heading">
+                <div class="filter-controls">
+                    <div class="filter-group">
+                        <label for="date-from" class="filter-label">
+                            <i class="fas fa-calendar-alt"></i>
+                            From Date
+                        </label>
+                        <input type="date" id="date-from" class="filter-input" aria-label="Filter from date">
+                    </div>
+                    <div class="filter-group">
+                        <label for="date-to" class="filter-label">
+                            <i class="fas fa-calendar-alt"></i>
+                            To Date
+                        </label>
+                        <input type="date" id="date-to" class="filter-input" aria-label="Filter to date">
+                    </div>
+                    <div class="filter-group">
+                        <label for="level-filter" class="filter-label">
+                            <i class="fas fa-filter"></i>
+                            Log Level
+                        </label>
+                        <select id="level-filter" class="filter-select" aria-label="Filter by log level">
+                            <option value="all" selected>All Levels</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                            <option value="CRITICAL">CRITICAL</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="page-size" class="filter-label">
+                            <i class="fas fa-list"></i>
+                            Per Page
+                        </label>
+                        <select id="page-size" class="filter-select" aria-label="Items per page">
+                            <option value="25">25</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                            <option value="200">200</option>
+                        </select>
+                    </div>
+                    <button id="apply-filters-btn" class="filter-btn" type="button" aria-label="Apply filters">
+                        <i class="fas fa-filter"></i>
+                        <span>Apply Filters</span>
+                    </button>
+                    <button id="clear-filters-btn" class="filter-btn secondary" type="button" aria-label="Clear filters">
+                        <i class="fas fa-times"></i>
+                        <span>Clear</span>
+                    </button>
+                    <button id="refresh-logs-btn" class="filter-btn refresh" type="button" aria-label="Refresh logs">
+                        <i class="fas fa-sync-alt"></i>
+                        <span>Refresh</span>
+                    </button>
+                </div>
+            </section>
+
+            <!-- Logs Table -->
+            <section class="logs-section" aria-labelledby="logs-heading">
+                <div class="logs-container" id="logs-container">
+                    <div class="loading">
+                        <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                        Loading system logs...
+                    </div>
+                </div>
+            </section>
+
+            <!-- Pagination -->
+            <section class="pagination-section" id="pagination-section" aria-label="Pagination" style="display: none;">
+                <div class="pagination-info">
+                    <span id="pagination-info">Page 1 of 1</span>
+                </div>
+                <div class="pagination-controls">
+                    <button id="prev-page-btn" class="pagination-btn" type="button" aria-label="Previous page" disabled>
+                        <i class="fas fa-chevron-left"></i>
+                        <span>Previous</span>
+                    </button>
+                    <button id="next-page-btn" class="pagination-btn" type="button" aria-label="Next page" disabled>
+                        <span>Next</span>
+                        <i class="fas fa-chevron-right"></i>
+                    </button>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="intelligence-footer">
+        <div class="footer-content">
+            <p>&copy; 2025 ITDIR-AI DEPARTMENT. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/admin-logs.js"></script>
+</body>
+</html>
+

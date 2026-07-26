@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Face Recognition Dashboard</title>
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3" />
+    <link rel="stylesheet" href="/frontend/css/dashboard.css?v=cards-3" />
+    <link rel="stylesheet" href="/frontend/css/footer.css" />
+</head>
+<body>
+    <!-- Navbar Component (loaded dynamically) - BACKEND CONTROLS PERMISSIONS -->
+    <div id="navbar-placeholder"></div>
+
+    <!-- Real-time Detection Notification -->
+    <div class="realtime-notification" id="realtimeNotification">
+        <div class="realtime-notification-content">
+            <div class="realtime-notification-icon">
+                <i class="fas fa-user-check"></i>
+            </div>
+            <div class="realtime-notification-text">
+                <div class="realtime-notification-name" id="notificationName"></div>
+                <div class="realtime-notification-pipeline" id="notificationPipeline"></div>
+            </div>
+        </div>
+    </div>
+
+    <main class="intelligence-main-container">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <div class="error-message" id="errorMessage">
+                <i class="fas fa-exclamation-triangle"></i>
+                <span id="errorText"></span>
+            </div>
+
+            <!-- Stats -->
+            <div class="stats-grid" id="stats-grid">
+                <div class="intelligence-stat-card blue admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-project-diagram"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="totalPipelines">0</div>
+                    <div class="stat-label">Active Pipelines</div>
+                </div>
+                <div class="intelligence-stat-card green admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-users"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="totalFaces">0</div>
+                    <div class="stat-label">Known Faces</div>
+                </div>
+                <div class="intelligence-stat-card orange admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-eye"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="totalDetections">0</div>
+                    <div class="stat-label">Total Detections</div>
+                </div>
+                <div class="intelligence-stat-card purple admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-tasks"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="queueSize">0</div>
+                    <div class="stat-label">Queue Size</div>
+                </div>
+                <div class="intelligence-stat-card red admin-only">
+                    <div class="stat-icon-wrapper">
+                        <i class="fas fa-cog"></i>
+                        <div class="icon-glow"></div>
+                    </div>
+                    <div class="stat-value" id="processing">0</div>
+                    <div class="stat-label">Processing</div>
+                </div>
+            </div>
+
+            <!-- System Metrics -->
+            <div class="system-metrics admin-only">
+                <div class="metrics-header">
+                    <div class="metrics-icon-wrapper">
+                        <i class="fas fa-chart-line"></i>
+                        <div class="metrics-icon-glow"></div>
+                    </div>
+                    <div class="metrics-title-text">
+                        <h2>System Performance</h2>
+                        <p class="metrics-subtitle">Real-time Metrics & Analytics</p>
+                    </div>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-label">Total Received</div>
+                        <div class="metric-value" id="totalReceived">0</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Total Processed</div>
+                        <div class="metric-value" id="processedCount">0</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Total Skipped</div>
+                        <div class="metric-value" id="skippedCount">0</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Success Rate</div>
+                        <div class="metric-value" id="successRate">0%</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pipeline Grid -->
+            <div class="pipeline-section">
+                <div class="section-header">
+                    <div class="section-icon-wrapper">
+                        <i class="fas fa-video"></i>
+                        <div class="section-icon-glow"></div>
+                    </div>
+                    <div class="section-title-text">
+                        <h2>Live Pipeline Feeds</h2>
+                        <p class="section-subtitle">Real-time Detection Streams</p>
+                    </div>
+                    <button id="sound-toggle-btn" class="alert-btn alert-btn-secondary" type="button" aria-pressed="false"
+                            title="Browsers require one click before pages may play sound">
+                        <i class="fas fa-volume-up" aria-hidden="true"></i>
+                        <span>Enable Alert Sound</span>
+                    </button>
+                    <span class="connection-status connecting" id="connectionStatus" title="Live feed connection">
+                        <span class="ws-status-dot"></span>
+                        <span id="statusText">Connecting...</span>
+                    </span>
+                </div>
+                <div class="pipeline-grid" id="pipelineGrid">
+                    <div class="no-data">
+                        <i class="fas fa-inbox"></i>
+                        <h3>No detections yet</h3>
+                        <p>Waiting for webhook requests...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Image Modal (listeners attached in dashboard.js — no inline handlers) -->
+    <div class="modal" id="imageModal">
+        <div class="modal-content">
+            <button class="modal-close" type="button" aria-label="Close image">×</button>
+            <img class="modal-image" id="modalImage" alt="Detection" />
+        </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div class="modal" id="uploadModal">
+        <div class="upload-modal-content">
+            <div class="upload-modal-header">
+                <div class="upload-modal-title">
+                    <i class="fas fa-user-plus"></i>
+                    Add Person to Track
+                </div>
+                <button class="upload-close-btn" id="upload-close-btn" type="button" aria-label="Close upload dialog">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+
+            <form class="upload-form" id="upload-form">
+                <div class="success-message" id="uploadSuccessMessage">
+                    <i class="fas fa-check-circle"></i>
+                    <span id="uploadSuccessText"></span>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="personName">
+                        <i class="fas fa-user"></i>
+                        Person Name
+                    </label>
+                    <input
+                        type="text"
+                        id="personName"
+                        class="form-input"
+                        placeholder="Enter person's name"
+                        required
+                    />
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="fileInput">
+                        <i class="fas fa-image"></i>
+                        Photo
+                    </label>
+                    <div
+                        class="file-upload-area"
+                        id="fileUploadArea"
+                    >
+                        <div class="file-upload-icon">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                        </div>
+                        <div class="file-upload-text">
+                            Click to upload or <strong>drag and drop</strong><br />
+                            PNG, JPG, WEBP up to 5MB
+                        </div>
+                    </div>
+                    <input
+                        type="file"
+                        id="fileInput"
+                        accept="image/png,image/jpeg,image/webp"
+                        style="display: none"
+                    />
+                    <div class="file-preview" id="filePreview">
+                        <img class="preview-image" id="previewImage" alt="Preview" />
+                        <div class="file-info" id="fileInfo"></div>
+                    </div>
+                </div>
+
+                <button type="submit" class="upload-submit-btn" id="uploadSubmitBtn" disabled>
+                    <i class="fas fa-upload"></i>
+                    Upload Person
+                </button>
+            </form>
+        </div>
+    </div>
+
+
+    <!-- Advanced Alert Overlay (listeners attached in dashboard.js) -->
+    <div class="alert-backdrop" id="alertBackdrop"></div>
+    <div class="alert-overlay" id="alertOverlay">
+        <div class="alert-box">
+            <div class="alert-header">
+                <div class="alert-icon-wrapper">
+                    <i class="fas fa-exclamation-triangle alert-icon"></i>
+                </div>
+                <div class="alert-title">
+                    <h2>Person Detected</h2>
+                    <p>Face Recognition Alert</p>
+                </div>
+            </div>
+
+            <div class="alert-body">
+                <div class="alert-detection-info">
+                    <div class="alert-person-name" id="alertPersonName"></div>
+
+                    <div class="alert-details">
+                        <div class="alert-detail-item">
+                            <div class="alert-detail-label">Pipeline</div>
+                            <div class="alert-detail-value" id="alertPipelineValue"></div>
+                        </div>
+                        <div class="alert-detail-item">
+                            <div class="alert-detail-label">Similarity</div>
+                            <div class="alert-detail-value highlight" id="alertSimilarityValue"></div>
+                        </div>
+                        <div class="alert-detail-item">
+                            <div class="alert-detail-label">Detection Time</div>
+                            <div class="alert-detail-value" id="alertTimestampValue"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <img id="alertImagePreview" class="alert-image-preview" alt="Detected Person" style="display: none;" />
+            </div>
+
+            <div class="alert-footer">
+                <button class="alert-btn alert-btn-primary" id="alert-ack-btn" type="button">
+                    Acknowledge
+                </button>
+                <button class="alert-btn alert-btn-secondary" id="alert-history-btn" type="button">
+                    View History
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert History Panel -->
+    <div class="alert-history-panel" id="alertHistoryPanel">
+        <div class="alert-history-header">
+            <div class="alert-history-title">
+                <i class="fas fa-history"></i>
+                Detection History (3h)
+            </div>
+            <button class="alert-history-close" id="alert-history-close-btn" type="button" aria-label="Close history">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="alert-history-content" id="alertHistoryContent">
+            <div class="no-data"><p>No detection history</p></div>
+        </div>
+    </div>
+
+    <!-- Alert Toggle Button -->
+    <button class="alert-toggle-btn" id="alert-toggle-btn" type="button" aria-label="Toggle detection history">
+        <i class="fas fa-bell"></i>
+        <div class="alert-badge" id="alertBadge" style="display: none;">0</div>
+    </button>
+
+    <!-- Footer -->
+    <footer class="military-footer">
+        <div class="footer-content">
+            <div class="footer-icon">
+                <i class="fas fa-shield-alt"></i>
+            </div>
+            <div class="footer-text">
+                <span class="footer-title">Face Recognition Service</span>
+                <span class="footer-subtitle">Developed and maintained by <strong>ITDIR-AI DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
+
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <script src="/frontend/js/dashboard.js?v=dash-10"></script>
+</body>
+</html>
+

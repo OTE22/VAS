@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Live Alerts - Get notified when tracked individuals are detected">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+    
+    <title>Live Alerts - Admin Panel | Face Recognition Service</title>
+    
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-live-alerts.css">
+</head>
+<body>
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-bell" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">Live Search Alerts</h1>
+                        <p class="page-description">Get notified when tracked individuals are detected</p>
+                    </div>
+                </div>
+                <div class="header-actions" id="header-actions">
+                    <span id="ws-status" class="ws-status-pill ws-connecting" role="status" aria-live="polite">Connecting…</span>
+                    <button id="ws-reconnect-btn" class="live-alert-btn" type="button" style="display: none;">
+                        <i class="fas fa-plug" aria-hidden="true"></i> Reconnect
+                    </button>
+                    <button id="sound-toggle-btn" class="live-alert-btn" type="button" aria-pressed="false"
+                            title="Browsers require one click before pages may play sound">
+                        <i class="fas fa-volume-up" aria-hidden="true"></i>
+                        <span>Enable Alert Sound</span>
+                    </button>
+                    <a href="/admin/search" class="intelligence-admin-btn" id="search-btn" style="display: none;">
+                        <div class="btn-content">
+                            <i class="fas fa-search"></i>
+                            <span class="btn-title">SEARCH</span>
+                        </div>
+                    </a>
+                </div>
+            </header>
+
+            <div class="alerts-container">
+                <div class="alerts-grid" id="alerts-grid">
+                    <!-- Create New Alert Card (listener attached in JS — no inline handlers) -->
+                    <div class="live-alert-card create-alert-card" role="button" tabindex="0">
+                        <i class="fas fa-plus" aria-hidden="true"></i>
+                        <span>Create Live Alert</span>
+                        <small id="create-alert-instruction">Search for a person first, then create alert</small>
+                    </div>
+                    <!-- Alerts loaded dynamically -->
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="intelligence-footer">
+        <div class="footer-content">
+            <div class="footer-brand">
+                <i class="fas fa-shield-alt"></i>
+                <span>ITDIR-AI DEPARTMENT</span>
+            </div>
+            <div class="footer-copyright">© 2025 Face Recognition Service</div>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <script src="/frontend/js/admin-navbar.js"></script>
+    <script src="/frontend/js/admin-live-alerts.js?v=alerts-3"></script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Surveillance Intelligence Agent</title>
+    <meta name="description"
+        content="AI-powered surveillance assistant for tracking people and analyzing detection patterns">
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/vendor/fonts/inter.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3" />
+    <link rel="stylesheet" href="/frontend/css/tracking.css?v=chatgpt-2">
+</head>
+
+<body>
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <!-- Main Container -->
+    <main class="military-main-container">
+        <!-- Sidebar for Query History -->
+        <aside class="history-sidebar" id="historySidebar">
+            <div class="sidebar-header">
+                <button class="new-chat-btn" id="newChatBtn" title="New Chat">
+                    <i class="fas fa-plus"></i>
+                    <span>New chat</span>
+                </button>
+                <button class="sidebar-close-btn" id="sidebarCloseBtn" title="Close Sidebar">
+                    <i class="fas fa-xmark"></i>
+                </button>
+            </div>
+            <div class="sidebar-content" id="sidebarContent">
+                <div class="history-loading" id="historyLoading">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <span>Loading history...</span>
+                </div>
+                <div class="history-empty" id="historyEmpty" style="display: none;">
+                    <i class="fas fa-message"></i>
+                    <p>No conversation history</p>
+                    <small>Your queries will appear here</small>
+                </div>
+                <div class="history-list" id="historyList" style="display: none;">
+                    <!-- History items grouped by day will be inserted here -->
+                </div>
+            </div>
+        </aside>
+
+        <!-- Sidebar Toggle Button -->
+        <button class="sidebar-toggle-btn" id="sidebarToggleBtn" title="Show History">
+            <i class="fas fa-bars"></i>
+        </button>
+
+        <!-- Chat Container -->
+        <div class="intelligence-chat-container">
+            <div class="chat-grid-overlay"></div>
+            <div class="chat-scan-line"></div>
+
+            <div class="chat-inner">
+                <!-- Chat Messages Area -->
+                <div class="chat-messages" id="chatMessages">
+                    <div class="welcome-message" id="welcomeMessage">
+                        <div class="welcome-icon">
+                            <i class="fas fa-robot"></i>
+                        </div>
+                        <div class="welcome-text">
+                            <h3>How can I help you today?</h3>
+                            <p>I'm your AI-powered surveillance assistant. I can help you track people, analyze
+                                detection patterns, and answer questions about surveillance data.</p>
+                            <p class="security-note"><i class="fas fa-shield-halved"></i> Your conversations are
+                                automatically saved</p>
+                            <div class="example-queries">
+                                <p class="example-title"><i class="fas fa-sparkles"></i> Try these prompts</p>
+                                <!-- Click behavior via delegation in tracking.js — no inline handlers -->
+                                <ul>
+                                    <li>Track Joey</li>
+                                    <li>Show me all detections from today
+                                    </li>
+                                    <li>Who was detected at camera
+                                        MD5AL_3EIN_7LWE?</li>
+                                    <li>What are the most active pipelines?
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Input Area -->
+                <div class="chat-input-area">
+                    <div class="input-wrapper">
+                        <!-- ONE authoritative handler is attached in tracking.js.
+                             Inline fallbacks are removed: they double-fired and
+                             could START a query while the button was in Stop mode. -->
+                        <textarea id="chatInput" class="military-chat-input" placeholder="Message Surveillance AI..."
+                            autocomplete="off" rows="1"></textarea>
+                        <button id="sendBtn" class="military-send-btn" type="button" title="Send message">
+                            <i class="fas fa-arrow-up"></i>
+                        </button>
+                    </div>
+                    <div class="input-footer">
+                        <span class="connection-status" id="connectionStatus">
+                            <div class="status-indicator active"></div>
+                            <span id="statusText">Ready</span>
+                        </span>
+                        <button id="showInstructionsBtn" class="instructions-btn" type="button">
+                            <i class="fas fa-circle-question"></i>
+                            <span>Help</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="military-footer">
+        <div class="footer-content">
+            <div class="footer-credits">
+                <i class="fas fa-brain"></i>
+                <span><strong>Face Recognition Service</strong> — <strong class="department-name">ITDIR-AI
+                        DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
+
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/tracking.js?v=chatgpt-3"></script>
+</body>
+
+</html>

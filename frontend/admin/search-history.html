@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search History - Admin Panel | Face Recognition Service</title>
+    
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-search-history.css">
+</head>
+<body>
+    <div id="navbar-placeholder"></div>
+
+    <main class="search-history-main">
+        <header class="page-header">
+            <div class="header-content">
+                <div class="header-icon-wrapper">
+                    <i class="fas fa-history"></i>
+                </div>
+                <div class="header-text">
+                    <h1>Search History</h1>
+                    <p>View and manage your past searches</p>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button class="btn-secondary" id="export-history-btn">
+                    <i class="fas fa-download"></i> Export
+                </button>
+                <button class="btn-danger" id="clear-history-btn">
+                    <i class="fas fa-trash"></i> Clear
+                </button>
+            </div>
+        </header>
+
+        <div class="history-filters">
+            <div class="filter-group">
+                <label>Search Type:</label>
+                <select id="filter-type" class="form-control">
+                    <option value="">All Types</option>
+                    <option value="single">Single</option>
+                    <option value="multi">Multi-Face</option>
+                    <option value="batch">Batch</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Days Back:</label>
+                <select id="days-back" class="form-control">
+                    <option value="7">Last 7 days</option>
+                    <option value="30" selected>Last 30 days</option>
+                    <option value="90">Last 90 days</option>
+                    <option value="365">Last year</option>
+                </select>
+            </div>
+            <button class="btn-primary" id="apply-filters-btn">
+                <i class="fas fa-filter"></i> Apply Filters
+            </button>
+        </div>
+
+        <div class="history-stats">
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fas fa-search"></i></div>
+                <div class="stat-content">
+                    <div class="stat-value" id="total-searches">0</div>
+                    <div class="stat-label">Total Searches</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fas fa-users"></i></div>
+                <div class="stat-content">
+                    <div class="stat-value" id="unique-identities">0</div>
+                    <div class="stat-label">Unique Identities</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fas fa-exclamation-triangle"></i></div>
+                <div class="stat-content">
+                    <div class="stat-value" id="watchlist-alerts">0</div>
+                    <div class="stat-label">Watchlist Alerts</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="history-list" id="history-list">
+            <div class="loading-state" id="loading-state">
+                <i class="fas fa-spinner fa-spin"></i>
+                <p>Loading search history...</p>
+            </div>
+        </div>
+
+        <div class="pagination" id="pagination" style="display: none;">
+            <button class="btn-secondary" id="load-more-btn">
+                <i class="fas fa-chevron-down"></i> Load More
+            </button>
+        </div>
+    </main>
+
+    <!-- Export Modal -->
+    <div class="modal" id="export-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Export Search History</h3>
+                <button class="modal-close" id="close-export-modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Export Format:</label>
+                    <select id="export-format" class="form-control">
+                        <option value="csv">CSV (Spreadsheet)</option>
+                        <option value="json">JSON (Structured Data)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Date Range:</label>
+                    <select id="export-days-back" class="form-control">
+                        <option value="7">Last 7 days</option>
+                        <option value="30" selected>Last 30 days</option>
+                        <option value="90">Last 90 days</option>
+                        <option value="365">Last year</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="cancel-export-btn">Cancel</button>
+                <button class="btn-primary" id="confirm-export-btn">
+                    <i class="fas fa-download"></i> Export
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/admin-search-history.js"></script>
+</body>
+</html>
+

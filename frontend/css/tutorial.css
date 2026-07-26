@@ -1,0 +1,542 @@
+/**
+ * Tutorial Page Styles
+ * ====================
+ * Security Intelligence Style for Admin Tutorial Page
+ */
+
+/* Override admin.css overflow restrictions for tutorial page */
+html.tutorial-page {
+    height: auto;
+    overflow: auto;
+}
+
+body.tutorial-page {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+    display: block;
+}
+
+/* Tutorial Container */
+.tutorial-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 1rem;
+    min-height: calc(100vh - 80px);
+    width: 100%;
+    box-sizing: border-box;
+    position: relative;
+}
+
+/* Tutorial Header */
+.tutorial-header {
+    background: rgba(0, 0, 0, 0.6);
+    border: 2px solid rgba(0, 255, 150, 0.4);
+    border-radius: 10px;
+    padding: 2rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 
+        0 0 20px rgba(0, 255, 150, 0.2),
+        inset 0 0 30px rgba(0, 255, 150, 0.05);
+    position: relative;
+    overflow: hidden;
+}
+
+.tutorial-header::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, 
+        transparent,
+        rgba(0, 255, 150, 0.1),
+        transparent);
+    animation: scanHeader 3s linear infinite;
+}
+
+@keyframes scanHeader {
+    0% {
+        left: -100%;
+    }
+    100% {
+        left: 100%;
+    }
+}
+
+.tutorial-header h1 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.8rem;
+    font-weight: 900;
+    color: #00ff96;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+    position: relative;
+    z-index: 2;
+}
+
+.tutorial-header p {
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: rgba(0, 255, 150, 0.8);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    position: relative;
+    z-index: 2;
+}
+
+/* Navigation Buttons */
+.tutorial-nav {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.tutorial-nav button {
+    padding: 0.75rem 1.5rem;
+    border: 2px solid rgba(0, 255, 150, 0.4);
+    background: rgba(0, 0, 0, 0.4);
+    color: #00ff96;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    transition: all 0.3s ease;
+    box-shadow: 
+        0 0 15px rgba(0, 255, 150, 0.2),
+        inset 0 0 20px rgba(0, 255, 150, 0.05);
+    position: relative;
+    overflow: hidden;
+}
+
+.tutorial-nav button::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, 
+        transparent,
+        rgba(0, 255, 150, 0.2),
+        transparent);
+    transition: left 0.5s ease;
+}
+
+.tutorial-nav button:hover::before {
+    left: 100%;
+}
+
+.tutorial-nav button:hover,
+.tutorial-nav button.active {
+    background: rgba(0, 255, 150, 0.15);
+    border-color: rgba(0, 255, 150, 0.8);
+    color: #00ff96;
+    box-shadow: 
+        0 0 25px rgba(0, 255, 150, 0.4),
+        inset 0 0 30px rgba(0, 255, 150, 0.1);
+    transform: translateY(-2px);
+}
+
+.tutorial-nav button.active {
+    background: rgba(0, 255, 150, 0.2);
+    border-color: #00ff96;
+}
+
+/* Tutorial Sections */
+.tutorial-section {
+    background: rgba(0, 0, 0, 0.5);
+    border: 2px solid rgba(0, 255, 150, 0.3);
+    border-radius: 10px;
+    padding: 2rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 
+        0 0 20px rgba(0, 255, 150, 0.15),
+        inset 0 0 30px rgba(0, 255, 150, 0.05);
+    position: relative;
+}
+
+.tutorial-section h2 {
+    color: #00ff96;
+    margin-top: 0;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid rgba(0, 255, 150, 0.3);
+    font-size: 1.5rem;
+    font-weight: 900;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+    position: relative;
+}
+
+.tutorial-section h2::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 0;
+    width: 100px;
+    height: 2px;
+    background: linear-gradient(90deg, 
+        rgba(0, 255, 150, 0.8),
+        transparent);
+    animation: scanLine 2s linear infinite;
+}
+
+.tutorial-section h3 {
+    color: #00ff96;
+    margin-top: 2rem;
+    font-size: 1.2rem;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    text-shadow: 0 0 8px rgba(0, 255, 150, 0.4);
+}
+
+.tutorial-content {
+    line-height: 1.8;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.95rem;
+}
+
+.tutorial-content p {
+    margin: 1rem 0;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.tutorial-content ul,
+.tutorial-content ol {
+    margin: 1rem 0;
+    padding-left: 2rem;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.tutorial-content li {
+    margin: 0.5rem 0;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.tutorial-content strong {
+    color: #00ff96;
+    font-weight: 700;
+}
+
+.tutorial-content pre {
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(0, 255, 150, 0.3);
+    padding: 1rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    overflow-y: auto;
+    max-width: 100%;
+    border-left: 4px solid #00ff96;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    margin: 1rem 0;
+    box-shadow: 
+        0 0 15px rgba(0, 255, 150, 0.1),
+        inset 0 0 20px rgba(0, 255, 150, 0.05);
+}
+
+.tutorial-content code {
+    font-family: 'Courier New', 'Consolas', monospace;
+    font-size: 0.9em;
+    color: #00ff96;
+    background: rgba(0, 255, 150, 0.1);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+}
+
+.tutorial-content pre code {
+    color: rgba(255, 255, 255, 0.9);
+    background: transparent;
+    padding: 0;
+}
+
+/* Example Cards */
+.example-card {
+    background: rgba(0, 0, 0, 0.4);
+    border: 2px solid rgba(0, 255, 150, 0.3);
+    border-left: 4px solid #00ff96;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+    border-radius: 8px;
+    box-shadow: 
+        0 0 15px rgba(0, 255, 150, 0.1),
+        inset 0 0 20px rgba(0, 255, 150, 0.05);
+}
+
+.example-card h4 {
+    color: #00ff96;
+    margin-top: 0;
+    font-size: 1.1rem;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    text-shadow: 0 0 8px rgba(0, 255, 150, 0.4);
+}
+
+.example-card p {
+    color: rgba(255, 255, 255, 0.9);
+    margin: 0.75rem 0;
+}
+
+.example-card ol {
+    margin: 1rem 0;
+    padding-left: 2rem;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.example-card ol li {
+    margin: 0.75rem 0;
+    color: rgba(255, 255, 255, 0.9);
+    line-height: 1.6;
+}
+
+/* API Endpoints */
+.api-endpoint {
+    background: rgba(0, 0, 0, 0.4);
+    border: 2px solid rgba(0, 150, 255, 0.4);
+    border-left: 4px solid #0096ff;
+    padding: 1.25rem;
+    margin: 1.25rem 0;
+    border-radius: 8px;
+    box-shadow: 
+        0 0 15px rgba(0, 150, 255, 0.1),
+        inset 0 0 20px rgba(0, 150, 255, 0.05);
+}
+
+.api-endpoint .method {
+    display: inline-block;
+    padding: 0.4rem 0.8rem;
+    background: #0096ff;
+    color: white;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 0.85rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-right: 0.75rem;
+    box-shadow: 0 0 10px rgba(0, 150, 255, 0.5);
+}
+
+.api-endpoint .path {
+    font-family: 'Courier New', 'Consolas', monospace;
+    color: #00ff96;
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+.api-endpoint p {
+    color: rgba(255, 255, 255, 0.9);
+    margin: 0.75rem 0;
+}
+
+.api-endpoint ul {
+    margin: 0.75rem 0;
+    padding-left: 1.5rem;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.api-endpoint ul li {
+    margin: 0.5rem 0;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.api-endpoint code {
+    color: #00ff96;
+    background: rgba(0, 255, 150, 0.1);
+}
+
+/* Quick Start Section */
+.quick-start {
+    background: rgba(0, 0, 0, 0.6);
+    border: 2px solid rgba(0, 255, 150, 0.4);
+    color: rgba(255, 255, 255, 0.9);
+    padding: 2rem;
+    border-radius: 10px;
+    margin-bottom: 1.5rem;
+    box-shadow: 
+        0 0 20px rgba(0, 255, 150, 0.2),
+        inset 0 0 30px rgba(0, 255, 150, 0.05);
+}
+
+.quick-start h2 {
+    margin-top: 0;
+    color: #00ff96;
+    border-bottom: 2px solid rgba(0, 255, 150, 0.3);
+    padding-bottom: 1rem;
+    font-size: 1.5rem;
+    font-weight: 900;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
+}
+
+.quick-start-step {
+    background: rgba(0, 255, 150, 0.1);
+    border: 1px solid rgba(0, 255, 150, 0.3);
+    padding: 1.25rem;
+    margin: 1rem 0;
+    border-radius: 8px;
+    border-left: 4px solid #00ff96;
+    box-shadow: 
+        0 0 10px rgba(0, 255, 150, 0.1),
+        inset 0 0 15px rgba(0, 255, 150, 0.05);
+}
+
+.quick-start-step h4 {
+    margin: 0 0 0.75rem 0;
+    color: #00ff96;
+    font-size: 1.1rem;
+    font-weight: 800;
+    text-shadow: 0 0 8px rgba(0, 255, 150, 0.4);
+}
+
+.quick-start-step p {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.9);
+    line-height: 1.6;
+}
+
+/* Loading and Error States */
+.loading {
+    text-align: center;
+    padding: 3rem;
+    color: rgba(0, 255, 150, 0.8);
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.error {
+    background: rgba(220, 38, 38, 0.2);
+    border: 2px solid rgba(220, 38, 38, 0.5);
+    color: #ff6b6b;
+    padding: 1.5rem;
+    border-radius: 8px;
+    margin: 1.5rem 0;
+    box-shadow: 0 0 15px rgba(220, 38, 38, 0.2);
+}
+
+/* Code Tabs */
+.code-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin: 1rem 0;
+    border-bottom: 2px solid rgba(0, 255, 150, 0.3);
+    padding-bottom: 0.5rem;
+}
+
+.code-tab {
+    padding: 0.75rem 1.5rem;
+    background: rgba(0, 0, 0, 0.4);
+    border: 2px solid rgba(0, 255, 150, 0.3);
+    border-bottom: 3px solid transparent;
+    cursor: pointer;
+    color: rgba(0, 255, 150, 0.7);
+    font-weight: 700;
+    font-size: 0.85rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-radius: 6px 6px 0 0;
+    transition: all 0.3s ease;
+}
+
+.code-tab:hover {
+    background: rgba(0, 255, 150, 0.1);
+    color: #00ff96;
+    border-color: rgba(0, 255, 150, 0.5);
+}
+
+.code-tab.active {
+    color: #00ff96;
+    border-bottom-color: #00ff96;
+    background: rgba(0, 255, 150, 0.15);
+    border-color: rgba(0, 255, 150, 0.6);
+    box-shadow: 0 0 10px rgba(0, 255, 150, 0.2);
+}
+
+.code-content {
+    display: none;
+}
+
+.code-content.active {
+    display: block;
+}
+
+.code-content pre {
+    max-height: 500px;
+    overflow-y: auto;
+    overflow-x: auto;
+    margin-top: 0;
+}
+
+/* Scrollbar Styling */
+.tutorial-content pre::-webkit-scrollbar,
+.code-content pre::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.tutorial-content pre::-webkit-scrollbar-track,
+.code-content pre::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+}
+
+.tutorial-content pre::-webkit-scrollbar-thumb,
+.code-content pre::-webkit-scrollbar-thumb {
+    background: rgba(0, 255, 150, 0.4);
+    border-radius: 4px;
+}
+
+.tutorial-content pre::-webkit-scrollbar-thumb:hover,
+.code-content pre::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 255, 150, 0.6);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .tutorial-container {
+        padding: 0.75rem;
+    }
+    
+    .tutorial-header {
+        padding: 1.5rem;
+    }
+    
+    .tutorial-header h1 {
+        font-size: 1.4rem;
+    }
+    
+    .tutorial-nav {
+        flex-direction: column;
+    }
+    
+    .tutorial-nav button {
+        width: 100%;
+    }
+    
+    .tutorial-section {
+        padding: 1.5rem;
+    }
+    
+    .code-tabs {
+        flex-wrap: wrap;
+    }
+    
+    .code-tab {
+        flex: 1;
+        min-width: 80px;
+        text-align: center;
+    }
+}
+
+/* Smooth Scrolling */
+html {
+    scroll-behavior: smooth;
+}
+

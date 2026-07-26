@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Pipeline management admin panel - Manage video pipelines and camera configurations">
+    <meta name="keywords" content="admin panel, pipeline management, camera configuration">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#667eea">
+
+    <title>Pipeline Management - Admin Panel | Face Recognition Service</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+</head>
+<body>
+    <!-- Skip to Main Content for Accessibility -->
+    <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
+
+    <!-- Navbar Component (loaded dynamically) -->
+    <div id="navbar-placeholder"></div>
+
+    <main class="intelligence-main-container" id="main-content" role="main">
+        <div class="intelligence-grid-overlay"></div>
+        <div class="intelligence-scan-line"></div>
+        
+        <div class="intelligence-content">
+            <header class="page-header">
+                <div class="header-content">
+                    <div class="header-icon-wrapper">
+                        <i class="fas fa-video" aria-hidden="true"></i>
+                        <div class="header-icon-glow"></div>
+                    </div>
+                    <div class="header-text">
+                        <h1 class="page-title">Pipeline Management</h1>
+                        <p class="page-description">Manage video pipelines and camera configurations</p>
+                    </div>
+                </div>
+                <button id="refresh-btn" class="intelligence-admin-btn" type="button" aria-label="Refresh pipeline list">
+                    <div class="btn-background"></div>
+                    <div class="btn-content">
+                        <div class="btn-icon-wrapper">
+                            <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                            <div class="btn-icon-glow"></div>
+                        </div>
+                        <div class="btn-text">
+                            <span class="btn-title">Refresh</span>
+                            <span class="btn-subtitle">Update List</span>
+                        </div>
+                        <div class="btn-arrow">
+                            <i class="fas fa-arrow-right"></i>
+                        </div>
+                    </div>
+                </button>
+            </header>
+
+            <!-- Pipeline List -->
+            <section class="table-section" aria-labelledby="pipelines-table-heading">
+                <div class="section-header">
+                    <div class="section-icon-wrapper">
+                        <i class="fas fa-table"></i>
+                        <div class="section-icon-glow"></div>
+                    </div>
+                    <div class="section-title-text">
+                        <h2 id="pipelines-table-heading">Pipeline Configurations</h2>
+                        <p class="section-subtitle">Video Source Registry</p>
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="intelligence-data-table" role="table" aria-label="Pipeline configurations list">
+                    <thead>
+                        <tr role="row">
+                            <th scope="col" role="columnheader">Pipeline ID</th>
+                            <th scope="col" role="columnheader">Status</th>
+                            <th scope="col" role="columnheader">Location</th>
+                            <th scope="col" role="columnheader">Total Detections</th>
+                            <th scope="col" role="columnheader">Created At</th>
+                            <th scope="col" role="columnheader">Updated At</th>
+                            <th scope="col" role="columnheader">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pipelines-table-body" role="rowgroup">
+                        <tr role="row">
+                            <td colspan="7" class="loading" role="cell">
+                                <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                                Loading pipelines...
+                            </td>
+                        </tr>
+                    </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- Coordinates Edit Modal -->
+    <div id="coordinates-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="coordinates-modal-title" style="display: none;">
+        <div class="modal-content coordinates-modal-content">
+            <header class="modal-header">
+                <div class="modal-header-icon">
+                    <i class="fas fa-map-marker-alt"></i>
+                </div>
+                <div class="modal-header-text">
+                    <h2 id="coordinates-modal-title">Set Pipeline Location</h2>
+                    <p id="coordinates-modal-subtitle" class="modal-subtitle">Configure coordinates for map visualization</p>
+                </div>
+                <button class="modal-close" type="button" onclick="closeCoordinatesModal()" aria-label="Close coordinates dialog">
+                    <i class="fas fa-times"></i>
+                </button>
+            </header>
+            <div class="modal-body">
+                <div class="coordinates-form-section">
+                    <label class="form-label">
+                        <i class="fas fa-tag"></i>
+                        Location Name
+                    </label>
+                    <input type="text" id="location-name-input" class="form-input" placeholder="e.g., Main Entrance, Parking Lot, Building A" maxlength="255">
+                </div>
+                
+                <div class="coordinates-map-section">
+                    <label class="form-label">
+                        <i class="fas fa-map"></i>
+                        Select Location on Map
+                    </label>
+                    <div id="coordinates-map" class="coordinates-map-container"></div>
+                    <div class="coordinates-hint">
+                        <i class="fas fa-info-circle"></i>
+                        Click on the map to set coordinates, or enter them manually below
+                    </div>
+                </div>
+                
+                <div class="coordinates-inputs-grid">
+                    <div class="coordinates-form-section">
+                        <label class="form-label">
+                            <i class="fas fa-globe"></i>
+                            Latitude
+                        </label>
+                        <input type="number" id="latitude-input" class="form-input" step="any" min="-90" max="90" placeholder="e.g., 40.7128">
+                        <small class="form-hint">Range: -90 to 90</small>
+                    </div>
+                    
+                    <div class="coordinates-form-section">
+                        <label class="form-label">
+                            <i class="fas fa-globe"></i>
+                            Longitude
+                        </label>
+                        <input type="number" id="longitude-input" class="form-input" step="any" min="-180" max="180" placeholder="e.g., -74.0060">
+                        <small class="form-hint">Range: -180 to 180</small>
+                    </div>
+                </div>
+                
+                <div class="coordinates-actions">
+                    <button type="button" class="btn-secondary" onclick="closeCoordinatesModal()">
+                        <i class="fas fa-times"></i> Cancel
+                    </button>
+                    <button type="button" class="btn-primary" onclick="saveCoordinates()">
+                        <i class="fas fa-save"></i> Save Location
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="military-footer" role="contentinfo">
+        <div class="footer-content">
+            <div class="footer-icon">
+                <i class="fas fa-shield-alt" aria-hidden="true"></i>
+            </div>
+            <div class="footer-text">
+                <span class="footer-title">Face Recognition Service</span>
+                <span class="footer-subtitle">Developed and maintained by <strong>ITDIR-AI DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <link rel="stylesheet" href="/frontend/vendor/leaflet/leaflet.css" />
+    <script src="/frontend/vendor/leaflet/leaflet.js"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
+    <script src="/frontend/js/admin-pipelines.js?v=rename-1" defer></script>
+    <script>
+        // Set current year dynamically
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+    </script>
+</body>
+</html>
+

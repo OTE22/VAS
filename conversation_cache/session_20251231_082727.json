@@ -1,0 +1,18 @@
+{
+  "session_id": "session_20251231_082727",
+  "created_at": "2025-12-31T08:27:36.369118",
+  "message_count": 1,
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "HI",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    }
+  ]
+}

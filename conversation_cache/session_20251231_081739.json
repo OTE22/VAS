@@ -1,0 +1,57 @@
+{
+  "session_id": "session_20251231_081739",
+  "created_at": "2025-12-31T08:26:22.397200",
+  "message_count": 4,
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "HI",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    },
+    {
+      "type": "ai",
+      "data": {
+        "content": "Hello! It's nice to meet you. I'm here to help with any questions or topics related to databases, SQL, and data. What can I assist you with today?",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": null,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    },
+    {
+      "type": "human",
+      "data": {
+        "content": "tRACK JOEY",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    },
+    {
+      "type": "ai",
+      "data": {
+        "content": "I apologize, but I encountered an error while preparing your response: Server disconnected without sending a response.",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": null,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ]
+}

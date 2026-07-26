@@ -1,0 +1,150 @@
+<!-- Comprehensive Admin Navbar Component -->
+<nav class="military-navbar" role="navigation" aria-label="Admin navigation">
+    <div class="navbar-brand" role="img" aria-label="Admin Panel Logo">
+        <i class="fas fa-shield-alt" aria-hidden="true"></i>
+        <span>Admin Panel</span>
+    </div>
+    <div class="nav-menu" role="menubar">
+        <!-- Main Dashboard - Admin Only -->
+        <a href="/home" class="military-nav-link admin-only" data-page="home" role="menuitem" style="display: none;">
+            <i class="fas fa-home" aria-hidden="true"></i>
+            <span>HOME</span>
+        </a>
+        
+        <!-- Live Dashboard - All Users -->
+        <a href="/dashboard" class="military-nav-link" data-page="dashboard" role="menuitem">
+            <i class="fas fa-tachometer-alt" aria-hidden="true"></i>
+            <span>DASHBOARD</span>
+        </a>
+        
+        <!-- Management Dropdown - Admin Only -->
+        <div class="nav-dropdown admin-only" data-dropdown="management" style="display: none;">
+            <button class="military-nav-link dropdown-toggle" type="button" aria-haspopup="true" aria-expanded="false" title="Management">
+                <i class="fas fa-cogs" aria-hidden="true"></i>
+                <span>MANAGEMENT</span>
+                <i class="fas fa-chevron-down dropdown-arrow" aria-hidden="true"></i>
+            </button>
+            <div class="dropdown-menu" role="menu">
+                <a href="#" class="dropdown-item" data-page="add-person" role="menuitem" title="Add a person to track" onclick="event.preventDefault(); if(typeof openUploadModal === 'function') { openUploadModal(); } else { console.warn('Upload modal not loaded yet'); }">
+                    <i class="fas fa-user-plus" aria-hidden="true"></i>
+                    <span>ADD PERSON</span>
+                </a>
+                <a href="/admin/users" class="dropdown-item" data-page="users" role="menuitem" title="User Management">
+                    <i class="fas fa-users" aria-hidden="true"></i>
+                    <span>USERS</span>
+                </a>
+                <a href="/admin/pipelines" class="dropdown-item" data-page="pipelines" role="menuitem" title="Pipeline Management">
+                    <i class="fas fa-video" aria-hidden="true"></i>
+                    <span>PIPELINES</span>
+                </a>
+                <a href="/admin/audit" class="dropdown-item" data-page="audit" role="menuitem" title="Audit Log">
+                    <i class="fas fa-clipboard-list" aria-hidden="true"></i>
+                    <span>AUDIT LOG</span>
+                </a>
+                <a href="/tracking-people" class="dropdown-item" data-page="tracking" role="menuitem" title="People Tracking">
+                    <i class="fas fa-user-friends" aria-hidden="true"></i>
+                    <span>TRACKING</span>
+                </a>
+            </div>
+        </div>
+        
+        <!-- Unknown Faces Management - Conditional (shown if user has access) -->
+        <a href="/admin/unknown" class="military-nav-link" data-page="unknown" role="menuitem" style="display: none;">
+            <i class="fas fa-user-secret" aria-hidden="true"></i>
+            <span>UNKNOWN FACES</span>
+        </a>
+        
+        <!-- Advanced Search Dropdown - Admin Only -->
+        <div class="nav-dropdown admin-only" data-dropdown="search" style="display: none;">
+            <button class="military-nav-link dropdown-toggle" type="button" aria-haspopup="true" aria-expanded="false" title="Advanced Search & Intelligence">
+                <i class="fas fa-search-plus" aria-hidden="true"></i>
+                <span>SEARCH & INTELLIGENCE</span>
+                <i class="fas fa-chevron-down dropdown-arrow" aria-hidden="true"></i>
+            </button>
+            <div class="dropdown-menu" role="menu">
+                <a href="/admin/search" class="dropdown-item" data-page="search" role="menuitem" title="Advanced Face Search with Multi-face Detection">
+                    <i class="fas fa-search-plus" aria-hidden="true"></i>
+                    <span>ADVANCED SEARCH</span>
+                </a>
+                <a href="/admin/search-history" class="dropdown-item" data-page="search-history" role="menuitem" title="View and manage search history">
+                    <i class="fas fa-history" aria-hidden="true"></i>
+                    <span>SEARCH HISTORY</span>
+                </a>
+                <a href="/admin/intelligence" class="dropdown-item" data-page="intelligence" role="menuitem" title="Intelligence Analysis - Related Identities, Temporal Patterns, Cross-Camera Tracking">
+                    <i class="fas fa-brain" aria-hidden="true"></i>
+                    <span>INTELLIGENCE ANALYSIS</span>
+                </a>
+                <a href="/admin/watchlists" class="dropdown-item" data-page="watchlists" role="menuitem" title="Manage Watchlists (VIP, Threat, POI)">
+                    <i class="fas fa-list-alt" aria-hidden="true"></i>
+                    <span>WATCHLISTS</span>
+                </a>
+                <a href="/admin/security-intelligence" class="dropdown-item" data-page="security-intelligence" role="menuitem" title="Security Intelligence - Network Analysis, Pattern Detection, Threat Assessment">
+                    <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                    <span>SECURITY INTELLIGENCE</span>
+                </a>
+            </div>
+        </div>
+        
+        <!-- System Dropdown - Admin Only -->
+        <div class="nav-dropdown admin-only" data-dropdown="system" style="display: none;">
+            <button class="military-nav-link dropdown-toggle" type="button" aria-haspopup="true" aria-expanded="false" title="System Management">
+                <i class="fas fa-server" aria-hidden="true"></i>
+                <span>SYSTEM</span>
+                <i class="fas fa-chevron-down dropdown-arrow" aria-hidden="true"></i>
+            </button>
+            <div class="dropdown-menu" role="menu">
+                <a href="/admin/ml-model" class="dropdown-item" data-page="ml-model" role="menuitem" title="ML Similarity Model - Train and manage merge suggestion model">
+                    <i class="fas fa-brain" aria-hidden="true"></i>
+                    <span>ML MODEL</span>
+                </a>
+                <a href="/admin/background-tasks" class="dropdown-item" data-page="background-tasks" role="menuitem" title="Monitor background task executions">
+                    <i class="fas fa-tasks" aria-hidden="true"></i>
+                    <span>BACKGROUND TASKS</span>
+                </a>
+                <a href="/admin/live-alerts" class="dropdown-item" data-page="live-alerts" role="menuitem" title="Live Search Alerts - Get notified when tracked faces appear">
+                    <i class="fas fa-bell" aria-hidden="true"></i>
+                    <span>LIVE ALERTS</span>
+                </a>
+                <a href="/admin/tutorial" class="dropdown-item" data-page="tutorial" role="menuitem" title="Admin Tutorial & Learning Guide">
+                    <i class="fas fa-graduation-cap" aria-hidden="true"></i>
+                    <span>TUTORIAL</span>
+                </a>
+                <a href="/admin/settings" class="dropdown-item" data-page="settings" role="menuitem" title="System Settings Management">
+                    <i class="fas fa-cog" aria-hidden="true"></i>
+                    <span>SETTINGS</span>
+                </a>
+                <a href="/admin/logs" class="dropdown-item" data-page="logs" role="menuitem" title="System Error Logs Viewer">
+                    <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                    <span>ERROR LOGS</span>
+                </a>
+                <a href="/docs" target="_blank" class="dropdown-item" data-page="docs" role="menuitem" title="Open API Documentation in new tab">
+                    <i class="fas fa-book" aria-hidden="true"></i>
+                    <span>API DOCS</span>
+                </a>
+                <button class="dropdown-item" id="navbar-refresh-btn" type="button" role="menuitem" title="Refresh page data">
+                    <i class="fas fa-sync-alt" id="navbar-refresh-icon" aria-hidden="true"></i>
+                    <span>REFRESH</span>
+                </button>
+            </div>
+        </div>
+        
+        <!-- Connection Status -->
+        <div class="connection-status disconnected" id="navbar-connection-status">
+            <div class="status-indicator"></div>
+            <span id="navbar-status-text">Connecting...</span>
+        </div>
+        
+        <!-- User Info -->
+        <div class="navbar-user-info" id="navbar-user-info" style="display: none;">
+            <i class="fas fa-user" aria-hidden="true"></i>
+            <span id="navbar-username">Loading...</span>
+        </div>
+        
+        <!-- Logout -->
+        <button id="logout-btn" class="military-btn logout-btn" type="button" aria-label="Logout from admin panel">
+            <i class="fas fa-sign-out-alt" aria-hidden="true"></i>
+            <span>LOGOUT</span>
+        </button>
+    </div>
+</nav>
+

@@ -1,0 +1,32 @@
+{
+  "session_id": "session_20260101_081256",
+  "created_at": "2026-01-01T08:16:20.398579",
+  "message_count": 2,
+  "messages": [
+    {
+      "type": "human",
+      "data": {
+        "content": "TRACK JOEY",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null
+      }
+    },
+    {
+      "type": "ai",
+      "data": {
+        "content": "I searched the database but found no matching records for your query.",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "ai",
+        "name": null,
+        "id": null,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <!-- Essential Meta Tags -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+    <!-- SEO and Description -->
+    <meta name="description" content="Secure sign in to Face Recognition Service - Advanced AI surveillance and detection system">
+    <meta name="keywords" content="face recognition, login, sign in, authentication, security">
+    <meta name="author" content="ITDIR-AI DEPARTMENT">
+    <meta name="robots" content="noindex, nofollow">
+
+    <!-- Security -->
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+
+    <!-- Performance -->
+    <meta name="theme-color" content="#1a472a">
+
+    <title>برنامج تتبع الاشخاص  | Secure Access Portal</title>
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/vendor/fonts/inter.css"><link rel="stylesheet" href="/frontend/vendor/fonts/cairo.css">
+    <link rel="stylesheet" href="/frontend/css/signin.css">
+</head>
+<body>
+    <a href="#signin-form" class="skip-to-main" aria-label="Skip to sign in form">Skip to sign in form</a>
+
+    <!-- Military Header with Arabic Text -->
+    <header class="military-header">
+        <div class="header-overlay"></div>
+        
+        <!-- Left: Date and Time -->
+        <div class="header-date-time">
+            <div class="datetime-container">
+                <div class="date-display">
+                    <i class="fas fa-calendar-alt"></i>
+                    <span id="current-date">Loading...</span>
+                </div>
+                <div class="time-display">
+                    <i class="fas fa-clock"></i>
+                    <span id="current-time">Loading...</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Right: Arabic Quote -->
+        <div class="header-quote">
+            <i class="fas fa-quote-right"></i>
+            <span class="quote-text">نرصد بذكاء، ونحمي بثقة</span>
+        </div>
+        
+        <div class="header-content">
+            <div class="military-badge">
+                <i class="fas fa-shield-alt"></i>
+            </div>
+            <h1 class="arabic-title">مديرية التأليل - قسم الذكاء الاصطناعي</h1>
+            <div class="header-divider"></div>
+            <p class="english-subtitle">IT DIRECTORY  - Artificial Intelligence Department</p>
+        </div>
+    </header>
+
+    <!-- Main Signin Container -->
+    <main class="military-signin-container" role="main">
+        <!-- Left Image -->
+        <div class="military-side-image left-image">
+            <div class="image-overlay"></div>
+            <img src="/icons/images/lebarmy.jpg" alt="" class="side-image" data-decorative="true">
+        </div>
+
+        <!-- Center Login Form -->
+        <article class="military-signin-card" role="region" aria-labelledby="signin-title">
+            <div class="card-grid-overlay"></div>
+            <div class="card-scan-line"></div>
+            
+            <div class="signin-card-inner">
+                <header class="signin-header">
+                    <div class="security-status">
+                        <div class="status-indicator active"></div>
+                        <span class="status-text">SYSTEM SECURE</span>
+                    </div>
+                    <div class="signin-logo">
+                        <i class="fas fa-user-shield"></i>
+                        <div class="logo-pulse"></div>
+                    </div>
+                    <h2 id="signin-title" class="signin-title">
+                        <span class="title-main">SECURE ACCESS</span>
+                        <span class="title-sub">Authentication Required</span>
+                    </h2>
+                </header>
+
+                <form id="signin-form" class="military-signin-form" method="post" novalidate aria-labelledby="signin-title">
+                    <fieldset class="form-fieldset">
+                        <legend class="visually-hidden">User Credentials</legend>
+
+                        <div class="military-form-group">
+                            <label for="username" class="military-label">
+                                <span class="label-icon"><i class="fas fa-user"></i></span>
+                                <span class="label-text">USERNAME</span>
+                                <span class="required-badge">REQUIRED</span>
+                            </label>
+                            <div class="military-input-wrapper">
+                                <input
+                                    type="text"
+                                    id="username"
+                                    name="username"
+                                    class="military-input"
+                                    required
+                                    autocomplete="username"
+                                    autocapitalize="none"
+                                    spellcheck="false"
+                                    placeholder="ENTER_USERNAME"
+                                    aria-required="true"
+                                    aria-describedby="username-help"
+                                >
+                                <div class="input-glow"></div>
+                                <div class="input-scan"></div>
+                            </div>
+                            <small id="username-help" class="form-help">
+                                <i class="fas fa-info-circle"></i>
+                                Your unique account identifier
+                            </small>
+                        </div>
+
+                        <div class="military-form-group">
+                            <label for="password" class="military-label">
+                                <span class="label-icon"><i class="fas fa-key"></i></span>
+                                <span class="label-text">PASSWORD</span>
+                                <span class="required-badge">REQUIRED</span>
+                            </label>
+                            <div class="military-input-wrapper">
+                                <input
+                                    type="password"
+                                    id="password"
+                                    name="password"
+                                    class="military-input"
+                                    required
+                                    autocomplete="current-password"
+                                    placeholder="••••••••"
+                                    aria-required="true"
+                                    aria-describedby="password-help"
+                                    minlength="6"
+                                >
+                                <!-- Toggle is wired in signin.js — no inline handler.
+                                     Keyboard reachable (no tabindex="-1"). -->
+                                <button
+                                    type="button"
+                                    class="toggle-password-btn"
+                                    aria-label="Show password"
+                                    aria-pressed="false"
+                                    aria-controls="password"
+                                >
+                                    <i class="fas fa-eye" aria-hidden="true"></i>
+                                </button>
+                                <div class="input-glow"></div>
+                                <div class="input-scan"></div>
+                            </div>
+                            <small id="password-help" class="form-help">
+                                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                                Minimum 6 characters required
+                            </small>
+                            <small id="capslock-warning" class="form-help form-warning" style="display: none;" role="status" aria-live="polite">
+                                <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                                Caps Lock is on
+                            </small>
+                        </div>
+
+                        <div id="error-message" class="military-error-message" style="display: none;" role="alert" aria-live="assertive" aria-atomic="true">
+                            <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+                            <span id="error-text"></span>
+                        </div>
+
+                        <!-- Submission progress announced to screen readers -->
+                        <p id="signin-status" class="visually-hidden" role="status" aria-live="polite"></p>
+                    </fieldset>
+
+                    <div class="military-form-actions">
+                        <button
+                            type="submit"
+                            class="military-btn-signin"
+                            aria-label="Sign in to your account"
+                            aria-describedby="error-message"
+                        >
+                            <span class="btn-glow"></span>
+                            <i class="fas fa-sign-in-alt" aria-hidden="true"></i>
+                            <span>LOGIN</span>
+                        </button>
+                    </div>
+                </form>
+
+                <footer class="signin-footer">
+                    <div class="security-info">
+                        <i class="fas fa-lock"></i>
+                        <span>All communications encrypted with military-grade security</span>
+                    </div>
+                </footer>
+            </div>
+        </article>
+
+        <!-- Right Image -->
+        <div class="military-side-image right-image">
+            <div class="image-overlay"></div>
+            <img src="/icons/images/lebarmyeye.png" alt="" class="side-image" data-decorative="true">
+        </div>
+    </main>
+
+    <script src="/frontend/js/signin.js?v=signin-3" defer></script>
+    <script>
+        // Decorative side images: hide on load failure (listener, not inline
+        // onerror). Password visibility is handled in signin.js.
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('img[data-decorative="true"]').forEach((img) => {
+                img.addEventListener('error', () => { img.style.display = 'none'; });
+                if (img.complete && img.naturalWidth === 0) img.style.display = 'none';
+            });
+        });
+
+        // Dynamic Date and Time Update (Works Offline)
+        function updateDateTime() {
+            const dateElement = document.getElementById('current-date');
+            const timeElement = document.getElementById('current-time');
+            
+            if (!dateElement || !timeElement) return;
+
+            const now = new Date();
+            
+            // Format date: Day Month Year (e.g., "05 September 2025")
+            const months = ['January', 'February', 'March', 'April', 'May', 'June',
+                          'July', 'August', 'September', 'October', 'November', 'December'];
+            const day = String(now.getDate()).padStart(2, '0');
+            const month = months[now.getMonth()];
+            const year = now.getFullYear();
+            
+            // Format time: HH:MM (e.g., "16:00")
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            
+            // Update date and time separately
+            dateElement.textContent = `${day} ${month} ${year}`;
+            timeElement.textContent = `${hours}:${minutes}`;
+        }
+
+        // Update immediately on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            updateDateTime();
+            // Update every second for real-time clock (1000 milliseconds)
+            setInterval(updateDateTime, 1000);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,234 @@
+/* =====================================================
+   Shared Footer Styles
+   ===================================================== */
+
+   .footer {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f172a 100%);
+    color: #ffffff;
+    padding: 1rem 2rem;
+    margin-top: auto;
+    border-top: 1px solid rgba(102, 126, 234, 0.2);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+    width: 100%;
+}
+
+.footer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(102, 126, 234, 0.3), transparent);
+}
+
+@keyframes gradient-shift {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+}
+
+.footer-content {
+    display: none; /* Hidden - no longer used */
+}
+
+.footer-section {
+    display: flex;
+    flex-direction: column;
+}
+
+.footer-section h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    letter-spacing: -0.01em;
+}
+
+.footer-section h3 i {
+    font-size: 1rem;
+    color: #667eea;
+    opacity: 0.8;
+}
+
+.footer-section p,
+.footer-section a {
+    color: #cbd5e0;
+    text-decoration: none;
+    line-height: 1.6;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    font-size: 0.875rem;
+    font-weight: 400;
+}
+
+.footer-section a:hover {
+    color: #667eea;
+    transform: translateX(8px);
+    display: inline-block;
+}
+
+.footer-brand {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.footer-brand-logo {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #ffffff;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.footer-brand-logo i {
+    font-size: 1.25rem;
+    color: #667eea;
+    opacity: 0.9;
+}
+
+.footer-brand-tagline {
+    font-size: 0.813rem;
+    color: #94a3b8;
+    line-height: 1.5;
+    font-weight: 400;
+}
+
+.footer-credits {
+    text-align: center;
+    padding: 0;
+    border-top: none;
+    margin-top: 0;
+    position: relative;
+    z-index: 1;
+    max-width: 1400px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* Removed decorative element for cleaner look */
+
+.footer-credits-text {
+    font-size: 0.813rem;
+    color: #cbd5e0;
+    font-weight: 400;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.25rem;
+    line-height: 1.4;
+}
+
+.footer-credits-text strong {
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.footer-credits-text .department-name {
+    color: #667eea;
+    font-weight: 600;
+    font-size: 0.813rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.footer-credits-text i {
+    color: #667eea;
+    font-size: 0.813rem;
+    opacity: 0.8;
+}
+
+.footer-social {
+    display: flex;
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+}
+
+.footer-social a {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%);
+    border: 2px solid rgba(102, 126, 234, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    color: #667eea;
+    font-size: 1.2rem;
+}
+
+.footer-social a:hover {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-color: #667eea;
+    color: #ffffff;
+    transform: translateY(-6px);
+    box-shadow: 0 12px 32px rgba(102, 126, 234, 0.4);
+}
+
+.footer-links {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.footer-links li {
+    margin-bottom: 0.5rem;
+}
+
+.footer-links a {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+}
+
+.footer-links a i {
+    font-size: 0.9rem;
+    width: 24px;
+    opacity: 0.8;
+    transition: opacity 0.3s ease;
+}
+
+.footer-links a:hover i {
+    opacity: 1;
+}
+
+.footer-copyright {
+    font-size: 0.688rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
+}
+
+.footer-copyright small {
+    color: #94a3b8;
+}
+
+/* Responsive Footer */
+@media (max-width: 768px) {
+    .footer {
+        padding: 0.75rem 1rem;
+    }
+
+    .footer-credits-text {
+        font-size: 0.75rem;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+
+    .footer-credits-text .department-name {
+        font-size: 0.75rem;
+    }
+
+    .footer-copyright {
+        font-size: 0.625rem;
+    }
+}

@@ -1,0 +1,102 @@
+# GPU-enabled requirements
+# This file is used when GPU (NVIDIA CUDA) is detected
+
+# Core ML/CV Dependencies (GPU)
+onnxruntime-gpu>=1.16.3
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+scikit-image
+faiss-gpu  # GPU version of FAISS
+
+# Web Framework - Production Ready
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
+
+# Database & Caching
+sqlalchemy
+asyncpg
+redis
+aioredis
+pgvector>=0.2.4  # PostgreSQL vector similarity search
+
+# Background Tasks & Queues
+celery
+kombu
+
+# Monitoring & Logging
+prometheus-client
+python-json-logger
+
+# Performance
+orjson
+
+# Utils
+python-dotenv
+pydantic
+pydantic-settings
+
+# Core Web Framework
+gunicorn
+
+# ASGI Server
+uvloop
+httptools
+
+# Database (Async PostgreSQL)
+psycopg2-binary
+alembic
+
+# Redis Cache
+redis[asyncio]
+hiredis
+
+# Image Processing
+opencv-contrib-python
+Pillow
+
+# Face Recognition Models (GPU)
+onnxruntime-gpu>=1.16.3
+scikit-image
+
+# Utilities
+python-multipart
+websockets
+aiofiles
+httpx
+
+# Security
+python-jose[cryptography]
+passlib[bcrypt]
+PyJWT
+bcrypt
+
+# Logging
+python-json-logger
+colorlog
+
+# LangChain & SQL Agent
+langchain
+langchain-ollama
+langchain-community
+langgraph
+langchain-experimental
+
+# SQL Agent specific
+sqlalchemy-utils
+chromadb
+fuzzywuzzy[speedup]
+
+# Vana AI
+pandas
+vanna[chromadb,postgres,ollama]
+requests
+
+# Document Export (PDF & Word)
+reportlab
+python-docx
+
+# Identity Clustering (for merge suggestions)
+scikit-learn>=1.3.0
+
