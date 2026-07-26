@@ -1,0 +1,13 @@
+# Development and test dependencies.
+#
+# The integration suite runs INSIDE the API container against the live service:
+#
+#   docker exec face_recognition_api pip install -r /app/requirements-dev.txt
+#   docker exec face_recognition_api python -m pytest tests/ -q
+#
+# Kept out of requirements-cpu.txt / requirements-gpu.txt so production images
+# do not ship a test runner. Recreating the container drops anything installed
+# ad-hoc, so install from this file rather than by hand.
+
+pytest==9.1.1
+requests==2.32.5

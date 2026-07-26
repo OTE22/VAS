@@ -49,10 +49,13 @@ async def websocket_endpoint(websocket: WebSocket):
     origin = websocket.headers.get("origin")
     if origin:
         try:
-            from urllib.parse import urlparse
-            origin_host = urlparse(origin).hostname
-            host_header = (websocket.headers.get("host") or "").split(":")[0]
-            allowed_hosts = {host_header, "localhost", "127.0.0.1"}
+            from backend.security.origins import origin_host as _origin_host
+            from backend.security.origins import approved_origin_hosts
+
+            origin_host = _origin_host(origin)
+            allowed_hosts = approved_origin_hosts(
+                request_host=websocket.headers.get("host") or ""
+            )
             if origin_host not in allowed_hosts:
                 logger.warning(f"[WS] ❌ Rejected cross-origin WebSocket from origin host: {origin_host}")
                 await websocket.close(code=1008, reason="Origin not allowed")

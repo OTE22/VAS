@@ -117,20 +117,18 @@ def client_ip(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 def _allowed_origin_hosts(request: Request) -> set:
-    """Hosts accepted as the origin of a credential submission."""
-    hosts = set()
-    configured = getattr(settings, "AUTH_ALLOWED_ORIGINS", "") or ""
-    for item in str(configured).split(","):
-        item = item.strip()
-        if not item:
-            continue
-        parsed = urlparse(item if "//" in item else f"//{item}")
-        hosts.add((parsed.hostname or item).lower())
-    # The host the request was actually sent to is always same-origin-valid.
-    request_host = (request.headers.get("host") or "").split(":")[0].lower()
-    if request_host:
-        hosts.add(request_host)
-    return hosts
+    """Hosts accepted as the origin of a credential submission.
+
+    Delegates to backend.security.origins so CORS, login-CSRF, WebSocket and
+    the SQL-agent stream cannot drift apart. The request Host is accepted as
+    same-origin unless AUTH_SAME_HOST_ORIGIN_TRUSTED is disabled, which
+    production does once every real hostname is listed explicitly.
+    """
+    from backend.security.origins import approved_origin_hosts
+
+    return approved_origin_hosts(
+        settings, request_host=request.headers.get("host") or ""
+    )
 
 
 def validate_login_origin(request: Request) -> Tuple[bool, Optional[str]]:

@@ -1163,10 +1163,13 @@ async def sql_agent_websocket(websocket: WebSocket):
     origin = websocket.headers.get("origin")
     if origin:
         try:
-            from urllib.parse import urlparse
-            origin_host = urlparse(origin).hostname
-            host_header = (websocket.headers.get("host") or "").split(":")[0]
-            if origin_host not in {host_header, "localhost", "127.0.0.1"}:
+            from backend.security.origins import approved_origin_hosts
+            from backend.security.origins import origin_host as _origin_host
+
+            origin_host = _origin_host(origin)
+            if origin_host not in approved_origin_hosts(
+                request_host=websocket.headers.get("host") or ""
+            ):
                 logger.warning(f"[SQL_AGENT_WS] Rejected cross-origin connection from {origin_host}")
                 await websocket.close(code=1008, reason="Origin not allowed")
                 return

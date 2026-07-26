@@ -82,7 +82,11 @@ services:
     container_name: face_recognition_api
     user: "1000:1000"
     environment:
-      ENVIRONMENT: production
+      # This is the DEVELOPMENT stack: plain HTTP, permissive config, seeded
+      # test credentials. The fail-closed preflight in
+      # backend/security/config_guard.py is inert outside production.
+      # Production lives in docker-compose.prod.yml.
+      ENVIRONMENT: development
       DEBUG: "false"
       # Unbuffered stdout/stderr so every log line reaches `docker logs` immediately
       PYTHONUNBUFFERED: "1"
@@ -90,6 +94,17 @@ services:
       PORT: 8000
       WORKERS: 1
       USE_GPU: "false"
+      ALLOW_CPU_FALLBACK: "true"
+      # Docs stay on in development; production disables them.
+      ENABLE_API_DOCS: "true"
+      # Seeded admin for the integration test suite. Supplied explicitly rather
+      # than hardcoded in backend/lifespan.py, and only ever used when no admin
+      # account exists yet. Rotation is off so the suite can log in directly.
+      BOOTSTRAP_ADMIN_USERNAME: admin
+      BOOTSTRAP_ADMIN_PASSWORD: admin123
+      BOOTSTRAP_ADMIN_REQUIRE_ROTATION: "false"
+      MIGRATIONS_MODE: run
+      MIGRATIONS_FAIL_CLOSED: "false"
       DATABASE_URL: postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition
       DB_POOL_SIZE: 30
       DB_MAX_OVERFLOW: 60
@@ -146,7 +161,11 @@ services:
       METRICS_PORT: 9090
       LOG_LEVEL: INFO
       LOG_DIR: /var/log/face-recognition
-      CORS_ORIGINS: '["*"]'
+      # Explicit origins, not a wildcard: a wildcard forces credentialed CORS
+      # off, and '["*"]' previously parsed as one malformed literal origin.
+      CORS_ORIGINS: "http://localhost,http://localhost:8000,http://127.0.0.1,http://127.0.0.1:8000"
+      AUTH_ALLOWED_ORIGINS: "http://localhost,http://localhost:8000,http://127.0.0.1,http://127.0.0.1:8000"
+      AUTH_SAME_HOST_ORIGIN_TRUSTED: "true"
       OLLAMA_BASE_URL: http://ollama:11434
       # Two-model setup for CPU: small fast model for chat/intent/normalization,
       # Arctic-Text2SQL-R1-7B (Snowflake, 2025) only for SQL generation/repair
