@@ -245,6 +245,22 @@ async def lifespan(app: FastAPI):
                 initialized_components.append("models")
             else:
                 raise RuntimeError("Models not properly initialized")
+
+            # GPU readiness. Provider discovery alone proves nothing: a session
+            # can register CUDA and still fail on first execution. This runs a
+            # real inference through the loaded sessions, and in GPU mode with
+            # ALLOW_CPU_FALLBACK=false it aborts startup rather than serving at
+            # a fraction of the expected throughput with no outward symptom.
+            from backend.core.gpu_runtime import verify_gpu_readiness
+
+            await run_in_threadpool(
+                verify_gpu_readiness,
+                settings,
+                sessions=[
+                    ("SCRFD", getattr(model_manager.detector, "session", None)),
+                    ("ArcFace", getattr(model_manager.recognizer, "session", None)),
+                ],
+            )
         except Exception as e:
             logger.error(f"  ❌ Model loading failed: {e}")
             raise  # Critical failure

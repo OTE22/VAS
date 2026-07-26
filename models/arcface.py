@@ -36,10 +36,16 @@ class ArcFace:
         logger.info(f"Initializing ArcFace model from {self.model_path}")
 
         try:
+            # Providers come from configuration rather than being hardcoded, so
+            # a CPU deployment does not request CUDA and a GPU deployment can
+            # refuse to fall back to the CPU silently.
+            from backend.core.gpu_runtime import select_providers, verify_session_providers
+
             self.session = InferenceSession(
                 self.model_path,
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+                providers=select_providers()
             )
+            verify_session_providers(self.session, "ArcFace")
 
             input_config = self.session.get_inputs()[0]
             self.input_name = input_config.name

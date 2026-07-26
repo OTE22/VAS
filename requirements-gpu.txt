@@ -2,7 +2,18 @@
 # This file is used when GPU (NVIDIA CUDA) is detected
 
 # Core ML/CV Dependencies (GPU)
-onnxruntime-gpu>=1.16.3
+#
+# PINNED, and pinned to match the base image's CUDA major version.
+# `onnxruntime-gpu>=1.16.3` resolved to whatever was newest at build time,
+# which is built against CUDA 12 — on the old CUDA 11.8 base image the CUDA
+# execution provider then failed to register and ONNX Runtime fell back to
+# the CPU silently. Inference stayed correct, logs stayed clean, and the
+# service was an order of magnitude slower with nothing reporting it.
+#
+# 1.20.1 targets CUDA 12.x + cuDNN 9, matching docker/Dockerfile.gpu.
+# If you change this version, change the base image in the same commit and
+# re-run the CUDA verification in Docs/61_DEPLOYMENT_RUNBOOK.md.
+onnxruntime-gpu==1.20.1
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
 scikit-image
@@ -53,11 +64,14 @@ redis[asyncio]
 hiredis
 
 # Image Processing
-opencv-contrib-python
+# opencv-contrib-python removed: it installs a SECOND, unpinned OpenCV
+# distribution alongside opencv-python-headless==4.9.0.80 above. Two
+# OpenCV builds in one environment shadow each other's cv2 module, so the
+# effective version depended on installation order.
 Pillow
 
 # Face Recognition Models (GPU)
-onnxruntime-gpu>=1.16.3
+# (onnxruntime-gpu is pinned once at the top of this file)
 scikit-image
 
 # Utilities

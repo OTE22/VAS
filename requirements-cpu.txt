@@ -2,7 +2,10 @@
 # This file is used when no GPU is detected
 
 # Core ML/CV Dependencies (CPU)
-onnxruntime
+# Pinned: an unpinned runtime resolves to whatever is newest at build
+# time, so two builds of the same commit can ship different inference
+# engines. requirements-cpu.lock.txt pins the full transitive set.
+onnxruntime==1.23.2
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
 scikit-image
@@ -53,11 +56,14 @@ redis[asyncio]
 hiredis
 
 # Image Processing
-opencv-contrib-python
-Pillow
+# opencv-contrib-python removed: it installs a SECOND OpenCV distribution
+# alongside opencv-python-headless==4.9.0.80 above. Both provide cv2, so
+# the effective version depended on installation order — the running
+# container had headless 4.9.0.80 pinned but contrib 4.11.0.86 shadowing it.
+Pillow==12.1.0
 
 # Face Recognition Models (CPU)
-onnxruntime
+# (onnxruntime is pinned once at the top of this file)
 scikit-image
 
 # Utilities

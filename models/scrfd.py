@@ -1,3 +1,4 @@
+import logging
 import os
 import cv2
 import numpy as np
@@ -5,6 +6,8 @@ import onnxruntime
 
 from utils.helpers import distance2bbox, distance2kps, draw_corners, draw_keypoints
 from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["SCRFD"]
 
@@ -56,15 +59,22 @@ class SCRFD:
             model_path (str): Path to .onnx model.
         """
         try:
+            # Providers come from configuration rather than being hardcoded, so
+            # a CPU deployment does not request CUDA and a GPU deployment can
+            # refuse to fall back to the CPU silently.
+            from backend.core.gpu_runtime import select_providers, verify_session_providers
+
             self.session = onnxruntime.InferenceSession(
                 model_path,
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+                providers=select_providers()
             )
+            verify_session_providers(self.session, "SCRFD")
+
             # Get model info
             self.output_names = [x.name for x in self.session.get_outputs()]
             self.input_names = [x.name for x in self.session.get_inputs()]
         except Exception as e:
-            print(f"Failed to load the model: {e}")
+            logger.error(f"Failed to load the SCRFD model: {type(e).__name__}: {e}")
             raise
 
     def forward(self, image, threshold):

@@ -6,11 +6,22 @@
 #   - NVIDIA Container Toolkit (nvidia-container-toolkit)
 #   - Docker with GPU support enabled
 #
-# Base Image: Official NVIDIA CUDA image from nvcr.io
+# Base Image: Official NVIDIA CUDA image
 # Registry: https://hub.docker.com/r/nvidia/cuda
-# Image: nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+#
+# CUDA 12.4 + cuDNN 9, matched to onnxruntime-gpu==1.20.1 in
+# requirements-gpu.txt. These two MUST move together.
+#
+# The previous pairing was CUDA 11.8 with an unpinned `onnxruntime-gpu>=1.16.3`.
+# pip resolved that to a CUDA 12 wheel, whose CUDA libraries were absent from
+# the 11.8 image, so ONNX Runtime dropped CUDAExecutionProvider from its
+# provider list and ran on the CPU. Nothing failed loudly: results were correct,
+# logs were clean, the healthcheck passed, and the GPU sat idle.
+#
+# Requires an NVIDIA driver >= 525 on the host. Verify before deploying:
+#   nvidia-smi --query-gpu=driver_version --format=csv
 
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 AS base
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS base
 
 # Environment
 ENV PYTHONUNBUFFERED=1 \
