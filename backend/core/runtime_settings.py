@@ -346,6 +346,20 @@ def apply_to_runtime(key: str, value: Any, category: Optional[str] = None) -> bo
     Returns True when the running behavior now reflects the value (immediate /
     next_request / next_job_run), False when a restart-level action is needed.
     """
+    from backend.security.config_guard import SECURITY_CRITICAL_KEYS
+    from backend.security.redaction import SECRET_SETTINGS
+
+    # Security-critical settings are never mutable in-process. This function is
+    # the only path that writes to the live settings object, so refusing here
+    # closes the hole where an admin token could set ENVIRONMENT=development
+    # and neutralize the production guard without restarting anything.
+    if key in SECURITY_CRITICAL_KEYS:
+        logger.warning(
+            "[SETTINGS] ⛔ Refused runtime change to security-critical setting %s "
+            "(restart with new configuration instead)", key
+        )
+        return False
+
     meta = get_meta(key, category)
     if meta.apply_mode not in DYNAMIC_APPLY_MODES:
         return False
@@ -357,7 +371,8 @@ def apply_to_runtime(key: str, value: Any, category: Optional[str] = None) -> bo
         raise
 
     _last_applied_at[key] = datetime.utcnow()
-    logger.info("[SETTINGS] ✅ Applied %s=%r to runtime (mode=%s)", key, value, meta.apply_mode)
+    shown = "***" if key in SECRET_SETTINGS else repr(value)
+    logger.info("[SETTINGS] ✅ Applied %s=%s to runtime (mode=%s)", key, shown, meta.apply_mode)
     return True
 
 

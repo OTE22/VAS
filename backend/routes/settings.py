@@ -385,10 +385,19 @@ async def sync_settings_from_config(db: AsyncSession):
             return "string"
     
     # Determine if sensitive
-    sensitive_keys = ["JWT_SECRET_KEY", "POSTGRES_PASSWORD", "DATABASE_URL"]
-    
-    # Determine if readonly
-    readonly_keys = ["DATABASE_URL", "DB_HOST", "DB_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"]
+    from backend.security.config_guard import SECURITY_CRITICAL_KEYS
+    from backend.security.redaction import SECRET_SETTINGS
+
+    sensitive_keys = sorted(SECRET_SETTINGS)
+
+    # Determine if readonly. Every setting the production guard validates must
+    # be here: runtime_settings.apply_to_runtime does a literal setattr on the
+    # live settings object, so a writable ENVIRONMENT or JWT_SECRET_KEY would
+    # let an admin token disable the guard from inside the running process.
+    readonly_keys = sorted(
+        {"DATABASE_URL", "DB_HOST", "DB_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"}
+        | SECURITY_CRITICAL_KEYS
+    )
     
     # Build settings from config
     for category, keys in categories.items():

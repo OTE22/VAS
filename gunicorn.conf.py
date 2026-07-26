@@ -154,6 +154,25 @@ def on_starting(server):
     """
     Called just before the master process is initialized.
     """
+    # Second layer of the fail-closed configuration gate. docker-entrypoint.sh
+    # is the primary one, but docker-compose.gpu.yml overrides `entrypoint:`
+    # and would otherwise skip it entirely. Runs once in the master, before any
+    # worker is forked, so sys.exit here aborts the whole process rather than
+    # triggering an endless worker-respawn loop.
+    import sys
+
+    try:
+        from backend.security.config_guard import ConfigGuardError, enforce
+
+        enforce()
+    except ConfigGuardError as exc:
+        sys.stderr.write(exc.report())
+        sys.stderr.write("Refusing to start: configuration is unsafe for production.\n")
+        sys.exit(78)  # EX_CONFIG
+    except Exception as exc:  # guard itself is broken — do not mask it
+        sys.stderr.write(f"Configuration preflight could not run: {type(exc).__name__}: {exc}\n")
+        sys.exit(78)
+
     print("=" * 70)
     print("🚀 Starting Face Recognition Service v4.0")
     print("=" * 70)

@@ -440,3 +440,78 @@ def test_preflight_output_never_contains_the_placeholder_value():
 
 def test_preflight_exits_zero_in_development():
     assert _run_guard(ENVIRONMENT="development").returncode == 0
+
+
+# ------------------------------------------------------- startup wiring
+
+def _read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def test_entrypoint_runs_the_preflight_before_starting_the_server():
+    script = _read("/app/docker-entrypoint.sh")
+    assert "backend.security.config_guard" in script
+    guard_at = script.index("backend.security.config_guard")
+    exec_at = script.index('exec gosu appuser "$@"')
+    assert guard_at < exec_at, "preflight must run before the server is exec'd"
+
+
+def test_entrypoint_preflight_failure_is_fatal():
+    """A non-zero preflight must exit, not warn and continue."""
+    script = _read("/app/docker-entrypoint.sh")
+    block = script[script.index("Configuration preflight"):]
+    assert 'exit "$status"' in block
+
+
+def test_gunicorn_master_also_enforces():
+    """docker-compose.gpu.yml overrides the entrypoint, so the master must
+    enforce independently or the GPU deployment would skip the gate."""
+    conf = _read("/app/gunicorn.conf.py")
+    block = conf[conf.index("def on_starting"):]
+    assert "config_guard" in block
+    assert "sys.exit(78)" in block
+
+
+def test_gunicorn_on_starting_exits_78_under_unsafe_production_config():
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import runpy;ns=runpy.run_path('/app/gunicorn.conf.py');ns['on_starting'](None)"],
+        capture_output=True, text=True, cwd="/app", timeout=120,
+        env={**os.environ,
+             "ENVIRONMENT": "production",
+             "MIGRATIONS_MODE": "skip",
+             "JWT_SECRET_KEY": "your-secret-key-change-in-production"},
+    )
+    assert result.returncode == 78, result.stderr
+
+
+# --------------------------------------------- runtime mutation is refused
+
+def test_apply_to_runtime_refuses_security_critical_settings():
+    """runtime_settings is the only writer to the live settings object."""
+    from backend.core.runtime_settings import apply_to_runtime
+
+    for key in ("ENVIRONMENT", "JWT_SECRET_KEY", "AUTH_COOKIE_SECURE", "WORKERS"):
+        assert apply_to_runtime(key, "attacker-value") is False
+
+
+def test_apply_to_runtime_does_not_change_environment():
+    from config import settings as live
+    from backend.core.runtime_settings import apply_to_runtime
+
+    before = live.ENVIRONMENT
+    apply_to_runtime("ENVIRONMENT", "development")
+    assert live.ENVIRONMENT == before
+
+
+def test_settings_api_marks_security_critical_keys_readonly():
+    source = _read("/app/backend/routes/settings.py")
+    assert "SECURITY_CRITICAL_KEYS" in source
+    assert "readonly_keys" in source
+
+
+def test_runtime_settings_does_not_log_secret_values():
+    source = _read("/app/backend/core/runtime_settings.py")
+    block = source[source.index("def apply_to_runtime"):]
+    assert "SECRET_SETTINGS" in block, "secret values must be masked before logging"
