@@ -9,7 +9,7 @@ import json
 import os
 from typing import List, Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 def parse_origin_list(raw) -> List[str]:
@@ -84,6 +84,10 @@ class Settings(BaseSettings):
         default="your-secret-key-change-in-production",
         env="JWT_SECRET_KEY"
     )
+    # Docker-secret file paths. When set, the file contents replace the inline
+    # value above, so the secret never appears in compose files, `docker
+    # inspect`, or the process environment.
+    JWT_SECRET_KEY_FILE: str = Field(default="", env="JWT_SECRET_KEY_FILE")
     JWT_ALGORITHM: str = Field(default="HS256", env="JWT_ALGORITHM")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=1440, env="ACCESS_TOKEN_EXPIRE_MINUTES")  # 24 hours
     JWT_ISSUER: str = Field(default="face-recognition-service", env="JWT_ISSUER", description="JWT 'iss' claim — tokens from other issuers are rejected")
@@ -97,6 +101,7 @@ class Settings(BaseSettings):
     # --- Login CSRF / origin validation ---
     AUTH_ALLOWED_ORIGINS: str = Field(default="", env="AUTH_ALLOWED_ORIGINS", description="Comma-separated hosts allowed to submit credentials (the request Host is always allowed)")
     AUTH_TRUST_PROXY_HEADERS: bool = Field(default=True, env="AUTH_TRUST_PROXY_HEADERS", description="Trust X-Real-IP from the reverse proxy for client IP attribution")
+    AUTH_SAME_HOST_ORIGIN_TRUSTED: bool = Field(default=True, env="AUTH_SAME_HOST_ORIGIN_TRUSTED", description="Treat the request Host as a valid credential-submission origin. Set False in production once AUTH_ALLOWED_ORIGINS lists every real hostname")
 
     # --- Brute-force / credential-stuffing protection ---
     AUTH_RATE_LIMIT_ENABLED: bool = Field(default=True, env="AUTH_RATE_LIMIT_ENABLED", description="Enable login rate limiting (Redis-backed, shared across replicas)")
@@ -106,6 +111,37 @@ class Settings(BaseSettings):
     AUTH_RATE_LIMIT_IP_WINDOW: int = Field(default=900, env="AUTH_RATE_LIMIT_IP_WINDOW", description="Source-IP throttle window in seconds")
     AUTH_RATE_LIMIT_GLOBAL_MAX: int = Field(default=600, env="AUTH_RATE_LIMIT_GLOBAL_MAX", description="Global login attempts per window (surge protection)")
     AUTH_RATE_LIMIT_GLOBAL_WINDOW: int = Field(default=60, env="AUTH_RATE_LIMIT_GLOBAL_WINDOW", description="Global surge window in seconds")
+
+    # =====================================================
+    # Bootstrap administrator
+    # =====================================================
+    # Used once, only when no administrator account exists. The password is
+    # never logged and never generated-and-printed.
+    BOOTSTRAP_ADMIN_ENABLED: bool = Field(default=True, env="BOOTSTRAP_ADMIN_ENABLED", description="Allow creating the first administrator when none exists")
+    BOOTSTRAP_ADMIN_USERNAME: str = Field(default="admin", env="BOOTSTRAP_ADMIN_USERNAME")
+    BOOTSTRAP_ADMIN_EMAIL: str = Field(default="admin@example.com", env="BOOTSTRAP_ADMIN_EMAIL")
+    BOOTSTRAP_ADMIN_PASSWORD: str = Field(default="", env="BOOTSTRAP_ADMIN_PASSWORD", description="First-admin password. Prefer BOOTSTRAP_ADMIN_PASSWORD_FILE")
+    BOOTSTRAP_ADMIN_PASSWORD_FILE: str = Field(default="", env="BOOTSTRAP_ADMIN_PASSWORD_FILE", description="Path to a Docker secret holding the first-admin password")
+    BOOTSTRAP_ADMIN_REQUIRE_ROTATION: bool = Field(default=True, env="BOOTSTRAP_ADMIN_REQUIRE_ROTATION", description="Force a password change on the bootstrapped account's first login")
+
+    # =====================================================
+    # Production posture
+    # =====================================================
+    # Consumed by backend/security/config_guard.py. In production the guard
+    # refuses to start the process when these are unsafe.
+    ENABLE_API_DOCS: bool = Field(default=True, env="ENABLE_API_DOCS", description="Serve /docs, /redoc and /openapi.json. Must be false in production")
+    ALLOW_MULTI_WORKER: bool = Field(default=False, env="ALLOW_MULTI_WORKER", description="Escape hatch for WORKERS>1. Only set once process-local state is externalized — see backend/core/runtime_settings.py")
+    ALLOW_CPU_FALLBACK: bool = Field(default=True, env="ALLOW_CPU_FALLBACK", description="Permit silent CPU inference when USE_GPU is set but CUDA is unavailable. Set False on real GPU deployments")
+
+    # =====================================================
+    # Database migrations
+    # =====================================================
+    # run    -> apply `alembic upgrade head`
+    # verify -> compare current revision against head; a mismatch is fatal
+    # skip   -> do nothing (the entrypoint already verified)
+    MIGRATIONS_MODE: str = Field(default="run", env="MIGRATIONS_MODE")
+    MIGRATIONS_FAIL_CLOSED: bool = Field(default=False, env="MIGRATIONS_FAIL_CLOSED", description="Abort startup on migration failure even outside production")
+    MIGRATIONS_EXPECTED_HEAD: str = Field(default="", env="MIGRATIONS_EXPECTED_HEAD", description="Pin the expected Alembic head so a drifted schema cannot serve traffic")
 
     # =====================================================
     # Database Configuration (PostgreSQL)
@@ -119,6 +155,8 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = Field(default="face_recognition", env="POSTGRES_DB")
     POSTGRES_USER: str = Field(default="postgres", env="POSTGRES_USER")
     POSTGRES_PASSWORD: str = Field(default="admin", env="POSTGRES_PASSWORD")
+    POSTGRES_PASSWORD_FILE: str = Field(default="", env="POSTGRES_PASSWORD_FILE")
+    DATABASE_URL_FILE: str = Field(default="", env="DATABASE_URL_FILE")
     
     # Connection Pool Settings
     # Database Connection Pool
@@ -133,6 +171,7 @@ class Settings(BaseSettings):
     # Redis Cache Configuration
     # =====================================================
     REDIS_URL: str = Field(default="redis://redis:6379/0", env="REDIS_URL")  # Docker: redis hostname
+    REDIS_URL_FILE: str = Field(default="", env="REDIS_URL_FILE")
     REDIS_MAX_CONNECTIONS: int = Field(default=100, env="REDIS_MAX_CONNECTIONS")
     REDIS_POOL_SIZE: int = Field(default=50, env="REDIS_POOL_SIZE")
     CACHE_TTL: int = Field(default=3600, env="CACHE_TTL", description="Cache TTL for dashboard data in seconds (default: 3600 = 1 hour)")
@@ -697,6 +736,35 @@ class Settings(BaseSettings):
     def allowed_image_extensions_list(self) -> List[str]:
         """Parse ALLOWED_IMAGE_EXTENSIONS from comma-separated string"""
         return [ext.strip() for ext in self.ALLOWED_IMAGE_EXTENSIONS.split(",")]
+
+    @model_validator(mode="after")
+    def _resolve_secret_files(self):
+        """Let Docker secret files override inline values.
+
+        Substitution only — this never raises a policy error, because config.py
+        is imported by alembic/env.py, gunicorn.conf.py and every test, and a
+        raising validator would turn all of them into import-time failures.
+        Policy lives in backend/security/config_guard.py.
+
+        This must run inside __init__ rather than at first use, because
+        backend/auth/auth_service.py caches settings.JWT_SECRET_KEY at import.
+        """
+        from backend.security.secrets import resolve_secret
+
+        for field, file_field in (
+            ("JWT_SECRET_KEY", "JWT_SECRET_KEY_FILE"),
+            ("POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE"),
+            ("DATABASE_URL", "DATABASE_URL_FILE"),
+            ("REDIS_URL", "REDIS_URL_FILE"),
+            ("BOOTSTRAP_ADMIN_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD_FILE"),
+        ):
+            path = getattr(self, file_field, "") or ""
+            if not path:
+                continue
+            resolved = resolve_secret(None, path, name=field)
+            if resolved:
+                object.__setattr__(self, field, resolved)
+        return self
 
     class Config:
         env_file = ".env"
