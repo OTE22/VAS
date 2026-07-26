@@ -184,13 +184,14 @@ async def log_requests(request: Request, call_next):
         )
     return response
 
-# CORS
+# CORS. Credentials are dropped automatically when a wildcard origin is
+# configured — the two together let any site read authenticated responses.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,  # Allow cookies to be sent with requests
+    allow_credentials=settings.cors_allow_credentials,
 )
 
 # Static files for frontend (CSS, JS)

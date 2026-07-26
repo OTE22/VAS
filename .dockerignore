@@ -1,0 +1,84 @@
+# =====================================================
+# Docker build context exclusions
+# =====================================================
+# Both Dockerfiles do `COPY . .` with build context `..`, so without this file
+# secrets, 45 MB of logs and the whole git history are baked into every layer.
+#
+# Do NOT add: alembic/, frontend/, icons/, backend/, sql_agent/, models/,
+# utils/, docker-entrypoint.sh, gunicorn.conf.py, config.py, db_models.py,
+# requirements-*.txt, init-db.sql — all are required at runtime.
+
+# --- Secrets and credentials ---
+.env
+.env.*
+!.env.example
+secrets/
+certs/
+*.key
+*.pem
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# --- Version control ---
+.git
+.gitignore
+.gitattributes
+
+# --- Runtime data (mounted as volumes, never baked in) ---
+logs/
+storage/
+chromadb_data/
+sql_agent/chromadb_data/
+conversation_cache/
+database/face_database/
+tiles/
+debug/
+backup/
+*.dump
+*.sql.gz
+*.bak
+
+# --- Model weights (mounted read-only from the host) ---
+weights/*.onnx
+
+# --- Python caches and build output ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test and tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+
+# --- Node ---
+node_modules/
+
+# --- Editor / OS noise ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Docs and plans (not needed at runtime) ---
+Docs/
+*.md
+!README.md

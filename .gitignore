@@ -3,6 +3,38 @@ app.log
 output_video.mp4
 database/face_database
 
+# =====================================================
+# Secrets and credentials — never commit
+# =====================================================
+.env
+.env.*
+!.env.example
+secrets/
+certs/
+*.key
+*.pem
+*.crt
+*.csr
+*.p12
+*.pfx
+*.jks
+
+# =====================================================
+# Runtime data and generated artifacts
+# =====================================================
+logs/
+storage/
+chromadb_data/
+conversation_cache/
+sql_agent/chromadb_data/
+tiles/
+debug/
+backup/
+*.dump
+*.sql.gz
+*.tar.gz
+*.bak
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

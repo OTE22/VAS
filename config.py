@@ -5,10 +5,44 @@ Single source of truth for all configuration variables.
 Loads from .env file in the root directory.
 """
 
+import json
 import os
 from typing import List, Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
+
+
+def parse_origin_list(raw) -> List[str]:
+    """Parse an origin configuration value into a clean list.
+
+    Accepts a JSON array ('["https://a","https://b"]'), a comma-separated
+    string, a single origin, or "*". Docker Compose passes the JSON form, which
+    a plain comma-split turns into one malformed literal origin — so JSON is
+    decoded first.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        text = str(raw).strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                decoded = json.loads(text)
+                items = decoded if isinstance(decoded, list) else [decoded]
+            except (ValueError, TypeError):
+                items = [text]
+        else:
+            items = text.split(",")
+
+    origins: List[str] = []
+    for item in items:
+        value = str(item).strip().strip('"').strip("'").rstrip("/")
+        if value and value not in origins:
+            origins.append(value)
+    return origins
 
 
 class Settings(BaseSettings):
@@ -274,13 +308,47 @@ class Settings(BaseSettings):
     # CORS Configuration
     # =====================================================
     CORS_ORIGINS: str = Field(default="*", env="CORS_ORIGINS")
-    
+
     @property
     def cors_origins_list(self) -> List[str]:
-        """Parse CORS_ORIGINS from comma-separated string or single value"""
-        if self.CORS_ORIGINS == "*":
-            return ["*"]
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        """Origins allowed by CORS."""
+        return parse_origin_list(self.CORS_ORIGINS)
+
+    @property
+    def cors_allows_wildcard(self) -> bool:
+        return "*" in self.cors_origins_list
+
+    @property
+    def cors_allow_credentials(self) -> bool:
+        """Credentials and a wildcard origin are mutually exclusive.
+
+        Starlette echoes the request Origin back with
+        Access-Control-Allow-Credentials: true when both are set, which lets any
+        site read authenticated responses. Never return True alongside "*".
+        """
+        return not self.cors_allows_wildcard
+
+    @property
+    def auth_allowed_origins_list(self) -> List[str]:
+        """Origins allowed to submit credentials."""
+        return parse_origin_list(self.AUTH_ALLOWED_ORIGINS)
+
+    @property
+    def approved_origins(self) -> List[str]:
+        """The single approved-origin policy.
+
+        CORS, login-Origin validation, CSRF and WebSocket Origin checks all
+        resolve through here so they can never drift apart. AUTH_ALLOWED_ORIGINS
+        wins when set; otherwise the non-wildcard CORS entries are used.
+        """
+        explicit = self.auth_allowed_origins_list
+        if explicit:
+            return explicit
+        return [origin for origin in self.cors_origins_list if origin != "*"]
+
+    @property
+    def is_production(self) -> bool:
+        return str(self.ENVIRONMENT).strip().lower() in ("production", "prod")
 
     # =====================================================
     # Data Retention & Cleanup
