@@ -11,6 +11,12 @@ mkdir -p /app/database/face_database
 mkdir -p /app/storage
 mkdir -p /app/storage/faces  # Known faces (uploaded persons)
 mkdir -p /var/log/face-recognition
+# ChromaDB downloads its ONNX embedder here on first use. Previously created by
+# an `entrypoint:` override in docker-compose.gpu.yml, which had the side effect
+# of skipping this script entirely.
+mkdir -p /home/appuser/.cache/chroma/onnx_models
+chown -R 1000:1000 /home/appuser/.cache/chroma 2>/dev/null || true
+chmod -R 755 /home/appuser/.cache/chroma 2>/dev/null || true
 
 # Fix permissions - make writable by all (safe in container)
 # Use more aggressive approach for Windows bind mounts

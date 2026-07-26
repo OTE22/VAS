@@ -208,47 +208,6 @@
     </main>
 
     <script src="/frontend/js/signin.js?v=signin-3" defer></script>
-    <script>
-        // Decorative side images: hide on load failure (listener, not inline
-        // onerror). Password visibility is handled in signin.js.
-        document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('img[data-decorative="true"]').forEach((img) => {
-                img.addEventListener('error', () => { img.style.display = 'none'; });
-                if (img.complete && img.naturalWidth === 0) img.style.display = 'none';
-            });
-        });
-
-        // Dynamic Date and Time Update (Works Offline)
-        function updateDateTime() {
-            const dateElement = document.getElementById('current-date');
-            const timeElement = document.getElementById('current-time');
-            
-            if (!dateElement || !timeElement) return;
-
-            const now = new Date();
-            
-            // Format date: Day Month Year (e.g., "05 September 2025")
-            const months = ['January', 'February', 'March', 'April', 'May', 'June',
-                          'July', 'August', 'September', 'October', 'November', 'December'];
-            const day = String(now.getDate()).padStart(2, '0');
-            const month = months[now.getMonth()];
-            const year = now.getFullYear();
-            
-            // Format time: HH:MM (e.g., "16:00")
-            const hours = String(now.getHours()).padStart(2, '0');
-            const minutes = String(now.getMinutes()).padStart(2, '0');
-            
-            // Update date and time separately
-            dateElement.textContent = `${day} ${month} ${year}`;
-            timeElement.textContent = `${hours}:${minutes}`;
-        }
-
-        // Update immediately on page load
-        document.addEventListener('DOMContentLoaded', () => {
-            updateDateTime();
-            // Update every second for real-time clock (1000 milliseconds)
-            setInterval(updateDateTime, 1000);
-        });
-    </script>
+    <script src="/frontend/js/signin-chrome.js?v=chrome-1" defer></script>
 </body>
 </html>

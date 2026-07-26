@@ -1,0 +1,22 @@
+# Redis ACL template — copy to users.acl and fill in the password hashes.
+#
+#   bash scripts/setup/generate-redis-acl.sh
+#
+# The real users.acl is gitignored. Passwords are stored as SHA-256 hashes
+# (`#<hex>`), never in plaintext, and never as a --requirepass command-line
+# argument where `docker inspect` and the host process list would expose them.
+#
+# Redis here is not a disposable cache: it holds sessions, login rate-limit
+# counters and the JWT revocation denylist. Unauthenticated write access would
+# let an attacker delete revocation entries and resurrect logged-out tokens.
+
+# Deny the default user entirely. Without this line an unauthenticated client
+# still gets full access.
+user default off
+
+# Application user: full data access on the keyspace, no administrative or
+# destructive server commands.
+user fr_app on #REPLACE_WITH_SHA256_HEX ~* &* +@all -@admin -@dangerous -flushall -flushdb -shutdown -config -debug -replicaof -slaveof -module -acl -script
+
+# Read-only user for monitoring and diagnostics.
+user fr_monitor on #REPLACE_WITH_MONITOR_SHA256_HEX ~* &* +@read +ping +info +client|id -@admin -@dangerous

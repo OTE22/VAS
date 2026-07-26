@@ -28,11 +28,22 @@ from utils.logging import setup_logging
 setup_logging(log_to_file=True)  # Enable file logging to logs/app.log
 logger = logging.getLogger(__name__)
 
+# Interactive docs publish the entire API surface, including every admin route,
+# to anyone who can reach the port. Production serves none of them; the guard
+# refuses to start if ENABLE_API_DOCS is left on there.
+_docs_enabled = bool(getattr(settings, "ENABLE_API_DOCS", True)) and not settings.is_production
+_docs_url = "/docs" if _docs_enabled else None
+_redoc_url = "/redoc" if _docs_enabled else None
+_openapi_url = "/openapi.json" if _docs_enabled else None
+
 # Create FastAPI app
 app = FastAPI(
     title=getattr(settings, 'APP_NAME', 'Face Recognition Service'),
     version=getattr(settings, 'VERSION', 'V1.0.0'),
     lifespan=lifespan,
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+    openapi_url=_openapi_url,
     description="""
     Face Recognition Service API
     

@@ -17,7 +17,7 @@ services:
     container_name: face_recognition_db
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: admin
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
       POSTGRES_DB: face_recognition
       POSTGRES_INITDB_ARGS: "-E UTF8"
       POSTGRES_MAX_CONNECTIONS: 200
@@ -27,13 +27,21 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
-    ports:
-      - "5432:5432"
+    # Not published. Postgres knows nothing about the application's
+    # authorization checks, so a reachable port with a weak password bypasses
+    # every one of them. Reach it via `docker compose exec postgres psql`.
+    expose:
+      - "5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d face_recognition"]
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     restart: unless-stopped
     networks:
       - face_recognition_network
@@ -42,25 +50,84 @@ services:
   redis:
     image: redis:7-alpine
     container_name: face_recognition_redis
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    # ACL file, not --requirepass: a command-line password is visible in
+    # `docker inspect` and in the host process list.
     command: >
       redis-server
+      --aclfile /etc/redis/users.acl
+      --protected-mode yes
       --maxmemory 2gb
       --maxmemory-policy allkeys-lru
       --save 60 1000
       --appendonly yes
+      --appendfsync everysec
       --tcp-backlog 511
       --timeout 0
       --tcp-keepalive 300
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
+      - ../docker/redis/users.acl:/etc/redis/users.acl:ro
+    # Not published. Redis holds sessions, login rate-limit counters and the
+    # token revocation denylist — unauthenticated write access would let an
+    # attacker un-revoke tokens that had been logged out.
+    expose:
+      - "6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # REDISCLI_AUTH is read from the environment, so the password never
+      # appears as a command-line argument.
+      test: ["CMD-SHELL", "redis-cli -u redis://fr_app@127.0.0.1:6379 ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     restart: unless-stopped
+    networks:
+      - face_recognition_network
+
+  # One-shot schema migration. Runs as the migration role (DDL), exits, and
+  # gates every API replica via service_completed_successfully so N replicas
+  # cannot race each other applying the same migration.
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    restart: "no"
+    user: "1000:1000"
+    environment:
+      ENVIRONMENT: production
+      MIGRATIONS_MODE: run
+      MIGRATIONS_FAIL_CLOSED: "true"
+      MIGRATIONS_EXPECTED_HEAD: b1c2d3e4f5a6
+      # Migration role: holds DDL rights the application role does not.
+      DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
+      POSTGRES_USER: fr_migrator
+      POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
+      REDIS_URL: redis://fr_app:${REDIS_PASSWORD}@redis:6379/0
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      CORS_ORIGINS: ${PUBLIC_ORIGIN}
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
+      AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
+      AUTH_COOKIE_SECURE: "true"
+      ENABLE_API_DOCS: "false"
+      JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
+      USE_GPU: "false"
+    secrets:
+      - jwt_secret
+    command: ["python", "-m", "backend.utils.migrations", "--upgrade-head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - face_recognition_network
 
@@ -78,14 +145,24 @@ services:
       PYTHONUNBUFFERED: "1"
       HOST: 0.0.0.0
       PORT: 8000
-      WORKERS: 16
+      # MUST stay 1. Runtime settings, the SQL-agent cancellation registry, the
+      # relationship/threshold/training single-flight guards, webhook dedup,
+      # FAISS autosave and the in-process token-revocation fallback are all
+      # per-process state. At 16 workers an admin settings change reached 1
+      # process in 16, "single-flight" jobs could run 16 times concurrently,
+      # cancelling a running query usually hit a worker that had never seen it,
+      # and 16 CUDA sessions competed for one GPU. See
+      # backend/core/runtime_settings.py and ALLOW_MULTI_WORKER.
+      WORKERS: 1
       USE_GPU: "true"
-      DATABASE_URL: postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition
+      # Fail startup rather than silently running GPU inference on the CPU.
+      ALLOW_CPU_FALLBACK: "false"
+      DATABASE_URL: postgresql+asyncpg://fr_app:${FR_APP_PASSWORD:?set FR_APP_PASSWORD in .env}@postgres:5432/face_recognition
       DB_POOL_SIZE: 50
       DB_MAX_OVERFLOW: 100
       DB_POOL_RECYCLE: 3600
       DB_POOL_PRE_PING: "true"
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://fr_app:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       REDIS_MAX_CONNECTIONS: 100
       REDIS_POOL_SIZE: 50
       CACHE_TTL: 3600
@@ -137,7 +214,19 @@ services:
       METRICS_PORT: 9090
       LOG_LEVEL: INFO
       LOG_DIR: /var/log/face-recognition
-      CORS_ORIGINS: '["*"]'
+      # Explicit origins only. A wildcard here is rejected at startup.
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal}
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
+      AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_COOKIE_SAMESITE: strict
+      ENABLE_API_DOCS: "false"
+      JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
+      BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+      # Workers only verify; the one-shot migrate job applies.
+      MIGRATIONS_MODE: verify
+      MIGRATIONS_FAIL_CLOSED: "true"
+      MIGRATIONS_EXPECTED_HEAD: b1c2d3e4f5a6
       OLLAMA_BASE_URL: http://ollama:11434
       # Two-model setup: general model for chat/intent/normalization,
       # Arctic-Text2SQL-R1-7B (Snowflake, 2025) only for SQL generation/repair
@@ -152,8 +241,8 @@ services:
       DB_HOST: postgres
       DB_PORT: "5432"
       POSTGRES_DB: face_recognition
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: admin
+      POSTGRES_USER: fr_app
+      POSTGRES_PASSWORD: ${FR_APP_PASSWORD}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
@@ -163,12 +252,15 @@ services:
       - face_database_data:/app/database
       - chromadb_data:/app/chromadb_data
       - chromadb_cache:/home/appuser/.cache/chroma
-      - ../:/app
-      - ../logs:/var/log/face-recognition
-    # Fix ChromaDB cache permissions on startup - use array format for command
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - "mkdir -p /home/appuser/.cache/chroma/onnx_models && chown -R 1000:1000 /home/appuser/.cache/chroma && chmod -R 755 /home/appuser/.cache/chroma && exec gunicorn backend.main:app -c gunicorn.conf.py"
+    # The Dockerfile ENTRYPOINT (docker-entrypoint.sh) must run: it performs the
+    # fail-closed configuration preflight, fixes volume permissions and drops
+    # privileges via gosu. Overriding `entrypoint:` here previously skipped all
+    # three. The ChromaDB cache directory it used to create is handled by the
+    # entrypoint's own mkdir/chown, so the override is no longer needed.
+    command: ["gunicorn", "backend.main:app", "-c", "gunicorn.conf.py"]
+    secrets:
+      - jwt_secret
+      - bootstrap_admin_password
     # Expose ports internally only (nginx will proxy)
     expose:
       - "8000"
@@ -178,6 +270,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # API replicas never race on migrations: they do not start until the
+      # single one-shot migrate container has exited successfully.
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       # Liveness only (zero-I/O endpoint): no flapping when dependencies are slow
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
@@ -225,10 +321,14 @@ services:
       # Ollama automatically detects and uses GPU when available
       # No additional configuration needed!
     volumes:
-      # Use host directory for Ollama models (Windows path - must use quotes and double backslashes)
-      - "C:\\Users\\Raven\\.ollama:/root/.ollama"
-    ports:
-      - "11434:11434"
+      # Named volume, not a host path: the previous Windows path made this file
+      # unusable on any Linux GPU host. Override with OLLAMA_MODELS_PATH if you
+      # need to share a pre-populated model directory.
+      - ollama_models:/root/.ollama
+    # Not published: only nginx exposes a host port. Other services reach Ollama
+    # over the compose network at http://ollama:11434.
+    expose:
+      - "11434"
     deploy:
       resources:
         reservations:
@@ -242,6 +342,11 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     restart: unless-stopped
     networks:
       - face_recognition_network
@@ -254,6 +359,7 @@ services:
       - ../nginx.conf:/etc/nginx/nginx.conf:ro
       - ../frontend:/usr/share/nginx/html/frontend:ro
       - ../icons:/usr/share/nginx/html/icons:ro
+      - ../certs:/etc/nginx/certs:ro
     ports:
       - "80:80"
       - "443:443"
@@ -266,9 +372,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     restart: unless-stopped
     networks:
       - face_recognition_network
+
+secrets:
+  jwt_secret:
+    file: ../secrets/jwt_secret
+  bootstrap_admin_password:
+    file: ../secrets/bootstrap_admin_password
 
 volumes:
   postgres_data:
@@ -281,7 +398,8 @@ volumes:
     driver: local
   chromadb_cache:
     driver: local
-  # ollama_data volume removed - using host directory C:\Users\Raven\.ollama instead
+  ollama_models:
+    driver: local
 
 networks:
   face_recognition_network:
