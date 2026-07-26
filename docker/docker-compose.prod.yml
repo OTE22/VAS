@@ -1,0 +1,435 @@
+# =============================================================================
+# PRODUCTION (CPU) — Face Recognition Service
+# =============================================================================
+# Differs from docker-compose.cpu.yml (development) in every way that matters:
+#   * ENVIRONMENT=production, so the fail-closed configuration preflight is armed
+#   * secrets come from Docker secrets and ${VAR}, never literals
+#   * no whole-repo bind mount, so the image is immutable
+#   * Postgres, Redis and Ollama publish no host ports
+#   * TLS terminates in nginx; only 80/443 are published
+#   * segmented networks: nginx cannot reach the database
+#   * a one-shot migrate job gates the API
+#   * the application connects as fr_app, not the postgres superuser
+#
+# Prerequisites, in order:
+#   bash scripts/setup/generate-secrets.sh        # secrets/ + docker/redis/users.acl
+#   bash scripts/tls/make-internal-ca.sh face-detector.internal <lan-ip>
+#   docker compose -f docker/docker-compose.prod.yml exec -T postgres \
+#     psql -U postgres -d face_recognition -f /db/roles.sql   # see db/roles.sql
+#
+# Deploy:
+#   docker compose -f docker/docker-compose.prod.yml up -d --build
+#
+# The stack refuses to start if any secret is missing. That is intended.
+# =============================================================================
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - log_statement=ddl
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_connections=on
+      - -c
+      - log_disconnections=on
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
+      POSTGRES_DB: face_recognition
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+      - ../db:/db:ro
+    # No published port. Postgres enforces none of the application's
+    # authorization rules, so a reachable port bypasses all of them.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d face_recognition"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+    restart: unless-stopped
+    networks:
+      - data
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      # Used only by the healthcheck, so the password never appears as a
+      # command-line argument visible in `docker inspect` or the host ps table.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command: >
+      redis-server
+      --aclfile /etc/redis/users.acl
+      --protected-mode yes
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1000
+      --tcp-keepalive 300
+    volumes:
+      - redis_data:/data
+      - ./redis/users.acl:/etc/redis/users.acl:ro
+    # Holds sessions, login rate-limit counters and the JWT revocation
+    # denylist. AOF persistence is required: losing the denylist on restart
+    # would silently resurrect tokens that had been logged out.
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -u redis://fr_app@127.0.0.1:6379 ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2560M
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+    restart: unless-stopped
+    networks:
+      - data
+
+  # One-shot schema migration. Runs as the migration role, exits, and gates the
+  # API so replicas can never race each other applying the same revision.
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    restart: "no"
+    user: "1000:1000"
+    environment:
+      ENVIRONMENT: production
+      MIGRATIONS_MODE: run
+      MIGRATIONS_FAIL_CLOSED: "true"
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-b1c2d3e4f5a6}
+      DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
+      POSTGRES_USER: fr_migrator
+      POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
+      REDIS_URL: redis://fr_app:${REDIS_PASSWORD}@redis:6379/0
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal}
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
+      AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
+      AUTH_COOKIE_SECURE: "true"
+      ENABLE_API_DOCS: "false"
+      JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
+    secrets:
+      - jwt_secret
+    command: ["python", "-m", "backend.utils.migrations", "--upgrade-head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    networks:
+      - data
+
+  face_recognition:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    user: "1000:1000"
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      PYTHONUNBUFFERED: "1"
+      HOST: 0.0.0.0
+      PORT: 8000
+      # Must stay 1 while runtime settings, the SQL-agent cancellation
+      # registry, the single-flight job guards, webhook dedup and FAISS
+      # autosave remain process-local. See backend/core/runtime_settings.py.
+      WORKERS: 1
+      USE_GPU: "false"
+
+      # --- secrets ---
+      JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
+      BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+      BOOTSTRAP_ADMIN_REQUIRE_ROTATION: "true"
+
+      # --- least-privilege database role ---
+      DATABASE_URL: postgresql+asyncpg://fr_app:${FR_APP_PASSWORD:?set FR_APP_PASSWORD in .env}@postgres:5432/face_recognition
+      POSTGRES_USER: fr_app
+      POSTGRES_PASSWORD: ${FR_APP_PASSWORD}
+      POSTGRES_DB: face_recognition
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_POOL_SIZE: 30
+      DB_MAX_OVERFLOW: 60
+      DB_POOL_RECYCLE: 3600
+      DB_POOL_PRE_PING: "true"
+
+      REDIS_URL: redis://fr_app:${REDIS_PASSWORD}@redis:6379/0
+      REDIS_MAX_CONNECTIONS: 50
+      REDIS_POOL_SIZE: 25
+      CACHE_TTL: 3600
+
+      # --- TLS-dependent auth posture ---
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_COOKIE_SAMESITE: strict
+      AUTH_COOKIE_HOST_PREFIX: "true"
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
+      AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
+      CORS_ORIGINS: ${PUBLIC_ORIGIN}
+      ENABLE_API_DOCS: "false"
+
+      # The migrate job already applied and verified; workers only re-check.
+      MIGRATIONS_MODE: verify
+      MIGRATIONS_FAIL_CLOSED: "true"
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-b1c2d3e4f5a6}
+
+      DETECTION_MODEL: /app/weights/det_10g.onnx
+      RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
+      SIMILARITY_THRESHOLD: 0.4
+      CONFIDENCE_THRESHOLD: 0.5
+      FACES_DIR: /app/storage/faces
+      STORAGE_DIR: /app/storage
+      DB_PATH: /app/database/face_database
+      VECTOR_BACKEND: pgvector
+      PGVECTOR_INDEX_TYPE: hnsw
+      MAX_QUEUE_SIZE: 2000
+      QUEUE_WORKERS: 15
+      INFERENCE_WORKERS: 3
+      MAX_CONCURRENT_INFERENCE: 3
+      SAVE_WEBHOOK_IMAGES: "false"
+      SAVE_CROPPED_IMAGES: "false"
+      DATA_RETENTION_DAYS: 30
+      ENABLE_METRICS: "true"
+      LOG_LEVEL: INFO
+      LOG_DIR: /var/log/face-recognition
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen2.5:1.5b
+      OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
+      CHROMADB_PATH: /app/sql_agent/chromadb_data
+    secrets:
+      - jwt_secret
+      - bootstrap_admin_password
+    volumes:
+      # Named volumes and read-only mounts only. The development stack's
+      # `../:/app` is deliberately absent: a production image must be
+      # immutable, and that mount also injected .env into the container.
+      - ../weights:/app/weights:ro
+      - storage_data:/app/storage
+      - face_database_data:/app/database
+      - chromadb_data:/app/chromadb_data
+      - chromadb_cache:/home/appuser/.cache/chroma
+      # Read-only, purely so the operational metrics can report backup age and
+      # certificate expiry. Without these the corresponding gauges stay unset
+      # and their alerts can never fire.
+      - backup_data:/backups:ro
+      - ../certs:/etc/nginx/certs:ro
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    stop_grace_period: 75s
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+    restart: unless-stopped
+    networks:
+      - edge        # nginx -> API
+      - data        # API -> postgres/redis
+      - ai          # API -> ollama
+      - monitoring  # prometheus -> API /metrics
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_MODELS=/root/.ollama/models
+      - OLLAMA_KEEP_ALIVE=-1
+    volumes:
+      - ollama_models:/root/.ollama
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+    restart: unless-stopped
+    networks:
+      - ai
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ../nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ../frontend:/usr/share/nginx/html/frontend:ro
+      - ../icons:/usr/share/nginx/html/icons:ro
+      - ../certs:/etc/nginx/certs:ro
+    # The only service that publishes host ports.
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      face_recognition:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+    restart: unless-stopped
+    # `edge` only: nginx has no route to postgres or redis, so a compromised
+    # nginx cannot reach the datastores directly.
+    networks:
+      - edge
+
+  backup:
+    image: postgres:15-alpine
+    environment:
+      PGHOST: postgres
+      PGUSER: fr_backup
+      PGPASSWORD: ${FR_BACKUP_PASSWORD:?set FR_BACKUP_PASSWORD in .env}
+      PGDATABASE: face_recognition
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ../scripts/backup:/scripts:ro
+      - backup_data:/backups
+      - storage_data:/data/storage:ro
+      - face_database_data:/data/database:ro
+    entrypoint: ["/bin/sh", "/scripts/backup-loop.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    restart: unless-stopped
+    networks:
+      - data
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=0.0.0.0:9090
+    expose:
+      - "9090"
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    # Bound to loopback: reach it with an SSH tunnel rather than exposing
+    # another authenticated surface on the LAN.
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "3" }
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+secrets:
+  jwt_secret:
+    file: ../secrets/jwt_secret
+  bootstrap_admin_password:
+    file: ../secrets/bootstrap_admin_password
+
+volumes:
+  postgres_data: { driver: local }
+  redis_data: { driver: local }
+  storage_data: { driver: local }
+  face_database_data: { driver: local }
+  chromadb_data: { driver: local }
+  chromadb_cache: { driver: local }
+  ollama_models: { driver: local }
+  backup_data: { driver: local }
+  prometheus_data: { driver: local }
+  grafana_data: { driver: local }
+
+networks:
+  edge:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true      # no route off the host: datastores never reach the internet
+  ai:
+    driver: bridge
+  monitoring:
+    driver: bridge
+    internal: true

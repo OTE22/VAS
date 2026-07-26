@@ -156,7 +156,8 @@ class WebSocketManager:
         
         try:
             redis_url = getattr(settings, 'REDIS_URL', "redis://localhost:6379/0")
-            logger.info(f"[WS-MANAGER] 🔗 Initializing Redis pub/sub for WebSocket broadcasts (URL: {redis_url})")
+            from backend.security.redaction import redact_url
+            logger.info(f"[WS-MANAGER] 🔗 Initializing Redis pub/sub for WebSocket broadcasts (URL: {redact_url(redis_url)})")
             
             self.redis_client = await redis.from_url(
                 redis_url,

@@ -148,7 +148,10 @@ async def test_redis_connection():
     
     try:
         # Check configuration
-        diagnostics["redis_url"] = getattr(settings, 'REDIS_URL', None)
+        # Redacted: this diagnostics payload is returned over HTTP, and the
+        # URL carries the Redis password once authentication is enabled.
+        from backend.security.redaction import redact_url
+        diagnostics["redis_url"] = redact_url(getattr(settings, 'REDIS_URL', '') or '')
         diagnostics["redis_configured"] = diagnostics["redis_url"] is not None
         
         if not diagnostics["redis_configured"]:

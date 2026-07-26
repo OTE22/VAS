@@ -172,7 +172,8 @@ async def lifespan(app: FastAPI):
         try:
             # Get Redis URL from settings or environment
             redis_url = getattr(settings, 'REDIS_URL', "redis://redis:6379/0")
-            logger.info(f"  📍 Connecting to Redis at: {redis_url}")
+            from backend.security.redaction import redact_url
+            logger.info(f"  📍 Connecting to Redis at: {redact_url(redis_url)}")
 
             await cache_manager.initialize()
             if cache_manager._enabled:

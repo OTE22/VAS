@@ -814,7 +814,8 @@ def print_config():
     print(f"  Pool Size: {settings.DB_POOL_SIZE}")
     print(f"  Max Overflow: {settings.DB_MAX_OVERFLOW}")
     print("\n📦 Cache:")
-    print(f"  Redis URL: {settings.REDIS_URL}")
+    from backend.security.redaction import redact_url
+    print(f"  Redis URL: {redact_url(settings.REDIS_URL)}")
     print(f"  Max Connections: {settings.REDIS_MAX_CONNECTIONS}")
     print(f"  TTL: {settings.CACHE_TTL}s")
     print("\n🔄 Identity Management:")

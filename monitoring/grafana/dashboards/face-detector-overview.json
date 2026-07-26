@@ -1,0 +1,119 @@
+{
+  "uid": "face-detector-overview",
+  "title": "Face Detector — Overview",
+  "tags": ["face-detector"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "API up",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [{ "expr": "up{job=\"face_recognition_api\"}", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "CUDA active (GPU deployments)",
+      "description": "0 means inference silently fell back to CPU. Every other signal looks healthy in that state, which is why it is surfaced here.",
+      "gridPos": { "h": 4, "w": 5, "x": 4, "y": 0 },
+      "targets": [{ "expr": "face_detector_cuda_available", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "CPU FALLBACK", "color": "red" }, "1": { "text": "CUDA", "color": "green" } } }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Model loaded",
+      "gridPos": { "h": 4, "w": 4, "x": 9, "y": 0 },
+      "targets": [{ "expr": "face_detector_model_loaded", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Backup age (hours)",
+      "gridPos": { "h": 4, "w": 5, "x": 13, "y": 0 },
+      "targets": [{ "expr": "(time() - face_detector_last_backup_timestamp_seconds) / 3600", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 26 },
+              { "color": "red", "value": 48 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Cert expiry (days)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "(face_detector_tls_cert_expiry_timestamp_seconds - time()) / 86400", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "green", "value": 60 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate by status",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "sum by (status) (rate(face_recognition_requests_total[5m]))", "legendFormat": "{{status}}", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency (p50 / p95 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(face_recognition_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(face_recognition_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, sum(rate(face_recognition_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Login attempts and failures",
+      "description": "A sustained failure rate with no matching success rate is the credential-stuffing signature.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(auth_login_attempts_total[5m]))", "legendFormat": "attempts", "refId": "A" },
+        { "expr": "sum(rate(auth_login_failures_total[5m]))", "legendFormat": "failures", "refId": "B" },
+        { "expr": "sum(rate(auth_login_rate_limited_total[5m]))", "legendFormat": "rate limited", "refId": "C" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Processing queue depth",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [{ "expr": "face_recognition_queue_size", "legendFormat": "queued", "refId": "A" }]
+    }
+  ]
+}

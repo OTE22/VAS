@@ -1,0 +1,205 @@
+groups:
+  # ==========================================================================
+  # Availability
+  # ==========================================================================
+  - name: availability
+    rules:
+      - alert: APIDown
+        expr: up{job="face_recognition_api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Face recognition API is not responding to scrapes"
+          description: >-
+            Prometheus has been unable to scrape the API for 2 minutes. Check
+            `docker compose logs face_recognition`. If the container is exiting
+            with code 78 the configuration preflight is rejecting the config —
+            the reason is printed on stderr.
+
+      - alert: PrometheusTargetMissing
+        expr: absent(up{job="face_recognition_api"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API scrape target has disappeared entirely"
+          description: "The target is not just down, it is absent from service discovery."
+
+  # ==========================================================================
+  # Errors and latency
+  # ==========================================================================
+  - name: errors
+    rules:
+      - alert: High5xxRate
+        expr: |
+          sum(rate(face_recognition_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(face_recognition_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Over 5% of requests are returning 5xx"
+          description: "{{ $value | humanizePercentage }} of requests are failing."
+
+      - alert: HighRequestLatency
+        expr: histogram_quantile(0.95, sum(rate(face_recognition_request_duration_seconds_bucket[5m])) by (le)) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 request latency above 5s"
+          description: "p95 is {{ $value | humanizeDuration }}."
+
+  # ==========================================================================
+  # Authentication
+  # ==========================================================================
+  - name: authentication
+    rules:
+      - alert: AuthenticationFailureSpike
+        expr: sum(rate(auth_login_failures_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained login failures — possible credential stuffing"
+          description: >-
+            {{ $value | printf "%.2f" }} failed logins/sec over 5 minutes. The
+            API throttles per account, per IP and globally; this alert means the
+            attempts are ongoing, not that they are succeeding.
+
+      - alert: LoginRateLimitingActive
+        expr: sum(rate(auth_login_rate_limited_total[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Logins are being rate limited"
+          description: "Either an attack in progress, or a misconfigured client retrying."
+
+      - alert: SessionCreationFailing
+        expr: sum(rate(auth_session_creation_failures_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Token issuance is failing"
+          description: "Users authenticate successfully but cannot obtain a session."
+
+  # ==========================================================================
+  # GPU — the silent-failure alerts
+  # ==========================================================================
+  - name: gpu
+    rules:
+      - alert: CudaProviderUnavailable
+        # Gated on cpu_fallback_active so a CPU deployment, where
+        # cuda_available is legitimately 0, never triggers this.
+        expr: face_detector_cpu_fallback_active == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU deployment is not using CUDA"
+          description: >-
+            CUDAExecutionProvider is not active. Inference still returns correct
+            results, just far slower, and every other signal looks healthy —
+            which is exactly why this needs an alert. Usually a CUDA/onnxruntime
+            version mismatch: check that the pinned onnxruntime-gpu matches the
+            base image CUDA major version.
+
+      - alert: InferenceRunningOnCPUInGpuMode
+        expr: face_detector_cpu_fallback_active == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU mode requested but inference fell back to CPU"
+
+      - alert: GpuMemoryNearlyExhausted
+        expr: |
+          face_detector_gpu_memory_total_bytes > 0
+            and face_detector_gpu_memory_used_bytes
+                / face_detector_gpu_memory_total_bytes > 0.92
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU memory above 92%"
+          description: "CUDA OOM is likely. Reduce GPU_BATCH_SIZE or concurrency."
+
+  # ==========================================================================
+  # Background work and storage
+  # ==========================================================================
+  - name: capacity
+    rules:
+      - alert: ProcessingQueueBacklog
+        expr: face_recognition_queue_size > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Processing queue backing up"
+          description: "{{ $value }} items queued; ingestion is outrunning inference."
+
+      - alert: DiskSpaceLow
+        expr: |
+          face_detector_storage_total_bytes > 0
+            and face_detector_storage_free_bytes
+                / face_detector_storage_total_bytes < 0.10
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Under 10% storage remaining"
+          description: "Image writes and database growth will fail once this reaches zero."
+
+      - alert: ModelLoadFailure
+        expr: face_detector_model_loaded == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Face recognition model is not loaded"
+
+  # ==========================================================================
+  # Backups and certificates
+  # ==========================================================================
+  - name: operations
+    rules:
+      - alert: BackupTooOld
+        # The >0 guard matters: an unset gauge reads 0, and `time() - 0`
+        # would fire this alert permanently in any deployment where the
+        # backup directory is not visible to the API container.
+        expr: |
+          face_detector_last_backup_timestamp_seconds > 0
+            and time() - face_detector_last_backup_timestamp_seconds > 172800
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful backup in over 48 hours"
+          description: >-
+            Alerting on the age of the newest backup rather than on a failure
+            event, so a backup job that silently stopped running still pages.
+
+      - alert: CertificateExpiringSoon
+        expr: |
+          face_detector_tls_cert_expiry_timestamp_seconds > 0
+            and (face_detector_tls_cert_expiry_timestamp_seconds - time()) / 86400 < 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expires in under 30 days"
+          description: >-
+            Reissue with scripts/tls/make-internal-ca.sh. Clients need no change
+            as long as the internal CA itself is unchanged.
+
+      - alert: CertificateExpired
+        expr: |
+          face_detector_tls_cert_expiry_timestamp_seconds > 0
+            and face_detector_tls_cert_expiry_timestamp_seconds - time() <= 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS certificate has expired — browsers will refuse to connect"

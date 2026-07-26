@@ -64,7 +64,8 @@ class RedisCacheService:
             redis_url = getattr(settings, 'REDIS_URL', "redis://redis:6379/0")
             cache_ttl = getattr(settings, 'CACHE_TTL', 3600)  # Default 1 hour
             
-            logger.info(f"[REDIS_CACHE] 🔗 Initializing Redis cache (URL: {redis_url}, TTL: {cache_ttl}s)")
+            from backend.security.redaction import redact_url
+            logger.info(f"[REDIS_CACHE] 🔗 Initializing Redis cache (URL: {redact_url(redis_url)}, TTL: {cache_ttl}s)")
             
             self.redis_client = await redis.from_url(
                 redis_url,
