@@ -27,8 +27,20 @@ if ! command -v openssl >/dev/null 2>&1; then
     exit 1
 fi
 
-# 48+ characters of base64 keeps the JWT key well above HS256's useful key size.
-gen() { openssl rand -base64 "${1:-32}" | tr -d '\n'; }
+# Two generators, deliberately.
+#
+# gen_b64 is for secrets that are read as opaque strings — the JWT key and the
+# bootstrap password. 48 bytes of base64 keeps the signing key well above
+# HS256's useful key size.
+gen_b64() { openssl rand -base64 "${1:-32}" | tr -d '\n'; }
+
+# gen_url is for anything embedded in a connection URL. base64 emits '/', '+'
+# and '=', and a '/' in a password makes urlsplit parse the URL completely
+# differently: in redis://fr_app:aB3/xY9@redis:6379/0 the host becomes "fr_app"
+# and the password becomes None, so the application connects nowhere. Hex has
+# no reserved characters, so no URL-encoding is required anywhere downstream.
+gen_url() { openssl rand -hex "${1:-24}" | tr -d '\n'; }
+
 sha256_hex() { printf '%s' "$1" | openssl dgst -sha256 | awk '{print $NF}'; }
 
 write_secret() {
@@ -43,18 +55,18 @@ write_secret() {
 }
 
 echo "Generating Docker secret files..."
-write_secret jwt_secret "$(gen 48)"
-write_secret bootstrap_admin_password "$(gen 24)"
+# Never embedded in a URL, so base64 is fine and gives more entropy per byte.
+write_secret jwt_secret "$(gen_b64 48)"
+write_secret bootstrap_admin_password "$(gen_b64 24)"
 
-# Database and Redis passwords go in .env, because compose interpolates them
-# into connection URLs.
-FR_APP_PASSWORD="$(gen 32)"
-FR_MIGRATOR_PASSWORD="$(gen 32)"
-FR_READONLY_PASSWORD="$(gen 32)"
-FR_BACKUP_PASSWORD="$(gen 32)"
-POSTGRES_SUPERUSER_PASSWORD="$(gen 32)"
-REDIS_PASSWORD="$(gen 32)"
-REDIS_MONITOR_PASSWORD="$(gen 32)"
+# These ARE embedded in connection URLs by compose, so they must be URL-safe.
+FR_APP_PASSWORD="$(gen_url 24)"
+FR_MIGRATOR_PASSWORD="$(gen_url 24)"
+FR_READONLY_PASSWORD="$(gen_url 24)"
+FR_BACKUP_PASSWORD="$(gen_url 24)"
+POSTGRES_SUPERUSER_PASSWORD="$(gen_url 24)"
+REDIS_PASSWORD="$(gen_url 24)"
+REDIS_MONITOR_PASSWORD="$(gen_url 24)"
 
 echo
 echo "Generating Redis ACL..."

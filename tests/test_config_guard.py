@@ -156,6 +156,31 @@ def test_unauthenticated_loopback_redis_allowed():
     assert "REDIS_NO_AUTH" not in codes(REDIS_URL="redis://localhost:6379/0")
 
 
+def test_base64_password_in_a_url_is_detected_as_broken():
+    """`openssl rand -base64` emits '/', and a '/' in a URL password silently
+    changes what the URL means: the host becomes the username and the password
+    is lost, so the service connects nowhere. The guard sees this as missing
+    credentials, which is the correct outcome — it must not be waved through.
+    """
+    broken = "redis://fr_app:aB3/xY9+zQ==@redis:6379/0"
+    assert "REDIS_NO_AUTH" in codes(REDIS_URL=broken)
+
+
+def test_url_safe_password_is_accepted():
+    safe = "redis://fr_app:" + ("a1b2c3d4" * 6) + "@redis:6379/0"
+    assert "REDIS_NO_AUTH" not in codes(REDIS_URL=safe)
+
+
+def test_secret_generator_uses_url_safe_passwords_for_connection_strings():
+    """Guards the fix: URL-embedded passwords must be hex, not base64."""
+    with open("/app/scripts/setup/generate-secrets.sh", encoding="utf-8") as handle:
+        source = handle.read()
+    assert "openssl rand -hex" in source
+    for variable in ("FR_APP_PASSWORD", "REDIS_PASSWORD", "POSTGRES_SUPERUSER_PASSWORD"):
+        line = next(l for l in source.splitlines() if l.startswith(f"{variable}="))
+        assert "gen_url" in line, f"{variable} must be URL-safe: {line}"
+
+
 # ----------------------------------------------------------------- cookies
 
 def test_insecure_cookie_rejected():
