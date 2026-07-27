@@ -312,6 +312,28 @@ def collect_violations(
                 "Enable a Redis ACL user and set REDIS_URL_FILE.",
             ))
 
+        # LLM-generated SQL must not execute with the application's own write
+        # privileges. The AST guard is application code and can have bugs;
+        # role grants cannot be overridden by the query text.
+        agent_user = str(getattr(cfg, "SQL_AGENT_DB_USER", "") or "").strip()
+        app_user = str(getattr(cfg, "POSTGRES_USER", "") or "").strip()
+        if not agent_user:
+            add(ConfigViolation(
+                "SQL_AGENT_DB_ROLE_MISSING", "SQL_AGENT_DB_USER",
+                "LLM-generated SQL would execute as the application's database "
+                "role, which can write. A validator bug would then be a data-loss "
+                "bug.",
+                "Set SQL_AGENT_DB_USER=fr_readonly and SQL_AGENT_DB_PASSWORD_FILE "
+                "(see db/roles.sql).",
+            ))
+        elif agent_user == app_user:
+            add(ConfigViolation(
+                "SQL_AGENT_DB_ROLE_SHARED", "SQL_AGENT_DB_USER",
+                "The SQL agent shares the application's database role, so "
+                "generated SQL inherits its write privileges.",
+                "Point SQL_AGENT_DB_USER at a SELECT-only role such as fr_readonly.",
+            ))
+
     # ---- Cookies ---------------------------------------------------------
     cookie_secure = _truthy(getattr(cfg, "AUTH_COOKIE_SECURE", False))
     samesite = str(getattr(cfg, "AUTH_COOKIE_SAMESITE", "lax") or "").strip().lower()

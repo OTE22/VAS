@@ -56,6 +56,12 @@ _GOOD = dict(
     REDIS_URL="redis://fr_app:Td8Hn3Qw6Zx1Ke9Bv4Ms7Cy2Lp5Rj0@redis:6379/0",
     BOOTSTRAP_ADMIN_PASSWORD="",
     BOOTSTRAP_ADMIN_PASSWORD_FILE="",
+    # LLM-generated SQL executes as a SELECT-only role, distinct from the
+    # application's own POSTGRES_USER. A production config without this is not
+    # clean: a validator bug would become a data-loss bug.
+    POSTGRES_USER="fr_app",
+    SQL_AGENT_DB_USER="fr_readonly",
+    SQL_AGENT_DB_PASSWORD="Qm7Rt2Bx9Kd4Lp6Zn1Hs8Vw3Jc5Yf0",
 )
 
 
@@ -154,6 +160,23 @@ def test_unauthenticated_redis_rejected():
 def test_unauthenticated_loopback_redis_allowed():
     """A loopback Redis is not reachable from the network."""
     assert "REDIS_NO_AUTH" not in codes(REDIS_URL="redis://localhost:6379/0")
+
+
+def test_production_requires_a_dedicated_role_for_generated_sql():
+    """Without it, LLM-generated SQL inherits the application's write grants
+    and the AST guard becomes the only thing preventing a write."""
+    assert "SQL_AGENT_DB_ROLE_MISSING" in codes(SQL_AGENT_DB_USER="")
+
+
+def test_production_rejects_sharing_the_application_role():
+    assert "SQL_AGENT_DB_ROLE_SHARED" in codes(
+        POSTGRES_USER="fr_app", SQL_AGENT_DB_USER="fr_app"
+    )
+
+
+def test_dedicated_read_only_role_is_accepted():
+    assert "SQL_AGENT_DB_ROLE_MISSING" not in codes()
+    assert "SQL_AGENT_DB_ROLE_SHARED" not in codes()
 
 
 def test_base64_password_in_a_url_is_detected_as_broken():

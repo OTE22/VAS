@@ -224,6 +224,10 @@ services:
       JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
       BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
       # Workers only verify; the one-shot migrate job applies.
+      # Generated SQL runs as a SELECT-only role. Required in
+      # production: the config guard refuses to start without it.
+      SQL_AGENT_DB_USER: fr_readonly
+      SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:?set FR_READONLY_PASSWORD in .env}
       MIGRATIONS_MODE: verify
       MIGRATIONS_FAIL_CLOSED: "true"
       MIGRATIONS_EXPECTED_HEAD: b1c2d3e4f5a6

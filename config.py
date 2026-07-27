@@ -234,6 +234,18 @@ class Settings(BaseSettings):
     SQL_AGENT_MAX_CONCURRENT: int = Field(default=2, env="SQL_AGENT_MAX_CONCURRENT")
     SQL_AGENT_TOTAL_TIMEOUT: int = Field(default=300, env="SQL_AGENT_TOTAL_TIMEOUT")
 
+    # --- Credentials used to execute LLM-generated SQL ---------------------
+    # Deliberately separate from the application's own database role. The AST
+    # guard in sql_agent/security/sql_guard.py is application code and can have
+    # bugs; a role without write grants cannot be talked out of them by the
+    # query text. Defence in depth, not a replacement.
+    #
+    # Left empty the agent falls back to the application role and logs a
+    # warning. In production the config guard rejects that fallback.
+    SQL_AGENT_DB_USER: str = Field(default="", env="SQL_AGENT_DB_USER", description="Read-only role used to execute generated SQL. Must differ from POSTGRES_USER")
+    SQL_AGENT_DB_PASSWORD: str = Field(default="", env="SQL_AGENT_DB_PASSWORD", description="Password for SQL_AGENT_DB_USER. Prefer SQL_AGENT_DB_PASSWORD_FILE")
+    SQL_AGENT_DB_PASSWORD_FILE: str = Field(default="", env="SQL_AGENT_DB_PASSWORD_FILE", description="Path to a Docker secret holding the read-only role's password")
+
     # --- Identity auto-enrichment: confidently-matched runtime embeddings are added
     # to the identity so it learns the person's appearance range over time.
     IDENTITY_ENRICH_MIN_SIMILARITY: float = Field(default=0.55, env="IDENTITY_ENRICH_MIN_SIMILARITY")

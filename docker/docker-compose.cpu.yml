@@ -155,6 +155,11 @@ services:
       WEBHOOK_MAX_BODY_MB: 25
       WEBHOOK_DEDUP_TTL_SECONDS: 60
       # SQL agent isolation
+      # Generated SQL executes as a SELECT-only role, never as the
+      # application's. The AST guard in sql_agent/security/sql_guard.py
+      # is the first layer; this is the one a validator bug cannot defeat.
+      SQL_AGENT_DB_USER: fr_readonly
+      SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:-TestRo-8jT5nKd3Yc}
       SQL_AGENT_MAX_CONCURRENT: 2
       SQL_AGENT_TOTAL_TIMEOUT: 300
       ENABLE_METRICS: "true"

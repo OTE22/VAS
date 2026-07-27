@@ -5,9 +5,13 @@ Configuration settings for the SQL Intelligence Agent.
 Uses the main config.py settings with fallback to environment variables.
 """
 
+import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 # Try to import from main config, fallback to env vars
 USE_MAIN_CONFIG = False
@@ -23,6 +27,56 @@ except (ImportError, AttributeError) as e:
     # If import fails, use environment variables directly
     USE_MAIN_CONFIG = False
     main_settings = None
+
+
+def _setting(name: str, default: str = "") -> str:
+    if USE_MAIN_CONFIG and main_settings is not None:
+        return str(getattr(main_settings, name, "") or "") or os.getenv(name, default)
+    return os.getenv(name, default)
+
+
+def agent_db_role_is_dedicated() -> bool:
+    """True when generated SQL runs as a role distinct from the application's.
+
+    Read by the production config guard, so the check lives with the logic that
+    resolves the credentials rather than being duplicated there.
+    """
+    agent_user = _setting("SQL_AGENT_DB_USER").strip()
+    app_user = _setting("POSTGRES_USER", "postgres").strip()
+    return bool(agent_user) and agent_user != app_user
+
+
+def _resolve_agent_db_credentials() -> Tuple[str, str]:
+    """Credentials used to execute LLM-generated SQL.
+
+    Prefers the dedicated read-only role. Falls back to the application's role
+    so development keeps working, but says so loudly — in that mode the AST
+    guard is the only thing standing between generated SQL and a write.
+    """
+    agent_user = _setting("SQL_AGENT_DB_USER").strip()
+    if agent_user:
+        password = _setting("SQL_AGENT_DB_PASSWORD")
+        password_file = _setting("SQL_AGENT_DB_PASSWORD_FILE").strip()
+        if password_file:
+            try:
+                with open(password_file, "r", encoding="utf-8") as handle:
+                    password = handle.read().strip()
+            except OSError as exc:
+                # Do not silently fall back to a privileged role.
+                raise RuntimeError(
+                    f"SQL_AGENT_DB_PASSWORD_FILE could not be read: {type(exc).__name__}"
+                ) from exc
+        return agent_user, password
+
+    app_user = _setting("POSTGRES_USER", "postgres")
+    logger.warning(
+        "[SQL_AGENT] SQL_AGENT_DB_USER is not set — generated SQL will run as "
+        "'%s', which holds write privileges. Set SQL_AGENT_DB_USER to a "
+        "read-only role (see db/roles.sql). Production refuses to start "
+        "without it.",
+        app_user,
+    )
+    return app_user, _setting("POSTGRES_PASSWORD", "admin")
 
 
 @dataclass
@@ -68,14 +122,16 @@ class Config:
         main_settings.POSTGRES_DB if USE_MAIN_CONFIG and main_settings else
         os.getenv("POSTGRES_DB", "face_recognition")
     )
-    db_user: str = (
-        main_settings.POSTGRES_USER if USE_MAIN_CONFIG and main_settings else
-        os.getenv("POSTGRES_USER", "postgres")
-    )
-    db_password: str = (
-        main_settings.POSTGRES_PASSWORD if USE_MAIN_CONFIG and main_settings else
-        os.getenv("POSTGRES_PASSWORD", "admin")
-    )
+    # Credentials for executing LLM-generated SQL.
+    #
+    # SQL_AGENT_DB_USER is preferred and should be a role with SELECT and
+    # nothing else. Falling back to the application's own role means generated
+    # SQL runs with write privileges — the AST guard is then the only thing
+    # preventing a write, and application code can have bugs where role grants
+    # cannot. The production config guard rejects the fallback; see
+    # _resolve_agent_db_credentials below for the warning path in development.
+    db_user: str = field(default_factory=lambda: _resolve_agent_db_credentials()[0])
+    db_password: str = field(default_factory=lambda: _resolve_agent_db_credentials()[1])
 
     # ChromaDB settings - use main config if available, otherwise env vars
     chroma_persist_dir: str = (

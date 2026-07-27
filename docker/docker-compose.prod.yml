@@ -194,6 +194,13 @@ services:
       CORS_ORIGINS: ${PUBLIC_ORIGIN}
       ENABLE_API_DOCS: "false"
 
+      # LLM-generated SQL runs as a SELECT-only role, never as fr_app. The AST
+      # guard is the first layer; this is the one a validator bug cannot
+      # defeat. Required in production — the config guard refuses to start
+      # without it.
+      SQL_AGENT_DB_USER: fr_readonly
+      SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:?set FR_READONLY_PASSWORD in .env}
+
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
       MIGRATIONS_FAIL_CLOSED: "true"
