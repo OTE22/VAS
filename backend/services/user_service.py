@@ -144,6 +144,30 @@ class UserService:
         return sorted(row[0] for row in result.all())
 
     @staticmethod
+    def _invalidate_sql_agent_cache(user_id: int, reason: str) -> None:
+        """Drop the user's cached SQL-agent instance after an authorization change.
+
+        The agent caches the user's scope (pipelines, features, conversation
+        memory), so leaving it in place would let a user keep querying through an
+        agent built under permissions they no longer hold.
+
+        Imported lazily: `sql_agent` imports from `backend`, so a module-level
+        import here would close an import cycle. Best-effort by design — the
+        authoritative guarantee is the permissions_version check in
+        `_get_or_create_user_agent`, which rebuilds the agent on the next request
+        whatever happens here. This must never be able to fail the write it
+        accompanies.
+        """
+        try:
+            from sql_agent.api.routes import invalidate_user_sql_agent
+            invalidate_user_sql_agent(user_id, reason=reason)
+        except Exception as exc:
+            logger.debug(
+                "[USER_SERVICE] SQL-agent cache invalidation skipped for user_id=%s: %s",
+                user_id, type(exc).__name__,
+            )
+
+    @staticmethod
     def _record_authorization_audit(*, db: AsyncSession, user: User,
                                     old: dict, new: dict, action: str,
                                     actor=None, context: Optional[dict] = None) -> None:
@@ -323,6 +347,7 @@ class UserService:
                 db=db, user=user, old=old_authz, new=new_authz,
                 action="authorization_updated", actor=actor, context=context,
             )
+            UserService._invalidate_sql_agent_cache(user.id, "authorization_updated")
         else:
             logger.debug("[UPDATE_USER] no authorization change; version unchanged")
 
@@ -501,6 +526,8 @@ class UserService:
 
         await db.commit()
         await db.refresh(user)
+        # After commit: a rolled-back block must not evict a still-valid agent.
+        UserService._invalidate_sql_agent_cache(user.id, "user_blocked")
         logger.warning(f"Blocked user: {user.username} - Reason: {reason}")
         return user
 
@@ -537,6 +564,7 @@ class UserService:
 
         await db.commit()
         await db.refresh(user)
+        UserService._invalidate_sql_agent_cache(user.id, "user_unblocked")
         logger.info(f"Unblocked user: {user.username}")
         return user
 

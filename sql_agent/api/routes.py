@@ -29,7 +29,13 @@ if parent_dir not in sys.path:
 try:
     from backend.auth.auth_service import get_current_user, require_chatbot_access
     from db_models import User
-    from db_connection import get_db
+    # db_manager is used directly (not via the get_db dependency) wherever a
+    # handler opens its OWN short-lived session: `async with
+    # db_manager.get_session()` is a real context manager, so the connection is
+    # returned deterministically. The previous `async for db in get_db()` idiom
+    # left the async generator suspended on `break`/`return`, deferring cleanup
+    # to garbage collection and holding pooled connections longer than the work.
+    from db_connection import get_db, db_manager
     from sql_agent.services.user_query_history_service import user_query_history_service
     AUTH_AVAILABLE = True
     _AUTH_IMPORT_ERROR = None
@@ -123,12 +129,58 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
     return lock
 
 
-def _get_or_create_user_agent(user_id: int):
-    """Get the user's agent (LRU-refresh) or create it, evicting the oldest."""
+# user_id -> permissions_version the cached agent was built for. A cached agent
+# carries the user's scope (pipelines, features, conversation memory), so it must
+# not outlive the authorization it was built under.
+_user_agent_versions: Dict[int, int] = {}
+
+
+def invalidate_user_sql_agent(user_id: int, reason: str = "authorization_changed") -> bool:
+    """Drop a user's cached agent so the next query rebuilds it from current config.
+
+    Called when an administrator changes a role, chatbot access, active state or
+    pipeline assignment. Returns True if an agent was actually evicted.
+
+    Deliberately synchronous and side-effect-free beyond the two dicts: it is
+    invoked from request handlers and from the users service, and must never be
+    able to fail the write it accompanies.
+    """
+    existed = _user_agents.pop(user_id, None) is not None
+    _user_agent_versions.pop(user_id, None)
+    if existed:
+        logger.info(
+            "[SQL_AGENT_API] Invalidated cached agent for user_id=%s reason=%s",
+            user_id, reason,
+        )
+    return existed
+
+
+def _get_or_create_user_agent(user_id: int, permissions_version: Optional[int] = None):
+    """Get the user's agent (LRU-refresh) or create it, evicting the oldest.
+
+    When ``permissions_version`` is supplied and differs from the version the
+    cached agent was built under, the cached agent is discarded and rebuilt. That
+    is what stops a user whose chatbot access or pipeline scope was just revoked
+    from continuing to be served by an agent holding the old scope.
+    """
     agent = _user_agents.get(user_id)
     if agent is not None:
-        _user_agents.move_to_end(user_id)
-        return agent
+        cached_version = _user_agent_versions.get(user_id)
+        if (permissions_version is not None
+                and cached_version is not None
+                and cached_version != permissions_version):
+            logger.info(
+                "[SQL_AGENT_API] Rebuilding agent for user_id=%s: permissions_version %s -> %s",
+                user_id, cached_version, permissions_version,
+            )
+            _user_agents.pop(user_id, None)
+            _user_agent_versions.pop(user_id, None)
+            agent = None
+        else:
+            _user_agents.move_to_end(user_id)
+            if permissions_version is not None:
+                _user_agent_versions[user_id] = permissions_version
+            return agent
 
     from sql_agent.agent import SQLIntelligenceAgent
     from sql_agent.conversation_memory import ConversationMemory
@@ -138,11 +190,14 @@ def _get_or_create_user_agent(user_id: int):
     user_session_id = user_memory.start_session()
     agent = SQLIntelligenceAgent(conversation_memory=user_memory)
     _user_agents[user_id] = agent
+    if permissions_version is not None:
+        _user_agent_versions[user_id] = permissions_version
     logger.info(f"[SQL_AGENT_API] User {user_id} agent created (session: {user_session_id})")
 
     while len(_user_agents) > _USER_AGENTS_MAX:
         evicted_id, _evicted = _user_agents.popitem(last=False)
         _user_query_locks.pop(evicted_id, None)
+        _user_agent_versions.pop(evicted_id, None)
         logger.info(f"[SQL_AGENT_API] Evicted LRU agent for user {evicted_id} (cap {_USER_AGENTS_MAX})")
 
     return agent
@@ -380,6 +435,100 @@ def _spawn_background(coro):
     return task
 
 
+async def check_authorization_fresh(user_id: int):
+    """Re-read the live authorization for a long-lived connection.
+
+    Returns ``(ok, permissions_version, reason)``. ``ok`` is False when the
+    account has been deactivated or chatbot access revoked since the connection
+    was authorized.
+
+    A WebSocket is authorized once at handshake, and because the session maker
+    sets ``expire_on_commit=False`` the ``current_user`` snapshot never refreshes
+    — so without this an administrator's revocation would not reach an open
+    socket at all, and `block_user_for_forbidden_sql` would leave the very socket
+    that triggered the block still working.
+
+    Deliberately a narrow column read on the primary key, opened and closed
+    inside this call, so it holds no connection between messages.
+    """
+    try:
+        from sqlalchemy import select as _select
+        from db_models import User as _User
+        from db_connection import db_manager
+
+        # db_manager.get_session() (a real async context manager), NOT
+        # `async for _db in get_db()`. Returning out of an `async for` over an
+        # async generator leaves the generator suspended, so its cleanup waits on
+        # garbage collection — which leaked a pooled connection per call. This
+        # runs on every WebSocket message, so that leak exhausted the pool under
+        # ordinary chat traffic (caught by
+        # test_check_authorization_fresh_holds_no_connection).
+        async with db_manager.get_session() as _db:
+            row = (await _db.execute(
+                _select(_User.permissions_version, _User.is_active, _User.can_use_chatbot)
+                .where(_User.id == user_id)
+            )).first()
+            if row is None:
+                return False, None, "ACCOUNT_NOT_FOUND"
+            version, is_active, can_use_chatbot = row
+            if not is_active:
+                return False, int(version or 1), "ACCOUNT_DEACTIVATED"
+            if not can_use_chatbot:
+                return False, int(version or 1), "CHATBOT_ACCESS_REVOKED"
+            return True, int(version or 1), None
+    except Exception as exc:
+        # Fail OPEN on infrastructure error, not on an authorization decision:
+        # a transient database blip must not disconnect every active user. The
+        # handshake check already established access; this is a re-check.
+        logger.warning(
+            "[SQL_AGENT_API] Authorization re-check failed for user_id=%s: %s",
+            user_id, type(exc).__name__,
+        )
+        return True, None, None
+    return True, None, None
+
+
+async def release_request_session(db, *detach) -> None:
+    """Return the pooled connection to the pool BEFORE starting a long stream.
+
+    Why this exists
+    ---------------
+    A ``StreamingResponse`` keeps FastAPI's dependency scope open until the last
+    byte is sent. ``get_current_user`` depends on ``get_db``, and its
+    ``SELECT ... FROM users`` autobegins a transaction — so without this call the
+    auth session sits *idle in transaction* for the whole stream.
+
+    PostgreSQL is configured with ``idle_in_transaction_session_timeout=300000``
+    (300s, ``db_connection.py``), which is the SAME number as
+    ``SQL_AGENT_TOTAL_TIMEOUT``. The server therefore terminates that connection
+    at almost exactly the moment the stream deadline fires, and the
+    ``session.commit()`` in ``get_session``'s cleanup then raises
+    ``InterfaceError`` ("connection closed during commit"). The database is
+    healthy throughout — only this one abandoned connection dies, which is why
+    ``/health`` and every other endpoint keep returning 200.
+
+    Detaching first is safe because the session maker sets
+    ``expire_on_commit=False``, so already-loaded attributes on ``current_user``
+    remain readable after expunge. Detaching is also the point: it makes any
+    accidental lazy load raise loudly instead of silently reopening a connection
+    mid-stream.
+    """
+    if db is None:
+        return
+    for obj in detach:
+        if obj is None:
+            continue
+        try:
+            db.expunge(obj)
+        except Exception:
+            # Already detached or never attached — nothing to do.
+            pass
+    try:
+        await db.close()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[SQL_AGENT_API] Failed to release request session: %s", type(exc).__name__)
+
+
 async def persist_query_history(
     user_id: int,
     query: str,
@@ -405,7 +554,7 @@ async def persist_query_history(
 
     query_history_id = None
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             db_session = await user_query_history_service.get_or_create_session(
                 db=db, user_id=user_id, session_id=session_id
             )
@@ -422,7 +571,6 @@ async def persist_query_history(
             await db.commit()
             query_history_id = query_history.id
             logger.info(f"[HISTORY_SAVE] ✅ Query {query_history_id} saved for user {user_id} (session {session_id})")
-            break
     except Exception as e:
         logger.error(f"[HISTORY_SAVE] ❌ Failed to persist query history for user {user_id}: {e}", exc_info=True)
         return None
@@ -446,7 +594,7 @@ async def _enrich_query_history(user_id, query_history_id, query, response, sess
     the sidebar entry intact.
     """
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             try:
                 await user_query_history_service.extract_and_save_memories(
                     db=db, user_id=user_id, query_id=query_history_id,
@@ -464,7 +612,6 @@ async def _enrich_query_history(user_id, query_history_id, query, response, sess
             except Exception as emb_err:
                 logger.warning(f"[HISTORY_ENRICH] embedding failed for query {query_history_id}: {emb_err}")
             await db.commit()
-            break
     except Exception as e:
         logger.warning(f"[HISTORY_ENRICH] enrichment task failed for query {query_history_id}: {e}")
 
@@ -504,7 +651,7 @@ async def log_chatbot_query(
         from db_models import ChatbotAuditLog
         from db_connection import get_db
         
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             audit_log = ChatbotAuditLog(
                 user_id=user_id,
                 username=username,
@@ -518,7 +665,6 @@ async def log_chatbot_query(
             db.add(audit_log)
             await db.commit()
             logger.debug(f"[AUDIT] Logged chatbot query for user {username} (success: {success})")
-            break
     except Exception as e:
         # Don't fail the main request if logging fails
         logger.warning(f"[AUDIT] Failed to log chatbot query: {e}")
@@ -539,7 +685,7 @@ async def block_user_for_forbidden_sql(
         from backend.services.user_service import UserService
         from db_connection import get_db
         
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             blocked_reason = f"Attempted forbidden SQL operation: {reason}. Query: {sql_query[:200]}"
             blocked_user = await UserService.block_user(
                 user_id=user_id,
@@ -568,7 +714,6 @@ async def block_user_for_forbidden_sql(
             except Exception as notify_error:
                 logger.error(f"[SECURITY] Failed to notify admins: {notify_error}", exc_info=True)
             
-            break
     except Exception as e:
         # Log but don't fail - blocking is important but shouldn't break the error response
         logger.error(f"[SECURITY] Failed to block user {username}: {e}", exc_info=True)
@@ -689,7 +834,10 @@ async def sql_agent_query(
                     ),
                 )
 
-            agent_instance = _get_or_create_user_agent(user_id)
+            agent_instance = _get_or_create_user_agent(
+                user_id,
+                permissions_version=int(getattr(current_user, "permissions_version", 1) or 1),
+            )
 
         # Track if security violation was detected (to prevent duplicate audit logs)
         security_violation_detected = False
@@ -879,7 +1027,8 @@ async def sql_agent_query(
 async def sql_agent_query_stream(
     request: dict,
     http_request: Request,
-    current_user: User = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None
+    current_user: User = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+    db=Depends(get_db) if AUTH_AVAILABLE else None,
 ):
     """
     Query the SQL Intelligence Agent with streaming SSE response.
@@ -940,10 +1089,28 @@ async def sql_agent_query_stream(
                 "message": "This request was already accepted. Not executing it again.",
             })
 
-        # Get or create user-specific agent instance for persistent memory
+        # Get or create user-specific agent instance for persistent memory.
+        # Keyed on permissions_version so an administrator's role / chatbot /
+        # pipeline change evicts the cached agent instead of letting it keep
+        # serving the old scope (see _get_or_create_user_agent).
         agent_instance = _sql_agent_instance
+        stream_user_id = None
+        stream_username = None
+        stream_permissions_version = None
         if AUTH_AVAILABLE and current_user:
-            agent_instance = _get_or_create_user_agent(current_user.id)
+            stream_user_id = current_user.id
+            stream_username = current_user.username
+            stream_permissions_version = int(getattr(current_user, "permissions_version", 1) or 1)
+            agent_instance = _get_or_create_user_agent(
+                stream_user_id, permissions_version=stream_permissions_version
+            )
+
+        # Hand the pooled connection back BEFORE the stream begins. Everything the
+        # stream needs is now a plain value (ids and strings), so nothing below
+        # touches the request session. Without this the auth session would sit
+        # idle-in-transaction for the full stream and PostgreSQL would terminate
+        # it at 300s — see release_request_session for the full chain.
+        await release_request_session(db, current_user)
 
         async def stream_query():
             final_response = None
@@ -963,7 +1130,7 @@ async def sql_agent_query_stream(
             # request registry — POST /requests/{id}/cancel sets it server-side)
             sem_acquired = False
             lock_acquired = False
-            user_lock = _get_user_lock(current_user.id) if (AUTH_AVAILABLE and current_user) else None
+            user_lock = _get_user_lock(stream_user_id) if stream_user_id is not None else None
             deadline = stream_start_time + SQL_AGENT_TOTAL_TIMEOUT
             was_cancelled = False
 
@@ -1025,6 +1192,35 @@ async def sql_agent_query_stream(
                             pass
                         current_time = asyncio.get_event_loop().time()
                         if current_time - last_heartbeat >= heartbeat_interval:
+                            # Authorization checkpoint, on the heartbeat cadence
+                            # rather than every 2s poll: a long stream must not
+                            # outlive the access that started it, but it also must
+                            # not issue a database round-trip per poll.
+                            if stream_user_id is not None:
+                                ok, _live_version, deny_reason = await check_authorization_fresh(
+                                    stream_user_id
+                                )
+                                if not ok:
+                                    cancel_event.set()
+                                    logger.info(
+                                        "[SQL_AGENT_API] request_id=%s terminating stream for "
+                                        "user_id=%s reason=%s",
+                                        request_id, stream_user_id, deny_reason,
+                                    )
+                                    invalidate_user_sql_agent(
+                                        stream_user_id, deny_reason or "authorization_changed"
+                                    )
+                                    yield evt({
+                                        "type": "error",
+                                        "error_code": "AUTHORIZATION_CHANGED",
+                                        "message": "Your access to the SQL assistant has changed. "
+                                                   "Please sign in again.",
+                                        "retryable": False,
+                                    })
+                                    yield evt({"type": "complete", "success": False})
+                                    completion_sent = True
+                                    stream_success = False
+                                    break
                             yield evt({"type": "heartbeat",
                                        "timestamp": datetime.utcnow().isoformat() + "Z"})
                             last_heartbeat = current_time
@@ -1158,15 +1354,22 @@ async def sql_agent_query_stream(
             # Log to audit and save history after streaming completes.
             # Note: do NOT require final_response here - even queries that produced an
             # empty/failed response must still appear in the user's sidebar history.
-            if AUTH_AVAILABLE and current_user:
+            if stream_user_id is not None:
                 try:
                     stream_time_ms = (asyncio.get_event_loop().time() - stream_start_time) * 1000
                     session_id = agent_instance.conversation_memory.current_session_id
-                    
-                    logger.info(f"[SQL_AGENT_API] 📊 Logging audit: user={current_user.username}, success={stream_success}, time={stream_time_ms:.2f}ms, response_length={len(final_response) if final_response else 0}")
+
+                    # Plain values only — the request session was closed before the
+                    # stream started, so these must not be ORM attribute reads.
+                    logger.info(
+                        "[SQL_AGENT_API] request_id=%s persisting history user_id=%s success=%s "
+                        "duration_ms=%.0f response_chars=%d",
+                        request_id, stream_user_id, stream_success, stream_time_ms,
+                        len(final_response) if final_response else 0,
+                    )
                     await log_chatbot_query(
-                        user_id=current_user.id,
-                        username=current_user.username,
+                        user_id=stream_user_id,
+                        username=stream_username,
                         query=query,
                         response=final_response,
                         success=stream_success,
@@ -1174,13 +1377,14 @@ async def sql_agent_query_stream(
                         processing_time_ms=stream_time_ms,
                         session_id=session_id
                     )
-                    
+
                     # Save to user query history so it appears in the sidebar.
                     # Awaited (not fire-and-forget) so it reliably commits within the
                     # request lifecycle. The full response is already streamed to the
                     # client at this point, so awaiting adds no user-facing latency.
+                    # Each of these opens its OWN short-lived session.
                     await persist_query_history(
-                        user_id=current_user.id,
+                        user_id=stream_user_id,
                         query=query,
                         response=final_response,
                         session_id=session_id,
@@ -1264,9 +1468,8 @@ async def sql_agent_websocket(websocket: WebSocket):
                         try:
                             user_id = int(user_id_str)
                             from db_connection import get_db
-                            async for db in get_db():
+                            async with db_manager.get_session() as db:
                                 current_user = await AuthService.get_user_by_id(user_id, db)
-                                break  # Exit the async for loop after getting the user
                         except (ValueError, TypeError) as e:
                             logger.error(f"[SQL_AGENT_WS] Invalid user ID in token: {user_id_str}, error: {e}")
                             await websocket.close(code=1008, reason="Invalid token")
@@ -1300,9 +1503,15 @@ async def sql_agent_websocket(websocket: WebSocket):
     
     # Get or create user-specific agent instance for persistent memory
     agent_instance = _sql_agent_instance
+    ws_user_id = None
+    ws_permissions_version = None
     if AUTH_AVAILABLE and current_user:
-        agent_instance = _get_or_create_user_agent(current_user.id)
-    
+        ws_user_id = current_user.id
+        ws_permissions_version = int(getattr(current_user, "permissions_version", 1) or 1)
+        agent_instance = _get_or_create_user_agent(
+            ws_user_id, permissions_version=ws_permissions_version
+        )
+
     try:
         while True:
             # Receive message from client — typed protocol:
@@ -1314,6 +1523,41 @@ async def sql_agent_websocket(websocket: WebSocket):
                 continue
 
             msg_type = data.get("type") or ("query" if data.get("query") else None)
+
+            # Re-authorize EVERY message. The handshake check is a point-in-time
+            # decision; without this an administrator's revocation would never
+            # reach an already-open socket.
+            if ws_user_id is not None:
+                ok, live_version, deny_reason = await check_authorization_fresh(ws_user_id)
+                if not ok:
+                    logger.info(
+                        "[SQL_AGENT_WS] Closing socket for user_id=%s reason=%s",
+                        ws_user_id, deny_reason,
+                    )
+                    try:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error_code": "AUTHORIZATION_CHANGED",
+                            "message": "Your access to the SQL assistant has changed. "
+                                       "Please sign in again.",
+                            "retryable": False,
+                        })
+                    except Exception:
+                        pass
+                    invalidate_user_sql_agent(ws_user_id, deny_reason or "authorization_changed")
+                    await websocket.close(code=1008, reason="AUTHORIZATION_CHANGED")
+                    return
+                if live_version is not None and live_version != ws_permissions_version:
+                    # Still authorized, but the scope changed (role, pipelines).
+                    # Rebuild the agent so it cannot serve the old scope.
+                    logger.info(
+                        "[SQL_AGENT_WS] user_id=%s permissions_version %s -> %s; rebuilding agent",
+                        ws_user_id, ws_permissions_version, live_version,
+                    )
+                    ws_permissions_version = live_version
+                    agent_instance = _get_or_create_user_agent(
+                        ws_user_id, permissions_version=live_version
+                    )
 
             if msg_type == "cancel":
                 cancel_id = data.get("request_id")
@@ -1995,7 +2239,7 @@ async def get_query_history(
     computed_offset = offset if offset is not None else (page - 1) * page_size
 
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             # Fetch one extra row to compute has_more without a COUNT(*)
             history = await user_query_history_service.get_user_query_history(
                 db=db,
@@ -2042,7 +2286,7 @@ async def get_query_by_id(
         raise HTTPException(status_code=401, detail="Authentication required")
     
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             query = await user_query_history_service.get_query_by_id(
                 db=db,
                 query_id=query_id,
@@ -2087,7 +2331,7 @@ async def delete_query_from_history(
         raise HTTPException(status_code=401, detail="Authentication required")
 
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             deleted = await user_query_history_service.delete_query(
                 db=db,
                 query_id=query_id,
@@ -2119,7 +2363,7 @@ async def list_user_sessions(
         raise HTTPException(status_code=401, detail="Authentication required")
     
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             sessions = await user_query_history_service.get_user_sessions(
                 db=db,
                 user_id=current_user.id,
@@ -2159,7 +2403,7 @@ async def create_session(
         session_name = request.get("session_name")
         session_id = request.get("session_id")
         
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             session = await user_query_history_service.get_or_create_session(
                 db=db,
                 user_id=current_user.id,
@@ -2196,7 +2440,7 @@ async def update_session(
         context_summary = request.get("context_summary")
         is_active = request.get("is_active")
         
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             session = await user_query_history_service.update_session(
                 db=db,
                 user_id=current_user.id,
@@ -2250,7 +2494,7 @@ async def get_user_memories(
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"Invalid memory type: {memory_type}")
         
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             memories = await user_query_history_service.get_user_memories(
                 db=db,
                 user_id=current_user.id,
@@ -2307,7 +2551,7 @@ async def create_memory(
         if expires_at:
             expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
         
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             memory = await user_query_history_service.save_memory(
                 db=db,
                 user_id=current_user.id,
@@ -2346,7 +2590,7 @@ async def delete_memory(
         raise HTTPException(status_code=401, detail="Authentication required")
     
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             deleted = await user_query_history_service.delete_memory(
                 db=db,
                 user_id=current_user.id,
@@ -2375,7 +2619,7 @@ async def get_query_context(
         raise HTTPException(status_code=401, detail="Authentication required")
     
     try:
-        async for db in get_db():
+        async with db_manager.get_session() as db:
             context = await user_query_history_service.get_context_for_query(
                 db=db,
                 user_id=current_user.id,
