@@ -39,9 +39,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     const logoutBtn = document.getElementById('logout-btn');
     if (logoutBtn) {
-        logoutBtn.addEventListener('click', () => {
-            localStorage.removeItem('access_token');
-            window.location.href = '/signin';
+        logoutBtn.addEventListener('click', (e) => {
+            // Defer to the ONE real logout (navbar-loader.js): it calls
+            // POST /api/auth/logout, which revokes the token server-side, and
+            // clears the cached navigation. This handler used to remove a
+            // localStorage 'access_token' that is never written — the credential
+            // is an HttpOnly cookie — so it redirected while leaving the session
+            // valid.
+            if (typeof window.handleLogout === 'function') {
+                e.preventDefault();
+                window.handleLogout();
+            }
+            // If navbar-loader has not loaded, fall through to the button's
+            // default behaviour rather than faking a logout that did not happen.
         });
     } else {
         console.error('[INIT] Logout button not found!');

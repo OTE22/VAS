@@ -4,11 +4,18 @@ let currentUser = null;
 // Load user info for UI customization only - BACKEND HANDLES ALL AUTHENTICATION
 // Backend route already authenticated user and checks admin role, exception handler handles redirects
 document.addEventListener('DOMContentLoaded', async () => {
-    // IMMEDIATELY show page - backend already authenticated user
-    // Don't wait for API call to show content
-    document.body.classList.add('admin-verified');
-    document.body.classList.add('admin-user');
-    
+    // Show the page immediately — the backend authenticated this request before
+    // serving it. But do NOT assume administrator: `admin-user` and
+    // `admin-verified` are what the stylesheet keys admin-only UI off, and
+    // adding them unconditionally showed every user admin controls until /me
+    // came back (and left them in place entirely if it failed).
+    //
+    // This is presentation only. Every admin route enforces authorization
+    // server-side, so a stale class exposes controls that do not work — but it
+    // still tells a non-admin the controls exist, and it is why a demoted user
+    // appeared to keep their old access.
+    document.body.classList.remove('admin-verified', 'admin-user');
+
     try {
         // Fetch user info for UI customization only (not for authentication)
         // Backend already authenticated user and verified admin role before serving this page
@@ -18,28 +25,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (response.ok) {
             currentUser = await response.json();
-        
-            // Backend already verified admin role - just load UI
+
             console.log('[HOME] Loading home page content');
-            
+
             displayUserInfo();
-            
-            // Show/hide admin-only elements (stats) based on role
+
+            // Apply admin styling only once the server has said so, and only
+            // from the capability list the backend actually enforces.
+            const permissions = Array.isArray(currentUser.permissions) ? currentUser.permissions : [];
+            const isAdmin = permissions.includes('admin.users.manage');
+            document.body.classList.toggle('admin-verified', isAdmin);
+            document.body.classList.toggle('admin-user', isAdmin);
+
+            // Both branches present: without the else a revoked privilege never
+            // hides anything, which is how demoted users kept seeing admin UI.
             const adminSection = document.getElementById('admin-section');
             if (adminSection) {
-                adminSection.style.display = 'block';
+                adminSection.style.display = isAdmin ? 'block' : 'none';
             }
-            
+
             // Load stats after currentUser is set
             loadStats();
             loadPipelines();
             
-            // Show tracking link if user has chatbot access
-            if (currentUser.can_use_chatbot) {
-                const trackingLink = document.getElementById('tracking-link');
-                if (trackingLink) {
-                    trackingLink.style.display = 'block';
-                }
+            // Show OR hide the assistant link. This previously only ever showed
+            // it — with no else, revoking chatbot access never took the link
+            // away, so a user who had lost access still saw the entry point.
+            const trackingLink = document.getElementById('tracking-link');
+            if (trackingLink) {
+                const canUseChatbot = permissions.includes('chatbot.use');
+                trackingLink.style.display = canUseChatbot ? 'block' : 'none';
             }
         } else {
             // If we can't get user info, still show page - backend already authenticated

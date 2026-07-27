@@ -80,11 +80,23 @@ def _bearer(username, password=PROBE_PASSWORD):
     return {"Authorization": f"Bearer {token}"}
 
 
+_ADMIN_HEADERS_CACHE = {}
+
+
 def _admin_headers():
-    """Admin auth plus the CSRF header the user-admin routes now require."""
-    headers = _bearer("admin", "admin123")
-    headers["X-Requested-With"] = "XMLHttpRequest"
-    return headers
+    """Admin auth plus the CSRF header the user-admin routes now require.
+
+    The token is cached for the module. Logging in on every call made each
+    authorization change pay a bcrypt verification, and with a single API worker
+    those serialize — enough of them and an unrelated request in the same run
+    exceeds its socket timeout. Admin authorization is not what these tests are
+    exercising, so re-establishing it each time buys nothing.
+    """
+    if "headers" not in _ADMIN_HEADERS_CACHE:
+        headers = _bearer("admin", "admin123")
+        headers["X-Requested-With"] = "XMLHttpRequest"
+        _ADMIN_HEADERS_CACHE["headers"] = headers
+    return dict(_ADMIN_HEADERS_CACHE["headers"])
 
 
 @pytest.fixture
@@ -369,3 +381,89 @@ def test_cannot_demote_the_last_administrator():
                                      {"i": target})).scalar()
 
     assert run_on_shared_loop(role_of()) == "admin"
+
+
+# ---------------------------------------------------------------------------
+# Frontend source contract
+# ---------------------------------------------------------------------------
+#
+# The frontend is not authorization — every route enforces server-side. But a UI
+# that renders privileges the backend has already revoked is the visible half of
+# the reported bug, so these pin the client behaviour too.
+
+def _js(name):
+    with open(f"/app/frontend/js/{name}", encoding="utf-8") as f:
+        return f.read()
+
+
+def _code_only(src):
+    """Strip comment lines: several of these fixes are DOCUMENTED by quoting the
+    old buggy code, and a naive substring check matches the explanation."""
+    return "\n".join(
+        line for line in src.splitlines()
+        if not line.lstrip().startswith(("//", "*", "/*"))
+    )
+
+
+def test_navbar_does_not_render_from_cache_before_the_network():
+    """Navigation must come from a fresh response, never from sessionStorage.
+
+    The cache used to be applied synchronously and refreshed in the background,
+    with failures swallowed — so a role change left the old navigation on screen
+    and a failed refresh left it there indefinitely.
+    """
+    code = _code_only(_js("navbar-loader.js"))
+    customize = code.split("async function customizeNavbarForUser", 1)[1].split("\n    }", 1)[0]
+
+    assert "applyNavbarPrivileges(JSON.parse(cached))" not in customize, (
+        "navbar still renders from the cache before the network"
+    )
+    assert "await fetchPrivileges()" in customize, "navbar must fetch before rendering"
+
+
+def test_rejected_credentials_clear_the_cached_view():
+    """401/403 must be distinguished from a network error."""
+    code = _code_only(_js("navbar-loader.js"))
+    assert "clearCachedSessionView" in code
+    assert "response.status === 401 || response.status === 403" in code, (
+        "a rejected credential is still indistinguishable from a network error"
+    )
+
+
+def test_there_is_exactly_one_real_logout():
+    """No page may fake a logout by clearing a key that is never written."""
+    assert "window.handleLogout = handleLogout" in _js("navbar-loader.js"), (
+        "the real logout is not exposed for page scripts to use"
+    )
+
+    for name in ("admin-navbar.js", "admin-users.js", "admin-audit.js", "admin-tutorial.js"):
+        code = _code_only(_js(name))
+        assert "localStorage.removeItem('access_token')" not in code, (
+            f"{name} still fakes a logout by clearing a key that is never written "
+            f"(the credential is an HttpOnly cookie)"
+        )
+        assert "window.handleLogout" in code, f"{name} does not defer to the real logout"
+
+
+def test_admin_styling_is_applied_from_permissions_and_can_be_removed():
+    """Admin classes must be toggled from the server's answer, not added blind."""
+    home = _code_only(_js("home.js"))
+    assert "classList.toggle('admin-user'" in home, (
+        "home.js must toggle admin styling, not only add it"
+    )
+    assert "permissions.includes('admin.users.manage')" in home, (
+        "admin styling must derive from the enforced capability list"
+    )
+
+    dashboard = _code_only(_js("dashboard.js"))
+    assert "classList.toggle('admin-user'" in dashboard, (
+        "dashboard.js only ever added admin-user, so a demotion never removed it"
+    )
+
+
+def test_chatbot_link_is_hidden_when_access_is_revoked():
+    """Showing without an else is why revocation never hid the entry point."""
+    home = _code_only(_js("home.js"))
+    assert "permissions.includes('chatbot.use')" in home
+    block = home.split("tracking-link", 1)[1][:400]
+    assert "'none'" in block, "the assistant link is shown but never hidden"

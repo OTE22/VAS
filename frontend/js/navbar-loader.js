@@ -17,18 +17,42 @@
     // Every page script (navbar, dashboard, unknown page...) needs /api/auth/me
     // and /api/auth/me/privileges. These helpers make the WHOLE page share ONE
     // in-flight request per endpoint instead of firing duplicates on every load.
+    // A rejected credential is NOT the same as a network error. Both used to
+    // resolve to null, so an expired or revoked session was indistinguishable
+    // from a flaky connection — and the stale navigation stayed on screen.
+    // Clearing the cached view on 401/403 is what makes a revocation visible
+    // without requiring the user to find the logout button.
+    function clearCachedSessionView() {
+        try {
+            sessionStorage.removeItem('navbar_privileges');
+            sessionStorage.removeItem('navbar_username');
+            Object.keys(sessionStorage)
+                .filter(k => k.startsWith('navbar_html:'))
+                .forEach(k => sessionStorage.removeItem(k));
+        } catch (e) { /* storage unavailable — nothing cached to clear */ }
+    }
+
+    function handleAuthResponse(response) {
+        if (response.ok) return response.json();
+        if (response.status === 401 || response.status === 403) {
+            clearCachedSessionView();
+        }
+        return null;
+    }
+
     window.getAuthMe = window.getAuthMe || function () {
         if (!window.__authMePromise) {
-            window.__authMePromise = fetch('/api/auth/me', { credentials: 'include' })
-                .then(r => (r.ok ? r.json() : null))
+            window.__authMePromise = fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' })
+                .then(handleAuthResponse)
                 .catch(() => null);
         }
         return window.__authMePromise;
     };
     window.getAuthPrivileges = window.getAuthPrivileges || function () {
         if (!window.__authPrivilegesPromise) {
-            window.__authPrivilegesPromise = fetch('/api/auth/me/privileges', { credentials: 'include' })
-                .then(r => (r.ok ? r.json() : null))
+            window.__authPrivilegesPromise = fetch('/api/auth/me/privileges',
+                    { credentials: 'include', cache: 'no-store' })
+                .then(handleAuthResponse)
                 .catch(() => null);
         }
         return window.__authPrivilegesPromise;
@@ -190,8 +214,7 @@
     // Handle logout
     async function handleLogout() {
         // Clear session caches so the next user doesn't see stale navbar data
-        sessionStorage.removeItem('navbar_privileges');
-        sessionStorage.removeItem('navbar_username');
+        clearCachedSessionView();
         try {
             const response = await fetch('/api/auth/logout', {
                 method: 'POST',
@@ -217,6 +240,17 @@
             window.location.href = '/signin';
         }
     }
+
+    // THE logout. Exposed so page scripts that bind their own logout button use
+    // this one rather than reimplementing it.
+    //
+    // Four pages (admin-navbar, admin-users, admin-audit, admin-tutorial) each
+    // had their own handler that removed a localStorage `access_token` key which
+    // is NEVER written — the credential is an HttpOnly cookie — and redirected
+    // without calling POST /api/auth/logout. So "logout" left the server session
+    // fully valid and the cached navigation intact; on pages loading both
+    // scripts, whichever navigated first won.
+    window.handleLogout = handleLogout;
 
     // Handle refresh - reloads the current page
     function handleRefresh(e) {
@@ -361,38 +395,37 @@
         return privileges;
     }
 
-    // Customize navbar based on backend-provided navbar links.
-    // Uses a session cache so links appear instantly on navigation; a background
-    // fetch keeps the cache in sync with the backend (still the source of truth).
+    // Customize navbar from backend-provided navbar links.
+    //
+    // The cache is WRITE-ONLY here: navigation is rendered from a fresh
+    // /api/auth/me/privileges response, never from sessionStorage.
+    //
+    // It previously applied the cached copy synchronously and then refreshed in
+    // the background, re-applying only if the serialized payload differed —
+    // with `.catch(() => {})` swallowing failures. So a user whose role had just
+    // been changed kept seeing their old navigation, and a failed refresh left
+    // that stale render in place indefinitely. The cache was cleared only on
+    // explicit logout.
+    //
+    // This is presentation only: every route enforces authorization server-side.
+    // The cache is retained purely so an unchanged payload does not repaint.
     async function customizeNavbarForUser() {
         const cacheKey = 'navbar_privileges';
         try {
-            const cached = sessionStorage.getItem(cacheKey);
-            if (cached) {
-                try {
-                    applyNavbarPrivileges(JSON.parse(cached));
-                } catch (e) {
-                    sessionStorage.removeItem(cacheKey);
-                }
-                // Refresh from backend in the background and re-apply if changed
-                fetchPrivileges().then(fresh => {
-                    if (fresh) {
-                        const serialized = JSON.stringify(fresh);
-                        if (serialized !== cached) {
-                            sessionStorage.setItem(cacheKey, serialized);
-                            applyNavbarPrivileges(fresh);
-                        }
-                    }
-                }).catch(() => { });
+            const privileges = await fetchPrivileges();
+            if (!privileges) {
+                // No authoritative answer — drop the stale copy rather than
+                // leaving navigation the backend may no longer permit.
+                try { sessionStorage.removeItem(cacheKey); } catch (e) { /* ignore */ }
                 return;
             }
-
-            const privileges = await fetchPrivileges();
-            if (!privileges) return;
-            sessionStorage.setItem(cacheKey, JSON.stringify(privileges));
+            try {
+                sessionStorage.setItem(cacheKey, JSON.stringify(privileges));
+            } catch (e) { /* storage full or unavailable — rendering still proceeds */ }
             applyNavbarPrivileges(privileges);
         } catch (error) {
             console.error('[Navbar] Error customizing navbar:', error);
+            try { sessionStorage.removeItem(cacheKey); } catch (e) { /* ignore */ }
             // Don't block page load if navbar customization fails
         }
     }

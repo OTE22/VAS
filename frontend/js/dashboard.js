@@ -261,9 +261,12 @@
     async function loadUserPipelineAccess() {
         try {
             const user = window.getAuthMe ? await window.getAuthMe() : null;
-            if (user && user.role === 'admin') document.body.classList.add('admin-user');
+            // toggle, not add: this only ever added the class, so a demoted
+            // administrator kept admin-only styling for the whole session.
+            const permissions = (user && Array.isArray(user.permissions)) ? user.permissions : [];
+            document.body.classList.toggle('admin-user', permissions.includes('admin.users.manage'));
             const trackingBtn = document.getElementById('tracking-btn');
-            if (trackingBtn) trackingBtn.style.display = user && user.can_use_chatbot ? 'flex' : 'none';
+            if (trackingBtn) trackingBtn.style.display = permissions.includes('chatbot.use') ? 'flex' : 'none';
 
             const privileges = window.getAuthPrivileges ? await window.getAuthPrivileges() : null;
             const role = privileges ? (privileges.role || (privileges.user && privileges.user.role)) : (user && user.role);
