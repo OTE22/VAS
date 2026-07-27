@@ -16,7 +16,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from ..config import config
 from ..state import AgentState
-from ..llm import create_llm, create_sql_llm
+from ..llm import TaskType, create_llm, create_sql_llm
 from ..database import DatabaseManager
 from ..knowledge_base import SQLKnowledgeBase
 from .sql_tools import prepare_sql_from_llm_response, validate_sql_query
@@ -29,8 +29,11 @@ class SQLAgentTools:
     """Tools for the SQL Intelligence Agent."""
 
     def __init__(self, conversation_memory=None):
-        self.llm = create_llm()  # fast general model: chat, intent, normalization, analysis
-        self.sql_llm = create_sql_llm()  # SQL specialist: query generation and repair only
+        # Routed by task, not by hardcoded model name: the registry decides
+        # which model serves each, applies the data-sensitivity policy, and
+        # records any fallback.
+        self.llm = create_llm(TaskType.CHAT)  # chat, intent, normalization, analysis
+        self.sql_llm = create_sql_llm(TaskType.SQL_GENERATION)  # generation and repair
         self.db = DatabaseManager(config)
         self.kb = SQLKnowledgeBase(config)  # Knowledge Base for RAG
         self.conversation_memory = conversation_memory  # Conversation memory for context
