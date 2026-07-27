@@ -163,7 +163,27 @@ function editUser(userId) {
         
         const roleField = document.getElementById('modal-role');
         if (roleField) {
-            roleField.value = user.role;
+            // Roles are stored canonically lowercase; normalise here too so an
+            // older row written as "Observer" still selects the right option
+            // instead of leaving the select blank.
+            const role = String(user.role || '').toLowerCase();
+            roleField.value = role;
+
+            // If the value still did not match an option, the select is now
+            // blank and saving would submit "" — which the backend skips,
+            // making the form appear to do nothing. Surface it instead.
+            if (!roleField.value) {
+                console.warn('[USER_FORM] Unrecognised role from server:', user.role);
+            }
+
+            // An administrator's role cannot be changed here. Disabling the
+            // whole select (rather than omitting the option) keeps the true
+            // role visible and makes the restriction obvious.
+            const isAdmin = role === 'admin';
+            roleField.disabled = isAdmin;
+            roleField.title = isAdmin
+                ? 'Administrator role cannot be changed from this form.'
+                : '';
         }
         
         const chatbotField = document.getElementById('modal-chatbot-access');
@@ -335,8 +355,10 @@ async function confirmDeleteUser() {
     try {
         const response = await fetch(`/api/users/${userId}`, {
             method: 'DELETE',
-            headers: { 
-                'Content-Type': 'application/json'
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest'
             }
         });
 
@@ -410,16 +432,27 @@ async function handleUserSubmit(e) {
     const userId = document.getElementById('user-id').value;
     const passwordValue = document.getElementById('modal-password').value.trim();
     
+    const roleSelect = document.getElementById('modal-role');
+
     const formData = {
         username: document.getElementById('modal-username').value,
         email: document.getElementById('modal-email').value,
         full_name: document.getElementById('modal-full-name').value,
-        role: document.getElementById('modal-role').value,
+        // Unchecked boxes are sent as explicit false, not omitted, so the
+        // backend removes the permission rather than leaving the old value.
         can_use_chatbot: document.getElementById('modal-chatbot-access').checked,
         is_active: document.getElementById('modal-is-active').checked,
         pipeline_ids: Array.from(document.querySelectorAll('#pipeline-checkboxes input:checked'))
             .map(cb => cb.value)
     };
+
+    // Role is omitted when the select is disabled (the target is an
+    // administrator). Sending it would be rejected by the backend's
+    // "cannot assign admin" rule and would block edits to this user's other
+    // fields; omitting it leaves the role untouched, which is the intent.
+    if (roleSelect && !roleSelect.disabled && roleSelect.value) {
+        formData.role = roleSelect.value;
+    }
 
     // Handle password: only include if provided (for both create and update)
     if (passwordValue) {
@@ -443,8 +476,12 @@ async function handleUserSubmit(e) {
 
         const response = await fetch(url, {
             method,
+            credentials: 'include',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                // Required by require_user_admin_csrf: proves the request was
+                // issued by our own page rather than a cross-site form.
+                'X-Requested-With': 'XMLHttpRequest'
             },
             body: JSON.stringify(formData)
         });
@@ -484,8 +521,12 @@ async function handlePasswordReset(e) {
     try {
         const response = await fetch(`/api/users/${userId}/reset-password`, {
             method: 'POST',
+            credentials: 'include',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                // Required by require_user_admin_csrf: proves the request was
+                // issued by our own page rather than a cross-site form.
+                'X-Requested-With': 'XMLHttpRequest'
             },
             body: JSON.stringify({ new_password: newPassword })
         });
@@ -516,7 +557,10 @@ async function unblockUser(userId) {
     try {
         const response = await fetch(`/api/users/${userId}/unblock`, {
             method: 'POST',
-            credentials: 'include' // Include HttpOnly cookies
+            credentials: 'include', // Include HttpOnly cookies
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
         });
 
         if (!response.ok) {

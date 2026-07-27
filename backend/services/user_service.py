@@ -135,6 +135,49 @@ class UserService:
         return user
 
     @staticmethod
+    async def _current_pipeline_ids(user_id: int, db: AsyncSession) -> List[str]:
+        """Pipeline ids currently granted to a user, sorted for stable diffing."""
+        result = await db.execute(
+            select(UserPipelineAccess.pipeline_id)
+            .where(UserPipelineAccess.user_id == user_id)
+        )
+        return sorted(row[0] for row in result.all())
+
+    @staticmethod
+    def _record_authorization_audit(*, db: AsyncSession, user: User,
+                                    old: dict, new: dict, action: str,
+                                    actor=None, context: Optional[dict] = None) -> None:
+        """Add an audit row to the CURRENT transaction.
+
+        Deliberately synchronous and `db.add`-only: it must commit or roll back
+        with the change it describes. Never records a password, token or cookie
+        — only the authorization fields and request metadata.
+        """
+        from db_models import UserAuthorizationAuditLog
+
+        context = context or {}
+        db.add(UserAuthorizationAuditLog(
+            target_user_id=user.id,
+            target_username=user.username,
+            changed_by_user_id=getattr(actor, "id", None),
+            changed_by_username=getattr(actor, "username", None),
+            action=action,
+            old_role=old.get("role"),
+            new_role=new.get("role"),
+            old_can_use_chatbot=old.get("can_use_chatbot"),
+            new_can_use_chatbot=new.get("can_use_chatbot"),
+            old_is_active=old.get("is_active"),
+            new_is_active=new.get("is_active"),
+            old_pipeline_ids=old.get("pipeline_ids"),
+            new_pipeline_ids=new.get("pipeline_ids"),
+            permissions_version=user.permissions_version,
+            request_id=context.get("request_id"),
+            ip_address=context.get("ip_address"),
+            user_agent=context.get("user_agent"),
+            change_reason=context.get("reason"),
+        ))
+
+    @staticmethod
     async def update_user(
         user_id: int,
         email: Optional[str] = None,
@@ -144,9 +187,16 @@ class UserService:
         can_use_chatbot: Optional[bool] = None,
         is_active: Optional[bool] = None,
         pipeline_ids: Optional[List[str]] = None,
-        db: AsyncSession = None
+        db: AsyncSession = None,
+        actor: Optional[User] = None,
+        context: Optional[dict] = None,
     ) -> User:
-        """Update user information"""
+        """Update user information.
+
+        `actor` and `context` are optional so existing callers keep working,
+        but the route passes both so the audit row records who made the change
+        and from where.
+        """
         logger.info(f"[UPDATE_USER] ✏️  Starting user update for user ID: {user_id}")
         
         # Step 1: Find user
@@ -190,13 +240,27 @@ class UserService:
             logger.debug(f"[UPDATE_USER] Step 3: Password field provided but empty - keeping current password")
 
         # Step 4: Update other fields
+        #
+        # Prior authorization state is captured BEFORE any mutation — the
+        # attributes are overwritten in place below, so reading them afterwards
+        # would record the new value as the old one.
+        from backend.auth.capabilities import canonical_role
+
+        old_authz = {
+            "role": user.role,
+            "can_use_chatbot": user.can_use_chatbot,
+            "is_active": user.is_active,
+            "pipeline_ids": await UserService._current_pipeline_ids(user_id, db),
+        }
+
         logger.info(f"[UPDATE_USER] Step 4: Updating other fields...")
         if full_name is not None:
             user.full_name = full_name
             logger.debug(f"[UPDATE_USER]   Full name updated: {full_name}")
         if role is not None:
-            user.role = role
-            logger.debug(f"[UPDATE_USER]   Role updated: {role}")
+            # Stored canonically so role comparisons cannot miss on casing.
+            user.role = canonical_role(role).value
+            logger.debug(f"[UPDATE_USER]   Role updated: {user.role}")
         if can_use_chatbot is not None:
             user.can_use_chatbot = can_use_chatbot
             logger.debug(f"[UPDATE_USER]   Can use chatbot updated: {can_use_chatbot}")
@@ -212,7 +276,10 @@ class UserService:
             await db.execute(
                 delete(UserPipelineAccess).where(UserPipelineAccess.user_id == user_id)
             )
-            # Add new access
+            # Add new access. Unknown pipeline ids are rejected rather than
+            # silently dropped: an admin who mistypes an id should be told, not
+            # left believing access was granted.
+            unknown = []
             for pipeline_id in pipeline_ids:
                 pipeline_result = await db.execute(
                     select(Pipeline).where(Pipeline.pipeline_id == pipeline_id)
@@ -224,7 +291,40 @@ class UserService:
                         pipeline_id=pipeline_id
                     )
                     db.add(access)
+                else:
+                    unknown.append(pipeline_id)
+            if unknown:
+                await db.rollback()
+                raise ValueError(
+                    f"Unknown pipeline id(s): {', '.join(sorted(unknown))}"
+                )
             logger.info(f"[UPDATE_USER] ✅ Step 5 SUCCESS: Pipeline access updated ({len(pipeline_ids)} pipelines)")
+
+        # Step 5b: Authorization version + audit, in THIS transaction.
+        #
+        # The version bump is what lets an already-open WebSocket or SSE stream
+        # notice the change; the audit row is what makes the change
+        # reconstructable afterwards. Both must share the transaction with the
+        # field writes, or a rollback can leave them disagreeing.
+        new_authz = {
+            "role": user.role,
+            "can_use_chatbot": user.can_use_chatbot,
+            "is_active": user.is_active,
+            "pipeline_ids": sorted(pipeline_ids) if pipeline_ids is not None
+                            else old_authz["pipeline_ids"],
+        }
+        if new_authz != old_authz:
+            user.permissions_version = int(user.permissions_version or 1) + 1
+            logger.info(
+                "[UPDATE_USER] authorization changed -> permissions_version=%s",
+                user.permissions_version,
+            )
+            UserService._record_authorization_audit(
+                db=db, user=user, old=old_authz, new=new_authz,
+                action="authorization_updated", actor=actor, context=context,
+            )
+        else:
+            logger.debug("[UPDATE_USER] no authorization change; version unchanged")
 
         # Step 6: Ensure user is tracked by session and flush
         logger.info(f"[UPDATE_USER] Step 6: Ensuring user is tracked by session...")
@@ -375,11 +475,30 @@ class UserService:
         if not user:
             raise ValueError(f"User with ID {user_id} not found")
 
+        old_authz = {
+            "role": user.role,
+            "can_use_chatbot": user.can_use_chatbot,
+            "is_active": user.is_active,
+            "pipeline_ids": await UserService._current_pipeline_ids(user_id, db),
+        }
+
         user.is_active = False
         user.can_use_chatbot = False
         user.blocked_reason = reason
         user.blocked_at = datetime.utcnow()
-        
+        # Bumping the version is what closes the blocked user's OPEN
+        # connections. Without it, the SQL-agent WebSocket that triggered the
+        # block keeps working — the socket was authorized at handshake and
+        # never re-checked.
+        user.permissions_version = int(user.permissions_version or 1) + 1
+
+        UserService._record_authorization_audit(
+            db=db, user=user, old=old_authz,
+            new={"role": user.role, "can_use_chatbot": False,
+                 "is_active": False, "pipeline_ids": old_authz["pipeline_ids"]},
+            action="user_blocked", actor=None, context={"reason": reason},
+        )
+
         await db.commit()
         await db.refresh(user)
         logger.warning(f"Blocked user: {user.username} - Reason: {reason}")
@@ -396,11 +515,26 @@ class UserService:
         if not user:
             raise ValueError(f"User with ID {user_id} not found")
 
+        old_authz = {
+            "role": user.role,
+            "can_use_chatbot": user.can_use_chatbot,
+            "is_active": user.is_active,
+            "pipeline_ids": await UserService._current_pipeline_ids(user_id, db),
+        }
+
         user.is_active = True
         user.blocked_reason = None
         user.blocked_at = None
         # Note: can_use_chatbot is not automatically restored - admin must set it explicitly
-        
+        user.permissions_version = int(user.permissions_version or 1) + 1
+
+        UserService._record_authorization_audit(
+            db=db, user=user, old=old_authz,
+            new={"role": user.role, "can_use_chatbot": user.can_use_chatbot,
+                 "is_active": True, "pipeline_ids": old_authz["pipeline_ids"]},
+            action="user_unblocked", actor=None, context=None,
+        )
+
         await db.commit()
         await db.refresh(user)
         logger.info(f"Unblocked user: {user.username}")

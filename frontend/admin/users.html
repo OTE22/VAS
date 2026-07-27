@@ -262,10 +262,24 @@
                                     <span class="security-badge required">REQUIRED</span>
                                 </label>
                                 <div class="security-select-wrapper">
+                                    <!--
+                                      Values are the canonical lowercase role
+                                      codes the backend stores. "Observer" was
+                                      previously capitalised here while role
+                                      comparisons were case-sensitive.
+
+                                      The admin option is disabled, not absent:
+                                      when it was absent, opening an
+                                      administrator set select.value to "" and
+                                      the form silently offered only demotion.
+                                      Present-but-disabled shows the true role
+                                      and cannot be chosen.
+                                    -->
                                     <select id="modal-role" name="role" required aria-required="true" class="security-select">
+                                        <option value="admin" disabled>ADMINISTRATOR - Full Access (not assignable here)</option>
+                                        <option value="observer">OBSERVER - Read-Only Access</option>
                                         <option value="user">USER - Standard Access</option>
                                         <option value="analyzer">ANALYZER - Analysis Access</option>
-                                        <option value="Observer">OBSERVER - Read-Only Access</option>
                                     </select>
                                     <div class="select-arrow"><i class="fas fa-chevron-down"></i></div>
                                     <div class="select-glow"></div>

@@ -9,7 +9,7 @@ import sys
 import logging
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -21,9 +21,89 @@ if parent_dir not in sys.path:
 from db_connection import get_db
 from db_models import User, UserPipelineAccess
 from backend.auth.auth_service import get_current_user, require_role
+from backend.auth.capabilities import (
+    Role,
+    assignable_role_values,
+    canonical_role,
+    is_known_role,
+)
 from backend.services.user_service import UserService
 
 logger = logging.getLogger(__name__)
+
+
+async def _guard_last_administrator(*, db: AsyncSession, target_user_id: int,
+                                    new_role=None, new_is_active=None) -> None:
+    """Refuse a change that would remove the final active administrator.
+
+    Applies to demotion (role change away from admin) and to deactivation,
+    since an inactive admin resolves to zero capabilities and is therefore just
+    as unable to administer.
+
+    Counts only ACTIVE admins: an already-disabled admin account is not a
+    usable escape hatch.
+    """
+    from sqlalchemy import func, select as _select
+
+    demoting = (new_role is not None
+                and canonical_role(new_role) is not Role.ADMIN)
+    deactivating = new_is_active is False
+    if not (demoting or deactivating):
+        return
+
+    target = (await db.execute(
+        _select(User).where(User.id == target_user_id)
+    )).scalar_one_or_none()
+    if target is None or canonical_role(target.role) is not Role.ADMIN:
+        return  # not an admin; nothing to protect
+
+    remaining = (await db.execute(
+        _select(func.count()).select_from(User).where(
+            User.role == Role.ADMIN.value,
+            User.is_active.is_(True),
+            User.id != target_user_id,
+        )
+    )).scalar_one()
+
+    if remaining == 0:
+        action = "demote" if demoting else "deactivate"
+        logger.warning(
+            "[UPDATE_USER_ROUTE] ❌ Blocked attempt to %s the last administrator (user_id=%s)",
+            action, target_user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "LAST_ADMINISTRATOR",
+                "message": (
+                    f"Cannot {action} the only remaining administrator. "
+                    "Promote another account to administrator first."
+                ),
+            },
+        )
+
+
+def require_user_admin_csrf(request: Request):
+    """CSRF defense-in-depth for cookie-authenticated user administration.
+
+    These endpoints create, modify and delete accounts and their permissions,
+    yet were the only mutating admin surface without a CSRF dependency — the
+    watchlist, intelligence and sql-agent routes all had one. A logged-in
+    admin visiting an attacker's page could therefore have their browser
+    silently change any user's role.
+
+    Same policy as require_sql_agent_csrf: SameSite cookie + custom header.
+    Bearer clients are exempt because a bearer token cannot be attached
+    cross-site by the browser.
+    """
+    if request.headers.get("authorization"):
+        return
+    if request.headers.get("x-requested-with", "").lower() != "xmlhttprequest":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF check failed: X-Requested-With header required",
+        )
+
 
 router = APIRouter()
 
@@ -71,7 +151,8 @@ class UserResponse(BaseModel):
 async def create_user(
     user_data: CreateUserRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_user_admin_csrf)
 ):
     """Create a new user (admin only)"""
     logger.info(f"[CREATE_USER_ROUTE] 👤 User creation request")
@@ -79,21 +160,24 @@ async def create_user(
     logger.debug(f"[CREATE_USER_ROUTE]   User data: username={user_data.username}, email={user_data.email}, role={user_data.role}")
     logger.debug(f"[CREATE_USER_ROUTE]   Password provided: {bool(user_data.password)}, Length: {len(user_data.password) if user_data.password else 0}")
     
-    # Prevent creating admin users through the API
-    if user_data.role.lower() == "admin":
+    # Prevent creating admin users through the API. Compared canonically so
+    # "Administrator" or " ADMIN " cannot slip past a lowercase equality check.
+    if canonical_role(user_data.role) is Role.ADMIN:
         logger.warning(f"[CREATE_USER_ROUTE] ❌ SECURITY: Attempt to create admin user blocked by {current_user.username}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin users cannot be created through this interface. Admin users must be created through system initialization or direct database access."
         )
-    
-    # Validate allowed roles
-    allowed_roles = ["user", "analyzer", "Observer"]
-    if user_data.role not in allowed_roles:
-        logger.warning(f"[CREATE_USER_ROUTE] ❌ Invalid role '{user_data.role}' provided. Allowed roles: {allowed_roles}")
+
+    # is_known_role first: canonical_role falls back to the least privileged
+    # role, so an unrecognised value would otherwise pass as "observer" and
+    # create the account with silently wrong permissions.
+    if (not is_known_role(user_data.role)
+            or canonical_role(user_data.role).value not in assignable_role_values()):
+        logger.warning(f"[CREATE_USER_ROUTE] ❌ Invalid role '{user_data.role}'. Allowed: {assignable_role_values()}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid role '{user_data.role}'. Allowed roles are: {', '.join(allowed_roles)}"
+            detail=f"Invalid role '{user_data.role}'. Allowed roles are: {', '.join(assignable_role_values())}"
         )
     
     try:
@@ -210,32 +294,57 @@ async def get_user(
 async def update_user(
     user_id: int,
     user_data: UpdateUserRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_user_admin_csrf),
 ):
     """Update user (admin only)"""
     logger.info(f"[UPDATE_USER_ROUTE] ✏️  Update user request for user ID: {user_id}")
     logger.debug(f"[UPDATE_USER_ROUTE]   Requested by admin: {current_user.username} (ID: {current_user.id})")
     logger.debug(f"[UPDATE_USER_ROUTE]   Update data: email={user_data.email is not None}, password={'***' if user_data.password else None}, full_name={user_data.full_name is not None}, role={user_data.role}, is_active={user_data.is_active}")
-    
-    # Prevent changing user role to admin through the API
-    if user_data.role and user_data.role.lower() == "admin":
+
+    # Prevent changing user role to admin through the API.
+    # Compared canonically so "Administrator" or " ADMIN " cannot slip past a
+    # plain lowercase equality check.
+    if user_data.role and canonical_role(user_data.role) is Role.ADMIN:
         logger.warning(f"[UPDATE_USER_ROUTE] ❌ SECURITY: Attempt to change user role to admin blocked by {current_user.username}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot change user role to 'admin' through this interface. Admin role must be assigned through system initialization or direct database access."
         )
-    
-    # Validate allowed roles if role is being updated
+
+    # Validate the submitted role against the canonical assignable set.
+    # An unrecognised value is rejected rather than silently stored — an
+    # unknown role resolves to the LEAST privileged capabilities, so accepting
+    # a typo would quietly strip a user's access.
     if user_data.role:
-        allowed_roles = ["user", "analyzer", "Observer"]
-        if user_data.role not in allowed_roles:
-            logger.warning(f"[UPDATE_USER_ROUTE] ❌ Invalid role '{user_data.role}' provided. Allowed roles: {allowed_roles}")
+        # is_known_role first: canonical_role falls back to the least
+        # privileged role, so an unrecognised value would otherwise pass this
+        # check as "observer" and silently demote the user.
+        if (not is_known_role(user_data.role)
+                or canonical_role(user_data.role).value not in assignable_role_values()):
+            logger.warning(
+                "[UPDATE_USER_ROUTE] ❌ Invalid role %r. Allowed: %s",
+                user_data.role, assignable_role_values(),
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid role '{user_data.role}'. Allowed roles are: {', '.join(allowed_roles)}"
+                detail=f"Invalid role '{user_data.role}'. Allowed roles are: {', '.join(assignable_role_values())}"
             )
-    
+
+    # Never leave the system without an administrator.
+    #
+    # This is not hypothetical: it happened during development. The role
+    # dropdown has no "admin" option, so opening an administrator renders the
+    # select blank, and choosing any value demotes them. With one admin
+    # account that locks everyone out of user management permanently — the
+    # only recovery is direct database access.
+    await _guard_last_administrator(
+        db=db, target_user_id=user_id,
+        new_role=user_data.role, new_is_active=user_data.is_active,
+    )
+
     try:
         user = await UserService.update_user(
             user_id=user_id,
@@ -246,7 +355,15 @@ async def update_user(
             can_use_chatbot=user_data.can_use_chatbot,
             is_active=user_data.is_active,
             pipeline_ids=user_data.pipeline_ids,
-            db=db
+            db=db,
+            actor=current_user,
+            context={
+                "request_id": request.headers.get("X-Request-ID"),
+                # nginx does not trust client-supplied X-Forwarded-For, so the
+                # socket address is the real one.
+                "ip_address": request.client.host if request.client else None,
+                "user_agent": request.headers.get("user-agent"),
+            },
         )
         logger.info(f"[UPDATE_USER_ROUTE] ✅✅✅ User updated successfully: {user.username} (ID: {user.id})")
         
@@ -281,7 +398,8 @@ async def reset_password(
     user_id: int,
     password_data: ResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_user_admin_csrf)
 ):
     """Reset user password (admin only)"""
     logger.info(f"[RESET_PASSWORD_ROUTE] 🔐 Password reset request for user ID: {user_id}")
@@ -307,7 +425,8 @@ async def reset_password(
 async def delete_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_user_admin_csrf)
 ):
     """Delete user (admin only)"""
     if user_id == current_user.id:
@@ -351,7 +470,8 @@ async def get_my_pipelines(
 async def unblock_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_user_admin_csrf)
 ):
     """Unblock a user (admin only) - restores system access"""
     try:

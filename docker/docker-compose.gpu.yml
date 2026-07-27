@@ -103,7 +103,7 @@ services:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
       MIGRATIONS_FAIL_CLOSED: "true"
-      MIGRATIONS_EXPECTED_HEAD: b1c2d3e4f5a6
+      MIGRATIONS_EXPECTED_HEAD: c1d2e3f4a5b6
       # Migration role: holds DDL rights the application role does not.
       DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_migrator
@@ -230,7 +230,7 @@ services:
       SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:?set FR_READONLY_PASSWORD in .env}
       MIGRATIONS_MODE: verify
       MIGRATIONS_FAIL_CLOSED: "true"
-      MIGRATIONS_EXPECTED_HEAD: b1c2d3e4f5a6
+      MIGRATIONS_EXPECTED_HEAD: c1d2e3f4a5b6
       OLLAMA_BASE_URL: http://ollama:11434
       # Two-model setup: general model for chat/intent/normalization,
       # Arctic-Text2SQL-R1-7B (Snowflake, 2025) only for SQL generation/repair

@@ -300,10 +300,76 @@ async def get_current_user(
     return user
 
 
+def require_capability(*required: "Capability"):
+    """Dependency factory requiring one or more capabilities.
+
+    The preferred gate. Capabilities are resolved from the freshly loaded user
+    row by the single resolver in backend/auth/capabilities.py, so a role or
+    permission change applies on the very next request with no cache to
+    invalidate.
+
+    Denials are logged with the required capability and the caller's role, but
+    never with the token, so an authorization failure is diagnosable from logs
+    alone.
+    """
+    from backend.auth.capabilities import (
+        Capability,
+        resolve_effective_authorization,
+    )
+
+    needed = tuple(required)
+
+    async def capability_checker(current_user: User = Depends(get_current_user)) -> User:
+        auth = resolve_effective_authorization(current_user)
+        missing = [c.value for c in needed if not auth.has(c)]
+        if missing:
+            logger.info(
+                "[AUTHZ] denied user_id=%s role=%s required=%s missing=%s version=%s",
+                auth.user_id, auth.role.value,
+                ",".join(c.value for c in needed), ",".join(missing),
+                auth.permissions_version,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "You do not have permission to perform this action.",
+                    "required": [c.value for c in needed],
+                },
+            )
+        logger.debug(
+            "[AUTHZ] allowed user_id=%s role=%s required=%s version=%s",
+            auth.user_id, auth.role.value,
+            ",".join(c.value for c in needed), auth.permissions_version,
+        )
+        return current_user
+
+    return capability_checker
+
+
 def require_role(allowed_roles: List[str]):
-    """Dependency to require specific role(s)"""
+    """Dependency to require specific role(s).
+
+    Retained so the ~45 existing call sites keep working unchanged, but role
+    comparison now goes through the canonical form. Previously this was a
+    case-sensitive membership test against raw column text, so a stored
+    "Observer" would never match an expected "observer" — and the mismatch
+    denied access silently.
+
+    Prefer require_capability for new code: it says what the endpoint needs
+    rather than who is allowed to reach it.
+    """
+    from backend.auth.capabilities import canonical_role
+
+    allowed = {canonical_role(r) for r in allowed_roles}
+
     async def role_checker(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role not in allowed_roles:
+        if canonical_role(current_user.role) not in allowed:
+            logger.info(
+                "[AUTHZ] denied user_id=%s role=%s required_roles=%s",
+                current_user.id, canonical_role(current_user.role).value,
+                ",".join(sorted(r.value for r in allowed)),
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access denied. Required role: {', '.join(allowed_roles)}"
@@ -314,8 +380,14 @@ def require_role(allowed_roles: List[str]):
 
 def require_admin():
     """Dependency factory to require admin role. Returns user dict for compatibility."""
+    from backend.auth.capabilities import canonical_role, Role
+
     async def admin_checker(current_user: User = Depends(get_current_user)) -> dict:
-        if current_user.role != "admin":
+        if canonical_role(current_user.role) is not Role.ADMIN:
+            logger.info(
+                "[AUTHZ] denied user_id=%s role=%s required_roles=admin",
+                current_user.id, canonical_role(current_user.role).value,
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied. Admin role required."
@@ -420,9 +492,27 @@ async def check_identity_access(
 
 
 def require_chatbot_access():
-    """Dependency to require chatbot access"""
+    """Dependency to require chatbot access.
+
+    Now resolved through the single capability resolver rather than reading
+    `can_use_chatbot` directly, so the chatbot cannot drift away from how the
+    rest of the application decides the same question. Behaviour is unchanged:
+    CHATBOT_USE is granted by `can_use_chatbot` and withdrawn when the account
+    is inactive.
+    """
+    from backend.auth.capabilities import (
+        Capability,
+        resolve_effective_authorization,
+    )
+
     async def chatbot_checker(current_user: User = Depends(get_current_user)) -> User:
-        if not current_user.can_use_chatbot:
+        auth = resolve_effective_authorization(current_user)
+        if not auth.has(Capability.CHATBOT_USE):
+            logger.info(
+                "[AUTHZ] denied user_id=%s role=%s required=%s version=%s",
+                auth.user_id, auth.role.value,
+                Capability.CHATBOT_USE.value, auth.permissions_version,
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Chatbot access denied"

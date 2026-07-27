@@ -232,6 +232,13 @@ class User(Base):
         Boolean, default=False, nullable=False, server_default=text("false")
     )
     password_changed_at = Column(DateTime, nullable=True)
+    # Bumped whenever role, can_use_chatbot, is_active or pipeline access
+    # changes. Long-lived connections (SQL-agent WebSocket, in-flight SSE)
+    # compare this integer instead of re-resolving permissions per message,
+    # which is what lets a revocation reach an already-open session.
+    permissions_version = Column(
+        Integer, default=1, nullable=False, server_default=text("1")
+    )
 
     # Relationships
     pipeline_access = relationship("UserPipelineAccess", back_populates="user", cascade="all, delete-orphan")
@@ -239,6 +246,66 @@ class User(Base):
     __table_args__ = (
         Index('idx_user_username_active', 'username', 'is_active'),
         Index('idx_user_role', 'role'),
+    )
+
+
+class UserAuthorizationAuditLog(Base):
+    """Who changed whose authorization, from what, to what, and when.
+
+    Previously nothing recorded this — the only trace was DEBUG-level log lines
+    in UserService.update_user, which are not persisted in production, so a
+    disputed permission change could not be reconstructed.
+
+    Written inside the same transaction as the change itself, so an audit row
+    cannot exist for a change that rolled back, nor a change exist without its
+    audit row. Shaped after SettingsAuditLog rather than inventing a second
+    audit pattern.
+
+    Never records passwords, tokens or cookies.
+    """
+    __tablename__ = "user_authorization_audit_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Usernames are denormalized so the record survives user deletion — the
+    # same reasoning as SettingsAuditLog.changed_by_username.
+    target_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'),
+                            nullable=True, index=True)
+    target_username = Column(String(100), nullable=True)
+    changed_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'),
+                                nullable=True, index=True)
+    changed_by_username = Column(String(100), nullable=True)
+
+    # authorization_updated | user_created | user_blocked | user_unblocked |
+    # user_deleted | password_reset
+    action = Column(String(50), nullable=False, default="authorization_updated")
+
+    # A NULL old/new pair means that field was not part of this change.
+    old_role = Column(String(50), nullable=True)
+    new_role = Column(String(50), nullable=True)
+    old_can_use_chatbot = Column(Boolean, nullable=True)
+    new_can_use_chatbot = Column(Boolean, nullable=True)
+    old_is_active = Column(Boolean, nullable=True)
+    new_is_active = Column(Boolean, nullable=True)
+    old_pipeline_ids = Column(JSONB, nullable=True)
+    new_pipeline_ids = Column(JSONB, nullable=True)
+
+    permissions_version = Column(Integer, nullable=True)
+
+    request_id = Column(String(64), nullable=True)
+    ip_address = Column(String(45), nullable=True)  # IPv4 or IPv6
+    user_agent = Column(Text, nullable=True)
+    change_reason = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    target_user = relationship("User", foreign_keys=[target_user_id])
+    changed_by = relationship("User", foreign_keys=[changed_by_user_id])
+
+    __table_args__ = (
+        Index('idx_user_authz_audit_target', 'target_user_id', 'created_at'),
+        Index('idx_user_authz_audit_actor', 'changed_by_user_id', 'created_at'),
+        Index('idx_user_authz_audit_created', 'created_at'),
     )
 
 
