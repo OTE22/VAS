@@ -200,7 +200,7 @@ async function loadPipelines() {
                     pipelinesSection.style.display = 'block';
                 }
                 pipelineList.innerHTML = pipelines.map(p => `
-                    <div class="pipeline-card" onclick="window.location.href='/dashboard?pipeline=${p}'">
+                    <div class="pipeline-card" data-action="goToPipeline" data-arg="${p}">
                         <h3>${p}</h3>
                         <p>View detections</p>
                     </div>
@@ -217,3 +217,21 @@ async function loadPipelines() {
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    goToPipeline: (el) => {
+        const pipeline = el.dataset.arg;
+        if (pipeline) {
+            window.location.href = '/dashboard?pipeline=' + encodeURIComponent(pipeline);
+        }
+    },
+});

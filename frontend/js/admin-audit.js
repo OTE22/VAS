@@ -24,6 +24,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 });
 
+// Handlers previously reached through inline onclick/onsubmit/onchange
+// attributes, which `script-src 'self'` blocks. Registered rather than looked
+// up on window, so only these names are invocable. Delegation means the
+// per-row "View Details" buttons work without rebinding after every render.
+Actions.register({
+    applyFilters,
+    clearFilters,
+    refreshData,
+    previousPage,
+    nextPage,
+    changeLimit,
+    closeDetailsModal,
+    viewDetails: (element) => {
+        const logId = Actions.intFrom(element, 'logId');
+        if (logId !== null) viewDetails(logId);
+    },
+});
+
 async function loadUsernames() {
     try {
         const response = await fetch('/api/users', {
@@ -127,17 +145,25 @@ function renderAuditTable(logs) {
         const date = new Date(log.created_at).toLocaleString();
         const timeMs = log.processing_time_ms ? `${log.processing_time_ms.toFixed(0)} ms` : 'N/A';
         
+        // Every value below comes from the API and is escaped. Previously
+        // log.username, log.query and the response preview were interpolated
+        // raw, so a stored query containing markup executed when an
+        // administrator opened this page — the audit log is exactly where
+        // attacker-controlled text lands.
+        const logId = Number(log.id);
+
         return `
             <tr>
-                <td>${log.id}</td>
-                <td>${log.username} (ID: ${log.user_id})</td>
-                <td class="query-cell" title="${log.query}">${queryPreview}</td>
-                <td class="response-cell">${responsePreview}</td>
+                <td>${escapeHtml(String(log.id ?? ''))}</td>
+                <td>${escapeHtml(String(log.username ?? ''))} (ID: ${escapeHtml(String(log.user_id ?? ''))})</td>
+                <td class="query-cell" title="${escapeHtml(String(log.query ?? ''))}">${escapeHtml(queryPreview)}</td>
+                <td class="response-cell">${escapeHtml(responsePreview)}</td>
                 <td><span class="badge badge-${log.success ? 'active' : 'inactive'}">${log.success ? 'Success' : 'Failed'}</span></td>
-                <td>${timeMs}</td>
-                <td>${date}</td>
+                <td>${escapeHtml(timeMs)}</td>
+                <td>${escapeHtml(date)}</td>
                 <td>
-                    <button class="btn-action" onclick="viewDetails(${log.id})">View Details</button>
+                    <button class="btn-action view-details-btn" type="button"
+                            data-action="viewDetails" data-log-id="${Number.isInteger(logId) ? logId : ''}">View Details</button>
                 </td>
             </tr>
         `;

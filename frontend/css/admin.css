@@ -6488,3 +6488,13 @@ body::before {
     border-color: rgba(239, 68, 68, 0.5);
     color: #f87171;
 }
+
+
+/* Hover state for the pipeline merge button rendered by
+   admin-unknown.js. Replaces inline onmouseover/onmouseout handlers,
+   which `script-src 'self'` blocks. The values are the ones those
+   handlers set, so the appearance is unchanged. */
+.merge-hover-btn:hover {
+    background: rgba(0, 255, 150, 0.3) !important;
+    border-color: rgba(0, 255, 150, 0.6) !important;
+}

@@ -104,10 +104,10 @@ function renderUsersTable() {
             <td>${user.pipeline_ids.length} pipeline(s)</td>
             <td>${statusBadge}</td>
             <td>
-                ${isBlocked ? `<button class="btn-action btn-success" onclick="unblockUser(${user.id})" title="Unblock user">Unblock</button>` : ''}
-                <button class="btn-action" onclick="editUser(${user.id})">Edit</button>
-                <button class="btn-action" onclick="resetPassword(${user.id})">Reset Password</button>
-                <button class="btn-action btn-danger" onclick="deleteUser(${user.id})">Delete</button>
+                ${isBlocked ? `<button class="btn-action btn-success" data-action="unblockUser" data-arg="${user.id}" title="Unblock user">Unblock</button>` : ''}
+                <button class="btn-action" data-action="editUser" data-arg="${user.id}">Edit</button>
+                <button class="btn-action" data-action="resetPassword" data-arg="${user.id}">Reset Password</button>
+                <button class="btn-action btn-danger" data-action="deleteUser" data-arg="${user.id}">Delete</button>
             </td>
         </tr>
     `;
@@ -567,10 +567,10 @@ function filterBlockedUsers() {
             <td>${user.pipeline_ids.length} pipeline(s)</td>
             <td>${statusBadge}</td>
             <td>
-                <button class="btn-action btn-success" onclick="unblockUser(${user.id})" title="Unblock user">Unblock</button>
-                <button class="btn-action" onclick="editUser(${user.id})">Edit</button>
-                <button class="btn-action" onclick="resetPassword(${user.id})">Reset Password</button>
-                <button class="btn-action btn-danger" onclick="deleteUser(${user.id})">Delete</button>
+                <button class="btn-action btn-success" data-action="unblockUser" data-arg="${user.id}" title="Unblock user">Unblock</button>
+                <button class="btn-action" data-action="editUser" data-arg="${user.id}">Edit</button>
+                <button class="btn-action" data-action="resetPassword" data-arg="${user.id}">Reset Password</button>
+                <button class="btn-action btn-danger" data-action="deleteUser" data-arg="${user.id}">Delete</button>
             </td>
         </tr>
     `;
@@ -591,3 +591,24 @@ function showAllUsers() {
     renderUsersTable();
 }
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    filterBlockedUsers,
+    showAllUsers,
+    closeModal,
+    closeDeleteModal,
+    closePasswordModal,
+    unblockUser: (el) => { const id = Actions.intFrom(el, 'arg'); if (id !== null) unblockUser(id); },
+    editUser: (el) => { const id = Actions.intFrom(el, 'arg'); if (id !== null) editUser(id); },
+    resetPassword: (el) => { const id = Actions.intFrom(el, 'arg'); if (id !== null) resetPassword(id); },
+    deleteUser: (el) => { const id = Actions.intFrom(el, 'arg'); if (id !== null) deleteUser(id); },
+});

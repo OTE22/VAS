@@ -36,14 +36,14 @@
 </div>
 
 <!-- Upload Person Modal - Global Component -->
-<div class="modal" id="uploadModal" onclick="closeUploadModalOnOutsideClick(event)" style="display: none;">
-    <div class="upload-modal-content" onclick="event.stopPropagation()">
+<div class="modal" id="uploadModal" data-action="closeUploadModalOnOutsideClick" style="display: none;">
+    <div class="upload-modal-content">
         <div class="upload-modal-header">
             <div class="upload-modal-title">
                 <i class="fas fa-user-plus"></i>
                 Add Person to Track
             </div>
-            <button class="upload-close-btn" onclick="closeUploadModal()">
+            <button class="upload-close-btn" data-action="closeUploadModal">
                 <i class="fas fa-times"></i>
             </button>
         </div>
@@ -53,7 +53,7 @@
             <span id="uploadSuccessText"></span>
         </div>
 
-        <form class="upload-form" onsubmit="handleGlobalUpload(event)">
+        <form class="upload-form" data-action-submit="handleGlobalUpload">
             <div class="form-group">
                 <label class="form-label" for="globalPersonName">
                     <i class="fas fa-user"></i>
@@ -76,7 +76,7 @@
                 <div
                     class="file-upload-area"
                     id="globalFileUploadArea"
-                    onclick="document.getElementById('globalFileInput').click()"
+                    data-action="triggerFileInput" data-target-input="globalFileInput"
                 >
                     <div class="file-upload-icon">
                         <i class="fas fa-cloud-upload-alt"></i>
@@ -91,7 +91,7 @@
                     id="globalFileInput"
                     accept="image/png,image/jpeg,image/webp"
                     style="display: none"
-                    onchange="handleGlobalFileSelect(event)"
+                    data-action-change="handleGlobalFileSelect"
                 />
                 <div class="file-preview" id="globalFilePreview">
                     <img class="preview-image" id="globalPreviewImage" alt="Preview" />

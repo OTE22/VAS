@@ -117,7 +117,7 @@
                     <h2 id="coordinates-modal-title">Set Pipeline Location</h2>
                     <p id="coordinates-modal-subtitle" class="modal-subtitle">Configure coordinates for map visualization</p>
                 </div>
-                <button class="modal-close" type="button" onclick="closeCoordinatesModal()" aria-label="Close coordinates dialog">
+                <button class="modal-close" type="button" data-action="closeCoordinatesModal" aria-label="Close coordinates dialog">
                     <i class="fas fa-times"></i>
                 </button>
             </header>
@@ -163,10 +163,10 @@
                 </div>
                 
                 <div class="coordinates-actions">
-                    <button type="button" class="btn-secondary" onclick="closeCoordinatesModal()">
+                    <button type="button" class="btn-secondary" data-action="closeCoordinatesModal">
                         <i class="fas fa-times"></i> Cancel
                     </button>
-                    <button type="button" class="btn-primary" onclick="saveCoordinates()">
+                    <button type="button" class="btn-primary" data-action="saveCoordinates">
                         <i class="fas fa-save"></i> Save Location
                     </button>
                 </div>
@@ -192,13 +192,11 @@
 
     <!-- Scripts -->
     <link rel="stylesheet" href="/frontend/vendor/leaflet/leaflet.css" />
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/vendor/leaflet/leaflet.js"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
     <script src="/frontend/js/admin-pipelines.js?v=rename-1" defer></script>
-    <script>
-        // Set current year dynamically
-        document.getElementById('current-year').textContent = new Date().getFullYear();
-    </script>
+        <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>
 

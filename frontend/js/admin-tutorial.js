@@ -296,9 +296,9 @@ function showExamplesSection() {
             <div class="example-card">
                 <h3>${example.title}</h3>
                 <div class="code-tabs">
-                    <button class="code-tab active" onclick="showCodeTab(this, '${key}-curl')">cURL</button>
-                    <button class="code-tab" onclick="showCodeTab(this, '${key}-js')">JavaScript</button>
-                    <button class="code-tab" onclick="showCodeTab(this, '${key}-py')">Python</button>
+                    <button class="code-tab active" data-action="showCodeTab" data-arg="${key}-curl">cURL</button>
+                    <button class="code-tab" data-action="showCodeTab" data-arg="${key}-js">JavaScript</button>
+                    <button class="code-tab" data-action="showCodeTab" data-arg="${key}-py">Python</button>
                 </div>
                 <div id="${key}-curl" class="code-content active">
                     <pre><code>${escapeHtml(example.curl)}</code></pre>
@@ -365,3 +365,19 @@ function setupNavButtons() {
 // Call setup after tutorial is loaded
 setTimeout(setupNavButtons, 500);
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    showSection: (el) => showSection(el.dataset.section),
+    // showCodeTab took the clicked element as its first argument; delegation
+    // supplies it, so the DOM lookup it used to rely on is unchanged.
+    showCodeTab: (el) => showCodeTab(el, el.dataset.arg),
+});

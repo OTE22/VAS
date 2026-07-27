@@ -221,7 +221,7 @@
             <div class="batch-file-item">
                 <i class="fas fa-image"></i>
                 <span class="file-name">${file.name}</span>
-                <span class="remove-file" onclick="removeBatchFile(${index})">
+                <span class="remove-file" data-action="removeBatchFile" data-arg="${index}">
                     <i class="fas fa-times"></i>
                 </span>
             </div>
@@ -615,9 +615,9 @@
             const fallbackSvg = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect fill="%23333" width="100" height="100"/%3E%3Ccircle cx="50" cy="35" r="15" fill="%23999"/%3E%3Cpath d="M 25 70 Q 25 60 35 60 L 65 60 Q 75 60 75 70 L 75 85 L 25 85 Z" fill="%23999"/%3E%3C/svg%3E';
 
             return `
-                <div class="match-card" onclick="viewIdentity('${match.identity_id}')">
+                <div class="match-card" data-action="viewIdentity" data-arg="${match.identity_id}">
                     <img class="match-snapshot" src="${snapshotUrl}" alt="${match.display_name || 'Match'}" 
-                         onerror="this.onerror=null; this.src='${fallbackSvg}';" 
+                         data-fallback-src="${fallbackSvg}" 
                          style="display: block; width: 50px; height: 50px; object-fit: cover; border-radius: 6px;">
                     <div class="match-details">
                         <div class="match-name">${match.display_name || 'Unknown'}</div>
@@ -1043,7 +1043,7 @@
                 <div class="exclude-item ${isSelected ? 'selected' : ''}" 
                      data-id="${identity.id}" 
                      data-name="${(identity.display_name || identity.id.substring(0, 8)).replace(/"/g, '&quot;')}"
-                     onclick="window.adminSearch?.toggleIdentity('${identity.id}', '${(identity.display_name || identity.id.substring(0, 8)).replace(/'/g, "\\'")}')">
+                     data-action="adminSearchToggleIdentity" data-arg="${identity.id}" data-arg2="${(identity.display_name || identity.id.substring(0, 8)).replace(/'/g, "\\'")}">
                     <i class="fas ${isSelected ? 'fa-check-circle' : 'fa-circle'}"></i>
                     <span class="exclude-item-name">${identity.display_name || `Identity ${identity.id.substring(0, 8)}`}</span>
                     <span class="exclude-item-type">${identity.type || 'known'}</span>
@@ -1063,7 +1063,7 @@
                 <div class="exclude-chip" data-id="${id}">
                     <i class="fas fa-user"></i>
                     <span>${name}</span>
-                    <span class="exclude-chip-remove" onclick="window.adminSearch?.removeIdentity('${id}')">
+                    <span class="exclude-chip-remove" data-action="adminSearchRemoveIdentity" data-arg="${id}">
                         <i class="fas fa-times"></i>
                     </span>
                 </div>
@@ -1149,7 +1149,7 @@
                 <div class="exclude-item ${isSelected ? 'selected' : ''}" 
                      data-id="${watchlist.id}" 
                      data-name="${watchlist.name}"
-                     onclick="window.adminSearch?.toggleWatchlist('${watchlist.id}', '${watchlist.name.replace(/'/g, "\\'")}')">
+                     data-action="adminSearchToggleWatchlist" data-arg="${watchlist.id}" data-arg2="${watchlist.name.replace(/'/g, "\\'")}">
                     <i class="fas ${isSelected ? 'fa-check-circle' : 'fa-circle'}"></i>
                     <span class="exclude-item-name">${watchlist.name}</span>
                     <span class="exclude-item-type">${watchlist.type || 'custom'}</span>
@@ -1168,7 +1168,7 @@
                 <div class="exclude-chip" data-id="${id}">
                     <i class="fas fa-list-alt"></i>
                     <span>${watchlist.name}</span>
-                    <span class="exclude-chip-remove" onclick="window.adminSearch?.removeWatchlist('${id}')">
+                    <span class="exclude-chip-remove" data-action="adminSearchRemoveWatchlist" data-arg="${id}">
                         <i class="fas fa-times"></i>
                     </span>
                 </div>
@@ -1314,3 +1314,23 @@
 
 })();
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    removeBatchFile: (el) => removeBatchFile(el.dataset.arg),
+    viewIdentity: (el) => viewIdentity(el.dataset.arg),
+    adminSearchToggleIdentity: (el) =>
+        window.adminSearch?.toggleIdentity(el.dataset.arg, el.dataset.arg2),
+    adminSearchRemoveIdentity: (el) => window.adminSearch?.removeIdentity(el.dataset.arg),
+    adminSearchToggleWatchlist: (el) =>
+        window.adminSearch?.toggleWatchlist(el.dataset.arg, el.dataset.arg2),
+    adminSearchRemoveWatchlist: (el) => window.adminSearch?.removeWatchlist(el.dataset.arg),
+});

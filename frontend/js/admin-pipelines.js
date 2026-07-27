@@ -146,11 +146,11 @@ function renderPipelinesTable() {
             <td>${createdDate}</td>
             <td>${updatedDate}</td>
             <td>
-                <button class="btn-action btn-location" onclick="openCoordinatesModal('${escapeHtml(pipeline.pipeline_id)}')" title="Set location coordinates">
+                <button class="btn-action btn-location" data-action="openCoordinatesModal" data-arg="${escapeHtml(pipeline.pipeline_id)}" title="Set location coordinates">
                     <i class="fas fa-map-marker-alt" aria-hidden="true"></i>
                     ${hasCoordinates ? 'Edit Location' : 'Set Location'}
                 </button>
-                <button class="btn-action btn-rename" onclick="renamePipeline('${escapeHtml(pipeline.pipeline_id)}')" title="Rename this pipeline (old id becomes an alias)">
+                <button class="btn-action btn-rename" data-action="renamePipeline" data-arg="${escapeHtml(pipeline.pipeline_id)}" title="Rename this pipeline (old id becomes an alias)">
                     <i class="fas fa-pen" aria-hidden="true"></i>
                     Rename
                 </button>
@@ -401,3 +401,19 @@ function showNotification(message, type = 'info') {
 }
 
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    closeCoordinatesModal,
+    saveCoordinates,
+    openCoordinatesModal: (el) => openCoordinatesModal(el.dataset.arg),
+    renamePipeline: (el) => renamePipeline(el.dataset.arg),
+});

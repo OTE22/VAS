@@ -27,7 +27,7 @@
     <link rel="stylesheet" href="/frontend/css/settings.css">
     <link rel="stylesheet" href="/frontend/css/footer.css">
 </head>
-<body>
+<body data-page-class="settings-page" data-page-class-scope="containers">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -128,7 +128,7 @@
                             <span class="title-subtitle" id="modal-subtitle">Update Configuration Value</span>
                         </h2>
                     </div>
-                    <button class="security-modal-close" type="button" onclick="closeSettingModal()" aria-label="Close dialog">
+                    <button class="security-modal-close" type="button" data-action="closeSettingModal" aria-label="Close dialog">
                         <i class="fas fa-times"></i>
                     </button>
                 </header>
@@ -180,7 +180,7 @@
                     </div>
 
                     <div class="security-modal-actions">
-                        <button type="button" class="security-btn-secondary" onclick="closeSettingModal()">
+                        <button type="button" class="security-btn-secondary" data-action="closeSettingModal">
                             <i class="fas fa-times"></i> Cancel
                         </button>
                         <button type="submit" class="security-btn-primary">
@@ -193,17 +193,10 @@
     </div>
 
     <!-- Scripts -->
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
-    <script>
-        // Add settings-page class to html element for CSS overrides
-        document.documentElement.classList.add('settings-page');
-        document.body.classList.add('settings-page');
-        const mainContainer = document.querySelector('.intelligence-main-container');
-        const content = document.querySelector('.intelligence-content');
-        if (mainContainer) mainContainer.classList.add('settings-page');
-        if (content) content.classList.add('settings-page');
-    </script>
     <script src="/frontend/js/admin-settings.js?v=settings-2"></script>
+    <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>
 

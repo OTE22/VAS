@@ -663,7 +663,7 @@ async function loadUnknownFaces() {
             <div class="no-results">
                 <i class="fas fa-exclamation-triangle"></i>
                 <p>Error: ${errorMessage}</p>
-                <button class="intelligence-admin-btn" onclick="loadUnknownFaces()" style="margin-top: 1rem;">
+                <button class="intelligence-admin-btn" data-action="loadUnknownFaces" style="margin-top: 1rem;">
                     <div class="btn-content">
                         <div class="btn-icon-wrapper">
                             <i class="fas fa-redo"></i>
@@ -1336,7 +1336,7 @@ function createPipelineGroup(pipelineId, identities) {
             <h2 class="pipeline-group-title" data-pipeline-id="${escapeHtml(pipelineId)}" title="${escapeHtml(pipelineId)}" style="margin: 0; color: #00ff96; font-size: 0.95rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(getPipelineDisplayName(pipelineId))}</h2>
             <span style="color: #999; font-size: 0.7rem; display: block; margin-top: 0.15rem;">${identities.length} ${identities.length === 1 ? 'identity' : 'identities'}</span>
         </div>
-        <button class="pipeline-merge-suggestions-btn" data-pipeline-id="${pipelineId}" title="View merge suggestions for this pipeline" onclick="window.openPipelineMergeSuggestions && window.openPipelineMergeSuggestions('${pipelineId}')" style="
+        <button class="pipeline-merge-suggestions-btn" data-pipeline-id="${pipelineId}" title="View merge suggestions for this pipeline" data-action="openPipelineMergeSuggestions" data-arg="${pipelineId}" style="
             background: rgba(0, 255, 150, 0.2);
             border: 1px solid rgba(0, 255, 150, 0.4);
             color: #00ff96;
@@ -1350,7 +1350,7 @@ function createPipelineGroup(pipelineId, identities) {
             gap: 0.4rem;
             transition: all 0.2s;
             white-space: nowrap;
-        " onmouseover="this.style.background='rgba(0, 255, 150, 0.3)'; this.style.borderColor='rgba(0, 255, 150, 0.6)';" onmouseout="this.style.background='rgba(0, 255, 150, 0.2)'; this.style.borderColor='rgba(0, 255, 150, 0.4)';">
+        " class="merge-hover-btn">
             <i class="fas fa-object-group"></i>
             <span>MERGE</span>
         </button>
@@ -1441,7 +1441,7 @@ function createIdentityCard(identity) {
                     alt="Unknown identity"
                     loading="lazy"
                     data-identity-image="${identity.id}"
-                    onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'200\' height=\'200\'%3E%3Crect fill=\'%23333\' width=\'200\' height=\'200\'/%3E%3Ctext fill=\'%23999\' font-family=\'sans-serif\' font-size=\'14\' x=\'50%25\' y=\'50%25\' text-anchor=\'middle\' dy=\'.3em\'%3ENo Image%3C/text%3E%3C/svg%3E';"
+                    data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'200\' height=\'200\'%3E%3Crect fill=\'%23333\' width=\'200\' height=\'200\'/%3E%3Ctext fill=\'%23999\' font-family=\'sans-serif\' font-size=\'14\' x=\'50%25\' y=\'50%25\' text-anchor=\'middle\' dy=\'.3em\'%3ENo Image%3C/text%3E%3C/svg%3E';"
                 >` :
                 `<div class="identity-no-image"><i class="fas fa-user-secret"></i><span>No snapshot</span></div>`
             }
@@ -1453,17 +1453,17 @@ function createIdentityCard(identity) {
             <i class="fas fa-clock"></i>${lastSeen.toLocaleDateString()}
         </div>
         <div class="identity-actions">
-            <button class="identity-action-primary" onclick="event.stopPropagation(); viewIdentityDetails('${identity.id}')" title="View details and create alerts">
+            <button class="identity-action-primary" data-action="viewIdentityDetails" data-arg="${identity.id}" title="View details and create alerts">
                 <i class="fas fa-eye"></i><span>VIEW &amp; ALERT</span>
             </button>
             <div class="identity-icon-row">
-                <button class="identity-icon-btn danger" onclick="event.stopPropagation(); analyzeInSecurityIntelligence('${identity.id}')" title="Security Intelligence analysis">
+                <button class="identity-icon-btn danger" data-action="analyzeInSecurityIntelligence" data-arg="${identity.id}" title="Security Intelligence analysis">
                     <i class="fas fa-shield-alt"></i>
                 </button>
-                <button class="identity-icon-btn" onclick="event.stopPropagation(); promoteIdentityModal('${identity.id}')" title="Promote to known person">
+                <button class="identity-icon-btn" data-action="promoteIdentityModal" data-arg="${identity.id}" title="Promote to known person">
                     <i class="fas fa-arrow-up"></i>
                 </button>
-                <button class="identity-icon-btn" onclick="event.stopPropagation(); openMergeModal('${identity.id}')" title="Merge with another identity">
+                <button class="identity-icon-btn" data-action="openMergeModal" data-arg="${identity.id}" title="Merge with another identity">
                     <i class="fas fa-code-branch"></i>
                 </button>
             </div>
@@ -1555,17 +1555,17 @@ function renderAdvancedTimeline(appearances) {
                 </div>
             </div>
             <div class="timeline-zoom-controls">
-                <button class="zoom-btn" onclick="timelineZoomOut()" title="Zoom Out">
+                <button class="zoom-btn" data-action="timelineZoomOut" title="Zoom Out">
                     <i class="fas fa-search-minus"></i>
                 </button>
                 <input type="range" id="timeline-scale-slider" min="0.1" max="2" step="0.1" value="${defaultScale}" 
-                       oninput="updateTimelineScale(this.value)" 
+                       data-action-input="updateTimelineScale" 
                        style="width: 150px; margin: 0 0.5rem;">
                 <span class="zoom-value" id="zoom-value">${Math.round(defaultScale * 100)}%</span>
-                <button class="zoom-btn" onclick="timelineZoomIn()" title="Zoom In">
+                <button class="zoom-btn" data-action="timelineZoomIn" title="Zoom In">
                     <i class="fas fa-search-plus"></i>
                 </button>
-                <button class="zoom-btn" onclick="timelineFitToView()" title="Fit to View">
+                <button class="zoom-btn" data-action="timelineFitToView" title="Fit to View">
                     <i class="fas fa-compress-arrows-alt"></i>
                 </button>
             </div>
@@ -1644,7 +1644,7 @@ function renderAdvancedTimeline(appearances) {
                 <div class="timeline-node-content">
                     <div class="node-image">
                         ${app.snapshot_url ? 
-                            `<img src="${app.snapshot_url}" alt="Appearance ${index + 1}" onerror="this.parentElement.innerHTML='<div class=\\'node-image-placeholder\\'><i class=\\'fas fa-user\\'></i></div>'">` :
+                            `<img src="${app.snapshot_url}" alt="Appearance ${index + 1}" data-fallback-class="node-image-placeholder" data-fallback-icon="fas fa-user">` :
                             `<div class="node-image-placeholder"><i class="fas fa-user"></i></div>`
                         }
                     </div>
@@ -1821,7 +1821,7 @@ async function viewIdentityDetails(identityId) {
             <div class="detail-header">
                 <div class="detail-image">
                     ${identity.snapshot_url ? 
-                        `<img src="${identity.snapshot_url}" alt="Identity" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'%3E%3Crect fill=\\'%23333\\' width=\\'100\\' height=\\'100\\'/%3E%3Ctext fill=\\'%23999\\' x=\\'50\\' y=\\'50\\' text-anchor=\\'middle\\' dominant-baseline=\\'middle\\' font-size=\\'40\\'%3E%3F%3C/text%3E%3C/svg%3E'">` :
+                        `<img src="${identity.snapshot_url}" alt="Identity" data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'%3E%3Crect fill=\'%23333\' width=\'100\' height=\'100\'/%3E%3Ctext fill=\'%23999\' x=\'50\' y=\'50\' text-anchor=\'middle\' dominant-baseline=\'middle\' font-size=\'40\'%3E%3F%3C/text%3E%3C/svg%3E">` :
                         `<div class="no-image"><i class="fas fa-user"></i></div>`
                     }
                 </div>
@@ -1830,8 +1830,8 @@ async function viewIdentityDetails(identityId) {
                     <div style="margin: 1rem 0; padding: 0.75rem; background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px;">
                         <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #999;">Identity ID:</p>
                         <div style="display: flex; align-items: center; gap: 0.5rem;">
-                            <code id="identity-id-display" style="flex: 1; font-size: 0.9rem; padding: 0.5rem; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 4px; color: #00ff96; word-break: break-all; cursor: pointer;" onclick="copyIdentityId('${identity.id}')" title="Click to copy">${identity.id}</code>
-                            <button class="intelligence-admin-btn small" onclick="copyIdentityId('${identity.id}')" style="padding: 0.5rem;" title="Copy Identity ID">
+                            <code id="identity-id-display" style="flex: 1; font-size: 0.9rem; padding: 0.5rem; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 4px; color: #00ff96; word-break: break-all; cursor: pointer;" data-action="copyIdentityId" data-arg="${identity.id}" title="Click to copy">${identity.id}</code>
+                            <button class="intelligence-admin-btn small" data-action="copyIdentityId" data-arg="${identity.id}" style="padding: 0.5rem;" title="Copy Identity ID">
                                 <div class="btn-content" style="padding: 0;">
                                     <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
                                         <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
@@ -1862,7 +1862,7 @@ async function viewIdentityDetails(identityId) {
                 </div>
             </div>
             <div class="detail-actions">
-                <button class="intelligence-admin-btn" onclick="analyzeInSecurityIntelligence('${identity.id}')" style="background: linear-gradient(135deg, rgba(255, 68, 68, 0.2) 0%, rgba(255, 100, 100, 0.1) 100%); border-color: rgba(255, 68, 68, 0.4);">
+                <button class="intelligence-admin-btn" data-action="analyzeInSecurityIntelligence" data-arg="${identity.id}" style="background: linear-gradient(135deg, rgba(255, 68, 68, 0.2) 0%, rgba(255, 100, 100, 0.1) 100%); border-color: rgba(255, 68, 68, 0.4);">
                     <div class="btn-content">
                         <div class="btn-icon-wrapper">
                             <i class="fas fa-shield-alt"></i>
@@ -1870,7 +1870,7 @@ async function viewIdentityDetails(identityId) {
                         <span class="btn-title">ANALYZE IN SECURITY INTELLIGENCE</span>
                     </div>
                 </button>
-                <button class="intelligence-admin-btn" onclick="openCreateLiveAlertModal('${identity.id}', '${identity.display_name || 'Unknown'}')">
+                <button class="intelligence-admin-btn" data-action="openCreateLiveAlertModal" data-arg="${identity.id}" data-arg2="${identity.display_name || 'Unknown'}">
                     <div class="btn-content">
                         <div class="btn-icon-wrapper">
                             <i class="fas fa-bell"></i>
@@ -1878,7 +1878,7 @@ async function viewIdentityDetails(identityId) {
                         <span class="btn-title">CREATE LIVE ALERT</span>
                     </div>
                 </button>
-                <button class="intelligence-admin-btn" onclick="openAddToWatchlistModal('${identity.id}', '${identity.display_name || 'Unknown'}')">
+                <button class="intelligence-admin-btn" data-action="openAddToWatchlistModal" data-arg="${identity.id}" data-arg2="${identity.display_name || 'Unknown'}">
                     <div class="btn-content">
                         <div class="btn-icon-wrapper">
                             <i class="fas fa-list-alt"></i>
@@ -1887,7 +1887,7 @@ async function viewIdentityDetails(identityId) {
                     </div>
                 </button>
                 ${identity.type === 'unknown' ? `
-                    <button class="intelligence-admin-btn" onclick="promoteIdentityModal('${identity.id}')">
+                    <button class="intelligence-admin-btn" data-action="promoteIdentityModal" data-arg="${identity.id}">
                         <div class="btn-content">
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-arrow-up"></i>
@@ -1895,7 +1895,7 @@ async function viewIdentityDetails(identityId) {
                             <span class="btn-title">PROMOTE TO KNOWN</span>
                         </div>
                     </button>
-                    <button class="intelligence-admin-btn" onclick="openMergeModal('${identity.id}')">
+                    <button class="intelligence-admin-btn" data-action="openMergeModal" data-arg="${identity.id}">
                         <div class="btn-content">
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-code-branch"></i>
@@ -2074,7 +2074,7 @@ function createSearchResultCard(result) {
     card.innerHTML = `
         <div class="card-image">
             ${result.snapshot_url || result.best_snapshot_path ? 
-                `<img src="${result.snapshot_url || `/${result.best_snapshot_path}`}" alt="Match" onerror="this.parentElement.innerHTML='<div class=\\'no-image\\'><i class=\\'fas fa-user\\'></i></div>'">` :
+                `<img src="${result.snapshot_url || `/${result.best_snapshot_path}`}" alt="Match" data-fallback-class="no-image" data-fallback-icon="fas fa-user">` :
                 `<div class="no-image"><i class="fas fa-user"></i></div>`
             }
             <div class="similarity-badge">${(result.similarity * 100).toFixed(1)}%</div>
@@ -2095,7 +2095,7 @@ function createSearchResultCard(result) {
                 </div>
             </div>
             <div class="card-actions">
-                <button class="intelligence-admin-btn small" onclick="viewIdentityDetails('${result.identity_id}')">
+                <button class="intelligence-admin-btn small" data-action="viewIdentityDetails" data-arg="${result.identity_id}">
                     <div class="btn-content">
                         <div class="btn-icon-wrapper">
                             <i class="fas fa-eye"></i>
@@ -2104,7 +2104,7 @@ function createSearchResultCard(result) {
                     </div>
                 </button>
                 ${result.type === 'unknown' ? `
-                    <button class="intelligence-admin-btn small" onclick="promoteIdentityModal('${result.identity_id}')">
+                    <button class="intelligence-admin-btn small" data-action="promoteIdentityModal" data-arg="${result.identity_id}">
                         <div class="btn-content">
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-arrow-up"></i>
@@ -2236,7 +2236,7 @@ function updateMultiMergeForm() {
                 <div style="display: flex; align-items: center; gap: 1rem; padding: 0.75rem; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(0, 255, 150, 0.2); border-radius: 6px; margin-bottom: 0.5rem;">
                     <div style="width: 50px; height: 50px; border-radius: 4px; overflow: hidden; background: rgba(0, 0, 0, 0.5); flex-shrink: 0;">
                         ${identity.snapshot_url || identity.best_snapshot_path ? 
-                            `<img src="${escapeHtml(identity.snapshot_url || `/${identity.best_snapshot_path}`)}" alt="Identity" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.parentElement.innerHTML='<div style=\\'width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #999;\\'><i class=\\'fas fa-user\\'></i></div>'">` :
+                            `<img src="${escapeHtml(identity.snapshot_url || `/${identity.best_snapshot_path}`)}" alt="Identity" style="width: 100%; height: 100%; object-fit: cover;" data-fallback-icon="fas fa-user">` :
                             `<div style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #999;"><i class="fas fa-user"></i></div>`
                         }
                     </div>
@@ -2245,7 +2245,7 @@ function updateMultiMergeForm() {
                         <p style="margin: 0; font-size: 0.75rem; color: #999; word-break: break-all;">${escapeHtml(identity.id)}</p>
                         <p style="margin: 0.25rem 0 0 0; font-size: 0.75rem; color: #ccc;">Appearances: ${identity.appearances_count}</p>
                     </div>
-                    <button class="intelligence-admin-btn small" onclick="removeFromSelection('${identity.id}')" style="padding: 0.4rem;">
+                    <button class="intelligence-admin-btn small" data-action="removeFromSelection" data-arg="${identity.id}" style="padding: 0.4rem;">
                         <div class="btn-content" style="padding: 0;">
                             <div class="btn-icon-wrapper" style="width: 20px; height: 20px;">
                                 <i class="fas fa-times" style="font-size: 0.7rem;"></i>
@@ -2353,7 +2353,7 @@ async function searchIdentityForMerge() {
             <div class="merge-search-result">
                 <div class="result-image">
                     ${identity.snapshot_url || identity.best_snapshot_path ? 
-                        `<img src="${escapeHtml(identity.snapshot_url || `/${identity.best_snapshot_path}`)}" alt="Identity" onerror="this.parentElement.innerHTML='<div class=\\'no-image\\'><i class=\\'fas fa-user\\'></i></div>'">` :
+                        `<img src="${escapeHtml(identity.snapshot_url || `/${identity.best_snapshot_path}`)}" alt="Identity" data-fallback-class="no-image" data-fallback-icon="fas fa-user">` :
                         `<div class="no-image"><i class="fas fa-user"></i></div>`
                     }
                 </div>
@@ -2361,13 +2361,13 @@ async function searchIdentityForMerge() {
                     <h4>${escapeHtml(identity.display_name || 'Unknown Identity')}</h4>
                     <div style="margin: 0.5rem 0; padding: 0.5rem; background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 4px;">
                         <p style="margin: 0 0 0.25rem 0; font-size: 0.75rem; color: #999;">Identity ID:</p>
-                        <code style="font-size: 0.8rem; color: #00ff96; word-break: break-all; cursor: pointer;" onclick="copyIdentityId('${identity.id}')" title="Click to copy">${escapeHtml(identity.id)}</code>
+                        <code style="font-size: 0.8rem; color: #00ff96; word-break: break-all; cursor: pointer;" data-action="copyIdentityId" data-arg="${identity.id}" title="Click to copy">${escapeHtml(identity.id)}</code>
                     </div>
                     <p>Type: ${escapeHtml(identity.type)} | Status: ${escapeHtml(identity.status)}</p>
                     <p>Appearances: ${identity.appearances_count}</p>
                     <p>First Seen: ${new Date(identity.first_seen_at).toLocaleString()}</p>
                     <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem;">
-                        <button class="intelligence-admin-btn small" onclick="selectIdentityForMerge('${identity.id}')" style="flex: 1;">
+                        <button class="intelligence-admin-btn small" data-action="selectIdentityForMerge" data-arg="${identity.id}" style="flex: 1;">
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-check"></i>
@@ -2375,7 +2375,7 @@ async function searchIdentityForMerge() {
                                 <span class="btn-title">SELECT</span>
                             </div>
                         </button>
-                        <button class="intelligence-admin-btn small" onclick="copyIdentityId('${identity.id}')" title="Copy Identity ID">
+                        <button class="intelligence-admin-btn small" data-action="copyIdentityId" data-arg="${identity.id}" title="Copy Identity ID">
                             <div class="btn-content" style="padding: 0;">
                                 <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
                                     <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
@@ -2572,7 +2572,7 @@ function renderMergePreview(preview) {
             <div class="identity-preview-card target-card">
                 <div class="preview-image">
                     ${preview.target_identity.snapshot_url || preview.target_identity.best_snapshot_path ? 
-                        `<img src="${escapeHtml(preview.target_identity.snapshot_url || `/${preview.target_identity.best_snapshot_path}`)}" alt="Target" onerror="this.parentElement.innerHTML='<div class=\\'no-image\\'><i class=\\'fas fa-user\\'></i></div>'">` :
+                        `<img src="${escapeHtml(preview.target_identity.snapshot_url || `/${preview.target_identity.best_snapshot_path}`)}" alt="Target" data-fallback-class="no-image" data-fallback-icon="fas fa-user">` :
                         `<div class="no-image"><i class="fas fa-user"></i></div>`
                     }
                 </div>
@@ -2602,7 +2602,7 @@ function renderMergePreview(preview) {
                     <div class="identity-preview-card source-card">
                         <div class="preview-image small">
                             ${source.snapshot_url || source.best_snapshot_path ? 
-                                `<img src="${escapeHtml(source.snapshot_url || `/${source.best_snapshot_path}`)}" alt="Source" onerror="this.parentElement.innerHTML='<div class=\\'no-image\\'><i class=\\'fas fa-user\\'></i></div>'">` :
+                                `<img src="${escapeHtml(source.snapshot_url || `/${source.best_snapshot_path}`)}" alt="Source" data-fallback-class="no-image" data-fallback-icon="fas fa-user">` :
                                 `<div class="no-image"><i class="fas fa-user"></i></div>`
                             }
                         </div>
@@ -2910,7 +2910,7 @@ async function loadMergeSuggestions() {
                         <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #999;"><strong>Identity IDs:</strong></p>
                         <div class="identity-ids" style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
                             ${suggestion.identity_ids.map(id => 
-                                `<span class="identity-tag" title="${escapeHtml(id)}" style="cursor: pointer;" onclick="copyIdentityId('${escapeHtml(id)}')">${escapeHtml(id.substring(0, 8))}...</span>`
+                                `<span class="identity-tag" title="${escapeHtml(id)}" style="cursor: pointer;" data-action="copyIdentityId" data-arg="${escapeHtml(id)}">${escapeHtml(id.substring(0, 8))}...</span>`
                             ).join('')}
                         </div>
                     </div>
@@ -2920,14 +2920,14 @@ async function loadMergeSuggestions() {
                         ${suggestion.representative_snapshots.map(snap => 
                             `<img src="/${escapeHtml(snap)}" alt="Identity snapshot" 
                                   style="max-width: 120px; max-height: 120px; border: 2px solid #00ff96; border-radius: 4px; object-fit: cover; cursor: pointer;" 
-                                  onclick="window.open('/${escapeHtml(snap)}', '_blank')"
-                                  onerror="this.style.display='none'">`
+                                  data-action="openSnapshot" data-arg="${escapeHtml(snap)}"
+                                  data-fallback-hide="">`
                         ).join('')}
                     </div>
                 ` : '<div style="padding: 1rem; text-align: center; color: #999; font-style: italic;">No snapshots available</div>'}
                 <div class="suggestion-actions" style="display: flex; gap: 0.5rem; margin-top: 1rem;">
                     ${suggestion.id ? `
-                        <button class="intelligence-admin-btn small" onclick="approveMergeSuggestion(${suggestion.id})" style="flex: 1;">
+                        <button class="intelligence-admin-btn small" data-action="approveMergeSuggestion" data-arg="${suggestion.id}" style="flex: 1;">
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-check"></i>
@@ -2935,7 +2935,7 @@ async function loadMergeSuggestions() {
                                 <span class="btn-title">APPROVE</span>
                             </div>
                         </button>
-                        <button class="intelligence-admin-btn small" onclick="rejectMergeSuggestion(${suggestion.id})" style="flex: 1;">
+                        <button class="intelligence-admin-btn small" data-action="rejectMergeSuggestion" data-arg="${suggestion.id}" style="flex: 1;">
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-times"></i>
@@ -2954,7 +2954,7 @@ async function loadMergeSuggestions() {
         }).join('');
     } catch (error) {
         console.error('Error loading merge suggestions:', error);
-        listDiv.innerHTML = `<div class="no-results"><i class="fas fa-exclamation-triangle"></i><p>Error: ${error.message}</p><button class="intelligence-admin-btn small" onclick="loadMergeSuggestions()" style="margin-top: 1rem;"><div class="btn-content"><div class="btn-icon-wrapper"><i class="fas fa-redo"></i></div><span class="btn-title">RETRY</span></div></button></div>`;
+        listDiv.innerHTML = `<div class="no-results"><i class="fas fa-exclamation-triangle"></i><p>Error: ${error.message}</p><button class="intelligence-admin-btn small" data-action="loadMergeSuggestions" style="margin-top: 1rem;"><div class="btn-content"><div class="btn-icon-wrapper"><i class="fas fa-redo"></i></div><span class="btn-title">RETRY</span></div></button></div>`;
     }
 }
 
@@ -3083,7 +3083,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
             const snapshotsHtml = suggestion.representative_snapshots && suggestion.representative_snapshots.length > 0
                 ? suggestion.representative_snapshots.map(snap => {
                     const snapUrl = snap.startsWith('storage/') ? `/${snap}` : `/storage/${snap}`;
-                    return `<img src="${snapUrl}" alt="Snapshot" style="width: 80px; height: 80px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(0, 255, 150, 0.3);" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 24 24\\' fill=\\'%23999\\'%3E%3Cpath d=\\'M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z\\'/%3E%3C/svg%3E';">`;
+                    return `<img src="${snapUrl}" alt="Snapshot" style="width: 80px; height: 80px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(0, 255, 150, 0.3);" data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\\">`;
                 }).join('')
                 : '<p style="color: #999; font-size: 0.85rem;">No snapshots available</p>';
 
@@ -3125,7 +3125,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
                 
                 <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
                     ${suggestion.id ? `
-                        <button class="intelligence-admin-btn small" onclick="approveMergeSuggestion(${suggestion.id})" style="flex: 1;">
+                        <button class="intelligence-admin-btn small" data-action="approveMergeSuggestion" data-arg="${suggestion.id}" style="flex: 1;">
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-check"></i>
@@ -3133,7 +3133,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
                                 <span class="btn-title">APPROVE</span>
                             </div>
                         </button>
-                        <button class="intelligence-admin-btn small" onclick="rejectMergeSuggestion(${suggestion.id})" style="flex: 1;">
+                        <button class="intelligence-admin-btn small" data-action="rejectMergeSuggestion" data-arg="${suggestion.id}" style="flex: 1;">
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-times"></i>
@@ -3156,7 +3156,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
             <div class="no-results">
                 <i class="fas fa-exclamation-triangle"></i>
                 <p>Error: ${error.message}</p>
-                <button class="intelligence-admin-btn small" onclick="loadPipelineMergeSuggestions('${pipelineId}')" style="margin-top: 1rem;">
+                <button class="intelligence-admin-btn small" data-action="loadPipelineMergeSuggestions" data-arg="${pipelineId}" style="margin-top: 1rem;">
                     <div class="btn-content">
                         <div class="btn-icon-wrapper">
                             <i class="fas fa-redo"></i>
@@ -3488,3 +3488,57 @@ window.copyIdentityIdFromAlert = copyIdentityIdFromAlert;
 window.openPipelineMergeSuggestions = openPipelineMergeSuggestions;
 window.loadPipelineMergeSuggestions = loadPipelineMergeSuggestions;
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    loadUnknownFaces,
+    loadMergeSuggestions,
+    searchIdentityForMerge,
+    openAdvancedMergePreview,
+    closeMergePreviewModal,
+    executeMergeFromPreview,
+    copyIdentityIdFromAlert,
+    timelineZoomIn,
+    timelineZoomOut,
+    timelineFitToView,
+
+    // copyIdentityId is used two ways: with an explicit id from a rendered
+    // card, and reading the current value of a merge input.
+    copyIdentityId: (el) => {
+        const fromInput = el.dataset.sourceInput
+            ? document.getElementById(el.dataset.sourceInput)
+            : null;
+        copyIdentityId(fromInput ? fromInput.value : el.dataset.arg);
+    },
+
+    viewIdentityDetails: (el) => viewIdentityDetails(el.dataset.arg),
+    promoteIdentityModal: (el) => promoteIdentityModal(el.dataset.arg),
+    openMergeModal: (el) => openMergeModal(el.dataset.arg),
+    analyzeInSecurityIntelligence: (el) => analyzeInSecurityIntelligence(el.dataset.arg),
+    selectIdentityForMerge: (el) => selectIdentityForMerge(el.dataset.arg),
+    removeFromSelection: (el) => removeFromSelection(el.dataset.arg),
+    approveMergeSuggestion: (el) => approveMergeSuggestion(el.dataset.arg),
+    rejectMergeSuggestion: (el) => rejectMergeSuggestion(el.dataset.arg),
+    openCreateLiveAlertModal: (el) =>
+        openCreateLiveAlertModal(el.dataset.arg, el.dataset.arg2),
+    openAddToWatchlistModal: (el) =>
+        openAddToWatchlistModal(el.dataset.arg, el.dataset.arg2),
+    loadPipelineMergeSuggestions: (el) => loadPipelineMergeSuggestions(el.dataset.arg),
+    openPipelineMergeSuggestions: (el) => {
+        if (typeof window.openPipelineMergeSuggestions === 'function') {
+            window.openPipelineMergeSuggestions(el.dataset.arg);
+        }
+    },
+    openSnapshot: (el) => {
+        if (el.dataset.arg) window.open('/' + el.dataset.arg, '_blank', 'noopener');
+    },
+    updateTimelineScale: (el) => updateTimelineScale(el.value),
+});

@@ -514,3 +514,12 @@ window.addEventListener('click', (e) => {
 window.filterByCategory = filterByCategory;
 window.editSetting = editSetting;
 window.closeSettingModal = closeSettingModal;
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration. Replaces the inline onclick attributes in
+// admin/settings.html, which `script-src 'self'` blocks.
+// ---------------------------------------------------------------------------
+Actions.register({
+    closeSettingModal,
+});

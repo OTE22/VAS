@@ -192,10 +192,10 @@
                 </div>
             </div>
             <div class="history-item-actions">
-                <button class="btn-small btn-small-primary" onclick="rerunSearch('${item.id}')">
+                <button class="btn-small btn-small-primary" data-action="rerunSearch" data-arg="${item.id}">
                     <i class="fas fa-redo"></i> Rerun
                 </button>
-                <button class="btn-small btn-small-primary" onclick="viewSearchDetails('${item.id}')">
+                <button class="btn-small btn-small-primary" data-action="viewSearchDetails" data-arg="${item.id}">
                     <i class="fas fa-eye"></i> View Details
                 </button>
             </div>
@@ -466,3 +466,17 @@
     window.viewSearchDetails = viewSearchDetails;
 })();
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    rerunSearch: (el) => rerunSearch(el.dataset.arg),
+    viewSearchDetails: (el) => viewSearchDetails(el.dataset.arg),
+});

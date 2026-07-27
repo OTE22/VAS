@@ -97,10 +97,10 @@
                         <tr>
                             <td colspan="8" style="padding: 1.5rem; text-align: center; width: 100%;">
                                 <div style="display: flex; justify-content: center; align-items: center; gap: 1rem; width: 100%;">
-                                    <button class="btn-secondary" onclick="filterBlockedUsers()" id="btn-blocked-only">
+                                    <button class="btn-secondary" data-action="filterBlockedUsers" id="btn-blocked-only">
                                         <i class="fas fa-ban"></i> BLOCKED USERS ONLY
                                     </button>
-                                    <button class="btn-secondary btn-active" onclick="showAllUsers()" id="btn-all-users">
+                                    <button class="btn-secondary btn-active" data-action="showAllUsers" id="btn-all-users">
                                         <i class="fas fa-users"></i> ALL USER
                                     </button>
                                 </div>
@@ -139,7 +139,7 @@
                             <span class="title-subtitle" id="modal-subtitle">CREATE NEW USER PROFILE</span>
                         </h2>
                     </div>
-                    <button class="security-modal-close" type="button" onclick="closeModal()" aria-label="Close dialog">
+                    <button class="security-modal-close" type="button" data-action="closeModal" aria-label="Close dialog">
                         <i class="fas fa-times"></i>
                     </button>
                 </header>
@@ -327,7 +327,7 @@
                             <span>All data encrypted and secured</span>
                         </div>
                         <div class="security-action-buttons">
-                            <button type="button" class="security-btn-cancel" onclick="closeModal()" aria-label="Cancel and close dialog">
+                            <button type="button" class="security-btn-cancel" data-action="closeModal" aria-label="Cancel and close dialog">
                                 <i class="fas fa-times"></i>
                                 <span>ABORT</span>
                             </button>
@@ -381,7 +381,7 @@
                     </div>
                 </div>
                 <div class="delete-modal-actions">
-                    <button type="button" class="btn-cancel-delete" onclick="closeDeleteModal()" aria-label="Cancel deletion">
+                    <button type="button" class="btn-cancel-delete" data-action="closeDeleteModal" aria-label="Cancel deletion">
                         <i class="fas fa-times"></i>
                         <span>Cancel</span>
                     </button>
@@ -399,7 +399,7 @@
         <div class="modal-content">
             <header class="modal-header">
                 <h2 id="password-modal-title">Reset Password</h2>
-                <button class="modal-close" type="button" onclick="closePasswordModal()" aria-label="Close dialog">&times;</button>
+                <button class="modal-close" type="button" data-action="closePasswordModal" aria-label="Close dialog">&times;</button>
             </header>
             <form id="password-form" class="modal-form" method="post" novalidate>
                 <input type="hidden" id="password-user-id" name="user_id">
@@ -428,7 +428,7 @@
                 </fieldset>
 
                 <div class="form-actions">
-                    <button type="button" class="btn-secondary" onclick="closePasswordModal()" aria-label="Cancel password reset">
+                    <button type="button" class="btn-secondary" data-action="closePasswordModal" aria-label="Cancel password reset">
                         <i class="fas fa-times" aria-hidden="true"></i>
                         <span>Cancel</span>
                     </button>
@@ -458,12 +458,10 @@
     </footer>
 
     <!-- Scripts -->
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-users.js" defer></script>
-    <script>
-        // Set current year dynamically
-        document.getElementById('current-year').textContent = new Date().getFullYear();
-    </script>
+        <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>

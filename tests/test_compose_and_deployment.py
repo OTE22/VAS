@@ -251,15 +251,84 @@ def test_csp_does_not_allow_inline_script(path):
     assert "unsafe-eval" not in script_src
 
 
-def test_frontend_has_no_inline_script_blocks():
-    """CSP script-src 'self' only holds if nothing relies on inline script."""
+def _frontend_files(*patterns):
+    """Authored frontend files, excluding third-party vendor bundles."""
     import glob
 
+    found = []
+    for pattern in patterns:
+        for path in glob.glob(f"{REPO}/frontend/**/{pattern}", recursive=True):
+            normalized = path.replace("\\", "/")
+            if "/vendor/" in normalized:
+                continue
+            found.append(normalized)
+    return found
+
+
+def test_frontend_has_no_inline_script_blocks():
+    """CSP script-src 'self' only holds if nothing relies on inline script.
+
+    Recursive: the first version of this test globbed frontend/*.html only and
+    so never looked in frontend/admin/, where five inline blocks lived.
+    """
     offenders = []
-    for path in glob.glob(f"{REPO}/frontend/*.html"):
-        if "<script>" in read(path):
-            offenders.append(path)
-    assert not offenders, f"inline <script> blocks would be blocked by CSP: {offenders}"
+    for path in _frontend_files("*.html"):
+        source = read(path)
+        for match in re.finditer(r"<script([^>]*)>", source):
+            if "src=" not in match.group(1):
+                offenders.append(path)
+                break
+    assert not offenders, f"inline <script> blocks are blocked by CSP: {offenders}"
+
+
+INLINE_HANDLER = re.compile(
+    r"""\son(click|submit|change|input|load|error|keydown|keyup|focus|blur"""
+    r"""|mouseover|mouseout|dblclick)\s*=\s*["']""",
+    re.I,
+)
+
+
+def test_frontend_has_no_inline_event_handlers():
+    """Inline handlers are inline script, whether authored in HTML or built
+    from a template literal in JavaScript. Both are blocked by CSP."""
+    offenders = {}
+    for path in _frontend_files("*.html", "*.js"):
+        if path.endswith("/actions.js"):
+            continue  # its documentation quotes the patterns it replaces
+        hits = INLINE_HANDLER.findall(read(path))
+        if hits:
+            offenders[path] = len(hits)
+    assert not offenders, f"inline event handlers are blocked by CSP: {offenders}"
+
+
+def test_every_data_action_has_a_registered_handler():
+    """A data-action with no registration is a button that silently does
+    nothing — exactly the regression this refactor could introduce."""
+    used, registered = set(), set()
+    for path in _frontend_files("*.html", "*.js"):
+        source = read(path)
+        if not path.endswith("/actions.js"):
+            used |= set(re.findall(r'data-action(?:-\w+)?="([A-Za-z_$][\w$]*)"', source))
+        for block in re.findall(r"Actions\.register\(\{(.*?)\n\}\);", source, re.S):
+            registered |= set(re.findall(r"^\s{4}([A-Za-z_$][\w$]*)\s*[,:]", block, re.M))
+
+    # admin-background-tasks.js owns this one with its own delegated listener.
+    unhandled = used - registered - {"details"}
+    assert not unhandled, f"data-action names with no handler: {sorted(unhandled)}"
+
+
+def test_actions_dispatcher_is_loaded_before_page_scripts():
+    """Both are deferred, so execution follows document order: actions.js must
+    appear first or Actions.register would be undefined."""
+    for path in _frontend_files("*.html"):
+        source = read(path)
+        if "actions.js" not in source:
+            continue
+        scripts = [m.group(1) for m in re.finditer(r'<script[^>]+src="([^"]+)"', source)]
+        assert scripts and "actions.js" in scripts[0], (
+            f"{path} loads actions.js at position "
+            f"{next(i for i, s in enumerate(scripts) if 'actions.js' in s)}, not first"
+        )
 
 
 # ------------------------------------------------------- build hygiene

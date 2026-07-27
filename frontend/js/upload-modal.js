@@ -103,7 +103,7 @@ function showUploadAlert(title, message, type = 'error') {
                 <div style="font-weight: 600; font-size: 16px; margin-bottom: 4px;">${title}</div>
                 <div style="font-size: 14px; line-height: 1.4; opacity: 0.9;">${message}</div>
             </div>
-            <button onclick="this.parentElement.parentElement.remove()" style="
+            <button data-action="removeGrandparent" style="
                 background: none;
                 border: none;
                 color: inherit;
@@ -412,3 +412,41 @@ window.handleGlobalUpload = handleGlobalUpload;
 window.showFaceDetectionAlert = showFaceDetectionAlert;
 window.closeFaceDetectionAlert = closeFaceDetectionAlert;
 
+
+
+// ---------------------------------------------------------------------------
+// CSP-safe event registration
+//
+// These handlers were previously reached through inline onclick/onchange/
+// onsubmit attributes, which `script-src 'self'` blocks. Registered rather
+// than looked up on window, so only these names are invocable; delegated in
+// actions.js, so dynamically rendered elements work without rebinding.
+// ---------------------------------------------------------------------------
+Actions.register({
+    closeUploadModal,
+    // The inner .upload-modal-content used to call event.stopPropagation() to
+    // avoid this. Comparing event.target to the overlay is equivalent and does
+    // not need a second handler: a click on the content never matches.
+    closeUploadModalOnOutsideClick: (el, event) => {
+        if (event.target === el) closeUploadModal();
+    },
+    handleGlobalUpload: (el, event) => handleGlobalUpload(event),
+    handleGlobalFileSelect: (el, event) => handleGlobalFileSelect(event),
+    triggerFileInput: (el) => {
+        const input = document.getElementById(el.dataset.targetInput);
+        if (input) input.click();
+    },
+    removeGrandparent: (el) => {
+        const target = el.parentElement && el.parentElement.parentElement;
+        if (target) target.remove();
+    },
+    openUploadModal: (el, event) => {
+        // Was an <a href="#">, so the default jump must still be suppressed.
+        event.preventDefault();
+        if (typeof openUploadModal === 'function') {
+            openUploadModal();
+        } else {
+            console.warn('Upload modal not loaded yet');
+        }
+    },
+});

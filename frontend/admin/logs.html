@@ -22,18 +22,13 @@
     <title>System Logs Viewer - Admin Panel | Face Recognition Service</title>
     
     <!-- Add logs-page class for CSS overrides -->
-    <script>
-        document.documentElement.classList.add('logs-page');
-        document.body.classList.add('logs-page');
-    </script>
-
-    <!-- Stylesheets -->
+<!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/logs.css">
     <link rel="stylesheet" href="/frontend/css/footer.css">
 </head>
-<body>
+<body data-page-class="logs-page">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -214,8 +209,10 @@
     </footer>
 
     <!-- Scripts -->
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
     <script src="/frontend/js/admin-logs.js"></script>
+    <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>
 

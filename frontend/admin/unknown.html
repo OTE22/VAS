@@ -367,7 +367,7 @@
                             <label for="merge-from-id">From Identity ID (Source) *</label>
                             <div style="display: flex; gap: 0.5rem; align-items: center;">
                                 <input type="text" id="merge-from-id" class="intelligence-input" readonly style="flex: 1; background: rgba(0, 0, 0, 0.3);">
-                                <button type="button" class="intelligence-admin-btn small" onclick="copyIdentityId(document.getElementById('merge-from-id').value)" title="Copy Identity ID" style="padding: 0.5rem;">
+                                <button type="button" class="intelligence-admin-btn small" data-action="copyIdentityId" data-source-input="merge-from-id" title="Copy Identity ID" style="padding: 0.5rem;">
                                     <div class="btn-content" style="padding: 0;">
                                         <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
                                             <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
@@ -383,7 +383,7 @@
                             <label for="merge-to-id">To Identity ID (Target) *</label>
                             <div style="display: flex; gap: 0.5rem; align-items: flex-start;">
                                 <input type="text" id="merge-to-id" class="intelligence-input" placeholder="Enter target identity ID or search by name..." style="flex: 1;">
-                                <button type="button" class="intelligence-admin-btn small" onclick="copyIdentityId(document.getElementById('merge-to-id').value)" title="Copy current ID" style="padding: 0.5rem;">
+                                <button type="button" class="intelligence-admin-btn small" data-action="copyIdentityId" data-source-input="merge-to-id" title="Copy current ID" style="padding: 0.5rem;">
                                     <div class="btn-content" style="padding: 0;">
                                         <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
                                             <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
@@ -395,7 +395,7 @@
                                 <i class="fas fa-lightbulb"></i> 
                                 <strong>Tip:</strong> Click VIEW on any identity card to see its ID, or search by name below
                             </p>
-                            <button type="button" class="intelligence-admin-btn small" onclick="searchIdentityForMerge()" style="margin-top: 0.5rem; width: 100%;">
+                            <button type="button" class="intelligence-admin-btn small" data-action="searchIdentityForMerge" style="margin-top: 0.5rem; width: 100%;">
                                 <div class="btn-content">
                                     <div class="btn-icon-wrapper">
                                         <i class="fas fa-search"></i>
@@ -438,7 +438,7 @@
                                 <span class="btn-title">CANCEL</span>
                             </div>
                         </button>
-                        <button type="button" class="intelligence-admin-btn" onclick="openAdvancedMergePreview()" id="preview-merge-btn" style="background: rgba(0, 150, 255, 0.2); border-color: rgba(0, 150, 255, 0.5);" title="Preview merge details before executing">
+                        <button type="button" class="intelligence-admin-btn" data-action="openAdvancedMergePreview" id="preview-merge-btn" style="background: rgba(0, 150, 255, 0.2); border-color: rgba(0, 150, 255, 0.5);" title="Preview merge details before executing">
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-eye"></i>
@@ -465,7 +465,7 @@
         <div class="modal-content" style="max-width: 900px; max-height: 90vh;">
             <div class="modal-header">
                 <h2><i class="fas fa-eye"></i> Merge Preview</h2>
-                <button class="modal-close" onclick="closeMergePreviewModal()">
+                <button class="modal-close" data-action="closeMergePreviewModal">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
@@ -484,7 +484,7 @@
                     <input type="text" id="merge-preview-notes" class="intelligence-input" placeholder="Add notes about this merge (optional)..." style="margin: 0;">
                 </div>
                 <div style="display: flex; gap: 0.5rem;">
-                    <button type="button" class="intelligence-admin-btn" onclick="closeMergePreviewModal()">
+                    <button type="button" class="intelligence-admin-btn" data-action="closeMergePreviewModal">
                         <div class="btn-content">
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-times"></i>
@@ -492,7 +492,7 @@
                             <span class="btn-title">CANCEL</span>
                         </div>
                     </button>
-                    <button type="button" class="intelligence-admin-btn execute-merge-btn" onclick="executeMergeFromPreview()" style="background: rgba(0, 255, 150, 0.3); border-color: rgba(0, 255, 150, 0.6);">
+                    <button type="button" class="intelligence-admin-btn execute-merge-btn" data-action="executeMergeFromPreview" style="background: rgba(0, 255, 150, 0.3); border-color: rgba(0, 255, 150, 0.6);">
                         <div class="btn-content">
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-check"></i>
@@ -668,8 +668,8 @@
                                 <i class="fas fa-fingerprint"></i> <strong>Identity ID:</strong>
                             </p>
                             <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                <code id="live-alert-identity-id" style="flex: 1; font-size: 0.85rem; padding: 0.5rem; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 4px; color: #00ff96; word-break: break-all; cursor: pointer; font-family: 'Courier New', monospace;" onclick="copyIdentityIdFromAlert()" title="Click to copy Identity ID">Loading...</code>
-                                <button type="button" class="intelligence-admin-btn small" onclick="copyIdentityIdFromAlert()" style="padding: 0.5rem;" title="Copy Identity ID">
+                                <code id="live-alert-identity-id" style="flex: 1; font-size: 0.85rem; padding: 0.5rem; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 4px; color: #00ff96; word-break: break-all; cursor: pointer; font-family: 'Courier New', monospace;" data-action="copyIdentityIdFromAlert" title="Click to copy Identity ID">Loading...</code>
+                                <button type="button" class="intelligence-admin-btn small" data-action="copyIdentityIdFromAlert" style="padding: 0.5rem;" title="Copy Identity ID">
                                     <div class="btn-content" style="padding: 0;">
                                         <div class="btn-icon-wrapper" style="width: 24px; height: 24px;">
                                             <i class="fas fa-copy" style="font-size: 0.8rem;"></i>
@@ -804,6 +804,7 @@
         </div>
     </footer>
 
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-unknown.js?v=unknown-7"></script>

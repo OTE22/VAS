@@ -53,17 +53,17 @@
 
             <div class="tutorial-container">
                 <div class="tutorial-nav">
-                    <button class="active" onclick="showSection('quick-start')">Quick Start</button>
-                    <button onclick="showSection('authentication')">API Authentication</button>
-                    <button onclick="showSection('understanding')">Understanding Unknown Faces</button>
-                    <button onclick="showSection('promote')">Promote to Known</button>
-                    <button onclick="showSection('merge')">Merge Identities</button>
-                    <button onclick="showSection('search')">Quick Search</button>
-                    <button onclick="showSection('advanced-search')">Advanced Search</button>
-                    <button onclick="showSection('settings')">System Settings</button>
-                    <button onclick="showSection('workflow')">System Workflow</button>
-                    <button onclick="showSection('advanced-sna')">Advanced SNA Features</button>
-                    <button onclick="showSection('examples')">API Examples</button>
+                    <button class="active" data-action="showSection" data-section="quick-start">Quick Start</button>
+                    <button data-action="showSection" data-section="authentication">API Authentication</button>
+                    <button data-action="showSection" data-section="understanding">Understanding Unknown Faces</button>
+                    <button data-action="showSection" data-section="promote">Promote to Known</button>
+                    <button data-action="showSection" data-section="merge">Merge Identities</button>
+                    <button data-action="showSection" data-section="search">Quick Search</button>
+                    <button data-action="showSection" data-section="advanced-search">Advanced Search</button>
+                    <button data-action="showSection" data-section="settings">System Settings</button>
+                    <button data-action="showSection" data-section="workflow">System Workflow</button>
+                    <button data-action="showSection" data-section="advanced-sna">Advanced SNA Features</button>
+                    <button data-action="showSection" data-section="examples">API Examples</button>
                 </div>
 
                 <div id="loading" class="loading">
@@ -79,6 +79,7 @@
         </div>
     </main>
 
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
     <script src="/frontend/js/admin-tutorial.js"></script>
 </body>

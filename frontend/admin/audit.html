@@ -367,7 +367,7 @@
                     <i class="fas fa-filter" aria-hidden="true"></i>
                     <span>Filter Audit Logs</span>
                 </h2>
-                <form class="filters-form" onsubmit="event.preventDefault(); applyFilters();" aria-label="Audit log filters">
+                <form class="filters-form" data-action-submit="applyFilters" aria-label="Audit log filters">
                     <div class="filter-row">
                         <div class="filter-group">
                             <label for="filter-user-id">
@@ -434,11 +434,11 @@
                             <i class="fas fa-check" aria-hidden="true"></i>
                             <span>APPLY FILTERS</span>
                         </button>
-                        <button class="audit-action-btn audit-btn-clear" type="button" onclick="clearFilters()" aria-label="Clear all filters">
+                        <button class="audit-action-btn audit-btn-clear" type="button" data-action="clearFilters" aria-label="Clear all filters">
                             <i class="fas fa-times" aria-hidden="true"></i>
                             <span>CLEAR</span>
                         </button>
-                        <button class="audit-action-btn audit-btn-refresh" type="button" onclick="refreshData()" aria-label="Refresh audit data">
+                        <button class="audit-action-btn audit-btn-refresh" type="button" data-action="refreshData" aria-label="Refresh audit data">
                             <i class="fas fa-sync-alt" aria-hidden="true"></i>
                             <span>REFRESH</span>
                         </button>
@@ -487,14 +487,14 @@
             <!-- Pagination -->
             <nav class="pagination-controls" aria-label="Audit log pagination" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
                 <div class="pagination-buttons" style="display: flex; align-items: center; gap: 0.75rem;">
-                    <button class="military-btn" type="button" onclick="previousPage()" id="prev-btn" disabled aria-label="Previous page">
+                    <button class="military-btn" type="button" data-action="previousPage" id="prev-btn" disabled aria-label="Previous page">
                         <i class="fas fa-chevron-left" aria-hidden="true"></i>
                         <span>PREVIOUS</span>
                     </button>
                     <span style="margin: 0 1rem;" role="status" aria-live="polite">
                         Page <strong><span id="current-page">1</span></strong>
                     </span>
-                    <button class="military-btn" type="button" onclick="nextPage()" id="next-btn" aria-label="Next page">
+                    <button class="military-btn" type="button" data-action="nextPage" id="next-btn" aria-label="Next page">
                         <span>NEXT</span>
                         <i class="fas fa-chevron-right" aria-hidden="true"></i>
                     </button>
@@ -504,7 +504,7 @@
                         <i class="fas fa-list-ol" aria-hidden="true"></i>
                         Results per page:
                     </label>
-                    <select id="page-limit" onchange="changeLimit()" aria-label="Select results per page">
+                    <select id="page-limit" data-action-change="changeLimit" aria-label="Select results per page">
                         <option value="50">50</option>
                         <option value="100" selected>100</option>
                         <option value="200">200</option>
@@ -520,7 +520,7 @@
         <div class="modal-content">
             <header class="modal-header">
                 <h2 id="details-modal-title">Audit Log Details</h2>
-                <button class="modal-close" type="button" onclick="closeDetailsModal()" aria-label="Close details dialog">&times;</button>
+                <button class="modal-close" type="button" data-action="closeDetailsModal" aria-label="Close details dialog">&times;</button>
             </header>
             <div class="modal-form" id="details-content" role="document">
                 <!-- Content will be populated by JavaScript -->
@@ -545,11 +545,9 @@
     </footer>
 
     <!-- Scripts -->
+    <script src="/frontend/js/actions.js?v=actions-1" defer></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-4"></script>
     <script src="/frontend/js/admin-audit.js" defer></script>
-    <script>
-        // Set current year dynamically
-        document.getElementById('current-year').textContent = new Date().getFullYear();
-    </script>
+        <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>
