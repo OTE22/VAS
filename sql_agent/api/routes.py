@@ -12,7 +12,7 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Optional, Dict
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -32,15 +32,46 @@ try:
     from db_connection import get_db
     from sql_agent.services.user_query_history_service import user_query_history_service
     AUTH_AVAILABLE = True
-except ImportError:
+    _AUTH_IMPORT_ERROR = None
+except ImportError as _auth_import_error:
+    # FAIL CLOSED.
+    #
+    # These stubs previously returned None, which turned every
+    # `Depends(require_chatbot_access())` into a no-op and served the entire
+    # SQL agent — including query execution — with no authentication at all.
+    # The blast radius was wider than it looks: this block also imports the
+    # query-history service, so an unrelated failure there disabled auth.
+    #
+    # An import failure is a deployment fault, not a reason to drop
+    # authorization. Refuse every request instead.
     AUTH_AVAILABLE = False
-    # Create dummy dependencies if auth is not available
-    def get_current_user():
-        return None
-    def require_chatbot_access():
-        def dummy_dep():
-            return None
-        return dummy_dep
+    _AUTH_IMPORT_ERROR = _auth_import_error
+    logger_name = __name__
+    logging.getLogger(logger_name).critical(
+        "[SQL_AGENT] Authentication could not be imported (%s). Every SQL agent "
+        "endpoint will refuse requests until this is fixed.",
+        _auth_import_error,
+    )
+
+    def _auth_unavailable():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "AUTH_UNAVAILABLE",
+                "message": (
+                    "The assistant is unavailable because authentication could "
+                    "not be initialised."
+                ),
+            },
+        )
+
+    async def get_current_user():  # type: ignore[misc]
+        _auth_unavailable()
+
+    def require_chatbot_access():  # type: ignore[misc]
+        async def _denied():
+            _auth_unavailable()
+        return _denied
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +146,32 @@ def _get_or_create_user_agent(user_id: int):
         logger.info(f"[SQL_AGENT_API] Evicted LRU agent for user {evicted_id} (cap {_USER_AGENTS_MAX})")
 
     return agent
+
+
+def _uid(current_user) -> str:
+    """User id for logs. Never logs the username."""
+    return str(getattr(current_user, "id", "unknown"))
+
+
+def _scoped_agent(current_user):
+    """The caller's own agent.
+
+    Session endpoints used to read and mutate the shared global instance, so
+    one user could enumerate, load or reset another's conversation without
+    authenticating. Routing through the per-user agent makes ownership
+    structural: a session belonging to someone else is not in this store, so
+    there is no ownership check left to forget.
+    """
+    user_id = getattr(current_user, "id", None)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error_code": "AUTH_REQUIRED",
+                "message": "Authentication is required.",
+            },
+        )
+    return _get_or_create_user_agent(user_id)
 
 
 _STREAM_SENTINEL = object()
@@ -1526,14 +1583,20 @@ async def sql_agent_health(response: Response):
 
 
 @router.get("/schema")
-async def sql_agent_schema():
-    """Get database schema description"""
+async def sql_agent_schema(
+    current_user: "User" = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+):
+    """Get database schema description.
+
+    Authenticated: the schema names every table and column the assistant can
+    reach, which is reconnaissance for anyone probing the deployment.
+    """
     logger.debug("[SQL_AGENT_API] Schema request received")
-    
+
     if not _sql_agent_available or _sql_agent_instance is None:
         logger.warning("[SQL_AGENT_API] Schema request - agent not available")
         raise HTTPException(status_code=503, detail="SQL Agent not available")
-    
+
     try:
         schema = _sql_agent_instance.get_schema()
         logger.info(f"[SQL_AGENT_API] Schema retrieved successfully ({len(schema)} chars)")
@@ -1547,81 +1610,113 @@ async def sql_agent_schema():
 
 
 @router.post("/session/new")
-async def sql_agent_new_session():
-    """Start a new conversation session"""
+async def sql_agent_new_session(
+    current_user: "User" = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+):
+    """Start a new conversation session for the calling user.
+
+    Operates on the caller's own agent. It previously ran unauthenticated
+    against the shared global instance, so any caller could reset, enumerate
+    or load another user's conversation.
+    """
     logger.info("[SQL_AGENT_API] New session request received")
-    
-    if not _sql_agent_available or _sql_agent_instance is None:
+
+    if not _sql_agent_available:
         logger.warning("[SQL_AGENT_API] New session - agent not available")
         raise HTTPException(status_code=503, detail="SQL Agent not available")
-    
+
     try:
-        session_id = _sql_agent_instance.conversation_memory.start_session()
-        logger.info(f"[SQL_AGENT_API] New session created: {session_id}")
+        agent_instance = _scoped_agent(current_user)
+        session_id = agent_instance.conversation_memory.start_session()
+        logger.info(f"[SQL_AGENT_API] New session created for user {_uid(current_user)}")
         return {
             "success": True,
             "session_id": session_id,
             "message": "New session created"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SQL_AGENT_API] New session error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not create a session.")
 
 
 @router.get("/sessions")
-async def sql_agent_list_sessions():
-    """List all conversation sessions"""
+async def sql_agent_list_sessions(
+    current_user: "User" = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+):
+    """List the calling user's conversation sessions.
+
+    Scoped to the caller's own agent. Unauthenticated enumeration of the shared
+    global instance previously exposed other users' session identifiers.
+    """
     logger.debug("[SQL_AGENT_API] List sessions request received")
-    
-    if not _sql_agent_available or _sql_agent_instance is None:
+
+    if not _sql_agent_available:
         logger.warning("[SQL_AGENT_API] List sessions - agent not available")
         raise HTTPException(status_code=503, detail="SQL Agent not available")
-    
+
     try:
-        sessions = _sql_agent_instance.conversation_memory.list_sessions()
-        logger.info(f"[SQL_AGENT_API] Listed {len(sessions)} sessions")
+        agent_instance = _scoped_agent(current_user)
+        memory = agent_instance.conversation_memory
+        sessions = memory.list_sessions()
+        logger.info(
+            "[SQL_AGENT_API] Listed %d sessions for user %s",
+            len(sessions), _uid(current_user),
+        )
         return {
             "success": True,
             "sessions": sessions,
-            "current_session": _sql_agent_instance.conversation_memory.current_session_id
+            "current_session": memory.current_session_id
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[SQL_AGENT_API] List sessions error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not list sessions.")
 
 
 @router.post("/session/load")
-async def sql_agent_load_session(request: dict):
-    """Load a previous conversation session"""
+async def sql_agent_load_session(
+    request: dict,
+    current_user: "User" = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+):
+    """Load one of the calling user's own sessions.
+
+    The session is resolved against the caller's agent, so a session_id
+    belonging to another user simply does not exist here — ownership is a
+    property of which store is consulted, not a check that can be forgotten.
+    """
     logger.info("[SQL_AGENT_API] Load session request received")
-    
-    if not _sql_agent_available or _sql_agent_instance is None:
+
+    if not _sql_agent_available:
         logger.warning("[SQL_AGENT_API] Load session - agent not available")
         raise HTTPException(status_code=503, detail="SQL Agent not available")
-    
+
+    session_id = request.get("session_id")
+    if not session_id or not isinstance(session_id, str):
+        logger.warning("[SQL_AGENT_API] Load session - session_id missing")
+        raise HTTPException(status_code=400, detail="session_id is required")
+
     try:
-        session_id = request.get("session_id")
-        if not session_id:
-            logger.warning("[SQL_AGENT_API] Load session - session_id missing")
-            raise HTTPException(status_code=400, detail="session_id is required")
-        
-        logger.debug(f"[SQL_AGENT_API] Attempting to load session: {session_id}")
-        loaded = _sql_agent_instance.conversation_memory.load_session(session_id)
+        agent_instance = _scoped_agent(current_user)
+        loaded = agent_instance.conversation_memory.load_session(session_id)
         if loaded:
-            logger.info(f"[SQL_AGENT_API] Session loaded successfully: {session_id}")
+            logger.info(
+                "[SQL_AGENT_API] Session loaded for user %s", _uid(current_user)
+            )
             return {
                 "success": True,
                 "session_id": session_id,
                 "message": "Session loaded successfully"
             }
-        else:
-            logger.warning(f"[SQL_AGENT_API] Session not found: {session_id}")
-            raise HTTPException(status_code=404, detail="Session not found")
+        logger.warning("[SQL_AGENT_API] Session not found for user %s", _uid(current_user))
+        raise HTTPException(status_code=404, detail="Session not found")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[SQL_AGENT_API] Load session error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Could not load the session.")
 
 
 # Export Models — server-enforced size limits (Pydantic rejects oversize)
