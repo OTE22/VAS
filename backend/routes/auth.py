@@ -72,6 +72,12 @@ class UserInfo(BaseModel):
     role: str
     can_use_chatbot: bool
     is_active: bool
+    # Same capability vocabulary and version as /api/auth/me/privileges, so the
+    # two endpoints can never disagree about the same user at the same moment.
+    # Defaulted because UserInfo is also nested inside UserPrivileges, where the
+    # authoritative copy is the top-level one.
+    permissions: list[str] = []
+    permissions_version: int = 1
 
 
 class NavbarLink(BaseModel):
@@ -106,6 +112,14 @@ class UserPrivileges(BaseModel):
     privileges_summary: str
     accessible_pipelines_count: int
     navbar_links: list[NavbarLink]  # Backend-determined navbar links to display
+    # Stable capability codes (e.g. "chatbot.use", "admin.users.manage") resolved
+    # by backend.auth.capabilities — the same resolver every server-side gate
+    # uses, so the client cannot disagree with the enforcement about what this
+    # user may do. `privileges` above remains human-readable prose.
+    permissions: list[str] = []
+    # Increments on every authorization change. A client holding a different
+    # value knows its view is stale without having to diff the whole payload.
+    permissions_version: int = 1
 
 
 def _client_ip(request: Request) -> str:
@@ -278,8 +292,11 @@ async def login(credentials: LoginRequest, request: Request, response: Response,
 @router.get("/api/auth/me", response_model=UserInfo)
 async def get_current_user_info(response: Response, current_user: User = Depends(get_current_user)):
     """Get current user information (never cached)."""
+    from backend.auth.capabilities import resolve_effective_authorization
+
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
+    authz = resolve_effective_authorization(current_user)
     return UserInfo(
         id=current_user.id,
         username=current_user.username,
@@ -288,11 +305,14 @@ async def get_current_user_info(response: Response, current_user: User = Depends
         role=current_user.role,
         can_use_chatbot=current_user.can_use_chatbot,
         is_active=current_user.is_active,
+        permissions=authz.permission_codes,
+        permissions_version=authz.permissions_version,
     )
 
 
 @router.get("/api/auth/me/privileges", response_model=UserPrivileges)
 async def get_user_privileges(
+    response: Response,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -323,9 +343,14 @@ async def get_user_privileges(
     """
     try:
         from backend.auth.auth_service import AuthService
+        from backend.auth.capabilities import resolve_effective_authorization
         from sqlalchemy import select
         from db_models import Pipeline
-        
+
+        # One resolver, shared with every server-side gate, so the capability
+        # list the client receives cannot drift from what is actually enforced.
+        effective_authz = resolve_effective_authorization(current_user)
+
         logger.debug(f"[PRIVILEGES] Getting privileges for user: {current_user.username} (role: {current_user.role})")
         
         # Get user pipelines
@@ -440,9 +465,17 @@ async def get_user_privileges(
             can_manage_identities=can_manage_identities,
             privileges_summary=privileges_summary,
             accessible_pipelines_count=len(pipelines),
-            navbar_links=navbar_links
+            navbar_links=navbar_links,
+            permissions=effective_authz.permission_codes,
+            permissions_version=effective_authz.permissions_version,
         )
-        
+
+        # no-store, matching /api/auth/me. Without it a cached privileges
+        # response can outlive a revocation and keep rendering navigation the
+        # backend will refuse — the client-side half of the same staleness bug.
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+
         logger.debug(f"[PRIVILEGES] Successfully returned privileges for user: {current_user.username}")
         return privileges
         

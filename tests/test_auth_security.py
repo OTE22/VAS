@@ -614,3 +614,55 @@ def test_cookie_configuration_is_production_ready():
     assert '"path": "/"' in cookie_fn
     assert '"domain": None' in cookie_fn, "host-only cookie (no broad Domain)"
     assert "__Host-" in sec, "support the __Host- prefix when Secure is enabled"
+
+
+# ---------------------------------------------------------------------------
+# /me and /me/privileges: one authorization vocabulary, never cached
+# ---------------------------------------------------------------------------
+
+def _admin_auth():
+    """Bearer token. No X-Requested-With — the body only carries the token for
+    non-browser clients (browsers get the HttpOnly cookie instead)."""
+    status, body, _ = _http("POST", "/api/auth/login",
+                            {"username": "admin", "password": "admin123"})
+    assert status == 200, body
+    return {"Authorization": f"Bearer {body['access_token']}"}
+
+
+def test_me_and_privileges_agree_on_the_same_user():
+    """The two endpoints must never disagree about one user at one moment.
+
+    They previously exposed overlapping but differently-shaped views, so a
+    client could believe one and be refused by the other.
+    """
+    auth = _admin_auth()
+    s1, me, _ = _http("GET", "/api/auth/me", headers=auth)
+    s2, priv, _ = _http("GET", "/api/auth/me/privileges", headers=auth)
+    assert s1 == 200 and s2 == 200
+
+    assert me["role"] == priv["role"]
+    assert me["permissions"] == priv["permissions"], "capability lists diverge"
+    assert me["permissions_version"] == priv["permissions_version"]
+
+
+def test_permissions_use_stable_codes_not_ui_labels():
+    """Capability codes must be stable identifiers the frontend can compare."""
+    auth = _admin_auth()
+    _s, me, _h = _http("GET", "/api/auth/me", headers=auth)
+
+    assert me["permissions"], "no capability codes returned"
+    assert me["permissions"] == sorted(me["permissions"]), "codes must be sorted"
+    for code in me["permissions"]:
+        assert "." in code, f"{code!r} is not a dotted capability code"
+        assert code == code.lower(), f"{code!r} should be lowercase"
+    # An admin holds the full set, including administration capabilities.
+    assert "admin.users.manage" in me["permissions"]
+
+
+def test_privileges_response_is_never_cached():
+    """A cached privileges response can outlive a revocation."""
+    auth = _admin_auth()
+    for path in ("/api/auth/me", "/api/auth/me/privileges"):
+        _s, _b, headers = _http("GET", path, headers=auth)
+        cache_control = headers.get("cache-control", "").lower()
+        assert "no-store" in cache_control, f"{path} is cacheable: {cache_control!r}"

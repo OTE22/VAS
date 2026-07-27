@@ -31,7 +31,7 @@ import contextlib
 
 import pytest
 
-from tests.conftest import run_on_shared_loop
+from conftest import run_on_shared_loop
 
 
 @contextlib.asynccontextmanager
@@ -262,10 +262,6 @@ def test_check_authorization_fresh_denies_revoked_and_deactivated():
     async def scenario():
         if not getattr(db_manager, "_initialized", False):
             await db_manager.init_db()
-        # asyncpg connections are loop-bound (see tests/conftest.py). An earlier
-        # module may have filled the pool from a different loop; disposing forces
-        # fresh connections on THIS loop. Checked-out connections are unaffected.
-        await db_manager.engine.dispose()
 
         async with db_manager.get_session() as db:
             await db.execute(text("DELETE FROM users WHERE username = :u"), {"u": username})

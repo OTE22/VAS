@@ -356,17 +356,35 @@ class UserService:
         db.add(user)  # Ensure object is tracked
         logger.debug(f"[UPDATE_USER]   User object added to session (or already tracked)")
         
-        logger.info(f"[UPDATE_USER] Step 7: Flushing changes to database...")
+        logger.info(f"[UPDATE_USER] Step 7: Committing changes to database...")
         try:
-            await db.flush()
-            logger.info(f"[UPDATE_USER] ✅ Step 7 SUCCESS: Changes flushed to database")
+            # COMMIT HERE, not in the session dependency's cleanup.
+            #
+            # This is the reported bug. FastAPI runs dependency cleanup AFTER the
+            # response has been sent, so leaving the commit to the session
+            # context manager meant PUT /api/users/{id} returned 200 while its
+            # transaction was still open. The admin UI reported success, and a
+            # read issued immediately afterwards — exactly what the UI does when
+            # it refreshes the user list — could beat the commit and show the old
+            # role. Worse, a commit that failed after the response was sent left
+            # the administrator told the change had been saved when it had not.
+            #
+            # Reproduced live before the fix: two sequential role changes, each
+            # returning 200 with the new role in the body, while the database
+            # still held the previous value.
+            #
+            # block_user and unblock_user already committed explicitly; this path
+            # was the odd one out. The version bump and the audit row are written
+            # in the SAME transaction, so an audit row cannot survive a rolled
+            # back change, nor a change happen without its audit row.
+            await db.commit()
+            await db.refresh(user)
+            logger.info(f"[UPDATE_USER] ✅ Step 7 SUCCESS: Changes committed")
         except Exception as e:
-            logger.error(f"[UPDATE_USER] ❌ Step 7 FAILED: Flush error: {type(e).__name__}: {str(e)}", exc_info=True)
+            logger.error(f"[UPDATE_USER] ❌ Step 7 FAILED: Commit error: {type(e).__name__}: {str(e)}", exc_info=True)
             await db.rollback()
             raise
-        
-        # Note: Commit will be handled by session context manager
-        logger.info(f"[UPDATE_USER]   Note: Commit will be handled by session context manager")
+
         logger.info(f"[UPDATE_USER] ✅✅✅ USER UPDATE COMPLETE for user: {user.username} (ID: {user.id})")
         return user
 
