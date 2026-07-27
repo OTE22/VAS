@@ -620,7 +620,18 @@
                 if (typeof data.response === 'string' && data.response.length > req.raw.length) {
                     req.raw = data.response.slice(0, MAX_RAW_RESPONSE_CHARS);
                 }
-                finalizeRequest(req.id, req.raw.trim() || data.success !== false ? 'completed' : 'failed');
+                // Success requires BOTH the server's verdict and actual content.
+                //
+                // This was `req.raw.trim() || data.success !== false ? ... : ...`,
+                // where `||` binds tighter than `?:` — so it read
+                // `(raw || success !== false) ? 'completed' : 'failed'`, and any
+                // partial content marked the request completed even when the
+                // server had explicitly reported success:false. Requiring content
+                // as well also stops an empty assistant message being rendered
+                // for a success:true response that streamed nothing.
+                const serverSaysOk = data.success !== false;
+                const hasContent = req.raw.trim().length > 0;
+                finalizeRequest(req.id, serverSaysOk && hasContent ? 'completed' : 'failed');
                 break;
             }
             case 'cancelled':
@@ -631,6 +642,18 @@
                 if (code === 'ACCOUNT_BLOCKED') {
                     finalizeRequest(req.id, 'failed', { message: 'Access restricted.' });
                     showBlockingModal(String(data.message || ''), data.reference_id);
+                } else if (code === 'AUTHORIZATION_CHANGED') {
+                    // An administrator changed this account's access mid-stream.
+                    // The server has already closed the stream; the cached
+                    // navigation privileges are now stale, so drop them rather
+                    // than leaving a menu the backend will refuse.
+                    finalizeRequest(req.id, 'failed', {
+                        message: 'Your access to the assistant has changed. Please sign in again.',
+                    });
+                    try {
+                        sessionStorage.removeItem('navbar_privileges');
+                    } catch (e) { /* storage unavailable — the redirect still corrects it */ }
+                    showNotice('Your access has changed. Please sign in again.', 'error');
                 } else {
                     finalizeRequest(req.id, 'failed', {
                         message: typeof data.message === 'string' ? data.message : 'The query failed.',

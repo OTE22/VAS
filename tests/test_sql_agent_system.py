@@ -364,3 +364,53 @@ def test_js_privacy_and_bounds():
     assert "X-Requested-With" in src, "CSRF header on mutating requests"
     assert "page_size=" in src, "server-side history pagination"
     assert "historyController.abort" in src, "older history refresh aborted"
+
+
+def test_js_completion_requires_both_verdict_and_content():
+    """A 'complete' event must not be treated as success on either alone.
+
+    The original expression was
+        req.raw.trim() || data.success !== false ? 'completed' : 'failed'
+    and `||` binds tighter than `?:`, so it evaluated as
+        (raw || success !== false) ? 'completed' : 'failed'
+    — any partial content marked the request completed even when the server had
+    explicitly reported success:false. Requiring content as well also prevents
+    an empty assistant message being rendered for a success:true response that
+    streamed nothing.
+    """
+    src = _js()
+    assert "serverSaysOk && hasContent" in src, (
+        "completion no longer requires both the server verdict and real content"
+    )
+    # Non-comment lines only: the fix is documented in a comment that quotes the
+    # original buggy expression, and a naive substring check matches its own
+    # explanation.
+    code = "\n".join(
+        line for line in src.splitlines()
+        if not line.lstrip().startswith(("//", "*", "/*"))
+    )
+    assert "req.raw.trim() || data.success !== false ?" not in code, (
+        "the operator-precedence bug is back"
+    )
+
+
+def test_js_handles_authorization_changed_terminally():
+    """A mid-stream revocation must end the request and drop stale privileges."""
+    src = _js()
+    assert "AUTHORIZATION_CHANGED" in src, (
+        "frontend does not handle the mid-stream revocation event"
+    )
+    branch = src.split("AUTHORIZATION_CHANGED", 1)[1][:600]
+    assert "finalizeRequest" in branch, "revocation must terminate the request"
+    assert "navbar_privileges" in branch, (
+        "cached navigation privileges must be dropped on revocation"
+    )
+
+
+def test_js_failure_path_restores_the_input():
+    """Every terminal outcome re-enables input — no stuck loading state."""
+    src = _js()
+    finalize = src.split("function finalizeRequest", 1)[1].split("\n    function ", 1)[0]
+    assert "setInputEnabled(true)" in finalize
+    assert "setSendButtonMode('send')" in finalize
+    assert "req.typingEl.remove()" in finalize, "loading indicator must be removed"
