@@ -62,3 +62,6 @@ class AgentState(TypedDict):
     security_block_user: Optional[bool]
     security_block_reason: Optional[str]
     security_block_user_id: Optional[int]  # User ID to block (if available)
+    # Owner of this turn. Scopes knowledge-base retrieval and learning so
+    # one user's stored questions cannot reach another user's prompt.
+    user_id: Optional[int]

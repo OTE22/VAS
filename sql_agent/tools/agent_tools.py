@@ -416,9 +416,14 @@ Examples:
 
         try:
             # Search for similar questions
+            # Scoped to the caller: learned examples carry the raw text of
+            # the question that produced them, and retrieved examples are
+            # interpolated into the SQL-generation system prompt. Unscoped,
+            # one user's questions became another user's prompt content.
             examples = self.kb.search_similar(
                 query=state["normalized_input"],
-                top_k=config.rag_top_k
+                top_k=config.rag_top_k,
+                user_id=state.get("user_id"),
             )
 
             state["retrieved_examples"] = examples
@@ -1411,7 +1416,8 @@ If you don't know something, say so politely."""),
                 # Check if this is a novel query worth learning
                 existing = self.kb.search_similar(
                     state["normalized_input"],
-                    top_k=1
+                    top_k=1,
+                    user_id=state.get("user_id"),
                 )
 
                 # Only learn if no very similar example exists (similarity < 0.9)
@@ -1419,7 +1425,8 @@ If you don't know something, say so politely."""),
                     self.kb.learn_from_success(
                         question=state["normalized_input"],
                         sql=generated_sql,
-                        purpose=state.get("sql_purpose", "")
+                        purpose=state.get("sql_purpose", ""),
+                        user_id=state.get("user_id"),
                     )
                     logger.info(f"[STEP_7] Learned new query pattern: {state['normalized_input'][:100]}")
                     print("✅ Learned new query pattern!")

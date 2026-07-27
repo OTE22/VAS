@@ -38,6 +38,10 @@ class SQLIntelligenceAgent:
     def _create_initial_state(self, user_input: str, should_learn: bool = True) -> AgentState:
         """Create the initial state for the agent."""
         return {
+            # Owner of this turn, taken from the per-user conversation memory.
+            # Scopes knowledge-base retrieval and learning; when it is None the
+            # knowledge base falls back to curated seed examples only.
+            "user_id": getattr(self.conversation_memory, "user_id", None),
             "original_input": user_input,
             "normalized_input": "",
             "intent": "CHAT",

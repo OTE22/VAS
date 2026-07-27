@@ -1001,7 +1001,8 @@ ORDER BY total_detections DESC""",
         self,
         query: str,
         top_k: Optional[int] = None,
-        min_similarity: Optional[float] = None
+        min_similarity: Optional[float] = None,
+        user_id: Optional[int] = None,
     ) -> List[Dict]:
         """
         Search for similar questions in the knowledge base.
@@ -1017,14 +1018,46 @@ ORDER BY total_detections DESC""",
         top_k = top_k or self.config.rag_top_k
         min_similarity = min_similarity or self.config.rag_similarity_threshold
 
-        logger.debug(f"[KB] Searching for similar examples: {query[:100]}... (top_k={top_k}, min_similarity={min_similarity})")
+        logger.debug(f"[KB] Searching for similar examples (top_k={top_k}, min_similarity={min_similarity})")
+
+        # Tenant scoping.
+        #
+        # Retrieved examples are interpolated into the SQL-generation system
+        # prompt, so anything reachable here is effectively injected into
+        # another user's prompt. Learned entries carry the raw text of the
+        # question that produced them — which in this deployment routinely
+        # names people — so an unscoped search leaked one user's queries into
+        # another's context, and made a crafted question a persistent
+        # prompt-injection vector.
+        #
+        # Curated seed examples are shared by design; learned ones are visible
+        # only to the user who produced them.
+        # An absent user_id means curated seed examples ONLY. It must not mean
+        # "no filter": the shared global agent instance carries no user id, so
+        # an unfiltered search there would return every user's learned entries.
+        if user_id is None:
+            where = {"source": {"$eq": "seed"}}
+        else:
+            where = {"$or": [
+                {"source": {"$eq": "seed"}},
+                {"user_id": {"$eq": str(user_id)}},
+            ]}
 
         # Query ChromaDB
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"]
-        )
+        query_kwargs = {
+            "query_texts": [query],
+            "n_results": top_k,
+            "include": ["documents", "metadatas", "distances"],
+            "where": where,
+        }
+
+        try:
+            results = self.collection.query(**query_kwargs)
+        except Exception as e:
+            # A malformed filter must not silently widen the search to every
+            # user's entries — return nothing rather than everything.
+            logger.error("[KB] Scoped search failed (%s); returning no examples", e)
+            return []
 
         # Process results
         examples = []
@@ -1055,23 +1088,39 @@ ORDER BY total_detections DESC""",
         question: str,
         sql: str,
         purpose: str = "",
-        user_feedback: Optional[str] = None
+        user_feedback: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> str:
         """
         Learn from a successful query execution.
-        Adds the question-SQL pair to the knowledge base for future reference.
+
+        "Success" here means the database did not raise — not that the answer
+        was correct — so learned entries are provenance-tagged and scoped to
+        the user who produced them. They are retrievable only by that user;
+        see search_similar. Without the owner tag an entry would be visible to
+        everyone, which is how one user's question text reached another user's
+        prompt.
 
         Args:
             question: The original user question
             sql: The SQL that successfully answered it
             purpose: Description of the query
             user_feedback: Optional user feedback
+            user_id: Owner. Required — an untagged entry cannot be scoped.
 
         Returns:
-            ID of the learned example
+            ID of the learned example, or "" when it was not stored.
         """
-        logger.info(f"[KB] Learning from successful query: {question[:100]}...")
-        metadata = {"learned": True}
+        if user_id is None:
+            # Refuse rather than store an entry every user can retrieve.
+            logger.warning(
+                "[KB] Refusing to learn an example with no owner: it would be "
+                "retrievable by every user."
+            )
+            return ""
+
+        logger.info("[KB] Learning from a successful query for user %s", user_id)
+        metadata = {"learned": True, "user_id": str(user_id)}
         if user_feedback:
             metadata["user_feedback"] = user_feedback
 
