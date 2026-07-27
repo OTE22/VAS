@@ -393,6 +393,93 @@ async def _handle_security_denial(current_user, query: str, reason: str,
         reference_id)
 
 
+class _StageTimer:
+    """Per-stage timing for one agent run.
+
+    The agent already tags every update with a ``step`` (init, schema, rag,
+    generate_sql, validate, execute, response, ...), so stage names come from the
+    agent itself rather than being guessed at this layer.
+
+    This exists because the reported incident timed out after 300s with
+    ``response_chars=0`` and no indication of which stage consumed the time. A
+    stage breakdown turns "the request hung" into "it hung in `execute`".
+
+    Records only stage names and durations — never query text, prompts, generated
+    SQL or response bodies.
+
+    Attribution note (this is easy to get wrong)
+    --------------------------------------------
+    The agent streams LangGraph node outputs, so an update announcing step X
+    arrives when node X has *finished*. The interval between two updates is
+    therefore the runtime of the LATER node, not the earlier one. Time is
+    credited accordingly.
+
+    When the stream ends with work still in flight — which is precisely the
+    timeout case — the outstanding interval belongs to a node that never
+    reported, so it is recorded as ``after:<last completed step>``. A stall
+    reported as ``after:rag`` means the graph was inside the node that follows
+    retrieve_examples. Naming that node here would couple this timer to the
+    graph's shape; saying "after rag" is what the events actually prove.
+    """
+
+    __slots__ = ("_now", "start", "stages", "_last_step", "_last_at",
+                 "first_chunk_at", "first_update_at", "_finished")
+
+    def __init__(self, now):
+        self._now = now
+        self.start = now()
+        self.stages = {}            # step -> cumulative ms
+        self._last_step = None
+        self._last_at = self.start
+        self.first_chunk_at = None  # first user-visible content
+        self.first_update_at = None # first update of any kind
+        self._finished = False
+
+    def observe(self, update: dict) -> None:
+        if not isinstance(update, dict) or self._finished:
+            return
+        t = self._now()
+        if self.first_update_at is None:
+            self.first_update_at = t
+        if update.get("type") == "content" and self.first_chunk_at is None:
+            self.first_chunk_at = t
+        step = update.get("step")
+        if not step:
+            return
+        # The elapsed interval is the work that PRODUCED this step.
+        self.stages[step] = self.stages.get(step, 0.0) + (t - self._last_at) * 1000.0
+        self._last_step = step
+        self._last_at = t
+
+    def finish(self) -> None:
+        """Close out any work still in flight (the timeout case)."""
+        if self._finished:
+            return
+        self._finished = True
+        outstanding = (self._now() - self._last_at) * 1000.0
+        if outstanding <= 0:
+            return
+        label = f"after:{self._last_step}" if self._last_step else "before_first_step"
+        self.stages[label] = self.stages.get(label, 0.0) + outstanding
+
+    @property
+    def slowest(self):
+        """(step, ms) of the stage that consumed the most time, or (None, 0)."""
+        if not self.stages:
+            return (None, 0.0)
+        step = max(self.stages, key=self.stages.get)
+        return (step, self.stages[step])
+
+    def summary(self) -> str:
+        """Compact `stage=ms` breakdown, longest first."""
+        if not self.stages:
+            return "none"
+        return " ".join(
+            f"{k}={v:.0f}" for k, v in
+            sorted(self.stages.items(), key=lambda kv: kv[1], reverse=True)
+        )
+
+
 def _start_stream_thread(agent_instance, query: str, cancel_event: threading.Event, loop) -> asyncio.Queue:
     """TRUE streaming bridge: a dedicated thread pumps the agent's blocking
     query_stream() generator into an asyncio.Queue item by item, so SSE/WS
@@ -1133,6 +1220,9 @@ async def sql_agent_query_stream(
             user_lock = _get_user_lock(stream_user_id) if stream_user_id is not None else None
             deadline = stream_start_time + SQL_AGENT_TOTAL_TIMEOUT
             was_cancelled = False
+            # Which limit ended the request, so the log names the culprit instead
+            # of leaving "300s" to be traced back through the config by hand.
+            timeout_source = None
 
             try:
                 # Concurrency cap: bounded simultaneous agent queries
@@ -1156,12 +1246,24 @@ async def sql_agent_query_stream(
                 update_queue = _start_stream_thread(
                     agent_instance, query, cancel_event, asyncio.get_running_loop()
                 )
+                stages = _StageTimer(lambda: asyncio.get_event_loop().time())
 
                 while True:
                     now = asyncio.get_event_loop().time()
                     if now >= deadline:
                         cancel_event.set()
-                        logger.warning(f"[SQL_AGENT_API] request_id={request_id} stream timeout after {SQL_AGENT_TOTAL_TIMEOUT}s")
+                        timeout_source = "SQL_AGENT_TOTAL_TIMEOUT"
+                        try:
+                            stages.finish()
+                            _slow_step, _slow_ms = stages.slowest
+                        except Exception:  # pragma: no cover
+                            _slow_step, _slow_ms = None, 0.0
+                        logger.warning(
+                            "[SQL_AGENT_API] request_id=%s stream timeout after %.0fs "
+                            "(source=SQL_AGENT_TOTAL_TIMEOUT) stalled_in=%s stage_ms=%.0f stages[%s]",
+                            request_id, SQL_AGENT_TOTAL_TIMEOUT, _slow_step, _slow_ms,
+                            stages.summary(),
+                        )
                         yield evt({"type": "error", "error_code": "QUERY_TIMEOUT",
                                    "message": "Query took too long and was cancelled.", "retryable": True})
                         yield evt({"type": "complete", "success": False})
@@ -1228,6 +1330,8 @@ async def sql_agent_query_stream(
 
                     if update is _STREAM_SENTINEL:
                         break
+
+                    stages.observe(update)
 
                     try:
                         # Format as SSE (request_id + sequence on every event)
@@ -1330,13 +1434,32 @@ async def sql_agent_query_stream(
                     except Exception:
                         pass
 
-                # PRIVACY: structured status only — never the response body
+                # PRIVACY: structured status and stage NAMES only — never the
+                # query, the generated SQL, or any part of the response body.
+                try:
+                    stages.finish()
+                    slowest_step, slowest_ms = stages.slowest
+                    ttfc = ("%.0f" % ((stages.first_chunk_at - stream_start_time) * 1000.0)
+                            if stages.first_chunk_at is not None else "none")
+                    ttfu = ("%.0f" % ((stages.first_update_at - stream_start_time) * 1000.0)
+                            if stages.first_update_at is not None else "none")
+                    stage_summary = stages.summary()
+                except Exception:  # pragma: no cover - instrumentation must never break the stream
+                    slowest_step, slowest_ms, ttfc, ttfu, stage_summary = None, 0.0, "?", "?", "?"
+
                 logger.info(
-                    "[SQL_AGENT_API] request_id=%s stream finished status=%s duration=%.1fs response_chars=%d",
+                    "[SQL_AGENT_API] request_id=%s user_id=%s stream finished status=%s "
+                    "duration=%.1fs response_chars=%d timeout_source=%s "
+                    "time_to_first_update_ms=%s time_to_first_chunk_ms=%s "
+                    "slowest_stage=%s slowest_stage_ms=%.0f stages[%s]",
                     request_id,
+                    stream_user_id,
                     "cancelled" if was_cancelled else ("completed" if stream_success else "failed"),
                     asyncio.get_event_loop().time() - stream_start_time,
                     len(final_response) if final_response else 0,
+                    timeout_source or "none",
+                    ttfu, ttfc,
+                    slowest_step, slowest_ms, stage_summary,
                 )
 
                 # Conversation-memory fallback for history persistence only

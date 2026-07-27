@@ -370,6 +370,107 @@ def test_sse_stream_rechecks_authorization():
 
 
 # ---------------------------------------------------------------------------
+# Stage timing
+# ---------------------------------------------------------------------------
+
+def test_stage_timer_credits_the_node_that_produced_the_event():
+    """Time belongs to the node that FINISHED, not the one before it.
+
+    The agent emits a step when its LangGraph node completes, so the interval
+    between two updates is the runtime of the later node. Getting this backwards
+    would name the wrong stage in exactly the situation the instrumentation
+    exists for. Uses a fake clock so the assertion is exact.
+    """
+    from sql_agent.api.routes import _StageTimer
+
+    clock = {"t": 0.0}
+    timer = _StageTimer(lambda: clock["t"])
+
+    clock["t"] = 1.0
+    timer.observe({"type": "status", "step": "schema"})       # schema took 1.0s
+    clock["t"] = 1.5
+    timer.observe({"type": "status", "step": "rag"})          # rag took 0.5s
+    clock["t"] = 60.0
+    timer.observe({"type": "status", "step": "execute"})      # execute took 58.5s
+    timer.finish()
+
+    step, ms = timer.slowest
+    assert step == "execute", f"time must be credited to the node that finished, got {step}"
+    assert abs(ms - 58500) < 1, ms
+    assert abs(timer.stages["schema"] - 1000) < 1
+    assert abs(timer.stages["rag"] - 500) < 1
+
+
+def test_stage_timer_labels_work_still_in_flight_at_timeout():
+    """A stall with no further event is reported as after:<last step>.
+
+    This is the live timeout signature: the last event was `rag`, then nothing
+    for 272s because the NEXT node never reported. Attributing that silence to
+    `rag` itself would point at the wrong stage.
+    """
+    from sql_agent.api.routes import _StageTimer
+
+    clock = {"t": 0.0}
+    timer = _StageTimer(lambda: clock["t"])
+
+    clock["t"] = 28.4
+    timer.observe({"type": "status", "step": "rag"})
+    clock["t"] = 300.6            # timeout, nothing further ever arrives
+    timer.finish()
+
+    step, ms = timer.slowest
+    assert step == "after:rag", f"expected after:rag, got {step}"
+    assert abs(ms - 272200) < 100, ms
+    # finish() is idempotent — the stream calls it on both the timeout and the
+    # terminal log paths, and double-counting would inflate the breakdown.
+    timer.finish()
+    assert abs(timer.stages["after:rag"] - 272200) < 100
+
+
+def test_stage_timer_records_time_to_first_chunk():
+    """time_to_first_chunk is only set by real content, not by status updates."""
+    from sql_agent.api.routes import _StageTimer
+
+    clock = {"t": 0.0}
+    timer = _StageTimer(lambda: clock["t"])
+
+    clock["t"] = 2.0
+    timer.observe({"type": "status", "step": "schema"})
+    assert timer.first_chunk_at is None, "a status update is not a content chunk"
+    assert timer.first_update_at == 2.0
+
+    clock["t"] = 9.0
+    timer.observe({"type": "content", "content": "x", "step": "response"})
+    assert timer.first_chunk_at == 9.0
+
+
+def test_stage_timer_logs_no_query_or_response_text():
+    """The breakdown must contain stage names and numbers only."""
+    from sql_agent.api.routes import _StageTimer
+
+    timer = _StageTimer(lambda: 0.0)
+    timer.observe({"type": "sql", "sql": "SELECT secret FROM users", "step": "generate_sql"})
+    timer.observe({"type": "content", "content": "sensitive answer", "step": "response"})
+    timer.finish()
+
+    summary = timer.summary()
+    assert "SELECT" not in summary and "secret" not in summary
+    assert "sensitive" not in summary
+    assert "generate_sql" in summary
+
+
+def test_stream_logs_timeout_source_and_stage_breakdown():
+    """Structural: the stream's terminal log names the limit that fired."""
+    import inspect
+    from sql_agent.api import routes
+
+    source = inspect.getsource(routes.sql_agent_query_stream)
+    assert "timeout_source" in source, "stream does not record which limit fired"
+    assert "SQL_AGENT_TOTAL_TIMEOUT" in source
+    assert "slowest_stage" in source, "stream does not report the stalled stage"
+
+
+# ---------------------------------------------------------------------------
 # Post-failure database health
 # ---------------------------------------------------------------------------
 
@@ -427,3 +528,75 @@ def test_database_healthy_after_a_connection_dies():
                 assert (await db.execute(text("SELECT 1"))).scalar() == 1
 
     run_on_shared_loop(scenario())
+
+
+# ---------------------------------------------------------------------------
+# A model timeout must read as a timeout
+# ---------------------------------------------------------------------------
+
+def test_timeout_errors_are_recognised_in_every_form():
+    """The timeout can arrive as httpx, builtin, or wrapped by langchain."""
+    import httpx
+    from sql_agent.tools.agent_tools import _is_timeout_error
+
+    assert _is_timeout_error(httpx.ReadTimeout("slow"))
+    assert _is_timeout_error(httpx.ConnectTimeout("down"))
+    assert _is_timeout_error(TimeoutError())
+
+    wrapped = RuntimeError("model call failed")
+    wrapped.__cause__ = httpx.ReadTimeout("slow")
+    assert _is_timeout_error(wrapped), "must follow the cause chain"
+
+    assert not _is_timeout_error(ValueError("bad SQL")), "must not swallow real errors"
+
+
+def test_generation_timeout_produces_a_useful_message_not_no_sql():
+    """A generation timeout must not surface as 'No SQL query to execute'.
+
+    Observed live: the model exceeded its budget, generated_sql was left empty,
+    and the user was shown a bare 'SQL Error: No SQL query to execute' — which
+    reads like an internal fault rather than a capacity limit.
+    """
+    import inspect
+    from sql_agent.tools import agent_tools
+
+    source = inspect.getsource(agent_tools.SQLAgentTools.generate_sql)
+    assert "sql_generation_timed_out" in source, (
+        "generate_sql does not distinguish a timeout from unusable output"
+    )
+
+    execute_source = inspect.getsource(agent_tools.SQLAgentTools.execute_sql)
+    assert "sql_generation_timed_out" in execute_source, (
+        "execute_sql overwrites the timeout reason with 'No SQL query to execute'"
+    )
+
+
+def test_timeout_message_leaks_no_internals():
+    """The user-facing timeout text must not expose prompts, SQL or stack detail."""
+    import inspect
+    from sql_agent.tools import agent_tools
+
+    source = inspect.getsource(agent_tools.SQLAgentTools.generate_sql)
+    start = source.index("sql_generation_timed_out")
+    window = source[max(0, start - 600):start]
+    assert "took too long" in window, "expected a plain-language timeout message"
+    for leak in ("prompt", "traceback", "exc_info=True"):
+        assert leak not in window.lower().split("logger.warning")[0][-300:], (
+            f"timeout branch may leak {leak}"
+        )
+
+
+def test_timeout_flag_is_declared_in_the_graph_state():
+    """LangGraph drops undeclared keys, so the flag must be in AgentState.
+
+    Without this declaration the flag is set by generate_sql and silently
+    discarded before execute_sql reads it — the timeout then surfaces as
+    "No SQL query to execute" again. Verified live: adding the field is what
+    made the useful message actually reach the client.
+    """
+    from sql_agent.state import AgentState
+
+    assert "sql_generation_timed_out" in AgentState.__annotations__, (
+        "sql_generation_timed_out is not declared in AgentState; LangGraph will "
+        "drop it between nodes"
+    )

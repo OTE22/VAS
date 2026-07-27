@@ -324,3 +324,160 @@ def test_real_registry_treats_local_models_as_restricted_capable():
 
     for model in build_default_registry(config).all():
         assert model.permits(DataSensitivity.RESTRICTED)
+
+
+# ---------------------------------------------------------------------------
+# Timeout enforcement and the retry budget
+# ---------------------------------------------------------------------------
+#
+# A live SQL-agent request timed out after 300s with response_chars=0. The
+# stalled stage was SQL generation: a single chain.invoke() ran for 458 seconds
+# against a configured OLLAMA_TIMEOUT of 120. The timeout was never enforced
+# because ChatOllama (langchain_ollama 1.0.x) has NO `timeout` field and
+# silently discards the kwarg. These tests pin both the enforcement route and
+# the ordering of the timeout hierarchy.
+
+
+def test_ollama_provider_sets_a_real_client_timeout():
+    """The timeout must go through client_kwargs, where httpx enforces it.
+
+    Passing `timeout=` to ChatOllama is silently dropped, so asserting on the
+    supported route is the whole point of this test.
+    """
+    from sql_agent.llm.ollama_provider import OllamaProvider
+
+    spec = ModelSpec(provider="ollama", model_id="m", display_name="m",
+                     capabilities=frozenset(), context_tokens=8192,
+                     timeout_seconds=120)
+    model = OllamaProvider("http://ollama:11434").build(spec)
+
+    assert "timeout" in model.client_kwargs, (
+        "no client timeout — the model call would be unbounded"
+    )
+    timeout = model.client_kwargs["timeout"]
+    assert getattr(timeout, "read", None) == 120.0
+    assert getattr(timeout, "connect", None) == 20.0, (
+        "connect must fail fast; waiting out the full response budget to "
+        "discover the server is down helps nobody"
+    )
+
+
+def test_chat_ollama_still_ignores_a_bare_timeout_kwarg():
+    """Guards the assumption this fix rests on.
+
+    If a future langchain_ollama gains a real `timeout` field, this fails and
+    the provider can be simplified — rather than silently keeping a workaround
+    nobody remembers the reason for.
+    """
+    from langchain_ollama import ChatOllama
+
+    assert "timeout" not in ChatOllama.model_fields, (
+        "ChatOllama now has a timeout field; revisit OllamaProvider.build"
+    )
+
+
+def test_provider_honours_an_explicit_client_kwargs_timeout():
+    """A caller-supplied timeout is not overwritten by the default."""
+    import httpx
+    from sql_agent.llm.ollama_provider import OllamaProvider
+
+    spec = ModelSpec(provider="ollama", model_id="m", display_name="m",
+                     capabilities=frozenset(), context_tokens=8192,
+                     timeout_seconds=120)
+    model = OllamaProvider("http://ollama:11434").build(
+        spec, client_kwargs={"timeout": httpx.Timeout(5.0)}
+    )
+    assert model.client_kwargs["timeout"].read == 5.0
+
+
+def test_llm_retry_budget_fits_inside_the_streaming_deadline():
+    """All attempts together must finish before the stream gives up.
+
+    max_retries=2 with a 120s per-call timeout permits 3 x 120s = 360s on a
+    count-only policy — longer than the 300s streaming deadline that wraps it,
+    so the caller would be cancelled mid-retry and the work thrown away.
+    """
+    from config import settings
+    from sql_agent.llm.gateway import LLMGateway
+
+    gateway = LLMGateway.__new__(LLMGateway)
+    spec = ModelSpec(provider="ollama", model_id="m", display_name="m",
+                     capabilities=frozenset(), context_tokens=8192,
+                     timeout_seconds=120, max_retries=2)
+
+    budget = gateway.total_budget_seconds(spec)
+    outer = float(settings.SQL_AGENT_TOTAL_TIMEOUT)
+
+    assert budget < outer, f"LLM budget {budget}s must be under the {outer}s stream deadline"
+    assert budget >= spec.timeout_seconds, "budget must fit at least one attempt"
+    assert budget < spec.timeout_seconds * (spec.max_retries + 1), (
+        "budget must actually constrain the count-only worst case"
+    )
+
+
+def test_retries_stop_when_the_budget_is_spent():
+    """A slow failing call is not retried into the outer deadline."""
+    from sql_agent.llm.gateway import LLMGateway
+
+    gateway = LLMGateway.__new__(LLMGateway)
+    gateway.breaker = CircuitBreaker()
+    gateway.ledger = UsageLedger()
+
+    spec = ModelSpec(provider="ollama", model_id="m", display_name="m",
+                     capabilities=frozenset(), context_tokens=8192,
+                     timeout_seconds=120, max_retries=2)
+
+    calls = {"n": 0}
+    clock = {"t": 0.0}
+
+    def slow_failure():
+        calls["n"] += 1
+        clock["t"] += 120.0        # each attempt burns its whole timeout
+        raise RuntimeError("model timed out")
+
+    import time as _time
+    real_monotonic = _time.monotonic
+    real_sleep = _time.sleep
+    _time.monotonic = lambda: clock["t"]
+    _time.sleep = lambda s: None
+    try:
+        with pytest.raises(RuntimeError):
+            gateway.call_with_retries(spec, TaskType.SQL_GENERATION, slow_failure)
+    finally:
+        _time.monotonic = real_monotonic
+        _time.sleep = real_sleep
+
+    # 180s budget, 120s per attempt: the second attempt cannot fit, so exactly
+    # one is made rather than the three a count-only policy would allow.
+    assert calls["n"] == 1, f"expected 1 attempt within budget, made {calls['n']}"
+
+
+def test_fast_failures_still_retry():
+    """The budget must not disable retries for genuinely transient errors."""
+    from sql_agent.llm.gateway import LLMGateway
+
+    gateway = LLMGateway.__new__(LLMGateway)
+    gateway.breaker = CircuitBreaker()
+    gateway.ledger = UsageLedger()
+
+    spec = ModelSpec(provider="ollama", model_id="m", display_name="m",
+                     capabilities=frozenset(), context_tokens=8192,
+                     timeout_seconds=120, max_retries=2)
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("connection reset")
+        return "ok"
+
+    import time as _time
+    real_sleep = _time.sleep
+    _time.sleep = lambda s: None
+    try:
+        assert gateway.call_with_retries(spec, TaskType.SQL_GENERATION, flaky) == "ok"
+    finally:
+        _time.sleep = real_sleep
+
+    assert calls["n"] == 3, "a fast transient failure must still exhaust its retries"

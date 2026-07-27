@@ -139,6 +139,32 @@ class LLMGateway:
         self.breaker = breaker or CircuitBreaker()
         self.ledger = ledger or UsageLedger()
 
+    # Fraction of the outer streaming deadline that all LLM attempts for a single
+    # node may consume. Below 1.0 so the agent still has room to validate SQL,
+    # run it and compose an answer after the model returns — a model allowed to
+    # eat the entire deadline produces a timeout with nothing to show for it,
+    # which is exactly the reported `response_chars=0`.
+    LLM_BUDGET_FRACTION = 0.6
+
+    def total_budget_seconds(self, spec: ModelSpec) -> float:
+        """Total wall-clock all attempts for one call may take.
+
+        Derived from the SQL-agent streaming deadline so the two cannot drift
+        apart: raising SQL_AGENT_TOTAL_TIMEOUT widens this automatically, and
+        lowering it tightens this rather than silently inverting the hierarchy.
+        """
+        outer = 0.0
+        try:
+            from config import settings as _settings
+            outer = float(getattr(_settings, "SQL_AGENT_TOTAL_TIMEOUT", 0) or 0)
+        except Exception:
+            outer = 0.0
+        if outer <= 0:
+            outer = 300.0  # matches the SQL_AGENT_TOTAL_TIMEOUT default
+        # Never below a single attempt: a budget that cannot fit one call would
+        # fail every request before the model was even given a chance.
+        return max(spec.timeout_seconds, outer * self.LLM_BUDGET_FRACTION)
+
     def build_for(
         self,
         task: TaskType,
@@ -198,10 +224,19 @@ class LLMGateway:
         )
 
     def call_with_retries(self, spec: ModelSpec, task: TaskType, fn: Callable[[], Any]) -> Any:
-        """Run `fn`, retrying transient failures with jittered backoff."""
+        """Run `fn`, retrying transient failures with jittered backoff.
+
+        Retries are bounded by a TOTAL budget, not just a count. With
+        max_retries=2 and a 120s per-call timeout, a naive count-only policy
+        permits 3 x 120s = 360s — longer than the 300s streaming deadline that
+        wraps it, so the caller would be cancelled mid-retry and the work
+        discarded. A retry is therefore skipped when there is not enough budget
+        left for it to plausibly finish.
+        """
         key = f"{spec.provider}/{spec.model_id}"
         started = time.monotonic()
         last_error: Optional[Exception] = None
+        budget = self.total_budget_seconds(spec)
 
         for attempt in range(spec.max_retries + 1):
             try:
@@ -209,14 +244,24 @@ class LLMGateway:
             except Exception as e:
                 last_error = e
                 self.breaker.record_failure(key)
+                elapsed = time.monotonic() - started
                 if attempt < spec.max_retries:
                     delay = _backoff_delay(attempt)
-                    logger.warning(
-                        "[LLM] %s attempt %d/%d failed (%s); retrying in %.2fs",
-                        key, attempt + 1, spec.max_retries + 1, type(e).__name__, delay,
-                    )
-                    time.sleep(delay)
-                    continue
+                    # Only retry if another full attempt could still fit.
+                    if elapsed + delay + spec.timeout_seconds > budget:
+                        logger.warning(
+                            "[LLM] %s attempt %d/%d failed (%s); no retry — "
+                            "%.0fs elapsed of %.0fs budget",
+                            key, attempt + 1, spec.max_retries + 1,
+                            type(e).__name__, elapsed, budget,
+                        )
+                    else:
+                        logger.warning(
+                            "[LLM] %s attempt %d/%d failed (%s); retrying in %.2fs",
+                            key, attempt + 1, spec.max_retries + 1, type(e).__name__, delay,
+                        )
+                        time.sleep(delay)
+                        continue
                 self.ledger.record(LLMCallRecord(
                     provider=spec.provider, model_id=spec.model_id, task=task.value,
                     duration_seconds=time.monotonic() - started,

@@ -25,6 +25,32 @@ from .sql_tools import prepare_sql_from_llm_response, validate_sql_query
 logger = logging.getLogger(__name__)
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Whether an exception represents the model running out of time.
+
+    Matched structurally where possible (httpx raises ReadTimeout / ConnectTimeout,
+    both subclasses of TimeoutException) and by name otherwise, because the
+    exception can arrive wrapped by langchain or the ollama client rather than as
+    the original httpx type.
+    """
+    try:
+        import httpx
+        if isinstance(exc, httpx.TimeoutException):
+            return True
+    except ImportError:  # pragma: no cover - httpx ships with the ollama client
+        pass
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "timedout" in name:
+        return True
+    # Last resort: the wrapped cause chain.
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause is not None and cause is not exc:
+        return _is_timeout_error(cause)
+    return False
+
+
 class SQLAgentTools:
     """Tools for the SQL Intelligence Agent."""
 
@@ -608,8 +634,23 @@ If no query is possible:
 
         except Exception as e:
             state["generated_sql"] = ""
-            state["sql_purpose"] = f"SQL generation error: {str(e)}"
-            logger.error(f"[STEP_4] SQL generation exception: {str(e)}", exc_info=True)
+            if _is_timeout_error(e):
+                # Distinguish "the model ran out of time" from "the model
+                # produced unusable SQL". Both used to arrive downstream as the
+                # bare "No SQL query to execute", which tells the user nothing
+                # and reads like a bug rather than a capacity limit.
+                state["sql_purpose"] = (
+                    "The assistant took too long to build a query for this question. "
+                    "Please try a simpler or more specific question."
+                )
+                state["sql_generation_timed_out"] = True
+                logger.warning(
+                    "[STEP_4] SQL generation timed out after the model budget (%s)",
+                    type(e).__name__,
+                )
+            else:
+                state["sql_purpose"] = f"SQL generation error: {str(e)}"
+                logger.error(f"[STEP_4] SQL generation exception: {str(e)}", exc_info=True)
             print(f"❌ Error: {state['sql_purpose']}")
 
         return state
@@ -827,12 +868,22 @@ Provide the corrected SQL:""")
         print("="*60)
 
         if not state.get("generated_sql"):
-            logger.error("[STEP_5] No SQL query to execute")
-            print("❌ No SQL query to execute!")
-            print(f"   generated_sql = '{state.get('generated_sql')}'")
+            # Carry forward WHY there is no SQL. A generation timeout surfaced
+            # here as the bare "No SQL query to execute", which reads like an
+            # internal fault instead of telling the user the assistant ran out
+            # of time and that a simpler question may work.
+            if state.get("sql_generation_timed_out"):
+                reason = state.get("sql_purpose") or (
+                    "The assistant took too long to build a query for this question."
+                )
+                logger.warning("[STEP_5] No SQL to execute — generation timed out")
+            else:
+                reason = "No SQL query to execute"
+                logger.error("[STEP_5] No SQL query to execute")
+            print(f"❌ {reason}")
             state["query_result"] = {
                 "success": False,
-                "error": "No SQL query to execute",
+                "error": reason,
                 "rows": [],
                 "row_count": 0
             }

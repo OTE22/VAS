@@ -30,6 +30,12 @@ class AgentState(TypedDict):
     # Step 4: SQL generation
     generated_sql: str
     sql_purpose: str
+    # True when generation hit the model's time budget rather than producing
+    # unusable output. Declared here because LangGraph merges node results
+    # against this schema and silently DROPS undeclared keys — without this line
+    # the flag never reaches execute_sql, and a timeout keeps surfacing as the
+    # misleading "No SQL query to execute".
+    sql_generation_timed_out: bool
 
     # Step 4.5: SQL Validation and Fixing
     sql_validation_status: Literal["VALID", "FIXED", "PARTIAL", "INVALID", "ERROR"]
