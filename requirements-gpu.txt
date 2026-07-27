@@ -63,6 +63,12 @@ alembic
 redis[asyncio]
 hiredis
 
+# SQL AST parsing. REQUIRED, not optional: sql_agent/security/sql_guard.py
+# fails closed without it, because a regex fallback reintroduces the
+# bypasses it exists to prevent (`BEGIN READ WRITE; DELETE ...` and
+# unrestricted table access).
+sqlglot==25.34.1
+
 # Image Processing
 # opencv-contrib-python removed: it installs a SECOND, unpinned OpenCV
 # distribution alongside opencv-python-headless==4.9.0.80 above. Two

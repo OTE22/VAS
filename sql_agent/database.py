@@ -13,12 +13,18 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from .config import Config
+from .security import SqlPolicy, validate_sql
 
 # Setup logger
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """Manages PostgreSQL database connections and operations."""
+
+    # Cap on returned rows. Enforced twice: injected as a LIMIT into the SQL by
+    # the AST guard (so the server never materialises more) and again by
+    # fetchmany (so a LIMIT the guard could not rewrite still cannot flood us).
+    MAX_ROWS = 500
 
     # Predefined schema for the face detection system
     KNOWN_SCHEMA = {
@@ -89,6 +95,15 @@ class DatabaseManager:
         self.config = config
         self._schema_cache: Optional[dict] = None
         self._use_known_schema: bool = True  # Set to False to fetch schema dynamically
+
+        # The allowlist is derived from the schema the agent is told about, so
+        # the two cannot drift: a table the model was never shown is a table it
+        # may not read. This is what prevents `SELECT ... FROM users`.
+        self.sql_policy = SqlPolicy.for_tables(
+            self.KNOWN_SCHEMA["tables"].keys(),
+            dialect="postgres",
+            max_rows=self.MAX_ROWS,
+        )
 
     def get_connection(self):
         """Create a new database connection."""
@@ -257,7 +272,36 @@ class DatabaseManager:
         """Execute a SQL query safely."""
         logger.debug(f"[DB] Executing query ({len(sql)} chars): {sql[:200]}...")
         
-        # Validate query is read-only
+        # Layer 1: AST validation. Authoritative, and fails closed.
+        #
+        # The regex gate below was bypassable in two ways, both verified
+        # against the live database before this layer existed:
+        #   `BEGIN READ WRITE; DELETE FROM ...` — the connection's
+        #   default_transaction_read_only is a session *default*, not a
+        #   constraint, and an explicit BEGIN overrides it.
+        #   `SELECT username, password_hash FROM users` — a pure SELECT passes
+        #   every regex, and there was no table allowlist.
+        verdict = validate_sql(sql, self.sql_policy)
+        if not verdict.allowed:
+            logger.warning(
+                "[DB] Query rejected by AST guard: code=%s tables=%s",
+                verdict.code, verdict.tables,
+            )
+            return {
+                "success": False,
+                "error": f"Security: {verdict.reason}",
+                "error_code": verdict.code,
+                "rows": [],
+                "row_count": 0
+            }
+
+        # The guard returns SQL carrying an enforced LIMIT. Without one the
+        # server still materialises the entire result set before fetchmany
+        # stops reading it.
+        sql = verdict.sql or sql
+
+        # Layer 2: the original regex gate, retained as defence in depth. It is
+        # no longer the only thing between generated text and the database.
         validation = self._validate_query(sql)
         if not validation["is_safe"]:
             logger.warning(f"[DB] Query validation failed: {validation['reason']}")
@@ -271,7 +315,7 @@ class DatabaseManager:
         try:
             start_time = time.time()
             
-            MAX_ROWS = 500  # cap result size: LLM answers never need more, and
+            MAX_ROWS = self.MAX_ROWS  # cap result size: LLM answers never need more, and
                             # unbounded fetchall() can balloon memory/latency
 
             with self.get_connection() as conn:
