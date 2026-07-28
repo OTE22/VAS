@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.exc import InterfaceError, DisconnectionError
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 
 from db_models import Base
 from config import settings
@@ -184,9 +185,14 @@ class DatabaseManager:
                         pass  # Ignore rollback errors if connection is closed
                     raise
 
-                except HTTPException:
-                    # 🚨 HTTPException should propagate normally (not a DB error)
-                    # Don't rollback or log as DB error - let FastAPI handle it
+                except (HTTPException, RequestValidationError):
+                    # 🚨 Client-facing outcomes propagate normally — they are
+                    # NOT database errors. RequestValidationError is included
+                    # because FastAPI raises it during dependency resolution
+                    # (e.g. page_size=500 against le=100): it used to fall into
+                    # the generic handler below and get logged TWICE at ERROR as
+                    # "DB session error", making routine 422s look like database
+                    # failures in production logs.
                     try:
                         await session.rollback()
                     except Exception:
@@ -238,6 +244,13 @@ class DatabaseManager:
             self._stats["failed_sessions"] += 1
             self._stats["active_sessions"] -= 1
             logger.error(f"DB connection timeout - database may be overloaded. Active sessions: {self._stats['active_sessions']}")
+            raise
+        except (HTTPException, RequestValidationError):
+            # Client-facing outcomes surfacing through the dependency exit —
+            # the inner handler already rolled back; re-logging them here as
+            # "DB session creation failed" is what made every 422 look like a
+            # database outage in production logs.
+            self._stats["active_sessions"] -= 1
             raise
         except Exception as e:
             self._stats["failed_sessions"] += 1

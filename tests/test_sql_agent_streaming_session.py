@@ -736,3 +736,37 @@ def test_all_persistence_sites_are_shielded():
         f"bare awaited history saves at lines {unshielded} — a client abort "
         f"cancels them mid-commit"
     )
+
+
+# ---------------------------------------------------------------------------
+# Validation errors are not database errors
+# ---------------------------------------------------------------------------
+
+def test_request_validation_errors_are_not_logged_as_db_failures(caplog):
+    """A 422 (e.g. page_size=500 against le=100) raised inside the get_db
+    dependency must propagate WITHOUT the 'DB session error' ERROR logging.
+
+    Observed live: each such 422 produced two ERROR lines with tracebacks
+    ('DB session error' + 'DB session creation failed'), making routine client
+    input rejections look like database failures.
+    """
+    import logging
+    from fastapi.exceptions import RequestValidationError
+    from db_connection import db_manager
+
+    async def scenario():
+        if not getattr(db_manager, "_initialized", False):
+            await db_manager.init_db()
+        with pytest.raises(RequestValidationError):
+            async with db_manager.get_session() as _db:
+                raise RequestValidationError(errors=[{"loc": ("query", "page_size"),
+                                                      "msg": "too big", "type": "le"}])
+
+    with caplog.at_level(logging.ERROR, logger="db_connection"):
+        run_on_shared_loop(scenario())
+
+    db_errors = [r for r in caplog.records
+                 if r.name == "db_connection" and r.levelno >= logging.ERROR]
+    assert not db_errors, (
+        f"validation error was logged as a DB failure: {[r.message for r in db_errors]}"
+    )
