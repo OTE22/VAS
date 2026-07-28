@@ -224,11 +224,15 @@ async def get_stats(
 
         # Get database connection stats
         from db_connection import db_manager
+        # get_stats(), not get_connection_stats() — the latter does not exist
+        # on DatabaseManager, so this raised AttributeError on EVERY request and
+        # the bare except below swallowed it, leaving "database": {} forever.
+        # The home page could not report database status as a result.
         db_stats = {}
         try:
-            db_stats = db_manager.get_connection_stats()
-        except Exception:
-            pass
+            db_stats = db_manager.get_stats()
+        except Exception as e:
+            logger.warning("[STATS] database stats unavailable: %s", type(e).__name__)
 
         return {
             "service": getattr(settings, 'APP_NAME', 'Face Recognition Service'),

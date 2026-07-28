@@ -267,7 +267,7 @@ async def detailed_health_check():
         db_healthy = await db_manager.health_check()
         checks["database"] = {
             "healthy": db_healthy,
-            "connections": db_manager.get_connection_stats()
+            "connections": db_manager.get_stats()
         }
 
         # Redis health
