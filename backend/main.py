@@ -359,6 +359,16 @@ except Exception as e:
 app.include_router(auth_router)  # Auth routes (login, logout, me)
 app.include_router(users_router)  # User management (admin only)
 app.include_router(audit_router)  # Audit logs (admin only)
+
+# Conversation domain (/api/v1) — guarded import like the optional routers:
+# a failure here must not take down face recognition, but it is logged loudly
+# because chat history would be running on the legacy path only.
+try:
+    from backend.routes.conversations import router as conversations_router
+    app.include_router(conversations_router)
+    logger.info("✅ Conversations router registered (/api/v1)")
+except Exception as _conv_error:  # pragma: no cover - import-time wiring
+    logger.error(f"❌ Conversations router failed to load: {_conv_error}", exc_info=True)
 if settings_router:
     app.include_router(settings_router)  # Settings management (admin only)
     logger.info("✅ Settings router registered")

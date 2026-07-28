@@ -1216,3 +1216,196 @@ class UserQueryEmbedding(Base):
         Index('idx_embedding_query', 'query_history_id'),
         Index('idx_embedding_model', 'embedding_model'),
     )
+
+
+# =====================================================
+# TENANCY + CONVERSATION DOMAIN
+# =====================================================
+# Organization -> Workspace -> User -> Conversation -> ConversationBranch
+# -> Message. Conversations belong DIRECTLY to a Workspace (no Project layer,
+# by explicit scope decision).
+#
+# Security note that shapes every table here: fr_readonly — the restricted
+# role that executes LLM-generated SQL — inherits SELECT on all future tables
+# via ALTER DEFAULT PRIVILEGES (db/roles.sql). The migration that creates
+# these tables REVOKEs that grant, because a prompt-injected query must never
+# be able to read anyone's private conversation content.
+
+
+class Organization(Base):
+    """Top-level tenant. One row ("Default Organization") is seeded by the
+    migration; multi-org support is structural from day one so adding a second
+    tenant is an INSERT, not a schema change."""
+    __tablename__ = "organizations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False, unique=True)
+    is_default = Column(Boolean, default=False, nullable=False,
+                        comment="Exactly one default org receives users with no explicit membership")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class Workspace(Base):
+    """Unit of isolation for conversations. Membership gates everything."""
+    __tablename__ = "workspaces"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True),
+                             ForeignKey('organizations.id', ondelete='CASCADE'),
+                             nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)
+    settings = Column(JSONB, nullable=True, comment="Workspace-level feature settings")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    organization = relationship("Organization", backref="workspaces")
+
+    __table_args__ = (
+        Index('idx_workspace_org', 'organization_id', 'name', unique=True),
+    )
+
+
+class WorkspaceMember(Base):
+    """Who may act inside a workspace, and as what.
+
+    Deliberately NOT a copy of users.role: the platform role (admin/analyzer/
+    ...) is about the face-recognition application; the workspace role is about
+    chat tenancy. An analyst can own one workspace and merely read another.
+    """
+    __tablename__ = "workspace_members"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True),
+                          ForeignKey('workspaces.id', ondelete='CASCADE'),
+                          nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'),
+                     nullable=False, index=True)
+    role = Column(String(32), nullable=False, default='member',
+                  comment="workspace role: admin | member | viewer")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    workspace = relationship("Workspace", backref="members")
+    user = relationship("User", backref="workspace_memberships")
+
+    __table_args__ = (
+        Index('idx_ws_member_unique', 'workspace_id', 'user_id', unique=True),
+    )
+
+
+class Conversation(Base):
+    """A chat thread. Owned by one user, scoped to one workspace."""
+    __tablename__ = "conversations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(UUID(as_uuid=True),
+                          ForeignKey('workspaces.id', ondelete='CASCADE'),
+                          nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'),
+                     nullable=False, index=True)
+    title = Column(String(500), nullable=False, default='New conversation')
+    pinned = Column(Boolean, default=False, nullable=False)
+    archived = Column(Boolean, default=False, nullable=False)
+    # Soft delete: history disappears from the UI immediately but survives
+    # until a retention job hard-deletes it, so accidental deletion is
+    # recoverable and audit questions remain answerable.
+    deleted_at = Column(DateTime, nullable=True, index=True)
+    # Bridge to the pre-existing flat history (user_query_history.session_id):
+    # lets the streaming path find the right conversation without a schema
+    # change on its side, and makes the backfill idempotent.
+    legacy_session_id = Column(String(255), nullable=True, index=True)
+    last_message_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    workspace = relationship("Workspace", backref="conversations")
+    user = relationship("User", backref="conversations")
+
+    __table_args__ = (
+        Index('idx_conv_owner_listing', 'user_id', 'workspace_id', 'deleted_at',
+              'pinned', 'last_message_at'),
+        Index('idx_conv_legacy_session', 'user_id', 'legacy_session_id'),
+    )
+
+
+class ConversationBranch(Base):
+    """One linear message sequence within a conversation.
+
+    Every conversation gets a primary branch at creation. Editing an earlier
+    user message forks a new branch at that point (forked_from_message_id),
+    leaving the original intact — the ChatGPT branching model.
+    """
+    __tablename__ = "conversation_branches"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(UUID(as_uuid=True),
+                             ForeignKey('conversations.id', ondelete='CASCADE'),
+                             nullable=False, index=True)
+    parent_branch_id = Column(UUID(as_uuid=True),
+                              ForeignKey('conversation_branches.id', ondelete='SET NULL'),
+                              nullable=True)
+    forked_from_message_id = Column(UUID(as_uuid=True), nullable=True,
+                                    comment="Message in the parent branch this branch diverges after")
+    name = Column(String(255), nullable=True)
+    is_primary = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    conversation = relationship("Conversation", backref="branches")
+
+    __table_args__ = (
+        Index('idx_branch_conversation', 'conversation_id', 'created_at'),
+    )
+
+
+class Message(Base):
+    """One turn in a branch, with TYPED content blocks.
+
+    content_blocks is a JSONB list of {"type": ..., ...} objects — text, sql,
+    result_table, warning, error — never one pre-rendered string, so the
+    frontend can render SQL with syntax highlighting and results as tables
+    without re-parsing prose, and new block types need no migration.
+    """
+    __tablename__ = "messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    branch_id = Column(UUID(as_uuid=True),
+                       ForeignKey('conversation_branches.id', ondelete='CASCADE'),
+                       nullable=False, index=True)
+    role = Column(String(16), nullable=False, comment="user | assistant | system")
+    sequence = Column(Integer, nullable=False, comment="Monotonic position within the branch")
+    content_blocks = Column(JSONB, nullable=False, default=list,
+                            comment='Typed blocks: [{"type":"text","text":...},{"type":"sql","sql":...},...]')
+    status = Column(String(16), nullable=False, default='complete',
+                    comment="complete | failed | cancelled")
+    model_provider = Column(String(64), nullable=True)
+    model_name = Column(String(255), nullable=True)
+    processing_time_ms = Column(Float, nullable=True)
+    edited_from_message_id = Column(UUID(as_uuid=True), nullable=True,
+                                    comment="Set when this message is an edit of an earlier one (branch fork)")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    branch = relationship("ConversationBranch", backref="messages")
+
+    __table_args__ = (
+        Index('idx_message_branch_seq', 'branch_id', 'sequence', unique=True),
+    )
+
+
+class MessageFeedback(Base):
+    """Thumbs up/down + optional comment, one per user per message."""
+    __tablename__ = "message_feedback"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    message_id = Column(UUID(as_uuid=True),
+                        ForeignKey('messages.id', ondelete='CASCADE'),
+                        nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'),
+                     nullable=False, index=True)
+    rating = Column(Integer, nullable=False, comment="+1 or -1")
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('idx_feedback_unique', 'message_id', 'user_id', unique=True),
+    )

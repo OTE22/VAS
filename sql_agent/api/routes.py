@@ -699,6 +699,35 @@ async def persist_query_history(
         logger.error(f"[HISTORY_SAVE] ❌ Failed to persist query history for user {user_id}: {e}", exc_info=True)
         return None
 
+    # Dual-write into the conversation domain (organizations -> workspaces ->
+    # conversations -> branches -> messages). Own session, own try/except:
+    # while both models coexist, the flat history above remains the read path
+    # for the sidebar, so a failure here must never lose the primary save.
+    try:
+        from backend.services.conversation_service import record_exchange_for_session
+
+        assistant_blocks = []
+        if response:
+            assistant_blocks.append({"type": "text", "text": response})
+        sql_text = (metadata or {}).get("sql")
+        if sql_text:
+            assistant_blocks.append({"type": "sql", "sql": str(sql_text)})
+        if not assistant_blocks:
+            assistant_blocks.append({"type": "text", "text": ""})
+
+        async with db_manager.get_session() as conv_db:
+            await record_exchange_for_session(
+                conv_db, user_id=user_id, session_id=session_id,
+                user_text=query, assistant_blocks=assistant_blocks,
+                success=success, processing_time_ms=processing_time_ms,
+            )
+            await conv_db.commit()
+    except Exception as conv_error:
+        logger.warning(
+            "[HISTORY_SAVE] conversation dual-write failed for user %s: %s",
+            user_id, type(conv_error).__name__,
+        )
+
     # Best-effort enrichment (memories + embeddings) — never blocks the sidebar row
     if query_history_id is not None:
         _spawn_background(_enrich_query_history(
