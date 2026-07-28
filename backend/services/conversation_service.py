@@ -405,6 +405,21 @@ async def record_feedback(db: AsyncSession, user_id: int, conversation_id,
                                rating=rating, comment=comment or None))
 
 
+async def verify_conversation_owner(db: AsyncSession, conversation_id,
+                                    user_id: int) -> bool:
+    """True when the user owns this live conversation.
+
+    Used by the SQL-agent stream BEFORE it starts: a client-supplied
+    conversation_id is never trusted, and rejecting up front beats streaming a
+    whole answer into a conversation the caller cannot read back.
+    """
+    try:
+        await _owned_conversation(db, conversation_id, user_id)
+        return True
+    except ConversationAccessError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Bridge from the streaming path (dual-write)
 # ---------------------------------------------------------------------------
@@ -414,13 +429,29 @@ async def record_exchange_for_session(db: AsyncSession, user_id: int,
                                       user_text: str,
                                       assistant_blocks: List[dict],
                                       success: bool,
-                                      processing_time_ms: Optional[float]) -> Optional[dict]:
-    """Append an exchange located by the LEGACY session id.
+                                      processing_time_ms: Optional[float],
+                                      conversation_id=None) -> Optional[dict]:
+    """Append an exchange to an EXPLICIT conversation, or locate one by the
+    legacy session id.
 
-    The SQL-agent stream still thinks in session ids. This finds (or creates)
-    the conversation bridged to that session in the default workspace, so the
-    new domain fills up without the streaming path changing its vocabulary.
+    conversation_id wins when given (the client selected a conversation in the
+    sidebar); ownership is re-checked here even though the route validated it
+    pre-stream, because the conversation can be deleted while the answer was
+    generating. On any access failure it falls back to the session path so the
+    exchange is recorded SOMEWHERE the user can see rather than lost.
     """
+    if conversation_id is not None:
+        try:
+            return await append_exchange(
+                db, user_id, conversation_id, user_text, assistant_blocks,
+                success=success, processing_time_ms=processing_time_ms,
+            )
+        except ConversationAccessError:
+            logger.warning(
+                "[CONV] target conversation vanished mid-stream for user_id=%s; "
+                "falling back to session placement", user_id,
+            )
+
     workspace_id = await get_default_workspace_id(db)
     await ensure_membership(db, workspace_id, user_id)
 

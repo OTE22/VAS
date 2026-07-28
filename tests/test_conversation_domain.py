@@ -489,3 +489,110 @@ def test_search_cannot_widen_visibility_across_users(probe_users):
     assert results["conversations"] == [], (
         "search returned another user's conversation"
     )
+
+
+# ---------------------------------------------------------------------------
+# Send-into-conversation (B2)
+# ---------------------------------------------------------------------------
+
+def test_stream_rejects_a_foreign_conversation_id_before_any_work(probe_users):
+    """A conversation the caller does not own must be refused up front.
+
+    The rejection happens BEFORE the agent starts, so the terminal error is
+    the FIRST event — this also keeps the test fast (no LLM involved).
+    """
+    user_a, user_b = probe_users
+    _s, created = _http("POST", "/api/v1/conversations",
+                        {"title": "A's target"}, headers=_bearer(user_a))
+    conv_id = created["id"]
+
+    # Raw fetch: the response is SSE text, not JSON, so the shared JSON helper
+    # cannot be used here.
+    import urllib.request as _ur
+    req = _ur.Request(BASE + "/api/sql-agent/query/stream",
+                      data=json.dumps({"query": "hello", "conversation_id": conv_id}).encode(),
+                      method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", _bearer(user_b)["Authorization"])
+    with _ur.urlopen(req, timeout=30) as resp:
+        first = resp.read(500).decode()
+    assert "CONVERSATION_NOT_FOUND" in first, f"foreign id accepted: {first[:200]}"
+
+
+def test_persist_targets_the_explicit_conversation(probe_users):
+    """With a conversation_id, the exchange lands in THAT conversation."""
+    user_a, _ = probe_users
+    auth = _bearer(user_a)
+    from sqlalchemy import text
+    from db_connection import db_manager
+    from sql_agent.api.routes import persist_query_history
+
+    _s, created = _http("POST", "/api/v1/conversations",
+                        {"title": "Explicit target"}, headers=auth)
+    conv_id = created["id"]
+
+    async def uid():
+        async with db_manager.get_session() as db:
+            return (await db.execute(text(
+                "SELECT id FROM users WHERE username = :u"), {"u": user_a})).scalar()
+    user_id = run_on_shared_loop(uid())
+
+    async def scenario():
+        await persist_query_history(
+            user_id=user_id, query="targeted question",
+            response="targeted answer", session_id="some_other_session",
+            success=True, processing_time_ms=5.0, metadata={},
+            conversation_id=conv_id,
+        )
+        async with db_manager.get_session() as db:
+            return (await db.execute(text("""
+                SELECT count(*) FROM messages m
+                JOIN conversation_branches b ON m.branch_id = b.id
+                WHERE b.conversation_id = :c
+            """), {"c": conv_id})).scalar()
+
+    assert run_on_shared_loop(scenario()) == 2, "exchange did not land in the target"
+
+
+def test_forged_conversation_id_cannot_write_into_another_users_thread(probe_users):
+    """Defense in depth: even if the route check were bypassed, the service
+    re-checks ownership and files the exchange in the CALLER's space instead.
+    """
+    user_a, user_b = probe_users
+    from sqlalchemy import text
+    from db_connection import db_manager
+    from sql_agent.api.routes import persist_query_history
+
+    _s, created = _http("POST", "/api/v1/conversations",
+                        {"title": "A's private thread"}, headers=_bearer(user_a))
+    a_conv_id = created["id"]
+
+    async def uid(name):
+        async with db_manager.get_session() as db:
+            return (await db.execute(text(
+                "SELECT id FROM users WHERE username = :u"), {"u": name})).scalar()
+    b_id = run_on_shared_loop(uid(user_b))
+
+    async def scenario():
+        # B calls persist with A's conversation id.
+        await persist_query_history(
+            user_id=b_id, query="intrusion attempt",
+            response="should not land in A's thread", session_id="b_fallback_session",
+            success=True, processing_time_ms=1.0, metadata={},
+            conversation_id=a_conv_id,
+        )
+        async with db_manager.get_session() as db:
+            in_a = (await db.execute(text("""
+                SELECT count(*) FROM messages m
+                JOIN conversation_branches b ON m.branch_id = b.id
+                WHERE b.conversation_id = :c
+            """), {"c": a_conv_id})).scalar()
+            in_b_fallback = (await db.execute(text("""
+                SELECT count(*) FROM conversations
+                WHERE user_id = :u AND legacy_session_id = 'b_fallback_session'
+            """), {"u": b_id})).scalar()
+            return in_a, in_b_fallback
+
+    in_a, in_b_fallback = run_on_shared_loop(scenario())
+    assert in_a == 0, "B's message landed in A's conversation"
+    assert in_b_fallback == 1, "fallback placement missing — the message was lost"

@@ -661,6 +661,7 @@ async def persist_query_history(
     success: bool = True,
     processing_time_ms: Optional[float] = None,
     metadata: Optional[dict] = None,
+    conversation_id=None,
 ):
     """Reliably persist a query so it appears in the user's sidebar history.
 
@@ -720,6 +721,7 @@ async def persist_query_history(
                 conv_db, user_id=user_id, session_id=session_id,
                 user_text=query, assistant_blocks=assistant_blocks,
                 success=success, processing_time_ms=processing_time_ms,
+                conversation_id=conversation_id,
             )
             await conv_db.commit()
     except Exception as conv_error:
@@ -1248,6 +1250,29 @@ async def sql_agent_query_stream(
                 "message": "This request was already accepted. Not executing it again.",
             })
 
+        # Optional explicit conversation target. Validated BEFORE the stream
+        # starts (and before the request session is released): a foreign or
+        # deleted id is rejected up front instead of streaming a full answer
+        # into a conversation the caller cannot read back.
+        stream_conversation_id = None
+        raw_conversation_id = request.get("conversation_id")
+        if raw_conversation_id and AUTH_AVAILABLE and current_user and db is not None:
+            import uuid as _uuid_mod
+            try:
+                candidate = _uuid_mod.UUID(str(raw_conversation_id))
+            except (ValueError, TypeError):
+                return _single_event_stream({
+                    "type": "error", "error_code": "CONVERSATION_NOT_FOUND",
+                    "message": "Conversation not found.",
+                })
+            from backend.services.conversation_service import verify_conversation_owner
+            if not await verify_conversation_owner(db, candidate, current_user.id):
+                return _single_event_stream({
+                    "type": "error", "error_code": "CONVERSATION_NOT_FOUND",
+                    "message": "Conversation not found.",
+                })
+            stream_conversation_id = candidate
+
         # Get or create user-specific agent instance for persistent memory.
         # Keyed on permissions_version so an administrator's role / chatbot /
         # pipeline change evicts the cached agent instead of letting it keep
@@ -1589,6 +1614,7 @@ async def sql_agent_query_stream(
                                 success=stream_success,
                                 processing_time_ms=stream_time_ms,
                                 metadata={},
+                                conversation_id=stream_conversation_id,
                             )
                         except Exception as history_error:
                             logger.error(f"[SQL_AGENT_API] Error saving history: {history_error}", exc_info=True)
@@ -1785,6 +1811,18 @@ async def sql_agent_websocket(websocket: WebSocket):
                 continue
 
             query = (data.get("query") or "").strip()
+            # Optional explicit conversation target. UUID-validated here;
+            # OWNERSHIP is enforced inside the conversation service, which
+            # falls back to session placement on any access failure — so a
+            # forged id can never write into another user's conversation.
+            ws_conversation_id = None
+            _raw_conv = data.get("conversation_id")
+            if _raw_conv:
+                import uuid as _uuid_mod
+                try:
+                    ws_conversation_id = _uuid_mod.UUID(str(_raw_conv))
+                except (ValueError, TypeError):
+                    ws_conversation_id = None
             request_id = _normalize_request_id(data.get("request_id"))
             seq = 0
 
@@ -1928,6 +1966,7 @@ async def sql_agent_websocket(websocket: WebSocket):
                             success=query_success,
                             processing_time_ms=ws_time_ms,
                             metadata={},
+                            conversation_id=ws_conversation_id,
                         ),
                         request_id,
                     )

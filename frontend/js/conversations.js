@@ -528,9 +528,37 @@
     // ------------------------------------------------------------------
     // Public surface + init
     // ------------------------------------------------------------------
+    /**
+     * Ensure there is an active conversation to send into, creating one when
+     * the user is in a fresh chat. Returns its id, or null when the backend
+     * refuses (the caller then sends without a target and the server files
+     * the exchange by session — degraded but never lost).
+     */
+    async function ensureActiveConversation(firstMessageText) {
+        if (activeConversationId) return activeConversationId;
+        const title = String(firstMessageText || '').trim().slice(0, 120) || 'New conversation';
+        const result = await api('/conversations', { method: 'POST', body: { title } });
+        if (!result.ok || !result.payload || !result.payload.id) return null;
+        activeConversationId = result.payload.id;
+        activeBranchId = result.payload.primary_branch_id || null;
+        branches = [];
+        refresh();
+        return activeConversationId;
+    }
+
+    function clearActive() {
+        activeConversationId = null;
+        activeBranchId = null;
+        branches = [];
+        document.querySelectorAll('.conv-item.active').forEach(n => n.classList.remove('active'));
+    }
+
     window.conversationsPanel = {
         refresh: () => refresh(false),
         open: openConversation,
+        getActiveId: () => activeConversationId,
+        ensureActiveConversation,
+        clearActive,
     };
 
     function init() {

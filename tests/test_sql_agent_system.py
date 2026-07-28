@@ -472,3 +472,32 @@ def test_edit_creates_a_branch_instead_of_overwriting():
     )
     # Branch navigation exists and is keyboard-accessible.
     assert "Branch " in src and "branch-nav-btn" in src
+
+
+def test_send_targets_the_active_conversation():
+    """The send path must create/reuse a conversation and pass its id."""
+    src = _js()
+    assert "ensureActiveConversation" in src, (
+        "send does not establish a conversation; everything piles into one session"
+    )
+    assert "conversation_id: req.conversationId || undefined" in src, (
+        "the stream request body does not carry the conversation target"
+    )
+    conv = _conv_js()
+    assert "async function ensureActiveConversation" in conv
+    assert "clearActive" in conv and "startNewChat" in src, (
+        "New chat must clear the active conversation so the next send forks a new one"
+    )
+
+
+def test_stream_route_validates_conversation_ownership_up_front():
+    with open("/app/sql_agent/api/routes.py", encoding="utf-8") as f:
+        src = f.read()
+    route = src.split("async def sql_agent_query_stream", 1)[1]
+    check_at = route.index("verify_conversation_owner")
+    release_at = route.index("release_request_session(db")
+    assert check_at < release_at, (
+        "ownership must be checked while the request session is still open, "
+        "before any streaming work begins"
+    )
+    assert "CONVERSATION_NOT_FOUND" in route

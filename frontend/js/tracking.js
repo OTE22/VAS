@@ -401,7 +401,7 @@
     // ------------------------------------------------------------------
     // states: idle -> connecting -> streaming -> (stopping) ->
     //         completed | failed | cancelled | interrupted
-    function createRequest(query) {
+    function createRequest(query, conversationId = null) {
         const id = newRequestId();
         // bound the map (prune oldest terminal entries)
         while (activeRequests.size >= MAX_ACTIVE_REQUESTS) {
@@ -411,6 +411,7 @@
         const req = {
             id,
             query,
+            conversationId,
             state: 'connecting',
             transport: null,
             lastSequence: 0,
@@ -549,6 +550,18 @@
         const welcomeMsg = document.getElementById('welcomeMessage');
         if (welcomeMsg) welcomeMsg.classList.add('hidden');
 
+        // Send INTO the selected conversation. In a fresh chat, create one
+        // first (title = the question), so "new chat" genuinely means a new
+        // conversation instead of everything piling into one session thread.
+        // A null id is tolerated: the server then files the exchange by
+        // session — degraded placement, never a lost message.
+        let conversationId = null;
+        if (window.conversationsPanel) {
+            try {
+                conversationId = await window.conversationsPanel.ensureActiveConversation(query);
+            } catch (e) { conversationId = null; }
+        }
+
         addMessage('user', query);
         input.value = '';
         if (input.tagName === 'TEXTAREA') input.style.height = 'auto';
@@ -556,7 +569,7 @@
         setSendButtonMode('stop');
         updateConnectionStatus('connecting', 'Thinking…');
 
-        const req = createRequest(query);
+        const req = createRequest(query, conversationId);
         activeRequestId = req.id;
 
         // Typing indicator + response container with PER-REQUEST ids
@@ -683,7 +696,7 @@
                 },
                 credentials: 'include',
                 cache: 'no-store',
-                body: JSON.stringify({ query: req.query, request_id: req.id, session_id: currentSessionId }),
+                body: JSON.stringify({ query: req.query, request_id: req.id, session_id: currentSessionId, conversation_id: req.conversationId || undefined }),
                 signal: req.controller.signal,
             });
         } catch (e) {
@@ -867,7 +880,7 @@
             }
             req.state = 'streaming';
             this.socket.send(JSON.stringify({
-                type: 'query', request_id: req.id, session_id: currentSessionId, query: req.query,
+                type: 'query', request_id: req.id, session_id: currentSessionId, query: req.query, conversation_id: req.conversationId || undefined,
             }));
             // WS idle watchdog
             const watchdog = () => {
@@ -1199,6 +1212,9 @@
     }
 
     function startNewChat() {
+        if (window.conversationsPanel && window.conversationsPanel.clearActive) {
+            window.conversationsPanel.clearActive();
+        }
         const messagesContainer = document.getElementById('chatMessages');
         if (messagesContainer) {
             const welcomeMsg = document.getElementById('welcomeMessage');
