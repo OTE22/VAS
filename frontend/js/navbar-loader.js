@@ -30,6 +30,10 @@
                 .filter(k => k.startsWith('navbar_html:'))
                 .forEach(k => sessionStorage.removeItem(k));
         } catch (e) { /* storage unavailable — nothing cached to clear */ }
+        // Drop in-memory auth promises too: leaving them would let the NEXT
+        // user in the same document inherit the previous user's answers.
+        window.__authMePromise = null;
+        window.__authPrivilegesPromise = null;
     }
 
     function handleAuthResponse(response) {
@@ -40,22 +44,41 @@
         return null;
     }
 
-    window.getAuthMe = window.getAuthMe || function () {
-        if (!window.__authMePromise) {
-            window.__authMePromise = fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' })
+    // In-flight de-duplication ONLY — never a permanent cache.
+    //
+    // These promises used to be memoized for the lifetime of the page, so the
+    // FIRST answer was the only answer: a privilege change (or a fresh login
+    // in the same document) could not be observed without a full reload, and
+    // every later caller got the stale result. Now concurrent callers still
+    // share one request, but the promise is released as soon as it settles, so
+    // the next call re-asks the server. Pass force=true to bypass an in-flight
+    // request entirely (used after login and on page show).
+    function _authFetch(cacheKey, url, force) {
+        if (force || !window[cacheKey]) {
+            const pending = fetch(url, { credentials: 'include', cache: 'no-store' })
                 .then(handleAuthResponse)
-                .catch(() => null);
+                .catch(() => null)
+                .finally(() => {
+                    // Release so the next call hits the network again.
+                    if (window[cacheKey] === pending) window[cacheKey] = null;
+                });
+            window[cacheKey] = pending;
         }
-        return window.__authMePromise;
+        return window[cacheKey];
+    }
+
+    window.getAuthMe = window.getAuthMe || function (force) {
+        return _authFetch('__authMePromise', '/api/auth/me', force);
     };
-    window.getAuthPrivileges = window.getAuthPrivileges || function () {
-        if (!window.__authPrivilegesPromise) {
-            window.__authPrivilegesPromise = fetch('/api/auth/me/privileges',
-                    { credentials: 'include', cache: 'no-store' })
-                .then(handleAuthResponse)
-                .catch(() => null);
-        }
-        return window.__authPrivilegesPromise;
+    window.getAuthPrivileges = window.getAuthPrivileges || function (force) {
+        return _authFetch('__authPrivilegesPromise', '/api/auth/me/privileges', force);
+    };
+
+    // Explicit invalidation for callers that KNOW the answer changed
+    // (after login, after an admin edits permissions, on logout).
+    window.refreshAuthState = window.refreshAuthState || function () {
+        window.__authMePromise = null;
+        window.__authPrivilegesPromise = null;
     };
 
     // Get the current page path to determine active link
@@ -210,6 +233,16 @@
             }
         }
     }
+
+    // Re-resolve privileges when the page is restored from the back/forward
+    // cache. A bfcache restore does NOT re-run scripts, so a user returning
+    // here after signing in (or after an admin changed their permissions)
+    // would otherwise keep whatever navigation was rendered before.
+    window.addEventListener('pageshow', (event) => {
+        if (!event.persisted) return;   // a normal load already re-fetched
+        if (window.refreshAuthState) window.refreshAuthState();
+        customizeNavbarForUser().catch(() => { /* render keeps the last good state */ });
+    });
 
     // Handle logout
     async function handleLogout() {
@@ -542,12 +575,16 @@
                 }
             }
 
-            // Add tooltip to UNKNOWN FACES link if user has pipeline access
-            if (privileges.can_access_unknown_faces && privileges.pipelines.length > 0) {
+            // Add tooltip to UNKNOWN FACES link if user has pipeline access.
+            // `pipelines` is defaulted, not assumed: an older/partial payload
+            // (or a future field rename) would otherwise throw here and abort
+            // the whole customization mid-render, leaving a half-built navbar.
+            const pipelineNames = Array.isArray(privileges.pipelines) ? privileges.pipelines : [];
+            if (privileges.can_access_unknown_faces && pipelineNames.length > 0) {
                 const unknownFacesLink = document.querySelector('.military-nav-link[data-page="unknown"]');
                 if (unknownFacesLink) {
-                    const pipelineList = privileges.pipelines.slice(0, 3).join(', ') +
-                        (privileges.pipelines.length > 3 ? ` +${privileges.pipelines.length - 3} more` : '');
+                    const pipelineList = pipelineNames.slice(0, 3).join(', ') +
+                        (pipelineNames.length > 3 ? ` +${pipelineNames.length - 3} more` : '');
                     unknownFacesLink.setAttribute('title', `Access to pipelines: ${pipelineList}`);
                 }
             }

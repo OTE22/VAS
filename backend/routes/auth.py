@@ -109,6 +109,10 @@ class UserPrivileges(BaseModel):
     pipelines: list[str]
     can_access_unknown_faces: bool
     can_manage_identities: bool
+    # Explicit sibling of the other can_* flags so a client never has to infer
+    # chatbot access from the privileges prose list or from navbar_links.
+    # Same source as CHATBOT_USE in the capability list — one resolver.
+    can_access_chatbot: bool = False
     privileges_summary: str
     accessible_pipelines_count: int
     navbar_links: list[NavbarLink]  # Backend-determined navbar links to display
@@ -396,7 +400,12 @@ async def get_user_privileges(
                 NavbarLink(page="users", href="/admin/users", label="USERS", icon="fas fa-users", visible=True, parent_page="management"),
                 NavbarLink(page="pipelines", href="/admin/pipelines", label="PIPELINES", icon="fas fa-video", visible=True, parent_page="management"),
                 NavbarLink(page="audit", href="/admin/audit", label="AUDIT LOG", icon="fas fa-clipboard-list", visible=True, parent_page="management"),
-                NavbarLink(page="tracking", href="/tracking-people", label="TRACKING", icon="fas fa-user-friends", visible=True, parent_page="management"),
+                # Gated on can_use_chatbot even for administrators: the page is
+                # the SQL assistant, and require_chatbot_access() rejects an
+                # admin whose flag is off. Showing a link that 403s is worse
+                # than not showing it.
+                *([NavbarLink(page="tracking", href="/tracking-people", label="TRACKING", icon="fas fa-user-friends", visible=True, parent_page="management")]
+                  if current_user.can_use_chatbot else []),
                 NavbarLink(page="unknown", href="/admin/unknown", label="UNKNOWN FACES", icon="fas fa-user-secret", visible=True),
                 # Search & Intelligence Dropdown items
                 NavbarLink(page="search", href="/admin/search", label="ADVANCED SEARCH", icon="fas fa-search-plus", visible=True, title="Advanced Face Search with Multi-face Detection", parent_page="search"),
@@ -433,7 +442,23 @@ async def get_user_privileges(
                 logger.debug(f"[PRIVILEGES] Regular user with pipeline access - showing UNKNOWN FACES and LIVE ALERTS links")
             else:
                 logger.debug(f"[PRIVILEGES] Regular user without pipeline access - hiding UNKNOWN FACES and LIVE ALERTS links")
-            
+
+            # THE reported bug: this branch previously had NO chatbot entry at
+            # all, so granting can_use_chatbot to a non-admin changed the
+            # database, /api/auth/me and the capability list — but the user
+            # still had no way to reach the assistant, because the navbar
+            # renders from navbar_links and the link was never emitted.
+            if current_user.can_use_chatbot:
+                navbar_links.append(
+                    NavbarLink(page="tracking", href="/tracking-people", label="TRACKING",
+                               icon="fas fa-user-friends", visible=True,
+                               title="AI data assistant")
+                )
+                logger.debug("[PRIVILEGES] Regular user with chatbot access - showing TRACKING link")
+            else:
+                logger.debug("[PRIVILEGES] Regular user without chatbot access - hiding TRACKING link")
+
+
             # Hide all admin-only links (backend decision)
             # These are not added to navbar_links, so frontend won't show them
             logger.debug(f"[PRIVILEGES] Regular user - showing only {len(navbar_links)} navbar links (DASHBOARD + UNKNOWN FACES if applicable)")
@@ -463,6 +488,7 @@ async def get_user_privileges(
             pipelines=pipelines,
             can_access_unknown_faces=can_access_unknown_faces,
             can_manage_identities=can_manage_identities,
+            can_access_chatbot=bool(current_user.can_use_chatbot),
             privileges_summary=privileges_summary,
             accessible_pipelines_count=len(pipelines),
             navbar_links=navbar_links,
@@ -476,7 +502,19 @@ async def get_user_privileges(
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
 
-        logger.debug(f"[PRIVILEGES] Successfully returned privileges for user: {current_user.username}")
+        # Structured resolution trace: user id (never the username), the
+        # chatbot decision, and what the navbar was told — enough to answer
+        # "why can't this user see the assistant?" from the log alone.
+        # No tokens, no emails, no pipeline contents.
+        logger.info(
+            "[PRIVILEGES] user_id=%s role=%s can_access_chatbot=%s "
+            "permissions_version=%s navbar_links=%d chatbot_link=%s pipelines=%d",
+            current_user.id, effective_authz.role.value,
+            bool(current_user.can_use_chatbot), effective_authz.permissions_version,
+            len(navbar_links),
+            any(link.page == "tracking" for link in navbar_links),
+            len(pipelines),
+        )
         return privileges
         
     except Exception as e:

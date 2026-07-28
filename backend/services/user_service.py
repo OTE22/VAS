@@ -291,6 +291,23 @@ class UserService:
         if is_active is not None:
             user.is_active = is_active
             logger.debug(f"[UPDATE_USER]   Is active updated: {is_active}")
+            # Reactivating clears the block markers. Without this, an admin who
+            # re-enables a blocked user through the edit form leaves
+            # blocked_reason/blocked_at set, and the users table keeps showing
+            # a BLOCKED badge for an active account (the badge is derived from
+            # those columns, not from is_active).
+            #
+            # The reverse is deliberately NOT done: un-ticking "active" in the
+            # ordinary edit form is a deactivation, not a block. blocked_at
+            # stays backend-controlled and is set only by block_user(), which
+            # records a reason — see block_user/unblock_user.
+            if is_active and (user.blocked_reason or user.blocked_at):
+                logger.info(
+                    "[UPDATE_USER] user_id=%s reactivated - clearing stale block markers",
+                    user.id,
+                )
+                user.blocked_reason = None
+                user.blocked_at = None
         logger.info(f"[UPDATE_USER] ✅ Step 4 SUCCESS: Other fields updated")
 
         # Step 5: Update pipeline access
