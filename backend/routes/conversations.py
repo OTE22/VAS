@@ -98,6 +98,7 @@ async def list_conversations(
     include_archived: bool = False,
     limit: int = 50,
     offset: int = 0,
+    q: Optional[str] = None,
     current_user: User = Depends(require_capability(Capability.CHATBOT_HISTORY_READ)),
     db: AsyncSession = Depends(get_db),
 ):
@@ -107,6 +108,7 @@ async def list_conversations(
     conversations = await svc.list_conversations(
         db, current_user.id, workspace_id,
         include_archived=include_archived, limit=limit, offset=offset,
+        search=q,
     )
     return {"workspace_id": str(workspace_id), "conversations": conversations}
 

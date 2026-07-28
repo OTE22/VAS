@@ -1028,7 +1028,17 @@
     let loadedHistoryQueryId = null;
     const historyItemNodes = new Map(); // id -> node (no string selectors on ids)
 
-    async function refreshHistory() { await loadQueryHistory(1, false); }
+    async function refreshHistory() {
+        // The conversations module (conversations.js) owns the sidebar when
+        // loaded: it reads the /api/v1 conversation domain (pinned/recent,
+        // search, branches). The flat legacy list below remains ONLY as the
+        // fallback if that module failed to load — never both at once.
+        if (window.conversationsPanel && typeof window.conversationsPanel.refresh === 'function') {
+            window.conversationsPanel.refresh();
+            return;
+        }
+        await loadQueryHistory(1, false);
+    }
 
     async function loadQueryHistory(page = 1, append = false) {
         const loadingEl = document.getElementById('historyLoading');
@@ -1349,6 +1359,17 @@
         for (const c of controllers) { try { c.abort(); } catch (e) { } }
         controllers.clear();
     }
+
+    // Rendering + UX primitives for feature modules (conversations.js).
+    // Modules reuse these instead of reimplementing them, so there is exactly
+    // ONE escape-first markdown pipeline and ONE notice system on the page.
+    window.trackingUI = {
+        renderInto,
+        showNotice,
+        scrollToBottom,
+        toggleSidebar,
+        startNewChat,
+    };
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize);

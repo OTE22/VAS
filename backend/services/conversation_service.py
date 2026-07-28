@@ -145,7 +145,8 @@ def _message_dict(m: Message) -> dict:
 
 async def list_conversations(db: AsyncSession, user_id: int, workspace_id,
                              include_archived: bool = False,
-                             limit: int = 50, offset: int = 0) -> List[dict]:
+                             limit: int = 50, offset: int = 0,
+                             search: Optional[str] = None) -> List[dict]:
     await require_membership(db, workspace_id, user_id)
     query = (
         select(Conversation)
@@ -160,6 +161,24 @@ async def list_conversations(db: AsyncSession, user_id: int, workspace_id,
     )
     if not include_archived:
         query = query.where(Conversation.archived.is_(False))
+    if search and search.strip():
+        # Title match OR any message in the conversation whose typed blocks
+        # contain the term. content_blocks::text over-matches slightly (it
+        # also sees the block "type" keys), which is acceptable for search;
+        # the parameter is bound, never interpolated. Scoping to the OWNER's
+        # conversations happens in the outer WHERE, so search cannot widen
+        # visibility.
+        from sqlalchemy import cast, exists, or_
+        from sqlalchemy.dialects.postgresql import TEXT
+
+        term = f"%{search.strip()[:200]}%"
+        message_match = exists(
+            select(Message.id)
+            .join(ConversationBranch, Message.branch_id == ConversationBranch.id)
+            .where(ConversationBranch.conversation_id == Conversation.id,
+                   cast(Message.content_blocks, TEXT).ilike(term))
+        )
+        query = query.where(or_(Conversation.title.ilike(term), message_match))
     rows = (await db.execute(query)).scalars().all()
     return [_conversation_dict(c) for c in rows]
 

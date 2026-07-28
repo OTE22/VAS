@@ -414,3 +414,61 @@ def test_js_failure_path_restores_the_input():
     assert "setInputEnabled(true)" in finalize
     assert "setSendButtonMode('send')" in finalize
     assert "req.typingEl.remove()" in finalize, "loading indicator must be removed"
+
+
+# ---------------------------------------------------------------------------
+# Conversations feature module (frontend/js/conversations.js)
+# ---------------------------------------------------------------------------
+
+def _conv_js():
+    with open("/app/frontend/js/conversations.js", encoding="utf-8") as f:
+        return f.read()
+
+
+def test_conversations_module_is_wired_into_the_page():
+    html = _html()
+    assert "conversations.js" in html, "chat page does not load the conversations module"
+    src = _js()
+    assert "window.conversationsPanel" in src, (
+        "tracking.js does not delegate history refresh to the conversations module"
+    )
+    assert "window.trackingUI" in src, (
+        "tracking.js does not expose its rendering primitives; the module "
+        "would have to duplicate the markdown pipeline"
+    )
+
+
+def test_conversations_module_is_csp_safe_and_escape_first():
+    src = _conv_js()
+    for banned in ("eval(", "new Function", "document.write", "innerHTML ="):
+        assert banned not in src, f"conversations.js uses {banned}"
+    # SQL and titles are untrusted: they must reach the DOM via textContent
+    # or the shared escape-first renderer, never string-built HTML.
+    assert "code.textContent = sql" in src, "SQL must be set via textContent"
+    assert "title.textContent" in src, "titles must be set via textContent"
+
+
+def test_block_renderer_covers_types_and_fails_safe():
+    src = _conv_js()
+    for block_type in ("'text'", "'sql'", "'error'", "'warning'"):
+        assert f"type === {block_type}" in src, f"no renderer for {block_type} blocks"
+    assert "Unsupported content" in src, (
+        "unknown block types must render a safe labelled fallback, not vanish"
+    )
+
+
+def test_destructive_actions_confirm_and_mutations_send_csrf():
+    src = _conv_js()
+    assert "window.confirm" in src, "delete has no confirmation"
+    assert "X-Requested-With" in src, "mutations do not send the CSRF header"
+    assert "credentials: 'include'" in src
+
+
+def test_edit_creates_a_branch_instead_of_overwriting():
+    src = _conv_js()
+    assert "/branches" in src, "edit does not call the branch endpoint"
+    assert "openConversation(activeConversationId, result.payload.branch_id)" in src, (
+        "after forking, the UI must navigate to the new branch"
+    )
+    # Branch navigation exists and is keyboard-accessible.
+    assert "Branch " in src and "branch-nav-btn" in src

@@ -433,3 +433,59 @@ def test_stream_persistence_dual_writes_into_conversations(probe_users):
     assert "text" in types and "sql" in types, (
         f"assistant message lost its typed blocks: {types}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+def test_search_matches_titles_and_message_content(probe_users):
+    user_a, _ = probe_users
+    auth = _bearer(user_a)
+    from sqlalchemy import text
+    from db_connection import db_manager
+    from backend.services.conversation_service import append_exchange
+
+    _s, created = _http("POST", "/api/v1/conversations",
+                        {"title": "Uniquely Named Falcon Thread"}, headers=auth)
+    conv_id = created["id"]
+
+    async def uid():
+        async with db_manager.get_session() as db:
+            return (await db.execute(text(
+                "SELECT id FROM users WHERE username = :u"), {"u": user_a})).scalar()
+    user_id = run_on_shared_loop(uid())
+
+    async def seed():
+        async with db_manager.get_session() as db:
+            await append_exchange(db, user_id, conv_id, "where was the osprey detected",
+                                  [{"type": "text", "text": "The osprey appeared on camera 3."}])
+            await db.commit()
+    run_on_shared_loop(seed())
+
+    # Title match
+    _s, by_title = _http("GET", "/api/v1/conversations?q=Falcon", headers=auth)
+    assert any(c["id"] == conv_id for c in by_title["conversations"]), "title search missed"
+
+    # Message-content match (the term appears only inside message blocks)
+    _s, by_content = _http("GET", "/api/v1/conversations?q=osprey", headers=auth)
+    assert any(c["id"] == conv_id for c in by_content["conversations"]), "content search missed"
+
+    # No match
+    _s, none = _http("GET", "/api/v1/conversations?q=zz_absent_zz", headers=auth)
+    assert not any(c["id"] == conv_id for c in none["conversations"])
+
+
+def test_search_cannot_widen_visibility_across_users(probe_users):
+    """Searching for another user's content must return nothing.
+
+    The search predicate is ORed onto the listing query; if it were ORed onto
+    the WHOLE where-clause instead of just the title/content pair, a match in
+    someone else's conversation would leak it. This pins the scoping.
+    """
+    user_a, user_b = probe_users
+    # user_a owns the Falcon/osprey conversation from the previous test; B searches for it.
+    _s, results = _http("GET", "/api/v1/conversations?q=osprey", headers=_bearer(user_b))
+    assert results["conversations"] == [], (
+        "search returned another user's conversation"
+    )
