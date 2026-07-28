@@ -596,3 +596,143 @@ def test_timeout_flag_is_declared_in_the_graph_state():
         "sql_generation_timed_out is not declared in AgentState; LangGraph will "
         "drop it between nodes"
     )
+
+
+# ---------------------------------------------------------------------------
+# History must survive the client disconnecting after the terminal event
+# ---------------------------------------------------------------------------
+#
+# Observed live (2026-07-28 08:28): a query timed out cleanly, the terminal
+# event was sent, the frontend aborted the connection on receiving it — and the
+# abort, propagated through BaseHTTPMiddleware's cancel scope, cancelled the
+# request task while persist_query_history was awaiting its commit. The log
+# showed "persisting history" with no "[HISTORY_SAVE] saved" after it, the row
+# never reached the sidebar, and SQLAlchemy's pool logged "Exception
+# terminating connection / CancelledError" tearing down the connection.
+
+def test_persistence_survives_cancellation_of_the_awaiting_task():
+    """Cancel the requester mid-persist; the commit must still land.
+
+    Exercises await_persistence_despite_disconnect with a coroutine that
+    records completion, cancelling the awaiting task while the work is
+    deliberately slow. The helper must re-raise CancelledError to the requester
+    (teardown proceeds) while the shielded task runs to completion.
+    """
+    from sql_agent.api import routes
+
+    async def scenario():
+        completed = asyncio.Event()
+
+        async def slow_persist():
+            await asyncio.sleep(0.3)
+            completed.set()
+
+        async def request_like():
+            await routes.await_persistence_despite_disconnect(slow_persist(), "test-req")
+
+        requester = asyncio.get_event_loop().create_task(request_like())
+        await asyncio.sleep(0.05)          # persist is now in flight
+        requester.cancel()                  # the client "disconnects"
+
+        with pytest.raises(asyncio.CancelledError):
+            await requester
+
+        # The persistence must still finish, uncancelled.
+        await asyncio.wait_for(completed.wait(), timeout=2.0)
+        assert completed.is_set()
+
+    run_on_shared_loop(scenario())
+
+
+def test_persistence_commits_to_the_database_despite_cancellation():
+    """Same, end-to-end: a REAL history row lands although the requester died."""
+    from sqlalchemy import text
+    from db_connection import db_manager
+    from sql_agent.api import routes
+
+    marker = "cancel_survival_probe_query"
+
+    async def scenario():
+        if not getattr(db_manager, "_initialized", False):
+            await db_manager.init_db()
+
+        async with db_manager.get_session() as db:
+            await db.execute(text(
+                "DELETE FROM user_query_history WHERE query_text = :q"), {"q": marker})
+            await db.commit()
+            admin_id = (await db.execute(text(
+                "SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1"))).scalar()
+        if admin_id is None:
+            pytest.skip("no admin user seeded")
+
+        async def request_like():
+            await routes.await_persistence_despite_disconnect(
+                routes.persist_query_history(
+                    user_id=admin_id,
+                    query=marker,
+                    response=None,
+                    session_id=None,
+                    success=False,
+                    processing_time_ms=1.0,
+                    metadata={},
+                ),
+                "test-db-req",
+            )
+
+        requester = asyncio.get_event_loop().create_task(request_like())
+        # Cancel essentially immediately — before the first commit can finish.
+        await asyncio.sleep(0)
+        requester.cancel()
+        try:
+            await requester
+        except asyncio.CancelledError:
+            pass
+
+        # Wait for the background task set to drain, then the row must exist.
+        for _ in range(100):
+            if not routes._background_tasks:
+                break
+            await asyncio.sleep(0.05)
+
+        async with db_manager.get_session() as db:
+            count = (await db.execute(text(
+                "SELECT count(*) FROM user_query_history WHERE query_text = :q"),
+                {"q": marker})).scalar()
+            await db.execute(text(
+                "DELETE FROM user_query_history WHERE query_text = :q"), {"q": marker})
+            await db.commit()
+
+        assert count == 1, (
+            "the history row was lost when the requester was cancelled — the "
+            "live incident of 2026-07-28 08:28 is back"
+        )
+
+    run_on_shared_loop(scenario())
+
+
+def test_all_persistence_sites_are_shielded():
+    """Every history save on a client-facing path must go through the helper.
+
+    A bare `await persist_query_history(...)` in a route handler dies with the
+    connection. Allowed exceptions: the helper itself and its own internals.
+    """
+    import inspect
+    from sql_agent.api import routes
+
+    source = inspect.getsource(routes)
+    lines = source.splitlines()
+    unshielded = []
+    for i, line in enumerate(lines):
+        if "await persist_query_history(" in line:
+            # Shielded if the wrapper appears nearby — either the call is the
+            # wrapper's argument (a few lines back) or it sits inside the
+            # _persist_outcome closure whose whole body runs as the shielded
+            # background task (the def is further up).
+            window = "\n".join(lines[max(0, i - 30):i + 1])
+            if ("await_persistence_despite_disconnect" not in window
+                    and "_persist_outcome" not in window):
+                unshielded.append(i + 1)
+    assert not unshielded, (
+        f"bare awaited history saves at lines {unshielded} — a client abort "
+        f"cancels them mid-commit"
+    )

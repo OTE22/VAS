@@ -522,6 +522,43 @@ def _spawn_background(coro):
     return task
 
 
+async def await_persistence_despite_disconnect(coro, request_id: str) -> None:
+    """Run a persistence coroutine so a client disconnect cannot destroy it.
+
+    Why this exists
+    ---------------
+    The stream persists history and audit AFTER its terminal event — and the
+    browser aborts the connection the moment it receives that event (a closed
+    tab does the same at any point). The abort propagates through Starlette's
+    BaseHTTPMiddleware cancel scope and cancels the request task, which was
+    still awaiting the history commit. Observed live: "persisting history"
+    logged with no "[HISTORY_SAVE] saved" after it, the row missing from the
+    sidebar, and SQLAlchemy's pool logging "Exception terminating connection /
+    CancelledError" as it tore down the connection mid-commit.
+
+    So: run the coroutine as a BACKGROUND task — outside the request's cancel
+    scope — and await it through asyncio.shield. The normal path still waits
+    for the commit before the request tears down; on cancellation the await is
+    interrupted but the task runs to completion and commits, and the
+    CancelledError is re-raised so teardown proceeds normally.
+
+    This is deliberately the narrow shield the incident brief allows ("shield
+    only a very small, essential cleanup operation") — never the agent
+    workflow, whose cancellation on disconnect is correct and wanted.
+    """
+    task = _spawn_background(coro)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if not task.done():
+            logger.info(
+                "[SQL_AGENT_API] request_id=%s client disconnected during persistence; "
+                "history/audit save continuing in background",
+                request_id,
+            )
+        raise
+
+
 async def check_authorization_fresh(user_id: int):
     """Re-read the live authorization for a long-lived connection.
 
@@ -1081,14 +1118,20 @@ async def sql_agent_query(
                         if isinstance(result_data, dict):
                             metadata["row_count"] = result_data.get("row_count", 0)
 
-                await persist_query_history(
-                    user_id=current_user.id,
-                    query=query,
-                    response=response,
-                    session_id=session_id,
-                    success=True,
-                    processing_time_ms=execution_time_ms,
-                    metadata=metadata,
+                # Shielded: a client that aborts while this handler is finishing
+                # would otherwise cancel the save mid-commit and lose the row
+                # (see await_persistence_despite_disconnect).
+                await await_persistence_despite_disconnect(
+                    persist_query_history(
+                        user_id=current_user.id,
+                        query=query,
+                        response=response,
+                        session_id=session_id,
+                        success=True,
+                        processing_time_ms=execution_time_ms,
+                        metadata=metadata,
+                    ),
+                    "query-sync",
                 )
 
         return {
@@ -1490,34 +1533,50 @@ async def sql_agent_query_stream(
                         request_id, stream_user_id, stream_success, stream_time_ms,
                         len(final_response) if final_response else 0,
                     )
-                    await log_chatbot_query(
-                        user_id=stream_user_id,
-                        username=stream_username,
-                        query=query,
-                        response=final_response,
-                        success=stream_success,
-                        error_message=None if stream_success else "Streaming error",
-                        processing_time_ms=stream_time_ms,
-                        session_id=session_id
-                    )
 
-                    # Save to user query history so it appears in the sidebar.
-                    # Awaited (not fire-and-forget) so it reliably commits within the
-                    # request lifecycle. The full response is already streamed to the
-                    # client at this point, so awaiting adds no user-facing latency.
-                    # Each of these opens its OWN short-lived session.
-                    await persist_query_history(
-                        user_id=stream_user_id,
-                        query=query,
-                        response=final_response,
-                        session_id=session_id,
-                        success=stream_success,
-                        processing_time_ms=stream_time_ms,
-                        metadata={},
-                    )
+                    async def _persist_outcome():
+                        # Audit first, then sidebar history. Each opens its OWN
+                        # short-lived session; a failure in one must not lose
+                        # the other.
+                        try:
+                            await log_chatbot_query(
+                                user_id=stream_user_id,
+                                username=stream_username,
+                                query=query,
+                                response=final_response,
+                                success=stream_success,
+                                error_message=None if stream_success else "Streaming error",
+                                processing_time_ms=stream_time_ms,
+                                session_id=session_id
+                            )
+                        except Exception as audit_error:
+                            logger.error(f"[SQL_AGENT_API] Error logging audit: {audit_error}", exc_info=True)
+                        try:
+                            await persist_query_history(
+                                user_id=stream_user_id,
+                                query=query,
+                                response=final_response,
+                                session_id=session_id,
+                                success=stream_success,
+                                processing_time_ms=stream_time_ms,
+                                metadata={},
+                            )
+                        except Exception as history_error:
+                            logger.error(f"[SQL_AGENT_API] Error saving history: {history_error}", exc_info=True)
 
+                    # Awaited so the commit normally lands within the request
+                    # lifecycle (the response is already fully streamed, so this
+                    # adds no user-facing latency) — but through the shield
+                    # helper, because the browser aborts the connection the
+                    # instant it sees the terminal event, and that abort used to
+                    # cancel this very save mid-commit. See
+                    # await_persistence_despite_disconnect.
+                    await await_persistence_despite_disconnect(_persist_outcome(), request_id)
+
+                except asyncio.CancelledError:
+                    raise
                 except Exception as audit_error:
-                    logger.error(f"[SQL_AGENT_API] Error logging audit: {str(audit_error)}", exc_info=True)
+                    logger.error(f"[SQL_AGENT_API] Error persisting outcome: {str(audit_error)}", exc_info=True)
         
         return StreamingResponse(
             stream_query(), 
@@ -1827,14 +1886,21 @@ async def sql_agent_websocket(websocket: WebSocket):
                         ws_session_id = agent_instance.conversation_memory.current_session_id
                     except Exception:
                         pass
-                    await persist_query_history(
-                        user_id=current_user.id,
-                        query=query,
-                        response=accumulated_response or None,
-                        session_id=ws_session_id,
-                        success=query_success,
-                        processing_time_ms=ws_time_ms,
-                        metadata={},
+                    # Shielded: the client has already received the terminal WS
+                    # message at this point, so a socket close right now — the
+                    # normal "user got their answer and left" case — would
+                    # cancel this save mid-commit and lose the row.
+                    await await_persistence_despite_disconnect(
+                        persist_query_history(
+                            user_id=current_user.id,
+                            query=query,
+                            response=accumulated_response or None,
+                            session_id=ws_session_id,
+                            success=query_success,
+                            processing_time_ms=ws_time_ms,
+                            metadata={},
+                        ),
+                        request_id,
                     )
 
             except WebSocketDisconnect:
