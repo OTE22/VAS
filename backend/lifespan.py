@@ -1033,12 +1033,22 @@ async def lifespan(app: FastAPI):
                         shutdown_results[component_name] = f"error: {e}"
                     continue
                 
-                # Special handling for identity_index (save instead of stop)
+                # Special handling for identity_index (save instead of stop).
+                # Off-loop (serialization blocks for seconds at scale) and
+                # BOUNDED: abandoning a timed-out save is safe now that saves
+                # are atomic — the on-disk pair is always the last complete
+                # snapshot, never a half-written one.
                 if component_name == "identity_index" and component:
                     try:
-                        component.save()
+                        await asyncio.wait_for(asyncio.to_thread(component.save), timeout=30.0)
                         logger.info(f"    ✅ Indexes saved")
                         shutdown_results[component_name] = "saved"
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "    ❌ Index save timed out after 30s — on-disk index "
+                            "remains the last atomic save"
+                        )
+                        shutdown_results[component_name] = "timeout"
                     except Exception as e:
                         logger.error(f"    ❌ Failed to save indexes: {e}")
                         shutdown_results[component_name] = f"error: {e}"

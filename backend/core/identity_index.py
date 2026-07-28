@@ -92,6 +92,20 @@ class IdentityIndexService:
         self._repair_task = None
         self._rebuild_task = None
         self._rebuild_queue = []  # Queue of index types that need rebuilding
+
+        # Monotonic save counter, stamped into BOTH metadata files by each
+        # atomic save. Equal versions across the two metas == a consistent
+        # snapshot; a mismatch on load means a crash landed between renames
+        # (a milliseconds-wide window) and repair should be allowed to run.
+        self._save_version = 0
+
+        # Serializes MAINTENANCE cycles (background repair vs. background
+        # rebuild). They previously ran with no mutual exclusion: repair could
+        # act on stale faiss_ids while a rebuild swapped the underlying index
+        # wholesale. asyncio.Lock (not the threading RLock) because both
+        # workers are coroutines on the event loop; safe to construct here in
+        # Python 3.11 (locks no longer bind an event loop at construction).
+        self._maintenance_lock = asyncio.Lock()
         
         # Initialize indexes
         self._initialize_indexes()
@@ -456,48 +470,162 @@ class IdentityIndexService:
         
         return moved
     
+    @staticmethod
+    def _available_memory_mb() -> Optional[int]:
+        """Available system memory in MB, or None when undeterminable.
+
+        Reads /proc/meminfo directly: psutil is NOT installed in the
+        production container (verified — system_metrics already guards on
+        PSUTIL_AVAILABLE for the same reason), and the container is Linux
+        where /proc is always present. Returns None on non-Linux dev hosts,
+        in which case callers proceed without the guard rather than never
+        rebuilding.
+        """
+        try:
+            with open("/proc/meminfo", encoding="ascii") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) // 1024  # kB -> MB
+        except OSError:
+            pass
+        return None
+
+    @staticmethod
+    def _fsync_file(path: str) -> None:
+        """fsync an already-written file by path (faiss.write_index does not)."""
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _write_artifacts_atomic(self) -> None:
+        """Serialize all four artifacts durably, then swap them in atomically.
+
+        The previous implementation wrote all four files IN PLACE: a crash (or
+        an OOM kill, or a worker recycle) between the first and the last write
+        left the index binaries and their metadata mutually inconsistent — the
+        exact corruption the repair worker exists to clean up after. Now every
+        artifact goes to a `.tmp` sibling, is fsynced, and only then renamed
+        over the final path. The vulnerable window shrinks from the entire
+        multi-second serialization to four sequential renames; a crash inside
+        THAT window is detectable because both metadata files carry the same
+        `save_version` only when they belong to one snapshot.
+
+        Caller must hold self.lock.
+        """
+        version = self._save_version + 1
+        saved_at = datetime.utcnow().isoformat()
+
+        def _index_to_cpu(index):
+            return faiss.index_gpu_to_cpu(index) if self.use_gpu else index
+
+        tmp_paths = {
+            self.known_index_file: self.known_index_file + ".tmp",
+            self.known_meta_file: self.known_meta_file + ".tmp",
+            self.unknown_index_file: self.unknown_index_file + ".tmp",
+            self.unknown_meta_file: self.unknown_meta_file + ".tmp",
+        }
+        try:
+            faiss.write_index(_index_to_cpu(self.known_index),
+                              tmp_paths[self.known_index_file])
+            self._fsync_file(tmp_paths[self.known_index_file])
+
+            with open(tmp_paths[self.known_meta_file], 'w', encoding='utf-8') as f:
+                json.dump({
+                    'save_version': version,
+                    'saved_at': saved_at,
+                    'metadata': {str(k): v for k, v in self.known_metadata.items()},
+                    'identity_to_faiss': {k: v for k, v in self.known_identity_to_faiss.items()}
+                }, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+
+            faiss.write_index(_index_to_cpu(self.unknown_index),
+                              tmp_paths[self.unknown_index_file])
+            self._fsync_file(tmp_paths[self.unknown_index_file])
+
+            with open(tmp_paths[self.unknown_meta_file], 'w', encoding='utf-8') as f:
+                json.dump({
+                    'save_version': version,
+                    'saved_at': saved_at,
+                    'metadata': {str(k): v for k, v in self.unknown_metadata.items()},
+                    'identity_to_faiss': {k: v for k, v in self.unknown_identity_to_faiss.items()}
+                }, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # All four durable — swap in fixed order.
+            for final, tmp in tmp_paths.items():
+                os.replace(tmp, final)
+
+            # Best-effort directory fsync so the renames themselves survive a
+            # power loss. Directories cannot be opened on Windows dev hosts —
+            # skipped there; the Linux container is what production runs.
+            try:
+                dir_fd = os.open(self.db_path, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+
+            self._save_version = version
+        except Exception:
+            for tmp in tmp_paths.values():
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except OSError:
+                    pass
+            raise
+
     def save(self):
-        """Save both indexes and metadata to disk"""
+        """Save both indexes and metadata to disk (atomic, versioned)."""
         try:
             os.makedirs(self.db_path, exist_ok=True)
-            
+
             with self.lock:
-                # Save KNOWN index
-                if self.use_gpu:
-                    cpu_known = faiss.index_gpu_to_cpu(self.known_index)
-                    faiss.write_index(cpu_known, self.known_index_file)
-                else:
-                    faiss.write_index(self.known_index, self.known_index_file)
-                
-                with open(self.known_meta_file, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'metadata': {str(k): v for k, v in self.known_metadata.items()},
-                        'identity_to_faiss': {k: v for k, v in self.known_identity_to_faiss.items()}
-                    }, f, indent=2)
-                
-                # Save UNKNOWN index
-                if self.use_gpu:
-                    cpu_unknown = faiss.index_gpu_to_cpu(self.unknown_index)
-                    faiss.write_index(cpu_unknown, self.unknown_index_file)
-                else:
-                    faiss.write_index(self.unknown_index, self.unknown_index_file)
-                
-                with open(self.unknown_meta_file, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'metadata': {str(k): v for k, v in self.unknown_metadata.items()},
-                        'identity_to_faiss': {k: v for k, v in self.unknown_identity_to_faiss.items()}
-                    }, f, indent=2)
-                
-                logger.info(f"✅ Saved identity indexes: KNOWN={self.known_index.ntotal}, UNKNOWN={self.unknown_index.ntotal}")
+                self._write_artifacts_atomic()
+                logger.info(
+                    f"✅ Saved identity indexes: KNOWN={self.known_index.ntotal}, "
+                    f"UNKNOWN={self.unknown_index.ntotal} (save_version={self._save_version})"
+                )
                 self.last_save_time = datetime.utcnow()
-        
+
         except Exception as e:
             logger.error(f"❌ Failed to save identity indexes: {e}", exc_info=True)
             raise
+
+    async def save_async(self, timeout: Optional[float] = None):
+        """Save without blocking the event loop.
+
+        Full index serialization takes seconds at scale; calling the sync
+        save() from a coroutine froze every request for that long (and was a
+        prime suspect in the loop-lag warnings). The threading RLock inside
+        save() still guarantees exclusivity against writers on other threads.
+        """
+        if timeout is not None:
+            await asyncio.wait_for(asyncio.to_thread(self.save), timeout=timeout)
+        else:
+            await asyncio.to_thread(self.save)
     
     def load(self) -> bool:
         """Load both indexes and metadata from disk"""
         try:
+            # A leftover .tmp means a save died before its renames — the final
+            # files are the last consistent snapshot; the partial is garbage.
+            for final in (self.known_index_file, self.known_meta_file,
+                          self.unknown_index_file, self.unknown_meta_file):
+                stale = final + ".tmp"
+                try:
+                    if os.path.exists(stale):
+                        os.remove(stale)
+                        logger.warning(f"Removed stale partial save artifact: {stale}")
+                except OSError:
+                    pass
+
             if not os.path.exists(self.known_index_file) or not os.path.exists(self.unknown_index_file):
                 logger.info("Identity indexes not found, starting fresh")
                 return False
@@ -520,11 +648,13 @@ class IdentityIndexService:
                     if self.use_gpu:
                         self.known_index = faiss.index_cpu_to_gpu(self.gpu_resource, 0, self.known_index)
                 
+                known_version = None
                 if os.path.exists(self.known_meta_file):
                     with open(self.known_meta_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         self.known_metadata = {int(k): v for k, v in data.get('metadata', {}).items()}
                         self.known_identity_to_faiss = data.get('identity_to_faiss', {})
+                        known_version = data.get('save_version')
                 
                 # Load UNKNOWN index
                 if self.use_gpu:
@@ -533,12 +663,29 @@ class IdentityIndexService:
                 else:
                     self.unknown_index = faiss.read_index(self.unknown_index_file)
                 
+                unknown_version = None
                 if os.path.exists(self.unknown_meta_file):
                     with open(self.unknown_meta_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                         self.unknown_metadata = {int(k): v for k, v in data.get('metadata', {}).items()}
                         self.unknown_identity_to_faiss = data.get('identity_to_faiss', {})
-                
+                        unknown_version = data.get('save_version')
+
+                # Version bookkeeping. A mismatch means a crash landed between
+                # the four renames of one save — report it (the repair worker
+                # reconciles index/metadata divergence) but still load: both
+                # halves are individually consistent snapshots.
+                if known_version is not None and unknown_version is not None:
+                    if known_version != unknown_version:
+                        logger.warning(
+                            f"⚠️ Index metadata versions diverge (known={known_version}, "
+                            f"unknown={unknown_version}) — a save was interrupted mid-swap; "
+                            f"background repair will reconcile"
+                        )
+                    self._save_version = max(known_version, unknown_version)
+                elif known_version is not None or unknown_version is not None:
+                    self._save_version = known_version or unknown_version
+
                 logger.info(f"✅ Loaded identity indexes: KNOWN={self.known_index.ntotal}, UNKNOWN={self.unknown_index.ntotal}")
                 return True
         
@@ -571,7 +718,9 @@ class IdentityIndexService:
                     # Check if there are changes (simple check: compare last save time)
                     time_since_save = (datetime.utcnow() - self.last_save_time).total_seconds()
                     if time_since_save >= self.auto_save_interval_seconds:
-                        self.save()
+                        # Off-loop: serialization takes seconds at scale and
+                        # used to freeze every request while it ran.
+                        await self.save_async()
                         self.last_save_time = datetime.utcnow()
                 except asyncio.CancelledError:
                     break
@@ -601,23 +750,32 @@ class IdentityIndexService:
             while True:
                 try:
                     await asyncio.sleep(60)  # Check every minute
-                    
-                    if self._rebuild_queue:
-                        index_type = self._rebuild_queue.pop(0)
+
+                    # Pop under the SAME lock the appends use. The pop was
+                    # previously unlocked while every append was locked — a
+                    # torn read could lose or double-run a rebuild request.
+                    with self.lock:
+                        index_type = self._rebuild_queue.pop(0) if self._rebuild_queue else None
+
+                    if index_type is not None:
                         logger.info(f"[FAISS_REBUILD] Starting background rebuild for {index_type.upper()} index...")
-                        
+
                         try:
-                            async with db_manager.get_session() as db:
-                                rebuilt = await self._rebuild_index_from_database(db, index_type)
-                                if rebuilt:
-                                    self.save()
-                                    logger.info(f"[FAISS_REBUILD] ✅ Background rebuild completed for {index_type.upper()} index")
-                                else:
-                                    logger.error(f"[FAISS_REBUILD] ❌ Background rebuild failed for {index_type.upper()} index")
-                                    # Re-queue for retry
-                                    with self.lock:
-                                        if index_type not in self._rebuild_queue:
-                                            self._rebuild_queue.append(index_type)
+                            # Maintenance mutex: a rebuild swaps the index
+                            # wholesale; a concurrently-running repair would be
+                            # acting on faiss_ids from the pre-swap index.
+                            async with self._maintenance_lock:
+                                async with db_manager.get_session() as db:
+                                    rebuilt = await self._rebuild_index_from_database(db, index_type)
+                                    if rebuilt:
+                                        await self.save_async()
+                                        logger.info(f"[FAISS_REBUILD] ✅ Background rebuild completed for {index_type.upper()} index")
+                                    else:
+                                        logger.error(f"[FAISS_REBUILD] ❌ Background rebuild failed for {index_type.upper()} index")
+                                        # Re-queue for retry
+                                        with self.lock:
+                                            if index_type not in self._rebuild_queue:
+                                                self._rebuild_queue.append(index_type)
                         except Exception as e:
                             logger.error(f"[FAISS_REBUILD] Error during background rebuild: {e}", exc_info=True)
                             # Re-queue for retry
@@ -677,22 +835,27 @@ class IdentityIndexService:
                         logger.warning(f"[FAISS_REPAIR] Failed to send notification: {e}")
                     
                     logger.info(f"[FAISS_REPAIR] Starting background repair (interval: {interval_hours}h)...")
-                    async with db_manager.get_session() as db:
-                        # Run efficient async repair
-                        repair_stats = await self.repair_orphaned_entries_async(db)
-                        known_repair = await self.repair_orphaned_embeddings_async(db, 'known')
-                        unknown_repair = await self.repair_orphaned_embeddings_async(db, 'unknown')
-                        
-                        total_removed = (
-                            repair_stats['known_removed'] + repair_stats['unknown_removed'] +
-                            known_repair['removed'] + unknown_repair['removed']
-                        )
-                        
-                        if total_removed > 0:
-                            logger.warning(f"[FAISS_REPAIR] Background repair removed {total_removed} orphaned entries")
-                            self.save()
-                        else:
-                            logger.info(f"[FAISS_REPAIR] Background repair: All entries valid")
+                    # Maintenance mutex: repair walks faiss_ids that a
+                    # concurrent rebuild would invalidate mid-walk by swapping
+                    # the whole index. Serialized, each cycle sees a stable
+                    # index; sleeps stay outside the lock so neither starves.
+                    async with self._maintenance_lock:
+                        async with db_manager.get_session() as db:
+                            # Run efficient async repair
+                            repair_stats = await self.repair_orphaned_entries_async(db)
+                            known_repair = await self.repair_orphaned_embeddings_async(db, 'known')
+                            unknown_repair = await self.repair_orphaned_embeddings_async(db, 'unknown')
+
+                            total_removed = (
+                                repair_stats['known_removed'] + repair_stats['unknown_removed'] +
+                                known_repair['removed'] + unknown_repair['removed']
+                            )
+
+                            if total_removed > 0:
+                                logger.warning(f"[FAISS_REPAIR] Background repair removed {total_removed} orphaned entries")
+                                await self.save_async()
+                            else:
+                                logger.info(f"[FAISS_REPAIR] Background repair: All entries valid")
                     
                     # Send completion notification
                     try:
@@ -1023,7 +1186,23 @@ class IdentityIndexService:
         try:
             from sqlalchemy import select
             from db_models import IdentityEmbedding
-            
+
+            # Memory guard: a rebuild materializes EVERY embedding for the
+            # index type into Python lists before training/adding — at scale
+            # that is a large transient allocation on top of the live index.
+            # Below the floor, defer rather than risk an OOM kill. The
+            # caller's False path re-queues, so a deferred rebuild retries on
+            # the next worker cycle.
+            available_mb = self._available_memory_mb()
+            if available_mb is not None:
+                min_available_mb = int(getattr(settings, 'FAISS_REBUILD_MIN_AVAILABLE_MB', 1024) or 1024)
+                if available_mb < min_available_mb:
+                    logger.warning(
+                        f"[FAISS_REBUILD] Deferring {index_type.upper()} rebuild: "
+                        f"{available_mb}MB available < {min_available_mb}MB required"
+                    )
+                    return False
+
             logger.info(f"[FAISS_REBUILD] Rebuilding {index_type.upper()} index from database...")
             
             # Get all embeddings from database for this index type
