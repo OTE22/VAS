@@ -204,27 +204,37 @@ async function loadPipelines() {
             const pipelines = await response.json();
             const pipelineList = document.getElementById('pipeline-list');
             const pipelinesSection = document.getElementById('pipelines-section');
-            
-            // Always show the section for regular users (not just admins)
-            if (currentUser && currentUser.role !== 'admin') {
-                pipelinesSection.style.display = 'block';
-            }
-            
+
+            // home.html has never contained these elements (verified against
+            // git history) — the section was aspirational. Without this guard
+            // every home load logged "Cannot read properties of null" once the
+            // pipelines response arrived.
+            if (!pipelineList || !pipelinesSection) return;
+
+            pipelinesSection.style.display = 'block';
+
             if (pipelines.length > 0) {
-                if (currentUser && currentUser.role === 'admin') {
-                    pipelinesSection.style.display = 'block';
-                }
-                pipelineList.innerHTML = pipelines.map(p => `
-                    <div class="pipeline-card" data-action="goToPipeline" data-arg="${p}">
-                        <h3>${p}</h3>
-                        <p>View detections</p>
-                    </div>
-                `).join('');
-            } else {
-                // Show message if no pipelines assigned
-                if (currentUser && currentUser.role !== 'admin') {
-                    pipelineList.innerHTML = '<p style="color: #666; text-align: center; padding: 2rem;">No pipelines assigned. Please contact your administrator.</p>';
-                }
+                // DOM-built, not an innerHTML template: pipeline ids are
+                // server data and must not be interpolated into markup.
+                pipelineList.replaceChildren();
+                pipelines.forEach(p => {
+                    const card = document.createElement('div');
+                    card.className = 'pipeline-card';
+                    card.dataset.action = 'goToPipeline';
+                    card.dataset.arg = String(p);
+                    const h3 = document.createElement('h3');
+                    h3.textContent = String(p);
+                    const hint = document.createElement('p');
+                    hint.textContent = 'View detections';
+                    card.appendChild(h3);
+                    card.appendChild(hint);
+                    pipelineList.appendChild(card);
+                });
+            } else if (currentUser && currentUser.role !== 'admin') {
+                const note = document.createElement('p');
+                note.style.cssText = 'color: #666; text-align: center; padding: 2rem;';
+                note.textContent = 'No pipelines assigned. Please contact your administrator.';
+                pipelineList.replaceChildren(note);
             }
         }
     } catch (error) {
