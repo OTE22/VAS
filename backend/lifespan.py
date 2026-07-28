@@ -724,16 +724,18 @@ async def lifespan(app: FastAPI):
         # 3.6 Queue Batch Flusher (periodic flush of incomplete batches)
         logger.info("  🔄 Starting queue batch flusher...")
         try:
-            async def periodic_batch_flush():
-                """Periodically flush incomplete batches"""
-                while True:
-                    await asyncio.sleep(0.5)  # Check every 0.5 seconds
-                    try:
-                        await processing_queue.flush_batches()
-                    except Exception as e:
-                        logger.error(f"Batch flush error: {e}")
-            
-            batch_flush_task = asyncio.create_task(periodic_batch_flush())
+            from backend.core.service_supervisor import supervised_loop as _supervised_loop
+            batch_flush_task = asyncio.create_task(
+                _supervised_loop(
+                    "batch_flusher",
+                    0.5,                       # check every 0.5 seconds (unchanged)
+                    processing_queue.flush_batches,
+                    error_backoff_base=0.5,
+                    error_backoff_max=30,
+                    jitter=0,
+                ),
+                name="batch_flusher",
+            )
             logger.info("  ✅ Queue batch flusher started")
             initialized_components.append("batch_flusher")
         except Exception as e:
@@ -746,22 +748,27 @@ async def lifespan(app: FastAPI):
         # WARN-logged with the drift so it's visible without Prometheus.
         logger.info("  🔄 Starting event-loop lag monitor...")
         try:
-            async def event_loop_lag_monitor():
+            async def _lag_probe_cycle():
                 from backend.core import metrics as _metrics
-                while True:
-                    t0 = asyncio.get_event_loop().time()
-                    await asyncio.sleep(1.0)
-                    lag = asyncio.get_event_loop().time() - t0 - 1.0
-                    lag = max(0.0, lag)
-                    try:
-                        if _metrics.metrics_event_loop_lag is not None:
-                            _metrics.metrics_event_loop_lag.set(lag)
-                    except Exception:
-                        pass
-                    if lag > 0.5:
-                        logger.warning(f"[LOOP-LAG] ⚠️ Event loop blocked for {lag:.2f}s — something is running sync work on the loop")
+                t0 = asyncio.get_event_loop().time()
+                await asyncio.sleep(1.0)
+                lag = max(0.0, asyncio.get_event_loop().time() - t0 - 1.0)
+                try:
+                    if _metrics.metrics_event_loop_lag is not None:
+                        _metrics.metrics_event_loop_lag.set(lag)
+                except Exception:
+                    pass
+                if lag > 0.5:
+                    logger.warning(f"[LOOP-LAG] ⚠️ Event loop blocked for {lag:.2f}s — something is running sync work on the loop")
 
-            loop_lag_task = asyncio.create_task(event_loop_lag_monitor())
+            from backend.core.service_supervisor import supervised_loop as _supervised_loop2
+            # interval=0: the probe's own 1s sleep IS the cadence; adding an
+            # interval sleep would halve the sampling rate.
+            loop_lag_task = asyncio.create_task(
+                _supervised_loop2("loop_lag_monitor", 0, _lag_probe_cycle,
+                                  error_backoff_base=1, error_backoff_max=30, jitter=0),
+                name="loop_lag_monitor",
+            )
             logger.info("  ✅ Event-loop lag monitor started")
             initialized_components.append("loop_lag_monitor")
         except Exception as e:

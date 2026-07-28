@@ -44,7 +44,27 @@ class SystemMetricsCollector:
 
     async def start(self):
         """Start periodic metrics collection"""
-        self._collector_task = asyncio.create_task(self._periodic_collection())
+        if self._collector_task and not self._collector_task.done():
+            logger.warning("System metrics collector already running; ignoring duplicate start()")
+            return
+        if PSUTIL_AVAILABLE:
+            # Prime the non-blocking CPU sampler: with interval=None the FIRST
+            # call always returns 0.0; priming here makes cycle 1 meaningful.
+            try:
+                psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
+        from backend.core.service_supervisor import supervised_loop
+        self._collector_task = asyncio.create_task(
+            supervised_loop(
+                "system_metrics",
+                self.collection_interval,
+                self.collect_and_save_metrics,
+                initial_delay=10,
+                error_backoff_base=self.collection_interval,
+            ),
+            name="system_metrics",
+        )
         logger.info(f"System metrics collector started (interval: {self.collection_interval}s)")
 
     async def stop(self):
@@ -56,21 +76,6 @@ class SystemMetricsCollector:
             except asyncio.CancelledError:
                 pass
         logger.info("System metrics collector stopped")
-
-    async def _periodic_collection(self):
-        """Run metrics collection periodically"""
-        # Wait a bit before first collection
-        await asyncio.sleep(10)
-
-        while True:
-            try:
-                await self.collect_and_save_metrics()
-                await asyncio.sleep(self.collection_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Metrics collection error: {e}")
-                await asyncio.sleep(self.collection_interval)
 
     async def collect_and_save_metrics(self):
         """Collect current metrics and save to database"""
@@ -100,7 +105,7 @@ class SystemMetricsCollector:
             # Get system resource usage (CPU, Memory) if psutil available
             if PSUTIL_AVAILABLE:
                 try:
-                    cpu_percent = psutil.cpu_percent(interval=1)
+                    cpu_percent = psutil.cpu_percent(interval=None)
                     memory = psutil.virtual_memory()
                     memory_percent = memory.percent
                     disk_usage_gb = psutil.disk_usage(settings.STORAGE_DIR).used / (1024**3) if os.path.exists(settings.STORAGE_DIR) else 0
@@ -113,6 +118,20 @@ class SystemMetricsCollector:
                 cpu_percent = None
                 memory_percent = None
                 disk_usage_gb = None
+
+            # Export process RSS (host-wide percent cannot reveal THIS
+            # process leaking). /proc read because psutil is not installed
+            # in the production container.
+            try:
+                from backend.core import metrics as _m
+                if getattr(_m, "metrics_process_rss", None):
+                    with open("/proc/self/status", encoding="ascii") as _f:
+                        for _line in _f:
+                            if _line.startswith("VmRSS"):
+                                _m.metrics_process_rss.set(int(_line.split()[1]) * 1024)
+                                break
+            except (OSError, Exception):
+                pass
 
             # Create metrics record in separate transaction
             async with db_manager.get_session() as db:
@@ -143,7 +162,10 @@ class SystemMetricsCollector:
                 )
 
         except Exception as e:
+            # Re-raise: the supervised loop owns failure accounting/backoff.
+            # Swallowing here made every failure invisible.
             logger.error(f"Failed to collect/save metrics: {e}")
+            raise
 
 
 metrics_collector = SystemMetricsCollector(collection_interval=60)  # Collect every 60 seconds

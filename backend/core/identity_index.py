@@ -710,25 +710,31 @@ class IdentityIndexService:
         """Start periodic auto-save task"""
         if not self.auto_save_enabled:
             return
-        
-        async def _periodic_save():
-            while True:
-                try:
-                    await asyncio.sleep(self.auto_save_interval_seconds)
-                    # Check if there are changes (simple check: compare last save time)
-                    time_since_save = (datetime.utcnow() - self.last_save_time).total_seconds()
-                    if time_since_save >= self.auto_save_interval_seconds:
-                        # Off-loop: serialization takes seconds at scale and
-                        # used to freeze every request while it ran.
-                        await self.save_async()
-                        self.last_save_time = datetime.utcnow()
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"Error in periodic index save: {e}", exc_info=True)
-                    await asyncio.sleep(60)  # Wait 1 minute before retry
-        
-        self._save_task = asyncio.create_task(_periodic_save())
+        if self._save_task and not self._save_task.done():
+            logger.warning("FAISS auto-save already running; ignoring duplicate start()")
+            return
+
+        async def _auto_save_cycle():
+            # Change detection: only save when something happened since the
+            # last save (compare last_save_time against the interval).
+            time_since_save = (datetime.utcnow() - self.last_save_time).total_seconds()
+            if time_since_save >= self.auto_save_interval_seconds:
+                # Off-loop: serialization takes seconds at scale and used to
+                # freeze every request while it ran.
+                await self.save_async()
+                self.last_save_time = datetime.utcnow()
+
+        from backend.core.service_supervisor import supervised_loop
+        self._save_task = asyncio.create_task(
+            supervised_loop(
+                "faiss_auto_save",
+                self.auto_save_interval_seconds,
+                _auto_save_cycle,
+                initial_delay=self.auto_save_interval_seconds,
+                error_backoff_base=60,
+            ),
+            name="faiss_auto_save",
+        )
         logger.info(f"✅ Started periodic index auto-save (interval: {self.auto_save_interval_seconds}s)")
     
     async def stop_auto_save(self):
@@ -746,51 +752,58 @@ class IdentityIndexService:
         Start background rebuild task for large indexes that need rebuilding.
         Runs rebuilds from the queue without blocking.
         """
+        if self._rebuild_task and not self._rebuild_task.done():
+            logger.warning("FAISS rebuild worker already running; ignoring duplicate start()")
+            return
+
         async def _background_rebuild_worker():
-            while True:
-                try:
-                    await asyncio.sleep(60)  # Check every minute
+            # One queue check. Pop under the SAME lock the appends use — the
+            # pop was previously unlocked while every append was locked, so a
+            # torn read could lose or double-run a rebuild request.
+            with self.lock:
+                index_type = self._rebuild_queue.pop(0) if self._rebuild_queue else None
 
-                    # Pop under the SAME lock the appends use. The pop was
-                    # previously unlocked while every append was locked — a
-                    # torn read could lose or double-run a rebuild request.
-                    with self.lock:
-                        index_type = self._rebuild_queue.pop(0) if self._rebuild_queue else None
+            if index_type is None:
+                return
 
-                    if index_type is not None:
-                        logger.info(f"[FAISS_REBUILD] Starting background rebuild for {index_type.upper()} index...")
-
-                        try:
-                            # Maintenance mutex: a rebuild swaps the index
-                            # wholesale; a concurrently-running repair would be
-                            # acting on faiss_ids from the pre-swap index.
-                            async with self._maintenance_lock:
-                                async with db_manager.get_session() as db:
-                                    rebuilt = await self._rebuild_index_from_database(db, index_type)
-                                    if rebuilt:
-                                        await self.save_async()
-                                        logger.info(f"[FAISS_REBUILD] ✅ Background rebuild completed for {index_type.upper()} index")
-                                    else:
-                                        logger.error(f"[FAISS_REBUILD] ❌ Background rebuild failed for {index_type.upper()} index")
-                                        # Re-queue for retry
-                                        with self.lock:
-                                            if index_type not in self._rebuild_queue:
-                                                self._rebuild_queue.append(index_type)
-                        except Exception as e:
-                            logger.error(f"[FAISS_REBUILD] Error during background rebuild: {e}", exc_info=True)
-                            # Re-queue for retry
+            logger.info(f"[FAISS_REBUILD] Starting background rebuild for {index_type.upper()} index...")
+            try:
+                # Maintenance mutex: a rebuild swaps the index wholesale; a
+                # concurrently-running repair would be acting on faiss_ids
+                # from the pre-swap index.
+                async with self._maintenance_lock:
+                    async with db_manager.get_session() as db:
+                        rebuilt = await self._rebuild_index_from_database(db, index_type)
+                        if rebuilt:
+                            await self.save_async()
+                            logger.info(f"[FAISS_REBUILD] ✅ Background rebuild completed for {index_type.upper()} index")
+                        else:
+                            logger.error(f"[FAISS_REBUILD] ❌ Background rebuild failed for {index_type.upper()} index")
                             with self.lock:
                                 if index_type not in self._rebuild_queue:
                                     self._rebuild_queue.append(index_type)
-                            await asyncio.sleep(300)  # Wait 5 minutes before retry
-                    
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"[FAISS_REBUILD] Background rebuild worker error: {e}", exc_info=True)
-                    await asyncio.sleep(60)
-        
-        self._rebuild_task = asyncio.create_task(_background_rebuild_worker())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Re-queue, then let the exception REACH the supervisor: it
+                # owns the failure counter and the (300s-base) backoff that
+                # replaces the old flat sleep(300).
+                with self.lock:
+                    if index_type not in self._rebuild_queue:
+                        self._rebuild_queue.append(index_type)
+                raise
+
+        from backend.core.service_supervisor import supervised_loop
+        self._rebuild_task = asyncio.create_task(
+            supervised_loop(
+                "faiss_rebuild",
+                60,                       # queue poll cadence (unchanged)
+                _background_rebuild_worker,
+                initial_delay=60,
+                error_backoff_base=300,
+            ),
+            name="faiss_rebuild",
+        )
         logger.info("✅ Started background FAISS rebuild worker")
     
     async def stop_background_rebuild(self):
@@ -812,12 +825,14 @@ class IdentityIndexService:
             db_manager: Database manager instance
             interval_hours: Hours between repair runs (default: 24)
         """
-        async def _periodic_repair():
-            # Wait 1 hour after startup before first repair
-            await asyncio.sleep(3600)
-            
-            while True:
-                try:
+        if self._repair_task and not self._repair_task.done():
+            logger.warning("FAISS repair worker already running; ignoring duplicate start()")
+            return
+
+        async def _repair_cycle():
+                # (indentation preserved from the original loop body so the
+                # diff stays reviewable; the while/try shell is now owned by
+                # supervised_loop)
                     # Send notification 1 minute before repair starts
                     try:
                         from backend.core.background_task_notifier import background_task_notifier, TaskType
@@ -873,15 +888,17 @@ class IdentityIndexService:
                     except Exception as e:
                         logger.debug(f"[FAISS_REPAIR] Failed to send completion notification: {e}")
                     
-                    # Wait for next repair cycle (subtract 60 seconds for notification lead time)
-                    await asyncio.sleep((interval_hours * 3600) - 60)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"[FAISS_REPAIR] Background repair error: {e}", exc_info=True)
-                    await asyncio.sleep(3600)  # Retry in 1 hour on error
-        
-        self._repair_task = asyncio.create_task(_periodic_repair())
+        from backend.core.service_supervisor import supervised_loop
+        self._repair_task = asyncio.create_task(
+            supervised_loop(
+                "faiss_repair",
+                (interval_hours * 3600) - 60,
+                _repair_cycle,
+                initial_delay=3600,
+                error_backoff_base=3600,
+            ),
+            name="faiss_repair",
+        )
         logger.info(f"✅ Started background FAISS repair (interval: {interval_hours}h)")
     
     async def stop_background_repair(self):

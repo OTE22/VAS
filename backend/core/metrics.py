@@ -26,6 +26,13 @@ metrics_cache_write_behind = None
 metrics_cache_circuit_state = None
 metrics_event_loop_lag = None
 metrics_request_duration = None
+# Background-service supervision (set by backend.core.service_supervisor):
+# these are what let Prometheus alert on a dead or failing background loop —
+# previously a loop could be dead for a week with no observable signal.
+metrics_bg_last_success = None
+metrics_bg_failures = None
+metrics_bg_service_up = None
+metrics_process_rss = None
 
 
 def initialize_metrics():
@@ -37,6 +44,8 @@ def initialize_metrics():
     global metrics_worker_active, metrics_cache_hit_rate, metrics_cache_size
     global metrics_cache_write_behind, metrics_cache_circuit_state
     global metrics_event_loop_lag, metrics_request_duration
+    global metrics_bg_last_success, metrics_bg_failures, metrics_bg_service_up
+    global metrics_process_rss
 
     # Helper function to safely create metrics
     def safe_metric(metric_class, name, documentation, **kwargs):
@@ -56,6 +65,22 @@ def initialize_metrics():
     )
     metrics_processing_time = safe_metric(
         Histogram, 'face_recognition_processing_seconds', 'Processing time in seconds'
+    )
+    metrics_bg_last_success = safe_metric(
+        Gauge, 'fr_background_task_last_success_timestamp',
+        'Unix time of the last successful background cycle', labelnames=['service']
+    )
+    metrics_bg_failures = safe_metric(
+        Counter, 'fr_background_task_failures_total',
+        'Background service cycle failures', labelnames=['service']
+    )
+    metrics_bg_service_up = safe_metric(
+        Gauge, 'fr_background_service_up',
+        '1 while the supervised loop is alive, 0 once stopped', labelnames=['service']
+    )
+    metrics_process_rss = safe_metric(
+        Gauge, 'fr_process_rss_bytes',
+        'Worker process resident set size (from /proc/self/status)'
     )
     metrics_queue_size = safe_metric(
         Gauge, 'face_recognition_queue_size', 'Current queue size'

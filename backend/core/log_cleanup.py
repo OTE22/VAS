@@ -49,9 +49,25 @@ class LogCleanupManager:
     
     async def start(self):
         """Start periodic log cleanup"""
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        if self._cleanup_task and not self._cleanup_task.done():
+            logger.warning("Log cleanup manager already running; ignoring duplicate start()")
+            return
+        from backend.core.service_supervisor import supervised_loop
+        # Cadence preserved: first run after 10 minutes, then every 6 hours
+        # (minus the 60s notification lead inside the cycle); 1h backoff on
+        # error was the old flat retry and is now the backoff BASE.
+        self._cleanup_task = asyncio.create_task(
+            supervised_loop(
+                "log_cleanup",
+                (6 * 3600) - 60,
+                self._run_cycle,
+                initial_delay=600,
+                error_backoff_base=3600,
+            ),
+            name="log_cleanup",
+        )
         logger.info(f"Log cleanup manager started (retention: {self.retention_hours} hours)")
-    
+
     async def stop(self):
         """Stop cleanup task"""
         if self._cleanup_task:
@@ -61,58 +77,49 @@ class LogCleanupManager:
             except asyncio.CancelledError:
                 pass
         logger.info("Log cleanup manager stopped")
-    
-    async def _periodic_cleanup(self):
-        """Run cleanup periodically"""
-        # Run first cleanup after 10 minutes (instead of 1 hour)
-        await asyncio.sleep(600)
-        
-        while True:
-            try:
-                # Send notification 1 minute before cleanup starts
-                try:
-                    from backend.core.background_task_notifier import background_task_notifier, TaskType
-                    next_run_time = datetime.utcnow() + timedelta(seconds=60)
-                    await background_task_notifier.notify_task_starting(
-                        task_type=TaskType.LOG_CLEANUP,
-                        task_name="Log Cleanup",
-                        description=f"Removing log entries older than {self.retention_hours} hours from app.log, error.log, and access.log files",
-                        estimated_duration="1-3 minutes",
-                        scheduled_time=next_run_time
-                    )
-                    await asyncio.sleep(60)  # Wait 1 minute before starting
-                except Exception as e:
-                    logger.warning(f"[LOG_CLEANUP] Failed to send notification: {e}")
-                
-                import time
-                start_time = time.time()
-                result = await self.cleanup_old_logs()
-                duration = time.time() - start_time
-                deleted_lines, freed_space_mb = result
-                
-                # Send completion notification
-                try:
-                    from backend.core.background_task_notifier import background_task_notifier, TaskType
-                    await background_task_notifier.notify_task_completed(
-                        task_type=TaskType.LOG_CLEANUP,
-                        task_name="Log Cleanup",
-                        success=True,
-                        duration_seconds=duration,
-                        details={
-                            "deleted_lines": deleted_lines,
-                            "freed_space_mb": round(freed_space_mb, 2)
-                        }
-                    )
-                except Exception as e:
-                    logger.debug(f"[LOG_CLEANUP] Failed to send completion notification: {e}")
-                
-                # Run cleanup every 6 hours (subtract 60 seconds for notification lead time)
-                await asyncio.sleep((6 * 3600) - 60)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Log cleanup error: {e}", exc_info=True)
-                await asyncio.sleep(3600)  # Retry in 1 hour on error
+
+    async def _run_cycle(self):
+        """One cleanup cycle: notify, wait the lead minute, clean, report.
+
+        The notification and its 60s lead stay INSIDE the cycle so the
+        task-history behavior (and its tests) are unchanged by supervision.
+        """
+        # Send notification 1 minute before cleanup starts
+        try:
+            from backend.core.background_task_notifier import background_task_notifier, TaskType
+            next_run_time = datetime.utcnow() + timedelta(seconds=60)
+            await background_task_notifier.notify_task_starting(
+                task_type=TaskType.LOG_CLEANUP,
+                task_name="Log Cleanup",
+                description=f"Removing log entries older than {self.retention_hours} hours from app.log, error.log, and access.log files",
+                estimated_duration="1-3 minutes",
+                scheduled_time=next_run_time
+            )
+            await asyncio.sleep(60)  # Wait 1 minute before starting
+        except Exception as e:
+            logger.warning(f"[LOG_CLEANUP] Failed to send notification: {e}")
+
+        import time
+        start_time = time.time()
+        result = await self.cleanup_old_logs()
+        duration = time.time() - start_time
+        deleted_lines, freed_space_mb = result
+
+        # Send completion notification
+        try:
+            from backend.core.background_task_notifier import background_task_notifier, TaskType
+            await background_task_notifier.notify_task_completed(
+                task_type=TaskType.LOG_CLEANUP,
+                task_name="Log Cleanup",
+                success=True,
+                duration_seconds=duration,
+                details={
+                    "deleted_lines": deleted_lines,
+                    "freed_space_mb": round(freed_space_mb, 2)
+                }
+            )
+        except Exception as e:
+            logger.debug(f"[LOG_CLEANUP] Failed to send completion notification: {e}")
     
     async def cleanup_old_logs(self) -> Tuple[int, float]:
         """

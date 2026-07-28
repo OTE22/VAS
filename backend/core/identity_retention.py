@@ -77,13 +77,26 @@ class IdentityRetentionManager:
     
     async def start(self):
         """Start periodic cleanup"""
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        if self._cleanup_task and not self._cleanup_task.done():
+            logger.warning("Identity retention manager already running; ignoring duplicate start()")
+            return
+        from backend.core.service_supervisor import supervised_loop
+        self._cleanup_task = asyncio.create_task(
+            supervised_loop(
+                "identity_retention",
+                (self.cleanup_interval_hours * 3600) - 60,
+                self._run_cycle,
+                initial_delay=3600,
+                error_backoff_base=3600,
+            ),
+            name="identity_retention",
+        )
         logger.info(
             f"Identity retention manager started "
             f"(snapshot retention: {self.snapshot_retention_days} days, "
             f"embedding retention: {self.embedding_retention_months} months)"
         )
-    
+
     async def stop(self):
         """Stop cleanup task"""
         if self._cleanup_task:
@@ -93,40 +106,26 @@ class IdentityRetentionManager:
             except asyncio.CancelledError:
                 pass
         logger.info("Identity retention manager stopped")
-    
-    async def _periodic_cleanup(self):
-        """Run cleanup periodically"""
-        # Wait before first cleanup (e.g., 1 hour after startup)
-        await asyncio.sleep(3600)
-        
-        while True:
-            try:
-                # Send notification 1 minute before cleanup starts
-                try:
-                    from backend.core.background_task_notifier import background_task_notifier, TaskType
-                    from datetime import datetime, timedelta
-                    next_run_time = datetime.utcnow() + timedelta(seconds=60)
-                    await background_task_notifier.notify_task_starting(
-                        task_type=TaskType.IDENTITY_RETENTION,
-                        task_name="Identity Retention Cleanup",
-                        description=f"Cleaning up old identity snapshots (older than {self.snapshot_retention_days} days), marking inactive identities, and removing excess embeddings. This affects unknown faces that users can access.",
-                        estimated_duration="3-10 minutes",
-                        scheduled_time=next_run_time,
-                        notify_all_users=True  # Notify all users since this affects unknown faces they can see
-                    )
-                    await asyncio.sleep(60)  # Wait 1 minute before starting
-                except Exception as e:
-                    logger.warning(f"[IDENTITY_RETENTION] Failed to send notification: {e}")
-                
-                await self.run_cleanup()  # Completion notification is sent inside run_cleanup()
-                
-                # Wait for next cleanup cycle (subtract 60 seconds for notification lead time)
-                await asyncio.sleep((self.cleanup_interval_hours * 3600) - 60)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Identity cleanup error: {e}", exc_info=True)
-                await asyncio.sleep(3600)  # Retry in 1 hour on error
+
+    async def _run_cycle(self):
+        """One retention cycle (notify + 60s lead stay inside the cycle)."""
+        try:
+            from backend.core.background_task_notifier import background_task_notifier, TaskType
+            from datetime import datetime, timedelta
+            next_run_time = datetime.utcnow() + timedelta(seconds=60)
+            await background_task_notifier.notify_task_starting(
+                task_type=TaskType.IDENTITY_RETENTION,
+                task_name="Identity Retention Cleanup",
+                description=f"Cleaning up old identity snapshots (older than {self.snapshot_retention_days} days), marking inactive identities, and removing excess embeddings. This affects unknown faces that users can access.",
+                estimated_duration="3-10 minutes",
+                scheduled_time=next_run_time,
+                notify_all_users=True  # Notify all users since this affects unknown faces they can see
+            )
+            await asyncio.sleep(60)  # Wait 1 minute before starting
+        except Exception as e:
+            logger.warning(f"[IDENTITY_RETENTION] Failed to send notification: {e}")
+
+        await self.run_cleanup()  # Completion notification is sent inside run_cleanup()
     
     async def run_cleanup(self):
         """Run all cleanup operations"""

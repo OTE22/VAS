@@ -49,7 +49,22 @@ class BatchDatabaseWriter:
         self._flush_task: Optional[asyncio.Task] = None
 
     async def start(self):
-        self._flush_task = asyncio.create_task(self._periodic_flush())
+        if self._flush_task and not self._flush_task.done():
+            logger.warning("Batch DB writer already running; ignoring duplicate start()")
+            return
+        from backend.core.service_supervisor import supervised_loop
+        # jitter=0: this is a sub-second hot loop; jittering a 2s flush
+        # cadence buys nothing and complicates timing-sensitive tests.
+        self._flush_task = asyncio.create_task(
+            supervised_loop(
+                "batch_writer",
+                self.flush_interval,
+                self.flush,
+                error_backoff_base=self.flush_interval,
+                jitter=0,
+            ),
+            name="batch_writer",
+        )
         logger.info(
             f"Batch DB writer started "
             f"(batch_size={self.batch_size}, flush_interval={self.flush_interval}s)"
@@ -266,17 +281,6 @@ class BatchDatabaseWriter:
         except Exception as e:
             await db_circuit_breaker.call_failed()
             logger.exception("❌ Batch write failed")
-
-    async def _periodic_flush(self):
-        while True:
-            try:
-                await asyncio.sleep(self.flush_interval)
-                await self.flush()
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("Batch periodic flush error")
-
 
 batch_writer = BatchDatabaseWriter()
 

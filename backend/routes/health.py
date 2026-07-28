@@ -91,11 +91,38 @@ async def readiness_check():
     all_ok = all(v["healthy"] for v in results.values())
     status = "ready" if all_ok else ("degraded" if required_ok else "not_ready")
 
+    # Background-service supervision. Pure in-memory registry read — zero I/O,
+    # no timeout needed. Reported under its OWN top-level key (components has a
+    # fixed {healthy, required} shape consumers assert on), and it NEVER
+    # affects the 503 branch: a dead cleanup loop must not make the load
+    # balancer pull the whole API. It degrades the status so operators see it.
+    background_summary = None
+    try:
+        from backend.core.service_supervisor import get_service_health, stale_services
+
+        services = get_service_health()
+        degraded_names = sorted(
+            name for name, s in services.items()
+            if s["status"] not in ("running", "starting")
+        )
+        stale_names = sorted(stale_services())
+        background_summary = {
+            "total": len(services),
+            "degraded": degraded_names,
+            "stale": stale_names,
+        }
+        if (degraded_names or stale_names) and status == "ready":
+            status = "degraded"
+    except Exception:
+        pass  # supervision must never break readiness reporting
+
     body = {
         "status": status,
         "timestamp": datetime.utcnow().isoformat(),
         "components": results,
     }
+    if background_summary is not None:
+        body["background_services"] = background_summary
     return JSONResponse(status_code=200 if required_ok else 503, content=body)
 
 
@@ -221,6 +248,20 @@ async def detailed_health_check():
     """Detailed health check for all components"""
     try:
         checks = {}
+
+        # Background-service supervision: full per-service dump (status,
+        # last_success, last_error, consecutive_failures, restarts) — the
+        # detailed view is where operators diagnose WHICH loop is sick.
+        try:
+            from backend.core.service_supervisor import get_service_health, stale_services
+            services = get_service_health()
+            checks["background_services"] = {
+                "healthy": all(s["status"] in ("running", "starting") for s in services.values())
+                           and not stale_services(),
+                "services": services,
+            }
+        except Exception as bg_error:
+            checks["background_services"] = {"healthy": False, "error": str(bg_error)}
 
         # Database health
         db_healthy = await db_manager.health_check()

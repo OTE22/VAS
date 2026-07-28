@@ -96,13 +96,27 @@ class IdentityClusteringService:
     
     async def start(self):
         """Start periodic clustering job"""
+        if self._clustering_task and not self._clustering_task.done():
+            logger.warning("[CLUSTERING] Already running; ignoring duplicate start()")
+            return
         logger.info("[CLUSTERING] Starting IdentityClusteringService...")
-        self._clustering_task = asyncio.create_task(self._periodic_clustering())
+        from backend.core.service_supervisor import supervised_loop
+        startup_delay_seconds = int(self.cluster_startup_delay_hours * 3600)
+        self._clustering_task = asyncio.create_task(
+            supervised_loop(
+                "identity_clustering",
+                (self.cluster_interval_hours * 3600) - 60,
+                self._run_cycle,
+                initial_delay=startup_delay_seconds,
+                error_backoff_base=3600,
+            ),
+            name="identity_clustering",
+        )
         if identity_index:
             logger.info(f"[CLUSTERING] ✅ Service started successfully (startup delay: {self.cluster_startup_delay_hours}h, interval: {self.cluster_interval_hours}h, hybrid mode: pattern-based + FAISS)")
         else:
             logger.warning("[CLUSTERING] ⚠️  Service started but FAISS index not available - using pattern-based only")
-    
+
     async def stop(self):
         """Stop clustering task"""
         if self._clustering_task:
@@ -112,57 +126,39 @@ class IdentityClusteringService:
             except asyncio.CancelledError:
                 pass
         logger.info("[CLUSTERING] ✅ Service stopped successfully")
-    
-    async def _periodic_clustering(self):
-        """Run clustering periodically"""
-        # Wait before first run (configurable delay after startup)
-        startup_delay_seconds = int(self.cluster_startup_delay_hours * 3600)
-        logger.info(f"[CLUSTERING] Waiting {self.cluster_startup_delay_hours} hour(s) ({startup_delay_seconds}s) after startup before first clustering run...")
-        await asyncio.sleep(startup_delay_seconds)
-        
-        while True:
-            try:
-                # Send notification 1 minute before clustering starts
-                try:
-                    from backend.core.background_task_notifier import background_task_notifier, TaskType
-                    from datetime import datetime, timedelta
-                    next_run_time = datetime.utcnow() + timedelta(seconds=60)
-                    await background_task_notifier.notify_task_starting(
-                        task_type=TaskType.IDENTITY_CLUSTERING,
-                        task_name="Identity Clustering",
-                        description="Analyzing unknown identities to generate merge suggestions using ML-based clustering",
-                        estimated_duration="2-10 minutes",
-                        scheduled_time=next_run_time
-                    )
-                    await asyncio.sleep(60)  # Wait 1 minute before starting
-                except Exception as e:
-                    logger.warning(f"[CLUSTERING] Failed to send notification: {e}")
-                
-                import time
-                start_time = time.time()
-                await self.generate_merge_suggestions()
-                duration = time.time() - start_time
-                
-                # Send completion notification
-                try:
-                    from backend.core.background_task_notifier import background_task_notifier, TaskType
-                    await background_task_notifier.notify_task_completed(
-                        task_type=TaskType.IDENTITY_CLUSTERING,
-                        task_name="Identity Clustering",
-                        success=True,
-                        duration_seconds=duration
-                    )
-                except Exception as e:
-                    logger.debug(f"[CLUSTERING] Failed to send completion notification: {e}")
-                
-                # Wait for next clustering cycle (subtract 60 seconds for notification lead time)
-                await asyncio.sleep((self.cluster_interval_hours * 3600) - 60)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[CLUSTERING] ❌ Error during clustering cycle: {e}", exc_info=True)
-                logger.info("[CLUSTERING] Will retry in 1 hour...")
-                await asyncio.sleep(3600)  # Retry in 1 hour on error
+
+    async def _run_cycle(self):
+        """One clustering cycle (notify + 60s lead stay inside the cycle)."""
+        try:
+            from backend.core.background_task_notifier import background_task_notifier, TaskType
+            from datetime import datetime, timedelta
+            next_run_time = datetime.utcnow() + timedelta(seconds=60)
+            await background_task_notifier.notify_task_starting(
+                task_type=TaskType.IDENTITY_CLUSTERING,
+                task_name="Identity Clustering",
+                description="Analyzing unknown identities to generate merge suggestions using ML-based clustering",
+                estimated_duration="2-10 minutes",
+                scheduled_time=next_run_time
+            )
+            await asyncio.sleep(60)  # Wait 1 minute before starting
+        except Exception as e:
+            logger.warning(f"[CLUSTERING] Failed to send notification: {e}")
+
+        import time
+        start_time = time.time()
+        await self.generate_merge_suggestions()
+        duration = time.time() - start_time
+
+        try:
+            from backend.core.background_task_notifier import background_task_notifier, TaskType
+            await background_task_notifier.notify_task_completed(
+                task_type=TaskType.IDENTITY_CLUSTERING,
+                task_name="Identity Clustering",
+                success=True,
+                duration_seconds=duration
+            )
+        except Exception as e:
+            logger.debug(f"[CLUSTERING] Failed to send completion notification: {e}")
     
     async def generate_merge_suggestions(self):
         """

@@ -101,7 +101,23 @@ class DataRetentionManager:
 
     async def start(self):
         """Start periodic cleanup"""
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        if self._cleanup_task and not self._cleanup_task.done():
+            logger.warning("Data retention manager already running; ignoring duplicate start()")
+            return
+        from backend.core.service_supervisor import supervised_loop
+        # Interval passed as a CALLABLE so admin changes to
+        # CLEANUP_INTERVAL_HOURS still apply on the next cycle (live-reread
+        # semantics the old loop had).
+        self._cleanup_task = asyncio.create_task(
+            supervised_loop(
+                "data_retention",
+                lambda: (self.cleanup_interval_hours * 3600) - 60,
+                self._run_cycle,
+                initial_delay=60,
+                error_backoff_base=3600,
+            ),
+            name="data_retention",
+        )
         logger.info(f"Data retention manager started (retention: {self.retention_days} days)")
 
     async def stop(self):
@@ -114,37 +130,24 @@ class DataRetentionManager:
                 pass
         logger.info("Data retention manager stopped")
 
-    async def _periodic_cleanup(self):
-        """Run cleanup periodically (interval re-read every cycle)"""
-        await asyncio.sleep(60)
+    async def _run_cycle(self):
+        """One retention cycle (notify + 60s lead stay inside the cycle)."""
+        try:
+            from backend.core.background_task_notifier import background_task_notifier, TaskType
+            next_run_time = datetime.utcnow() + timedelta(seconds=60)
+            await background_task_notifier.notify_task_starting(
+                task_type=TaskType.DATA_RETENTION,
+                task_name="Data Retention Cleanup",
+                description=f"Removing old detections and face images older than {self.retention_days} days. This affects all users as it deletes detection records and images.",
+                estimated_duration="5-15 minutes",
+                scheduled_time=next_run_time,
+                notify_all_users=True
+            )
+            await asyncio.sleep(60)
+        except Exception as e:
+            logger.warning(f"[RETENTION] Failed to send notification: {e}")
 
-        while True:
-            try:
-                # Send notification 1 minute before cleanup starts
-                try:
-                    from backend.core.background_task_notifier import background_task_notifier, TaskType
-                    next_run_time = datetime.utcnow() + timedelta(seconds=60)
-                    await background_task_notifier.notify_task_starting(
-                        task_type=TaskType.DATA_RETENTION,
-                        task_name="Data Retention Cleanup",
-                        description=f"Removing old detections and face images older than {self.retention_days} days. This affects all users as it deletes detection records and images.",
-                        estimated_duration="5-15 minutes",
-                        scheduled_time=next_run_time,
-                        notify_all_users=True
-                    )
-                    await asyncio.sleep(60)
-                except Exception as e:
-                    logger.warning(f"[RETENTION] Failed to send notification: {e}")
-
-                await self.cleanup_old_data()
-
-                # Interval read LIVE each cycle so admin changes apply next loop
-                await asyncio.sleep((self.cleanup_interval_hours * 3600) - 60)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Cleanup error: {e}")
-                await asyncio.sleep(3600)  # Retry in 1 hour
+        await self.cleanup_old_data()
 
     async def cleanup_old_data(self, dry_run: bool = False, job_id: str = None,
                                progress_cb=None, cancel_check=None) -> dict:
