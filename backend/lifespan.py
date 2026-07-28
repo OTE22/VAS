@@ -85,6 +85,49 @@ async def _emergency_shutdown(initialized_components: list, worker_tasks: list =
     logger.error("🛑 Emergency shutdown completed")
 
 
+def _asyncio_exception_handler(loop, context):
+    """Log unhandled task exceptions instead of losing them to GC.
+
+    Without a loop-level handler, a bare create_task whose coroutine dies
+    surfaces only as "Task exception was never retrieved" — at garbage
+    collection time, long after the fact, with no service attribution. This
+    logs immediately with the task name. It never re-raises: a background
+    task's death must not take the API process with it.
+    """
+    exception = context.get("exception")
+    if isinstance(exception, asyncio.CancelledError):
+        return  # normal shutdown traffic
+    task = context.get("task")
+    logger.error(
+        "unhandled_task_exception task=%s type=%s msg=%s",
+        task.get_name() if task else "?",
+        type(exception).__name__ if exception else "?",
+        context.get("message", ""),
+        exc_info=exception,
+    )
+
+
+async def _bounded_stop(component_name: str, awaitable, timeout: float = 10.0) -> str:
+    """Await one component's stop/close with a deadline.
+
+    17 of 19 components used to stop UNBOUNDED — any one of them hanging
+    stalled the entire shutdown (and gunicorn would eventually SIGABRT the
+    worker). Timeouts are recorded and aggregated, never fatal: shutdown
+    always proceeds to the next component.
+    """
+    try:
+        await asyncio.wait_for(awaitable, timeout=timeout)
+        return "success"
+    except asyncio.TimeoutError:
+        logger.error(f"    ❌ {component_name} stop timed out after {timeout:.0f}s")
+        return "timeout"
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"    ❌ {component_name} stop failed: {e}")
+        return f"error: {e}"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -96,9 +139,17 @@ async def lifespan(app: FastAPI):
     initialized_components = []
     worker_tasks = []
     cache_metrics_task = None
+    # Hoisted so the shutdown stop-list can see them: these two were started
+    # in Phase 3.x but never appeared in components_to_stop — they were only
+    # killed by the blanket all-tasks cancel at the very end.
+    batch_flush_task = None
+    loop_lag_task = None
 
     # ==================== STARTUP PHASE ====================
     try:
+        # Loop-level exception attribution, installed before ANY task exists.
+        asyncio.get_running_loop().set_exception_handler(_asyncio_exception_handler)
+
         logger.info("=" * 70)
         logger.info("🚀 Starting Face Recognition Service v5.1 (Production)")
         logger.info(f"📊 Face Tracking: {'ENABLED' if FACE_TRACKING_ENABLED else 'DISABLED'}")
@@ -972,6 +1023,13 @@ async def lifespan(app: FastAPI):
         components_to_stop = [
             ("workers", "Stopping worker pool", lambda: worker_tasks),
             ("cache_metrics", "Stopping cache metrics", lambda: cache_metrics_task if 'cache_metrics' in initialized_components else None),
+            # These three were STARTED but never stopped here — the audit's
+            # missing stop-list entries. loop_lag/batch_flusher are real tasks
+            # (cancel + await); task_notifier owns no task (verified) and is
+            # listed so the stop list is exhaustive in code, not just in prose.
+            ("loop_lag_monitor", "Stopping event-loop lag monitor", lambda: loop_lag_task if 'loop_lag_monitor' in initialized_components else None),
+            ("batch_flusher", "Stopping queue batch flusher", lambda: batch_flush_task if 'batch_flusher' in initialized_components else None),
+            ("task_notifier", "Releasing background task notifier", lambda: "stateless" if 'task_notifier' in initialized_components else None),
             ("metrics_collector", "Stopping metrics collector", lambda: metrics_collector if 'metrics_collector' in initialized_components else None),
             ("log_cleanup", "Stopping log cleanup", lambda: log_cleanup_manager if 'log_cleanup' in initialized_components else None),
             ("retention_manager", "Stopping data retention", lambda: retention_manager if 'retention_manager' in initialized_components else None),
@@ -1010,7 +1068,7 @@ async def lifespan(app: FastAPI):
                 # Special handling for identity_index_auto_save (stop auto-save task)
                 if component_name == "identity_index_auto_save" and component:
                     try:
-                        await component.stop_auto_save()
+                        await asyncio.wait_for(component.stop_auto_save(), timeout=10.0)
                         logger.info(f"    ✅ Auto-save stopped")
                         shutdown_results[component_name] = "stopped"
                     except Exception as e:
@@ -1021,7 +1079,7 @@ async def lifespan(app: FastAPI):
                 # Special handling for identity_index_background_repair (stop repair task)
                 if component_name == "identity_index_background_repair" and component:
                     try:
-                        await component.stop_background_repair()
+                        await asyncio.wait_for(component.stop_background_repair(), timeout=10.0)
                         logger.info(f"    ✅ Background repair stopped")
                         shutdown_results[component_name] = "stopped"
                     except Exception as e:
@@ -1032,7 +1090,7 @@ async def lifespan(app: FastAPI):
                 # Special handling for identity_index_background_rebuild (stop rebuild task)
                 if component_name == "identity_index_background_rebuild" and component:
                     try:
-                        await component.stop_background_rebuild()
+                        await asyncio.wait_for(component.stop_background_rebuild(), timeout=10.0)
                         logger.info(f"    ✅ Background rebuild stopped")
                         shutdown_results[component_name] = "stopped"
                     except Exception as e:
@@ -1078,12 +1136,19 @@ async def lifespan(app: FastAPI):
                     except Exception as e:
                         logger.error(f"    ❌ Workers shutdown error: {e}")
 
-                elif component_name == "cache_metrics":
+                elif component_name in ("cache_metrics", "loop_lag_monitor", "batch_flusher"):
+                    # Bare-task components: cancel + await, bounded.
                     component.cancel()
                     try:
                         await asyncio.wait_for(component, timeout=5.0)
                     except (asyncio.CancelledError, asyncio.TimeoutError):
                         pass
+
+                elif component_name == "task_notifier":
+                    # Stateless (no task to cancel) — recorded so the stop
+                    # list accounts for every started component.
+                    shutdown_results[component_name] = "skipped (stateless)"
+                    continue
 
                 elif component_name == "redis_cache_service":
                     from backend.core.redis_cache import redis_cache_service
@@ -1109,13 +1174,20 @@ async def lifespan(app: FastAPI):
                     continue
 
                 elif hasattr(component, 'stop'):
-                    # Components with async stop() method
-                    await component.stop()
+                    # Components with async stop() method — BOUNDED: one hung
+                    # stop() used to stall the entire shutdown.
+                    result = await _bounded_stop(component_name, component.stop())
+                    if result != "success":
+                        shutdown_results[component_name] = result
+                        continue
                     logger.info(f"    ✅ Stopped in {(time.time() - start):.2f}s")
 
                 elif hasattr(component, 'close'):
-                    # Components with async close() method
-                    await component.close()
+                    # Components with async close() method — bounded likewise.
+                    result = await _bounded_stop(component_name, component.close())
+                    if result != "success":
+                        shutdown_results[component_name] = result
+                        continue
                     logger.info(f"    ✅ Closed in {(time.time() - start):.2f}s")
 
                 elif component_name == "models":
@@ -1129,6 +1201,10 @@ async def lifespan(app: FastAPI):
                 logger.error(f"  ❌ Failed to stop {component_name}: {e}")
                 shutdown_results[component_name] = f"error: {str(e)}"
                 # Continue shutdown even if one component fails
+
+        timed_out = sorted(n for n, r in shutdown_results.items() if r == "timeout")
+        if timed_out:
+            logger.warning("shutdown_timeouts: %s", timed_out)
 
         # Final flush of any pending batch writes
         if 'batch_writer' in initialized_components and hasattr(batch_writer, 'pending_detections'):
