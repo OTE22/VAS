@@ -1,213 +1,465 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="hp">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>Intelligence Command Center - Admin Only</title>
+    <title>Face Recognition Service — System Home</title>
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/vendor/fonts/inter.css"><link rel="stylesheet" href="/frontend/vendor/fonts/cairo.css">
-    <link rel="stylesheet" href="/frontend/css/home.css">
-    <!-- Include admin.css for navbar styles to match other admin pages -->
+    <!--
+      admin.css owns the injected navbar and is loaded FIRST so home.css can
+      reclaim document scroll (admin.css pins html/body to overflow:hidden).
+      home.css additionally out-specifies those rules via html.hp / body.hp,
+      so the layout survives a future re-ordering of these two links.
+    -->
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
-    <style>
-        /* Ensure navbar styles from admin.css take precedence */
-        .military-navbar {
-            position: relative;
-            width: 100%;
-            padding: 0.75rem 1.5rem;
-            background: linear-gradient(135deg, 
-                rgba(10, 25, 41, 0.95) 0%,
-                rgba(26, 71, 42, 0.95) 100%);
-            border-bottom: 2px solid rgba(0, 255, 150, 0.3);
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
-            z-index: 1000;
-            flex-shrink: 0;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            backdrop-filter: blur(10px);
-        }
-        
-        /* Base military-btn styles for logout button */
-        .military-btn {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.5rem 1rem;
-            background: rgba(0, 255, 150, 0.1);
-            border: 2px solid rgba(0, 255, 150, 0.3);
-            border-radius: 6px;
-            color: rgba(0, 255, 150, 0.9);
-            font-size: 0.75rem;
-            font-weight: 700;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            text-decoration: none;
-            font-family: 'Inter', monospace;
-        }
-        
-        .military-btn:hover {
-            background: rgba(0, 255, 150, 0.2);
-            border-color: rgba(0, 255, 150, 0.5);
-            box-shadow: 0 0 15px rgba(0, 255, 150, 0.3);
-            transform: translateY(-2px);
-        }
-        
-        .military-btn i {
-            font-size: 0.9rem;
-        }
-    </style>
-    <style>
-        /* Hide page content until admin verification - SECURITY MEASURE */
-        body:not(.admin-verified) {
-            visibility: hidden;
-            opacity: 0;
-        }
-        body.admin-verified {
-            visibility: visible;
-            opacity: 1;
-            transition: opacity 0.3s ease;
-        }
-        /* Show loading message while verifying */
-        body:not(.admin-verified)::before {
-            content: 'Verifying access...';
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            z-index: 9999;
-            color: #00ff96;
-            font-size: 1.2rem;
-            font-weight: 700;
-            visibility: visible;
-            text-shadow: 0 0 10px rgba(0, 255, 150, 0.5);
-        }
-    </style>
+    <link rel="stylesheet" href="/frontend/css/home.css?v=home-3">
 </head>
-<body>
-    <!-- Navbar Component (loaded dynamically) -->
+<body class="hp" data-state="loading" data-freshness="never">
+    <!-- Navbar Component (loaded dynamically by navbar-loader.js) -->
     <div id="navbar-placeholder"></div>
 
-    <!-- Main Container - No Scroll -->
-    <main class="intelligence-main-container">
-        <div class="intelligence-grid-overlay"></div>
-        <div class="intelligence-scan-line"></div>
-        
-        <div class="intelligence-content">
-            <!-- Welcome Section -->
-            <div class="welcome-section">
-                <div class="welcome-icon">
-                    <i class="fas fa-user-shield"></i>
-                    <div class="icon-pulse"></div>
+    <!--
+      Access boot gate. Replaces the old body:not(.admin-verified){visibility:hidden}
+      rule, which blanked the whole document permanently whenever /api/auth/me
+      failed. /home is already restricted to role == 'admin' server-side; the only
+      admin-only CONTENT on this page (#admin-section) stays inline-hidden and is
+      revealed solely by the capability check in home.js.
+    -->
+    <div class="hp-boot" role="status" aria-live="polite">
+        <span class="hp-boot__spinner" aria-hidden="true"></span>
+        <p class="hp-boot__text">Checking your access…</p>
+    </div>
+
+    <main class="hp-main">
+        <div class="hp-container">
+
+            <!-- ============================================================
+                 HERO — identity, version, one aggregated verdict, freshness
+                 ============================================================ -->
+            <header class="hp-hero">
+                <div class="hp-hero__lead">
+                    <p class="hp-hero__eyebrow" id="user-info"></p>
+                    <h1 class="hp-hero__title" id="hp-service">Face Recognition Service</h1>
+                    <p class="hp-hero__desc">Live detection, enrolment and pipeline monitoring across every connected source.</p>
                 </div>
-                <h1>Intelligence Command Center</h1>
-                <p class="subtitle">Advanced Surveillance & Recognition System</p>
+                <div class="hp-hero__meta">
+                    <span class="hp-chip" id="hp-version">v —</span>
+                    <span class="hp-hero__live" role="status" aria-live="polite" aria-atomic="true">
+                        <span class="hp-status hp-status--lg" id="hp-overall" data-status="unknown">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="hp-overall-state">Checking system…</span>
+                        </span>
+                        <span class="hp-badge hp-badge--warn" id="hp-stale" hidden>Stale data</span>
+                    </span>
+                </div>
+                <div class="hp-hero__actions">
+                    <p class="hp-hero__updated">Updated <time id="hp-updated" datetime="">never</time></p>
+                    <button type="button" class="hp-btn hp-btn--primary" id="hp-refresh"
+                            data-action="refreshStats" aria-label="Refresh system statistics">
+                        <i class="fas fa-rotate" id="hp-refresh-icon" aria-hidden="true"></i><span>Refresh</span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- ============================================================
+                 ERROR STRIP — sits above every number so a failure is read
+                 before any possibly-stale value
+                 ============================================================ -->
+            <div class="hp-alert" id="hp-error" role="alert" data-status="crit" hidden>
+                <i class="fas fa-triangle-exclamation hp-alert__icon" aria-hidden="true"></i>
+                <div class="hp-alert__body">
+                    <p class="hp-alert__title">Live data unavailable</p>
+                    <p class="hp-alert__detail" id="hp-error-detail"></p>
+                    <p class="hp-alert__meta">Last successful update <time id="hp-error-last" datetime="">never</time>
+                        <span aria-hidden="true">·</span> <span id="hp-error-conn">Connection: unknown</span></p>
+                </div>
+                <button type="button" class="hp-btn hp-btn--ghost" data-action="refreshStats">
+                    <i class="fas fa-rotate-right" aria-hidden="true"></i><span>Try again</span>
+                </button>
             </div>
 
-            <!-- Admin Actions -->
-            <div class="admin-actions-section admin-only" id="admin-section" style="display: none;">
-                <div class="section-header">
-                    <div class="header-icon-wrapper">
-                        <i class="fas fa-shield-alt"></i>
-                        <div class="header-icon-glow"></div>
-                    </div>
-                    <div class="header-text">
-                        <h2>Administrative Controls</h2>
-                        <p class="header-subtitle">System Management & Configuration</p>
-                    </div>
+            <!-- ============================================================
+                 KPI GRID — the numeric headline
+                 ============================================================ -->
+            <section class="hp-section hp-section--kpis">
+                <h2 class="hp-section__title">Key metrics</h2>
+                <div class="hp-kpi-grid">
+
+                    <article class="hp-kpi" id="kpi-pipelines" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-video" aria-hidden="true"></i>Active pipelines</p>
+                        <p class="hp-kpi__value" id="kpi-pipelines-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-pipelines-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-detections" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-bullseye" aria-hidden="true"></i>Total detections</p>
+                        <p class="hp-kpi__value" id="kpi-detections-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-detections-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-faces" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-user-group" aria-hidden="true"></i>Registered faces</p>
+                        <p class="hp-kpi__value" id="kpi-faces-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-faces-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-queue" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-layer-group" aria-hidden="true"></i>Queue usage</p>
+                        <p class="hp-kpi__value" id="kpi-queue-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-queue-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-processed" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-circle-check" aria-hidden="true"></i>Processed items</p>
+                        <p class="hp-kpi__value" id="kpi-processed-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-processed-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-storage" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-hard-drive" aria-hidden="true"></i>Storage used</p>
+                        <p class="hp-kpi__value" id="kpi-storage-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-storage-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi hp-kpi--word" id="kpi-cache" data-state="loading" data-status="unknown">
+                        <p class="hp-kpi__label"><i class="fas fa-bolt" aria-hidden="true"></i>Cache health</p>
+                        <p class="hp-kpi__value" id="kpi-cache-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-cache-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi hp-kpi--word" id="kpi-tracker" data-state="loading" data-status="unknown">
+                        <p class="hp-kpi__label"><i class="fas fa-crosshairs" aria-hidden="true"></i>Tracker status</p>
+                        <p class="hp-kpi__value" id="kpi-tracker-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-tracker-note">Loading…</p>
+                    </article>
+
                 </div>
-                <div class="admin-actions">
-                    <a href="/admin/users" class="intelligence-admin-btn users-btn">
-                        <div class="btn-background"></div>
-                        <div class="btn-content">
-                            <div class="btn-icon-wrapper">
-                                <i class="fas fa-user-cog"></i>
-                                <div class="btn-icon-glow"></div>
-                            </div>
-                            <div class="btn-text">
-                                <span class="btn-title">Manage Users</span>
-                                <span class="btn-subtitle">User Accounts & Permissions</span>
-                            </div>
-                            <div class="btn-arrow">
-                                <i class="fas fa-arrow-right"></i>
-                            </div>
-                        </div>
-                    </a>
-                    <a href="/admin/pipelines" class="intelligence-admin-btn pipelines-btn">
-                        <div class="btn-background"></div>
-                        <div class="btn-content">
-                            <div class="btn-icon-wrapper">
-                                <i class="fas fa-network-wired"></i>
-                                <div class="btn-icon-glow"></div>
-                            </div>
-                            <div class="btn-text">
-                                <span class="btn-title">Manage Pipelines</span>
-                                <span class="btn-subtitle">Video Sources & Configuration</span>
-                            </div>
-                            <div class="btn-arrow">
-                                <i class="fas fa-arrow-right"></i>
-                            </div>
-                        </div>
-                    </a>
+            </section>
+
+            <!-- ============================================================
+                 SYSTEM HEALTH — drill-down of the hero verdict
+                 ============================================================ -->
+            <section class="hp-panel" id="health-section" tabindex="-1">
+                <div class="hp-panel__head">
+                    <h2 class="hp-panel__title">System health</h2>
+                    <p class="hp-panel__subtitle" id="health-summary">Checking 6 subsystems…</p>
                 </div>
+                <ul class="hp-health-grid">
+
+                    <li class="hp-health" id="health-api" data-status="unknown">
+                        <i class="hp-health__glyph fas fa-plug" aria-hidden="true"></i>
+                        <span class="hp-health__name">API</span>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="health-api-state">Checking</span>
+                        </span>
+                        <span class="hp-health__detail" id="health-api-detail">—</span>
+                    </li>
+
+                    <li class="hp-health" id="health-db" data-status="unknown">
+                        <i class="hp-health__glyph fas fa-database" aria-hidden="true"></i>
+                        <span class="hp-health__name">Database</span>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="health-db-state">Checking</span>
+                        </span>
+                        <span class="hp-health__detail" id="health-db-detail">—</span>
+                    </li>
+
+                    <li class="hp-health" id="health-cache" data-status="unknown">
+                        <i class="hp-health__glyph fas fa-bolt" aria-hidden="true"></i>
+                        <span class="hp-health__name">Cache</span>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="health-cache-state">Checking</span>
+                        </span>
+                        <span class="hp-health__detail" id="health-cache-detail">—</span>
+                    </li>
+
+                    <li class="hp-health" id="health-tracker" data-status="unknown">
+                        <i class="hp-health__glyph fas fa-crosshairs" aria-hidden="true"></i>
+                        <span class="hp-health__name">Tracker</span>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="health-tracker-state">Checking</span>
+                        </span>
+                        <span class="hp-health__detail" id="health-tracker-detail">—</span>
+                    </li>
+
+                    <li class="hp-health" id="health-queue" data-status="unknown">
+                        <i class="hp-health__glyph fas fa-layer-group" aria-hidden="true"></i>
+                        <span class="hp-health__name">Queue</span>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="health-queue-state">Checking</span>
+                        </span>
+                        <span class="hp-health__detail" id="health-queue-detail">—</span>
+                    </li>
+
+                    <li class="hp-health" id="health-storage" data-status="unknown">
+                        <i class="hp-health__glyph fas fa-hard-drive" aria-hidden="true"></i>
+                        <span class="hp-health__name">Storage</span>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="health-storage-state">Checking</span>
+                        </span>
+                        <span class="hp-health__detail" id="health-storage-detail">—</span>
+                    </li>
+
+                </ul>
+            </section>
+
+            <!-- ============================================================
+                 PIPELINES — the only per-user content on the page.
+                 MUST resolve to display:block: loadPipelines() assigns that
+                 value unconditionally (see .hp-panel--block).
+                 ============================================================ -->
+            <section class="hp-panel hp-panel--block" id="pipelines-section" data-state="loading">
+                <div class="hp-panel__head">
+                    <h2 class="hp-panel__title">Pipelines</h2>
+                </div>
+                <dl class="hp-defs">
+                    <div class="hp-defs__row"><dt>Active</dt><dd id="pl-active">—</dd></div>
+                    <div class="hp-defs__row"><dt>Total detections</dt><dd id="pl-detections">—</dd></div>
+                </dl>
+                <h3 class="hp-panel__subtitle">
+                    <label class="hp-field__label" for="pipeline-select">Your pipelines</label>
+                </h3>
+                <div class="hp-field">
+                    <select class="hp-select" id="pipeline-select"
+                            data-action-change="selectPipeline"
+                            aria-describedby="pipeline-selected-detail">
+                        <option value="">Loading pipelines…</option>
+                    </select>
+                    <i class="hp-select__chevron fas fa-chevron-down" aria-hidden="true"></i>
+                </div>
+                <!-- Detail for the chosen camera. Values are written with
+                     textContent; the location name is operator-supplied data. -->
+                <dl class="hp-defs hp-defs--sub" id="pipeline-selected-detail" hidden>
+                    <div class="hp-defs__row"><dt>Location</dt><dd id="pl-sel-location">—</dd></div>
+                    <div class="hp-defs__row"><dt>Pipeline ID</dt><dd id="pl-sel-id">—</dd></div>
+                    <div class="hp-defs__row"><dt>State</dt><dd id="pl-sel-state">—</dd></div>
+                    <div class="hp-defs__row"><dt>Last activity</dt><dd id="pl-sel-seen">—</dd></div>
+                </dl>
+                <p class="hp-empty" id="pl-empty" hidden>
+                    <i class="fas fa-video-slash" aria-hidden="true"></i>
+                    <span class="hp-empty__title">No pipelines assigned to your account</span>
+                    <span class="hp-empty__text">Ask an administrator to grant access to a camera pipeline.</span>
+                </p>
+            </section>
+
+            <!-- ============================================================
+                 CAPACITY PAIR — queue and storage read as one row
+                 ============================================================ -->
+            <div class="hp-detail-row">
+
+                <section class="hp-panel" id="queue-panel" data-state="loading" data-status="unknown">
+                    <div class="hp-panel__head">
+                        <h2 class="hp-panel__title">Processing queue</h2>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="q-state">Checking…</span>
+                        </span>
+                    </div>
+                    <p class="hp-panel__lead">
+                        <span class="hp-panel__figure" id="q-size">—</span>
+                        <span class="hp-panel__unit" id="q-max">of —</span>
+                    </p>
+                    <div class="hp-meter" id="q-meter" role="progressbar" aria-label="Queue usage"
+                         aria-valuemin="0" aria-valuemax="100" data-state="loading">
+                        <span class="hp-meter__fill"></span>
+                    </div>
+                    <p class="hp-meter__legend" id="q-usage">Loading…</p>
+                    <dl class="hp-defs">
+                        <div class="hp-defs__row"><dt>Processing</dt><dd id="q-processing">—</dd></div>
+                        <div class="hp-defs__row"><dt>Received</dt><dd id="q-received">—</dd></div>
+                        <div class="hp-defs__row"><dt>Processed</dt><dd id="q-processed">—</dd></div>
+                        <div class="hp-defs__row"><dt>Skipped</dt><dd id="q-skipped">—</dd></div>
+                    </dl>
+                    <p class="hp-callout" id="q-anomaly" data-status="idle" hidden>
+                        <i class="hp-callout__icon fas fa-circle-info" aria-hidden="true"></i>
+                        <span class="hp-callout__text"></span>
+                    </p>
+                </section>
+
+                <section class="hp-panel" id="storage-panel" data-state="loading" data-status="unknown">
+                    <div class="hp-panel__head">
+                        <h2 class="hp-panel__title">Storage</h2>
+                        <span class="hp-status hp-status--sm">
+                            <span class="hp-status__dot" aria-hidden="true"></span>
+                            <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                            <span class="hp-status__label" id="st-state">Checking…</span>
+                        </span>
+                    </div>
+                    <p class="hp-panel__lead">
+                        <span class="hp-panel__figure" id="st-used">—</span>
+                        <span class="hp-panel__unit" id="st-max">of —</span>
+                    </p>
+                    <div class="hp-meter" id="st-meter" role="progressbar" aria-label="Storage usage"
+                         aria-valuemin="0" aria-valuemax="100" data-state="loading">
+                        <span class="hp-meter__fill"></span>
+                    </div>
+                    <p class="hp-meter__legend" id="st-usage">Loading…</p>
+                    <dl class="hp-defs">
+                        <div class="hp-defs__row"><dt>Files</dt><dd id="st-files">—</dd></div>
+                        <div class="hp-defs__row"><dt>Used (GB)</dt><dd id="st-used-gb">—</dd></div>
+                        <div class="hp-defs__row"><dt>Retention</dt><dd id="st-retention">—</dd></div>
+                    </dl>
+                    <p class="hp-callout" id="st-note" data-status="idle" hidden>
+                        <i class="hp-callout__icon fas fa-circle-info" aria-hidden="true"></i>
+                        <span class="hp-callout__text"></span>
+                    </p>
+                </section>
+
             </div>
 
-            <!-- Quick Stats -->
-            <div class="stats-grid" id="stats-grid">
-                <div class="intelligence-stat-card admin-only">
-                    <div class="stat-icon-wrapper">
-                        <i class="fas fa-users"></i>
-                        <div class="icon-glow"></div>
-                    </div>
-                    <div class="stat-value" id="total-faces">-</div>
-                    <div class="stat-label">Known Faces</div>
+            <!-- ============================================================
+                 TRACKER — the deepest specialist detail
+                 ============================================================ -->
+            <section class="hp-panel" id="tracker-panel" data-state="loading" data-status="unknown">
+                <div class="hp-panel__head">
+                    <h2 class="hp-panel__title">Face tracker</h2>
+                    <span class="hp-status hp-status--sm">
+                        <span class="hp-status__dot" aria-hidden="true"></span>
+                        <i class="hp-status__icon fas fa-circle-notch" aria-hidden="true"></i>
+                        <span class="hp-status__label" id="tk-state">Checking…</span>
+                    </span>
                 </div>
-                <div class="intelligence-stat-card">
-                    <div class="stat-icon-wrapper">
-                        <i class="fas fa-video"></i>
-                        <div class="icon-glow"></div>
-                    </div>
-                    <div class="stat-value" id="active-pipelines">-</div>
-                    <div class="stat-label">Active Pipelines</div>
+                <dl class="hp-defs hp-defs--3col">
+                    <div class="hp-defs__row"><dt>Active pipelines</dt><dd id="tk-pipelines">—</dd></div>
+                    <div class="hp-defs__row"><dt>Tracked faces</dt><dd id="tk-faces">—</dd></div>
+                    <div class="hp-defs__row"><dt>Faces added</dt><dd id="tk-added">—</dd></div>
+                    <div class="hp-defs__row"><dt>Faces skipped</dt><dd id="tk-skipped">—</dd></div>
+                    <div class="hp-defs__row"><dt>Duplicates prevented</dt><dd id="tk-duplicates">—</dd></div>
+                    <div class="hp-defs__row"><dt>Tracking window</dt><dd id="tk-window">—</dd></div>
+                    <div class="hp-defs__row"><dt>Notification window</dt><dd id="tk-notify">—</dd></div>
+                    <div class="hp-defs__row"><dt>Memory</dt><dd id="tk-memory">—</dd></div>
+                </dl>
+                <div class="hp-meter" id="tk-mem-meter" role="progressbar" aria-label="Tracker memory usage"
+                     aria-valuemin="0" aria-valuemax="100" data-state="loading">
+                    <span class="hp-meter__fill"></span>
                 </div>
-                <div class="intelligence-stat-card admin-only">
-                    <div class="stat-icon-wrapper">
-                        <i class="fas fa-bolt"></i>
-                        <div class="icon-glow"></div>
-                    </div>
-                    <div class="stat-value" id="queue-size">-</div>
-                    <div class="stat-label">Queue Size</div>
+                <p class="hp-callout" id="tk-empty" data-status="idle" hidden>
+                    <i class="hp-callout__icon fas fa-circle-check" aria-hidden="true"></i>
+                    <span class="hp-callout__text"></span>
+                </p>
+            </section>
+
+            <!-- ============================================================
+                 QUICK ACTIONS — never gated on /api/stats
+                 ============================================================ -->
+            <nav class="hp-section" aria-label="Quick actions">
+                <h2 class="hp-section__title">Quick actions</h2>
+                <div class="hp-action-grid">
+
+                    <a class="hp-action" href="/dashboard">
+                        <span class="hp-action__icon"><i class="fas fa-gauge-high" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Dashboard</span>
+                            <span class="hp-action__sub">Live detections</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <a class="hp-action" href="/dashboard">
+                        <span class="hp-action__icon"><i class="fas fa-user-plus" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Add person</span>
+                            <span class="hp-action__sub">Enrol a new face</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <a class="hp-action" href="/admin/unknown">
+                        <span class="hp-action__icon"><i class="fas fa-user-secret" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Unknown faces</span>
+                            <span class="hp-action__sub">Review unmatched identities</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <a class="hp-action" id="tracking-link" href="/tracking-people">
+                        <span class="hp-action__icon"><i class="fas fa-location-crosshairs" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Tracking people</span>
+                            <span class="hp-action__sub">Assistant &amp; tracking</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <a class="hp-action" href="/admin/pipelines">
+                        <span class="hp-action__icon"><i class="fas fa-network-wired" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Pipelines</span>
+                            <span class="hp-action__sub">Sources &amp; configuration</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <button type="button" class="hp-action" data-action="focusHealth">
+                        <span class="hp-action__icon"><i class="fas fa-heart-pulse" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">System status</span>
+                            <span class="hp-action__sub">Jump to subsystem detail</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-down" aria-hidden="true"></i>
+                    </button>
+
                 </div>
-                <div class="intelligence-stat-card admin-only">
-                    <div class="stat-icon-wrapper">
-                        <i class="fas fa-check-circle"></i>
-                        <div class="icon-glow"></div>
-                    </div>
-                    <div class="stat-value" id="system-status">-</div>
-                    <div class="stat-label">System Status</div>
+            </nav>
+
+            <!-- ============================================================
+                 ADMINISTRATION — gated by exactly ONE mechanism: this inline
+                 display:none plus home.js's adminSection.style.display
+                 assignment. No CSS rule keys off .admin-user for page content.
+                 ============================================================ -->
+            <section class="hp-panel hp-panel--block" id="admin-section" style="display: none;">
+                <div class="hp-panel__head">
+                    <h2 class="hp-panel__title">Administration</h2>
+                    <p class="hp-panel__subtitle">System management &amp; configuration</p>
                 </div>
-            </div>
+                <div class="hp-action-grid">
+                    <a class="hp-action" href="/admin/users">
+                        <span class="hp-action__icon"><i class="fas fa-user-gear" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Manage users</span>
+                            <span class="hp-action__sub">Accounts, roles &amp; permissions</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+                    <a class="hp-action" href="/admin/pipelines">
+                        <span class="hp-action__icon"><i class="fas fa-sliders" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Manage pipelines</span>
+                            <span class="hp-action__sub">Video sources &amp; configuration</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+                </div>
+            </section>
+
         </div>
     </main>
 
-    <!-- Footer -->
-    <footer class="military-footer">
-        <div class="footer-content">
-            <div class="footer-credits">
-                <i class="fas fa-brain"></i>
-                <span><strong>Face Recognition Service</strong> - Developed by <strong class="department-name">ITDIR-AI DEPARTMENT</strong></span>
-            </div>
-            <div class="footer-copyright">
-                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
-            </div>
-        </div>
+    <footer class="hp-footer">
+        <p class="hp-footer__credits"><i class="fas fa-brain" aria-hidden="true"></i>
+            <span><strong>Face Recognition Service</strong> — developed by <strong>ITDIR-AI Department</strong></span>
+        </p>
+        <p class="hp-footer__copy"><small>&copy; <span id="current-year">2026</span> All rights reserved</small></p>
     </footer>
 
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
-    <script src="/frontend/js/home.js?v=home-2"></script>
+    <script src="/frontend/js/home.js?v=home-3"></script>
 </body>
 </html>
-

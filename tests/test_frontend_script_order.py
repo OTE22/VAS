@@ -75,10 +75,30 @@ def test_home_pipelines_loader_survives_missing_markup():
     dereference null (this logged an error on every home page load)."""
     with open(os.path.join(FRONTEND, "js", "home.js"), encoding="utf-8") as f:
         src = f.read()
-    assert "if (!pipelineList || !pipelinesSection) return;" in src, (
-        "loadPipelines dereferences elements that do not exist in home.html"
+    loader = src.split("async function loadPipelines", 1)[1].split("\nfunction ", 1)[0]
+    # Intent, not identifiers: the loader must bail out before touching the DOM
+    # when its markup is absent. (Asserting the exact variable names made this
+    # test fail on a pure rename during the dashboard redesign.)
+    guard = re.search(r"if \(!\w+ \|\| !\w+\) return;", loader)
+    assert guard, (
+        "loadPipelines has no early return for missing markup — it would "
+        "dereference null once the pipelines response arrives"
     )
-    # Server data must not be interpolated into pipeline markup.
-    assert "pipelineList.innerHTML" not in src, (
-        "loadPipelines builds HTML from server-supplied pipeline ids"
+    # ...and the guard must come before any DOM mutation.
+    first_write = min(
+        (loader.index(tok) for tok in ("replaceChildren", "appendChild", ".style.")
+         if tok in loader),
+        default=len(loader),
+    )
+    assert guard.start() < first_write, "the null guard runs after a DOM write"
+
+    # Server data must not be interpolated into pipeline markup. Checked on
+    # NON-COMMENT lines only: the loader documents why it avoids innerHTML,
+    # and a naive substring match reads that explanation as the violation.
+    loader_code = "\n".join(
+        line for line in loader.splitlines()
+        if not line.lstrip().startswith(("//", "*", "/*"))
+    )
+    assert "innerHTML" not in loader_code, (
+        "loadPipelines builds HTML from server-supplied pipeline data"
     )
