@@ -928,6 +928,35 @@ async def lifespan(app: FastAPI):
         shutdown_time = time.time()
         logger.info("=" * 70)
         logger.info("🛑 Starting graceful shutdown...")
+        # Deterministic shutdown context, one structured line. This exists
+        # because the 2026-07-28 "mystery shutdowns" were a planned
+        # max_requests recycle that nothing attributed: the shutdown sequence
+        # logged WHAT stopped but never WHO asked, HOW LONG the process had
+        # lived, or what state it was in. psutil-free so it can never fail
+        # the shutdown path.
+        try:
+            import os as _os
+            import threading as _threading
+            _uptime_s = int(time.time() - startup_time)
+            _rss_mb = None
+            try:
+                with open("/proc/self/status") as _f:
+                    for _line in _f:
+                        if _line.startswith("VmRSS"):
+                            _rss_mb = int(_line.split()[1]) // 1024
+                            break
+            except OSError:
+                pass  # non-Linux dev host
+            logger.info(
+                "shutdown_context pid=%s ppid=%s uptime_s=%s rss_mb=%s "
+                "active_tasks=%s threads=%s "
+                "(cause is logged by the process manager: look for a gunicorn "
+                "'Worker exiting'/'ABORTED'/max-requests line just above)",
+                _os.getpid(), _os.getppid(), _uptime_s, _rss_mb,
+                len(asyncio.all_tasks()), _threading.active_count(),
+            )
+        except Exception:  # pragma: no cover — instrumentation must never block shutdown
+            pass
         logger.info("=" * 70)
 
         shutdown_results = {}
@@ -1095,18 +1124,38 @@ async def lifespan(app: FastAPI):
                 except Exception as e:
                     logger.error(f"    ❌ Batch flush failed: {e}")
 
-        # Wait for any remaining async tasks (with timeout)
+        # Cancel-then-await for any remaining async tasks.
+        #
+        # The previous order was inverted: it WAITED 10 seconds hoping tasks
+        # would finish on their own (periodic loops never do — they sleep), and
+        # only then cancelled, without awaiting the cancellations. Every
+        # shutdown therefore stalled exactly 10s (visible in the logs as
+        # "Waiting for application shutdown" -> "Worker exiting" 10s apart),
+        # logged the anonymous "3 tasks still pending", and exited before the
+        # cancelled tasks' cleanup ran. Cancelling FIRST turns the same tasks
+        # into immediate CancelledError exits, and awaiting them lets their
+        # finally-blocks complete.
         logger.info("  🔄 Cleaning up remaining tasks...")
         try:
             pending_tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             if pending_tasks:
-                logger.info(f"    ⏳ Waiting for {len(pending_tasks)} remaining tasks...")
-                done, pending = await asyncio.wait(pending_tasks, timeout=10.0, return_when=asyncio.ALL_COMPLETED)
+                logger.info(f"    ⏳ Cancelling {len(pending_tasks)} remaining tasks...")
+                for task in pending_tasks:
+                    task.cancel()
+                done, pending = await asyncio.wait(pending_tasks, timeout=5.0)
                 if pending:
-                    logger.warning(f"    ⚠️  {len(pending)} tasks still pending after timeout")
-                    # Cancel remaining tasks
-                    for task in pending:
-                        task.cancel()
+                    # NAME the survivors — an anonymous count is undebuggable.
+                    # A task that survives cancel+await is either shielded or
+                    # stuck in un-cancellable blocking code; the name says
+                    # which service owns it.
+                    survivors = [
+                        f"{t.get_name()}:{getattr(t.get_coro(), '__qualname__', repr(t.get_coro())[:60])}"
+                        for t in pending
+                    ]
+                    logger.warning(
+                        "    ⚠️  %d tasks survived cancellation after 5s: %s",
+                        len(pending), ", ".join(survivors),
+                    )
         except Exception as e:
             logger.error(f"    ❌ Task cleanup failed: {e}")
 

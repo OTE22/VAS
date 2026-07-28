@@ -47,9 +47,22 @@ worker_connections = 2000 if USE_GPU else 1000  # GPU can handle more connection
 threads = 1  # Threads per worker (keep at 1 for async)
 
 # Worker lifecycle
-# Optimized for high-throughput scenarios
-max_requests = 1000 if USE_GPU else 500  # GPU workers can handle more requests
-max_requests_jitter = 200  # Reduced jitter for more predictable restarts
+#
+# max_requests recycling is only safe when ANOTHER worker can cover the gap.
+# With a single worker (the current CPU deployment: WORKERS=1 is load-bearing
+# because of process-local state), a recycle is a full outage: observed live
+# 2026-07-28, "Maximum request limit of 606 exceeded" took the only worker
+# down for 63 seconds (shutdown 10:12:22 -> startup complete 10:13:25) and
+# gunicorn logged the planned recycle as "Worker exited with code 1". The
+# dashboard's polling reaches ~600 requests in well under an hour, so this
+# repeated all day and read as mysterious crashes.
+#
+# Recycling exists to paper over slow memory leaks; this process has been
+# observed stable at ~730MB RSS under sustained test load. If a leak appears,
+# fix the leak or schedule an off-hours restart — do not take a planned
+# outage every few hundred requests.
+max_requests = 1000 if workers > 1 else 0   # 0 = recycling disabled
+max_requests_jitter = 200 if workers > 1 else 0
 # Increased timeout for long-running SSE streams (up to 10 minutes)
 timeout = 600 if USE_GPU else 600  # 10 minutes for streaming requests
 graceful_timeout = 60  # Increased for graceful shutdown of long-running requests
@@ -205,20 +218,47 @@ def when_ready(server):
     print("=" * 70)
 
 
+def _worker_context(worker):
+    """One-line diagnostic context for lifecycle events.
+
+    Every worker lifecycle line carries the same fields so the NEXT unexplained
+    shutdown can be attributed from the log alone — the 2026-07-28 incident
+    took log archaeology to trace to max_requests recycling because the events
+    logged nothing but a pid.
+    """
+    import os as _os
+    import threading as _threading
+    parts = [f"pid={worker.pid}", f"ppid={_os.getppid()}"]
+    try:
+        parts.append(f"age_s={int(worker.age)}")
+    except Exception:
+        pass
+    try:
+        parts.append(f"requests_handled={worker.nr}")
+    except Exception:
+        pass
+    parts.append(f"threads={_threading.active_count()}")
+    try:
+        import resource
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        parts.append(f"peak_rss_mb={rss_kb // 1024}")
+    except Exception:
+        pass
+    return " ".join(parts)
+
+
 def worker_int(worker):
-    """
-    Called when a worker receives SIGINT or SIGQUIT.
-    """
-    print(f"⚠️  Worker {worker.pid} interrupted by user")
+    """Called when a worker receives SIGINT or SIGQUIT."""
+    print(f"⚠️  Worker interrupted signal=SIGINT/SIGQUIT {_worker_context(worker)}")
 
 
 def worker_abort(worker):
-    """
-    Called when a worker receives SIGABRT.
-    Usually happens when the worker times out.
-    """
-    print(f"❌ Worker {worker.pid} aborted (timeout or crash)")
-    print(f"   Worker age: {worker.age}")
+    """Called when a worker receives SIGABRT — almost always the gunicorn
+    heartbeat timeout, i.e. the event loop was blocked past `timeout` seconds.
+    This is the line to look for when a worker dies without a graceful
+    shutdown sequence."""
+    print(f"❌ Worker ABORTED signal=SIGABRT probable_cause=event_loop_blocked_past_timeout "
+          f"{_worker_context(worker)}")
 
 
 def pre_fork(server, worker):
@@ -243,10 +283,9 @@ def post_worker_init(worker):
 
 
 def worker_exit(server, worker):
-    """
-    Called when a worker is exited.
-    """
-    print(f"👋 Worker {worker.pid} exited gracefully")
+    """Called in the worker process as it exits (any reason)."""
+    print(f"👋 Worker exiting {_worker_context(worker)} "
+          f"(recycle_note: with max_requests>0 a planned recycle also passes here)")
 
 
 def child_exit(server, worker):
