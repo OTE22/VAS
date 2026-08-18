@@ -71,8 +71,17 @@ async def require_membership(db: AsyncSession, workspace_id, user_id: int) -> st
 
 
 async def ensure_membership(db: AsyncSession, workspace_id, user_id: int,
-                            role: str = "member") -> None:
-    """Enroll a user created after the migration ran. Idempotent."""
+                            role: Optional[str] = None) -> None:
+    """Enroll a user created after the migration ran. Idempotent.
+
+    Same rule as migration d3e4f5a6b7c8 applied to the users that existed
+    then: platform admins RUN the workspace (role `admin`), everyone else is a
+    `member`. Without this a bootstrap administrator created on a fresh
+    database would be a plain member and could not see orphaned (deleted-user)
+    conversations — the admin-readable guarantee would silently not hold on
+    every fresh install. `role` may be passed explicitly; otherwise it is
+    derived from users.role.
+    """
     existing = (await db.execute(
         select(WorkspaceMember.id).where(
             WorkspaceMember.workspace_id == workspace_id,
@@ -80,6 +89,11 @@ async def ensure_membership(db: AsyncSession, workspace_id, user_id: int,
         )
     )).scalar()
     if existing is None:
+        if role is None:
+            from db_models import User
+            platform_role = (await db.execute(
+                select(User.role).where(User.id == user_id))).scalar()
+            role = "admin" if platform_role == "admin" else "member"
         db.add(WorkspaceMember(workspace_id=workspace_id, user_id=user_id, role=role))
         # Flush now: the session maker sets autoflush=False, so without this
         # the membership check that follows in the same request would SELECT
@@ -89,7 +103,16 @@ async def ensure_membership(db: AsyncSession, workspace_id, user_id: int,
 
 async def _owned_conversation(db: AsyncSession, conversation_id, user_id: int,
                               include_deleted: bool = False) -> Conversation:
-    """Fetch a conversation the caller owns, or raise. Ownership in the WHERE."""
+    """Fetch a conversation the caller owns, or raise. Ownership in the WHERE.
+
+    Deliberately strict about orphans: `Conversation.user_id == user_id` can
+    never match a NULL user_id, so a deleted user's conversation is not owned
+    by anyone. Every MUTATING path (rename, flags, delete, append, branch)
+    resolves through here, which is what makes orphaned history immutable.
+    Read access for workspace admins goes through
+    _readable_historical_conversation below — a separate gate on purpose, so
+    historical visibility can never widen into mutation rights.
+    """
     query = select(Conversation).where(
         Conversation.id == conversation_id,
         Conversation.user_id == user_id,
@@ -101,6 +124,40 @@ async def _owned_conversation(db: AsyncSession, conversation_id, user_id: int,
         raise ConversationAccessError("conversation not found")
     await require_membership(db, conversation.workspace_id, user_id)
     return conversation
+
+
+async def _readable_historical_conversation(db: AsyncSession, conversation_id,
+                                            user_id: int) -> Conversation:
+    """READ-ONLY access to an orphaned conversation (owner deleted).
+
+    Matches only `user_id IS NULL` rows — a live user's conversation can never
+    be reached this way — and requires the caller to hold the `admin` role in
+    that conversation's workspace, so ordinary members see nothing and a
+    cross-workspace admin fails the membership check. Called exclusively from
+    GET paths; no mutating handler resolves through here.
+    """
+    conversation = (await db.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id.is_(None),
+            Conversation.deleted_at.is_(None),
+        )
+    )).scalars().first()
+    if conversation is None:
+        raise ConversationAccessError("conversation not found")
+    role = await require_membership(db, conversation.workspace_id, user_id)
+    if role != "admin":
+        raise ConversationAccessError("conversation not found")
+    return conversation
+
+
+async def _readable_conversation(db: AsyncSession, conversation_id,
+                                 user_id: int) -> Conversation:
+    """Owner access first; workspace-admin historical read as the fallback."""
+    try:
+        return await _owned_conversation(db, conversation_id, user_id)
+    except ConversationAccessError:
+        return await _readable_historical_conversation(db, conversation_id, user_id)
 
 
 def _validate_blocks(blocks, allowed=_ALLOWED_BLOCK_TYPES) -> List[dict]:
@@ -121,6 +178,11 @@ def _conversation_dict(c: Conversation) -> dict:
         "archived": c.archived,
         "last_message_at": c.last_message_at.isoformat() + "Z" if c.last_message_at else None,
         "created_at": c.created_at.isoformat() + "Z" if c.created_at else None,
+        # NULL user_id = the owner's account was deleted. author_username is
+        # the denormalized attribution stamped at deletion; the UI renders
+        # "Deleted User (<name>)" and treats the conversation as read-only.
+        "orphaned": c.user_id is None,
+        "author_username": c.author_username if c.user_id is None else None,
     }
 
 
@@ -147,12 +209,21 @@ async def list_conversations(db: AsyncSession, user_id: int, workspace_id,
                              include_archived: bool = False,
                              limit: int = 50, offset: int = 0,
                              search: Optional[str] = None) -> List[dict]:
-    await require_membership(db, workspace_id, user_id)
+    role = await require_membership(db, workspace_id, user_id)
+    # Owner-only listing — except that workspace ADMINS also see orphaned
+    # conversations (owner deleted, user_id IS NULL), read-only. Members never
+    # do: `user_id == user_id` cannot match NULL.
+    if role == "admin":
+        from sqlalchemy import or_ as _or
+        owner_filter = _or(Conversation.user_id == user_id,
+                           Conversation.user_id.is_(None))
+    else:
+        owner_filter = Conversation.user_id == user_id
     query = (
         select(Conversation)
         .where(
             Conversation.workspace_id == workspace_id,
-            Conversation.user_id == user_id,           # owner-only listing
+            owner_filter,
             Conversation.deleted_at.is_(None),
         )
         .order_by(Conversation.pinned.desc(),
@@ -240,7 +311,8 @@ async def get_primary_branch_id(db: AsyncSession, conversation_id):
 
 
 async def list_branches(db: AsyncSession, user_id: int, conversation_id) -> List[dict]:
-    await _owned_conversation(db, conversation_id, user_id)
+    # Read path: owner, or workspace admin for an orphaned conversation.
+    await _readable_conversation(db, conversation_id, user_id)
     rows = (await db.execute(
         select(ConversationBranch)
         .where(ConversationBranch.conversation_id == conversation_id)
@@ -259,7 +331,8 @@ async def list_branches(db: AsyncSession, user_id: int, conversation_id) -> List
 async def get_messages(db: AsyncSession, user_id: int, conversation_id,
                        branch_id=None, limit: int = 100, before_sequence: Optional[int] = None) -> dict:
     """Messages for one branch, oldest-first, paginated by sequence."""
-    await _owned_conversation(db, conversation_id, user_id)
+    # Read path: owner, or workspace admin for an orphaned conversation.
+    await _readable_conversation(db, conversation_id, user_id)
     if branch_id is None:
         branch_id = await get_primary_branch_id(db, conversation_id)
         if branch_id is None:

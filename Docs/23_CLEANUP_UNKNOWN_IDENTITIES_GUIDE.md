@@ -1,5 +1,11 @@
 # Cleanup Unknown Identities - Complete Guide
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 ## Overview
 
 This guide explains how to remove all unknown identities and their related data from the database to start fresh.
@@ -219,6 +225,10 @@ WHERE identity_id IN (
     SELECT id FROM identities WHERE type = 'unknown'
 );
 
+-- ⚠️ DESTRUCTIVE AND IRREVERSIBLE. Take a database backup first
+-- (Docs/60_BACKUP_AND_RESTORE.md) and prefer the Python script, which also
+-- removes the stored image files these rows point at.
+
 -- Step 2: Delete related records
 DELETE FROM identity_embeddings 
 WHERE identity_id IN (SELECT id FROM identities WHERE type = 'unknown');
@@ -293,7 +303,7 @@ After cleanup, the system will:
 
 - `cleanup_unknown_identities.py` - The cleanup script
 - `db_models.py` - Database model definitions
-- `backend/core/identity_index.py` - FAISS index management
+- `backend/core/vector_index/` - FAISS index management
 
 ## Support
 

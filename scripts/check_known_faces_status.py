@@ -91,7 +91,7 @@ async def check_known_faces_status():
         
         # Check storage/faces directory
         from config import settings
-        faces_dir = getattr(settings, 'FACES_DIR', './storage/faces')
+        faces_dir = settings.FACES_DIR
         logger.info("")
         logger.info("📁 Storage Directory Status:")
         logger.info("=" * 80)

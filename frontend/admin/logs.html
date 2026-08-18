@@ -136,13 +136,11 @@
                             <i class="fas fa-filter"></i>
                             Log Level
                         </label>
+                        <!-- Options are REPLACED on load from GET /api/logs/config.
+                             These are only what renders before that answers; the
+                             level vocabulary lives in the backend. -->
                         <select id="level-filter" class="filter-select" aria-label="Filter by log level">
                             <option value="all" selected>All Levels</option>
-                            <option value="DEBUG">DEBUG</option>
-                            <option value="INFO">INFO</option>
-                            <option value="WARNING">WARNING</option>
-                            <option value="ERROR">ERROR</option>
-                            <option value="CRITICAL">CRITICAL</option>
                         </select>
                     </div>
                     <div class="filter-group">
@@ -150,11 +148,11 @@
                             <i class="fas fa-list"></i>
                             Per Page
                         </label>
+                        <!-- Populated from GET /api/logs/config (page_size_options,
+                             bounded by LOG_API_MAX_PAGE_SIZE). No literal page size
+                             is hard-coded here: raising the server ceiling changes
+                             this control with no frontend edit. -->
                         <select id="page-size" class="filter-select" aria-label="Items per page">
-                            <option value="25">25</option>
-                            <option value="50" selected>50</option>
-                            <option value="100">100</option>
-                            <option value="200">200</option>
                         </select>
                     </div>
                     <button id="apply-filters-btn" class="filter-btn" type="button" aria-label="Apply filters">
@@ -210,7 +208,7 @@
 
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
     <script src="/frontend/js/admin-logs.js"></script>
     <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>

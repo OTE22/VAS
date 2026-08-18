@@ -33,7 +33,8 @@ from db_models import (
 from sqlalchemy import select, func, and_, text
 
 # Import FAISS index (original backend)
-from backend.core.identity_index import identity_index
+from backend.core.vector_index.access import (get_vector_index, load_vector,
+                                             search_similar_embeddings)
 
 # Import pgvector index (new backend)
 try:
@@ -45,7 +46,7 @@ except ImportError:
     PGVECTOR_AVAILABLE = False
 
 # Determine which backend to use
-VECTOR_BACKEND = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower()
+VECTOR_BACKEND = settings.VECTOR_BACKEND.lower()
 USE_PGVECTOR = VECTOR_BACKEND == 'pgvector' and PGVECTOR_AVAILABLE
 
 logger = logging.getLogger(__name__)
@@ -83,17 +84,63 @@ class IdentityClusteringService:
         min_samples: Optional[int] = None
     ):
         logger.info("[CLUSTERING] Initializing IdentityClusteringService...")
-        # Load from central config if not provided
-        self.cluster_interval_hours = cluster_interval_hours or settings.CLUSTER_INTERVAL_HOURS
-        self.cluster_startup_delay_hours = cluster_startup_delay_hours or getattr(settings, 'CLUSTER_STARTUP_DELAY_HOURS', 1.0)
-        self.min_cluster_size = min_cluster_size or settings.CLUSTER_MIN_SIZE
-        self.eps = eps or settings.CLUSTER_EPS
-        self.min_samples = min_samples or settings.CLUSTER_MIN_SAMPLES
+        # Constructor arguments are stored as OVERRIDES, not as resolved values.
+        #
+        # This class is instantiated as a module-level singleton, so every
+        # `self.x = ... or settings.X` here executed exactly once, at first
+        # import, and froze the value for the life of the process. The comment
+        # below used to say "Read the live setting instead" — and it did, once.
+        # An admin editing UNKNOWN_SIMILARITY_THRESHOLD on the settings page saw
+        # it applied to the running config and still never reached clustering.
+        # Properties resolve per read, so a caller-supplied override still wins
+        # and everything else follows the live setting.
+        self._cluster_interval_hours_override = cluster_interval_hours
+        self._cluster_startup_delay_hours_override = cluster_startup_delay_hours
+        self._min_cluster_size_override = min_cluster_size
+        self._eps_override = eps
+        self._min_samples_override = min_samples
         self._clustering_task = None
         # Always enabled - hybrid approach works with or without scikit-learn
         self._enabled = True
         logger.info(f"[CLUSTERING] Configuration: interval={self.cluster_interval_hours}h, startup_delay={self.cluster_startup_delay_hours}h, min_size={self.min_cluster_size}, eps={self.eps}, min_samples={self.min_samples}")
-    
+
+    @property
+    def cluster_interval_hours(self):
+        return self._cluster_interval_hours_override or settings.CLUSTER_INTERVAL_HOURS
+
+    @property
+    def cluster_startup_delay_hours(self):
+        return (self._cluster_startup_delay_hours_override
+                if self._cluster_startup_delay_hours_override is not None
+                else settings.CLUSTER_STARTUP_DELAY_HOURS)
+
+    @property
+    def min_cluster_size(self):
+        return self._min_cluster_size_override or settings.CLUSTER_MIN_SIZE
+
+    @property
+    def eps(self):
+        return self._eps_override or settings.CLUSTER_EPS
+
+    @property
+    def min_samples(self):
+        return self._min_samples_override or settings.CLUSTER_MIN_SAMPLES
+
+    @property
+    def vector_verify_threshold(self) -> float:
+        """Similarity required to confirm a merge candidate by vector check."""
+        return float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
+
+    @property
+    def cross_camera_verify_threshold(self) -> float:
+        """The stricter bar applied when the two identities never shared a camera.
+
+        Two people seen only on different cameras have no co-appearance evidence
+        for or against a merge, so the vector alone has to carry it.
+        """
+        return float(settings.CROSS_PIPELINE_SIMILARITY_THRESHOLD)
+
+
     async def start(self):
         """Start periodic clustering job"""
         if self._clustering_task and not self._clustering_task.done():
@@ -112,10 +159,9 @@ class IdentityClusteringService:
             ),
             name="identity_clustering",
         )
-        if identity_index:
-            logger.info(f"[CLUSTERING] ✅ Service started successfully (startup delay: {self.cluster_startup_delay_hours}h, interval: {self.cluster_interval_hours}h, hybrid mode: pattern-based + FAISS)")
-        else:
-            logger.warning("[CLUSTERING] ⚠️  Service started but FAISS index not available - using pattern-based only")
+        logger.info(f"[CLUSTERING] ✅ Service started (startup delay: "
+                    f"{self.cluster_startup_delay_hours}h, interval: "
+                    f"{self.cluster_interval_hours}h, hybrid mode: pattern-based + vector)")
 
     async def stop(self):
         """Stop clustering task"""
@@ -168,11 +214,11 @@ class IdentityClusteringService:
         start_time = datetime.utcnow()
         
         # Check if we have at least one backend available
-        has_faiss = identity_index is not None
+        has_faiss = get_vector_index() is not None
         has_pgvector = USE_PGVECTOR and PGVECTOR_AVAILABLE
         
         if not has_faiss and not has_pgvector:
-            logger.warning("[CLUSTERING] ⚠️  No vector backend available (FAISS or pgvector), skipping clustering")
+            logger.warning("[CLUSTERING] ⚠️  No vector backend available, skipping clustering")
             return
         
         logger.info(f"[CLUSTERING] 🔄 Starting identity clustering for merge suggestions... (FAISS: {has_faiss}, pgvector: {has_pgvector})")
@@ -180,8 +226,10 @@ class IdentityClusteringService:
         try:
             async with db_manager.get_session() as db:
                 # Get active unknown identities with recent embeddings
-                # Only consider identities seen in the last 90 days
-                recent_cutoff = datetime.utcnow() - timedelta(days=90)
+                # Only consider identities seen recently enough to still be
+                # worth clustering.
+                recent_cutoff = datetime.utcnow() - timedelta(
+                    days=int(settings.CLUSTER_ACTIVE_WINDOW_DAYS))
                 logger.debug(f"[CLUSTERING] Querying for unknown identities seen after {recent_cutoff}")
                 
                 result = await db.execute(
@@ -257,7 +305,7 @@ class IdentityClusteringService:
         logger.info(f"[CLUSTERING] Starting multi-approach clustering for {len(identities)} identities")
         
         # Check if we have at least one backend available
-        has_faiss = identity_index is not None
+        has_faiss = get_vector_index() is not None
         has_pgvector = USE_PGVECTOR and PGVECTOR_AVAILABLE
         
         if not has_faiss and not has_pgvector:
@@ -382,7 +430,7 @@ class IdentityClusteringService:
                 # MODE 2: Cross-camera detection (NEW!)
                 # If no camera overlap but vector backend will verify face similarity
                 # This is slower but catches cross-camera duplicates
-                elif overlap_ratio < 0.5 and (identity_index or USE_PGVECTOR):
+                elif overlap_ratio < 0.5 and (get_vector_index() is not None or USE_PGVECTOR):
                     # Cross-camera: No pattern pre-filter, rely entirely on FAISS
                     # Only check if both have at least 2 appearances (reduces noise)
                     if identity1.appearances_count >= 2 and identity2.appearances_count >= 2:
@@ -428,8 +476,12 @@ class IdentityClusteringService:
                 identity1, identity2, db
             )
             
-            # Cross-camera requires higher similarity threshold (0.5 vs 0.35)
-            min_similarity = 0.50 if is_cross_camera else 0.35
+            # Cross-camera requires the higher bar. Both used to be literals
+            # that duplicated UNKNOWN_SIMILARITY_THRESHOLD and
+            # CROSS_PIPELINE_SIMILARITY_THRESHOLD, so the settings page offered
+            # thresholds this decision never consulted.
+            min_similarity = (self.cross_camera_verify_threshold if is_cross_camera
+                              else self.vector_verify_threshold)
             
             if not is_similar or face_similarity < min_similarity:
                 skipped_count += 1
@@ -656,8 +708,10 @@ class IdentityClusteringService:
             similarity_score, quality1, quality2 = row
             similarity_score = float(similarity_score)
             
-            # Use same threshold as FAISS (0.35 for unknown)
-            threshold = 0.35
+            # The same bar the unknown search uses. The comment claimed this
+            # already matched FAISS; the literal meant it stopped matching the
+            # moment anyone tuned the setting.
+            threshold = self.vector_verify_threshold
             is_similar = similarity_score >= threshold
             
             if is_similar:
@@ -693,15 +747,11 @@ class IdentityClusteringService:
         Searches for identity2 when querying with identity1's embedding.
         Returns (is_similar, similarity_score)
         """
-        logger.debug(f"[CLUSTERING] [FAISS_VERIFY] Verifying similarity: {str(identity1.id)[:8]}... vs {str(identity2.id)[:8]}...")
-        
-        if not identity_index:
-            logger.debug("[CLUSTERING] [FAISS_VERIFY] Identity index not available")
-            return False, 0.0
-        
+        logger.debug(f"[CLUSTERING] [VECTOR_VERIFY] Verifying similarity: "
+                     f"{str(identity1.id)[:8]}... vs {str(identity2.id)[:8]}...")
+
         try:
-            # Get best embedding records for both identities
-            logger.debug(f"[CLUSTERING] [FAISS_VERIFY] Fetching embeddings for identity1: {str(identity1.id)[:8]}...")
+            # Best embedding for identity1, chosen by quality.
             emb_result1 = await db.execute(
                 select(IdentityEmbedding).where(
                     and_(
@@ -712,90 +762,50 @@ class IdentityClusteringService:
                 ).order_by(IdentityEmbedding.quality.desc()).limit(1)
             )
             emb_record1 = emb_result1.scalar_one_or_none()
-            
-            emb_result2 = await db.execute(
-                select(IdentityEmbedding).where(
-                    and_(
-                        IdentityEmbedding.identity_id == identity2.id,
-                        IdentityEmbedding.faiss_index_type == 'unknown',
-                        IdentityEmbedding.quality.isnot(None)
-                    )
-                ).order_by(IdentityEmbedding.quality.desc()).limit(1)
-            )
-            emb_record2 = emb_result2.scalar_one_or_none()
-            
-            if not emb_record1 or not emb_record2:
-                logger.debug(f"[CLUSTERING] [FAISS_VERIFY] Missing embeddings: emb1={emb_record1 is not None}, emb2={emb_record2 is not None}")
+            if emb_record1 is None:
+                logger.debug("[CLUSTERING] [VECTOR_VERIFY] identity1 has no scored embedding")
                 return False, 0.0
-            
-            if emb_record1.faiss_id is None or emb_record2.faiss_id is None:
-                logger.debug(f"[CLUSTERING] [FAISS_VERIFY] Missing FAISS IDs: faiss_id1={emb_record1.faiss_id}, faiss_id2={emb_record2.faiss_id}")
+
+            # The query vector comes from the authoritative column, not from a
+            # positional reconstruct() against the index. Positional ids shift
+            # on rebuild, so the old path could compare the wrong person.
+            emb1_vector = await load_vector(db, emb_record1.id)
+            if emb1_vector is None or emb1_vector.size == 0:
+                logger.debug("[CLUSTERING] [VECTOR_VERIFY] identity1 embedding row has no vector")
                 return False, 0.0
-            
-            logger.debug(f"[CLUSTERING] [FAISS_VERIFY] Found embeddings: faiss_id1={emb_record1.faiss_id}, faiss_id2={emb_record2.faiss_id}, quality1={emb_record1.quality}, quality2={emb_record2.quality}")
-            
-            # Get embeddings from FAISS index using reconstruct
-            # FAISS IndexFlatIP supports reconstruct
-            try:
-                with identity_index.lock:
-                    # Check if index has enough vectors
-                    if identity_index.unknown_index.ntotal == 0:
-                        return False, 0.0
-                    
-                    if emb_record1.faiss_id >= identity_index.unknown_index.ntotal:
-                        logger.warning(f"[CLUSTERING] [FAISS_VERIFY] FAISS ID {emb_record1.faiss_id} out of range (total: {identity_index.unknown_index.ntotal})")
-                        return False, 0.0
-                    
-                    # Reconstruct embedding for identity1
-                    logger.debug(f"[CLUSTERING] [FAISS_VERIFY] Reconstructing embedding from FAISS index (faiss_id={emb_record1.faiss_id})")
-                    emb1_vector = identity_index.unknown_index.reconstruct(int(emb_record1.faiss_id))
-                    emb1_vector = emb1_vector.astype(np.float32).reshape(1, -1)
-                    
-                    # Normalize for cosine similarity (IndexFlatIP uses inner product)
-                    emb1_norm = np.linalg.norm(emb1_vector)
-                    if emb1_norm > 0:
-                        emb1_vector = emb1_vector / emb1_norm
-                    
-                    # Search for similar identities using identity1's embedding
-                    # We'll search top 20 to see if identity2 appears
-                    search_k = min(20, identity_index.unknown_index.ntotal)
-                    similarities, indices = identity_index.unknown_index.search(emb1_vector, search_k)
-                    
-                    # Check if identity2 appears in results
-                    identity2_str = str(identity2.id)
-                    for sim, idx in zip(similarities[0], indices[0]):
-                        if idx < 0:
-                            continue
-                        found_identity_id = identity_index.unknown_metadata.get(int(idx))
-                        if found_identity_id == identity2_str:
-                            # Found identity2 in search results
-                            similarity_score = float(sim)
-                            # Use threshold of 0.35 (same as unknown search)
-                            if similarity_score >= 0.35:
-                                logger.debug(
-                                    f"[CLUSTERING] [FAISS_VERIFY] ✅ Face similarity verified: {str(identity1.id)[:8]}... ↔ {str(identity2.id)[:8]}... "
-                                    f"(similarity: {similarity_score:.3f})"
-                                )
-                                return True, similarity_score
-                    
+
+            norm = float(np.linalg.norm(emb1_vector))
+            if norm > 0:
+                emb1_vector = emb1_vector / norm
+
+            # Search, then let the database say which identity each hit belongs
+            # to. Works identically on both backends.
+            hits = await search_similar_embeddings(
+                db, emb1_vector, top_k=20, threshold=0.0, identity_type='unknown')
+
+            identity2_str = str(identity2.id)
+            for hit in hits:
+                if hit["identity_id"] != identity2_str:
+                    continue
+                similarity_score = float(hit["similarity"])
+                if similarity_score >= self.vector_verify_threshold:
                     logger.debug(
-                        f"[CLUSTERING] [FAISS_VERIFY] ❌ Identity2 not found in top {search_k} results"
-                    )
-                    return False, 0.0
-                    
-            except AttributeError:
-                # Index type doesn't support reconstruct
-                logger.warning("[CLUSTERING] [FAISS_VERIFY] ⚠️  FAISS index doesn't support reconstruct, using pattern-based only")
-                return True, 0.5  # Fallback to pattern-based
-            except Exception as e:
-                logger.debug(f"FAISS reconstruct/search error: {e}")
-                # Fallback: if both have embeddings, assume pattern-based is good enough
-                return True, 0.5
-            
-        except Exception as e:
-            logger.debug(f"Error in FAISS similarity verification: {e}")
+                        f"[CLUSTERING] [VECTOR_VERIFY] ✅ Verified: "
+                        f"{str(identity1.id)[:8]}... ↔ {str(identity2.id)[:8]}... "
+                        f"(similarity: {similarity_score:.3f})")
+                    return True, similarity_score
+                logger.debug(
+                    f"[CLUSTERING] [VECTOR_VERIFY] ❌ Below threshold "
+                    f"({similarity_score:.3f} < {self.vector_verify_threshold})")
+                return False, similarity_score
+
+            logger.debug(f"[CLUSTERING] [VECTOR_VERIFY] ❌ identity2 not in top {len(hits)} results")
             return False, 0.0
-    
+
+        except Exception as e:
+            logger.debug(f"Error in vector similarity verification: {e}")
+            return False, 0.0
+
     async def _create_graph_based_suggestions(
         self,
         identities: List[Identity],
@@ -941,8 +951,9 @@ class IdentityClusteringService:
                         identity1, identity2, db
                     )
                     
-                    # Cross-camera requires higher similarity threshold
-                    min_similarity = 0.50 if is_cross_camera else 0.35
+                    # Cross-camera requires the higher bar (see the hybrid path).
+                    min_similarity = (self.cross_camera_verify_threshold if is_cross_camera
+                                      else self.vector_verify_threshold)
                     
                     if is_similar and face_similarity >= min_similarity:
                         # Add edge to graph (bidirectional)

@@ -8,8 +8,8 @@
  *    are built after, URL preselection uses the component API (no timers).
  *  - No backend value ever passes through innerHTML or inline handlers.
  *  - Identity selection is SERVER-SIDE searched and paginated.
- *  - Backend map HTML runs only in a sandboxed iframe (scripts only,
- *    opaque origin — no cookies, no parent DOM, no APIs).
+ *  - The map is MapLibre GL JS rendering GeoJSON from /map-data over the
+ *    offline Martin basemap (frontend/js/identity-map.js) — no iframe.
  *  - Every resource has an AbortController + generation: stale responses
  *    can never overwrite newer results.
  *  - Expensive/security features are opt-in; a missing control means OFF.
@@ -30,7 +30,13 @@
     const MAP_STYLES = ['light', 'dark', 'satellite', 'terrain'];
     const VALID_SECURITY_TABS = new Set(['network', 'patterns', 'anomalies', 'threats', 'advanced', 'map']);
     const SEVERITY_CLASSES = new Set(['low', 'medium', 'high', 'critical']);
-    const THREAT_LEVEL_CLASSES = new Set(['critical', 'high', 'medium', 'low', 'minimal']);
+    // Unified risk-engine severities include 'moderate' (0-24 low, 25-49
+    // moderate, 50-74 high, 75-100 critical); 'medium'/'minimal' remain for
+    // older payloads. Styling maps moderate onto the medium classes.
+    const THREAT_LEVEL_CLASSES = new Set(['critical', 'high', 'medium', 'moderate', 'low', 'minimal']);
+    function severityClass(level) {
+        return level === 'moderate' ? 'medium' : level;
+    }
     const STRENGTH_CLASSES = new Set(['strong', 'moderate', 'weak', 'none']);
 
     const DEFAULT_AVATAR = 'data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2780%27 height=%2780%27%3E%3Crect fill=%27%23333%27 width=%2780%27 height=%2780%27/%3E%3Ccircle cx=%2740%27 cy=%2730%27 r=%2712%27 fill=%27%23999%27/%3E%3Cpath d=%27M 20 55 Q 20 45 30 45 L 50 45 Q 60 45 60 55 L 60 65 L 20 65 Z%27 fill=%27%23999%27/%3E%3C/svg%3E';
@@ -316,6 +322,8 @@
     // ============================================
 
     const state = {
+        mapController: null,
+        mapDataKey: null,
         activeTab: 'network',
         networkInstance: null,
         pipelines: [],            // normalized
@@ -1005,7 +1013,10 @@
             const node = document.getElementById(id);
             if (node) node.textContent = String(value);
         };
-        setStat('stat-nodes', nodes.length);
+        // Truncation honesty: a clipped graph must not read as the whole graph.
+        const totalNodes = toNonNegativeInteger(data.total_nodes, nodes.length);
+        setStat('stat-nodes', data.truncated === true && totalNodes > nodes.length
+            ? nodes.length + ' / ' + totalNodes : nodes.length);
         setStat('stat-edges', Array.isArray(data.edges) ? data.edges.length : 0);
         setStat('stat-clusters', Array.isArray(data.clusters) ? data.clusters.length : 0);
         setStat('stat-central', Array.isArray(data.central_nodes) ? data.central_nodes.length : 0);
@@ -1067,22 +1078,44 @@
         const req = beginRequest('patterns');
         renderLoading(container, 'Detecting patterns...');
         try {
-            const patterns = await api('/api/security/patterns', {
+            const data = await api('/api/security/patterns', {
                 signal: req.signal, timeout: LONG_TIMEOUT_MS,
                 params: { days_back: daysBack, min_group_size: minGroup }
             });
             if (!req.isCurrent()) return;
-            renderPatterns(Array.isArray(patterns) ? patterns : []);
+            // patterns-v2 envelope: {items, truncated, total, analysis_window}
+            const items = data && Array.isArray(data.items) ? data.items
+                : (Array.isArray(data) ? data : []);
+            renderPatterns(items, !!(data && data.truncated === true));
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(container, 'Failed to load patterns', err.referenceId);
         }
     }
 
-    function renderPatterns(patterns) {
+    function buildTruncationNote() {
+        const note = el('div', {
+            className: 'patterns-truncation-note',
+            text: 'Partial scan — the analysis window hit its cap; older activity was not examined.'
+        });
+        note.style.cssText = 'padding:0.5rem 0.75rem;margin-bottom:0.5rem;border:1px solid rgba(255,170,0,0.5);' +
+            'border-radius:6px;color:#ffaa00;font-size:0.85rem;';
+        return note;
+    }
+
+    function renderPatterns(patterns, truncated) {
         const container = document.getElementById('patterns-container');
         if (!container) return;
         if (!patterns.length) {
+            // A clean result from a PARTIAL scan must not read as a clean
+            // complete result — the note survives the empty state.
+            if (truncated) {
+                container.replaceChildren(buildTruncationNote(), el('div', {
+                    className: 'empty-state',
+                    text: 'No suspicious patterns detected in the scanned portion of the window'
+                }));
+                return;
+            }
             renderStateInto(container, 'fas fa-info-circle', 'No suspicious patterns detected');
             return;
         }
@@ -1116,6 +1149,9 @@
                 ])
             ]);
         }).filter(Boolean);
+        if (truncated) {
+            cards.unshift(buildTruncationNote());
+        }
         container.replaceChildren.apply(container, cards);
     }
 
@@ -1134,20 +1170,33 @@
         const req = beginRequest('anomalies');
         renderLoading(container, 'Detecting anomalies...');
         try {
-            const anomalies = await api('/api/security/anomalies/' + encodeURIComponent(identityId), {
+            const data = await api('/api/security/anomalies/' + encodeURIComponent(identityId), {
                 signal: req.signal, timeout: LONG_TIMEOUT_MS, params: { days_back: daysBack }
             });
             if (!req.isCurrent()) return;
-            renderAnomalies(Array.isArray(anomalies) ? anomalies : []);
+            // anomaly-v2 envelope: {items, baseline: {sufficient, samples, ...}}
+            const items = data && Array.isArray(data.items) ? data.items
+                : (Array.isArray(data) ? data : []);
+            renderAnomalies(items, data && typeof data.baseline === 'object' ? data.baseline : null);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(container, err.status === 404 ? 'Identity not found' : 'Failed to load anomalies', err.referenceId);
         }
     }
 
-    function renderAnomalies(anomalies) {
+    function renderAnomalies(anomalies, baseline) {
         const container = document.getElementById('anomalies-container');
         if (!container) return;
+        // 'Not enough history to judge' is NOT the same claim as 'behavior is
+        // normal' — the green check must never cover an empty baseline.
+        if (baseline && baseline.sufficient === false) {
+            const samples = toNonNegativeInteger(baseline.samples, 0);
+            renderStateInto(container, 'fas fa-hourglass-half',
+                'Insufficient baseline — only ' + samples +
+                ' earlier appearance' + (samples === 1 ? '' : 's') +
+                ' to compare against. Anomaly detection needs more history before it can judge this identity.');
+            return;
+        }
         if (!anomalies.length) {
             renderStateInto(container, 'fas fa-check-circle', 'No anomalies detected');
             return;
@@ -1204,6 +1253,7 @@
         if (!container) return;
         const threatLevel = THREAT_LEVEL_CLASSES.has(String(assessment.threat_level || '').toLowerCase())
             ? String(assessment.threat_level).toLowerCase() : 'minimal';
+        const levelClass = severityClass(threatLevel);
         const riskFactors = Array.isArray(assessment.risk_factors) ? assessment.risk_factors : [];
         const recommendations = Array.isArray(assessment.recommendations) ? assessment.recommendations : [];
 
@@ -1214,8 +1264,8 @@
                     el('div', { className: 'threat-identity-id', text: safeText(assessment.identity_id) })
                 ]),
                 el('div', { className: 'threat-score-container' }, [
-                    el('div', { className: 'threat-score ' + threatLevel, text: formatScore(assessment.overall_risk_score) }),
-                    el('div', { className: 'threat-level ' + threatLevel, text: threatLevel.toUpperCase() })
+                    el('div', { className: 'threat-score ' + levelClass, text: formatScore(assessment.overall_risk_score) }),
+                    el('div', { className: 'threat-level ' + levelClass, text: threatLevel.toUpperCase() })
                 ])
             ]),
             el('div', { className: 'risk-factors' },
@@ -1231,7 +1281,11 @@
                 }).filter(Boolean)))
         ];
         if (assessment.last_assessed) {
-            children.push(el('p', { className: 'threat-calculated-at', text: 'Calculated: ' + fmtDateTime(assessment.last_assessed) }));
+            children.push(el('p', {
+                className: 'threat-calculated-at',
+                text: 'Calculated: ' + fmtDateTime(assessment.last_assessed) +
+                    (assessment.algorithm_version ? ' · ' + safeText(assessment.algorithm_version) : '')
+            }));
         }
         if (recommendations.length) {
             children.push(el('div', { className: 'recommendations' },
@@ -1315,6 +1369,15 @@
                 'Learning thresholds — job ' + jobId + ' (' + status + (progress ? ', ' + progress + '%' : '') + ')');
         } catch (err) {
             if (err.aborted) return;
+            if (err.status === 404) {
+                // The job is gone from tracking — either a synchronous
+                // (deprecated-endpoint) run that finished, or history was
+                // pruned. Polling to the cap would end with a misleading
+                // "check Background Tasks" for a job that is not there.
+                renderStateInto(resultsDiv, 'fas fa-info-circle',
+                    'Threshold job ' + jobId + ' is no longer tracked — it likely finished. Re-run to see fresh results.');
+                return;
+            }
             // transient poll failure — keep trying within the bound
         }
         state.jobPollTimer = window.setTimeout(function () {
@@ -1550,7 +1613,7 @@
     }
 
     // ============================================
-    // Map view (sandboxed)
+    // Map view (MapLibre)
     // ============================================
 
     // Missing control === feature OFF. Never default a security feature on.
@@ -1584,29 +1647,61 @@
             params.detect_patterns = readCheckbox('map-detect-patterns', false);
             params.show_risk_heatmap = readCheckbox('map-show-heatmap', false);
 
-            const mapHtml = await api('/api/identities/' + encodeURIComponent(identityId) + '/map', {
-                signal: req.signal, timeout: LONG_TIMEOUT_MS, expect: 'html', params: params
-            });
-            if (!req.isCurrent()) return;
+            const flags = {
+                popups: params.include_popups, cluster: params.cluster_markers,
+                routes: params.show_routes, security: params.enable_security_features,
+                patterns: params.detect_patterns, risk: params.show_risk_heatmap
+            };
+            const style = params.map_style;
+            // Only server-side flags travel; display flags stay client-side.
+            const serverParams = {
+                date: params.date, days_back: params.days_back,
+                show_routes: params.show_routes,
+                enable_security_features: params.enable_security_features,
+                detect_patterns: params.detect_patterns,
+                show_risk_heatmap: params.show_risk_heatmap
+            };
 
-            // Sandboxed iframe: scripts run in a unique opaque origin with no
-            // access to cookies, storage, parent DOM or application APIs.
-            const iframe = document.createElement('iframe');
-            iframe.setAttribute('sandbox', 'allow-scripts');
-            iframe.setAttribute('referrerpolicy', 'no-referrer');
-            iframe.referrerPolicy = 'no-referrer';
-            iframe.setAttribute('title', 'Identity movement map');
-            iframe.style.cssText = 'width:100%;height:100%;border:none;border-radius:8px;';
-            iframe.srcdoc = mapHtml;
-            mapContainer.replaceChildren(iframe);
+            // MapLibre renders INTO the page (no iframe, no backend HTML).
+            const IM = await window.IdentityMap.ready;
+            const dataKey = identityId + '|' + JSON.stringify(serverParams);
+            let ctl = state.mapController;
+            if (!ctl || ctl.container !== mapContainer || !ctl.map) {
+                if (ctl) ctl.destroy();
+                ctl = new IM.Controller(mapContainer, {
+                    style: 'light',
+                    onError: function (kind, detail) {
+                        if (kind === 'dataset') showNotification('Map style not installed (' + detail.code + ')', 'error');
+                    }
+                });
+                await ctl.init();
+                await ctl.loadAvailability(styleSelect);
+                state.mapController = ctl;
+                state.mapDataKey = null;
+            }
+            if (!req.isCurrent()) return;
+            if (ctl.isStyleAvailable(style)) {
+                if (style !== ctl.style) await ctl.setBasemap(style);
+            } else {
+                if (styleSelect) styleSelect.value = ctl.style;
+                showNotification('Map style "' + style + '" is unavailable: ' + IM.UNAVAILABLE, 'error');
+            }
+            if (!req.isCurrent()) return;
+            if (state.mapDataKey !== dataKey) {
+                await ctl.load(identityId, serverParams, flags);
+                state.mapDataKey = dataKey;
+            } else {
+                Object.assign(ctl.flags, flags);
+                ctl._restoreOverlays();
+            }
+            if (req.isCurrent() && btn) btn.disabled = false;
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(mapContainer,
                 err.status === 503 ? 'Map service is temporarily unavailable' :
                     err.status === 404 ? 'Identity not found' : 'Map generation failed',
                 err.referenceId);
-        } finally {
-            if (req.isCurrent() && btn) btn.disabled = false;
+            if (btn) btn.disabled = false;
         }
     }
 
@@ -1694,6 +1789,7 @@
 
     function destroy() {
         abortAllRequests();
+        if (state.mapController) { state.mapController.destroy(); state.mapController = null; state.mapDataKey = null; }
         stopJobPolling();
         destroyNetworkInstance();
         for (const id of Array.from(selectorRegistry.keys())) destroySelector(id);

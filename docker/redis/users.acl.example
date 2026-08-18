@@ -1,6 +1,13 @@
 # Redis ACL template — copy to users.acl and fill in the password hashes.
 #
-#   bash scripts/setup/generate-redis-acl.sh
+# Do not do that by hand. This renders users.acl with real SHA-256 hashes and
+# writes the matching passwords to docker/.env in the same pass, so the two
+# cannot drift:
+#
+#   bash scripts/setup/generate-secrets.sh
+#
+# (This block used to name generate-redis-acl.sh, which has never existed in
+# this repository.)
 #
 # The real users.acl is gitignored. Passwords are stored as SHA-256 hashes
 # (`#<hex>`), never in plaintext, and never as a --requirepass command-line

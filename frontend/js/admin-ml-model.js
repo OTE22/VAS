@@ -573,8 +573,19 @@
         }
         const minSamplesEl = getElement('min-samples');
         if (minSamplesEl) minSamplesEl.textContent = String(toNonNegativeInteger(config.minimum_samples, s.minSamples));
+        // Always reflect the server's configured minimum unless the operator
+        // has typed over it in this session. The old `if (!input.value)` guard
+        // never fired, because the HTML shipped a hard-coded value="50".
         const minSamplesInput = getElement('min-samples-input');
-        if (minSamplesInput && !minSamplesInput.value) minSamplesInput.value = String(s.minSamples);
+        if (minSamplesInput && !minSamplesInput.dataset.userEdited) {
+            minSamplesInput.value = String(s.minSamples);
+        }
+        if (minSamplesInput && !minSamplesInput.dataset.editListenerBound) {
+            minSamplesInput.dataset.editListenerBound = '1';
+            minSamplesInput.addEventListener('input', () => {
+                minSamplesInput.dataset.userEdited = '1';
+            });
+        }
         const autoTrainEl = getElement('auto-train');
         if (autoTrainEl) {
             // Explicit boolean render — a real false must show "Disabled"

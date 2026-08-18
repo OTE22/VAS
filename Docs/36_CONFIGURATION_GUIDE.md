@@ -1,5 +1,11 @@
 # Complete Configuration Guide
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 **Face Recognition Surveillance System**  
 **ITDIR-AI DEPARTMENT**
 
@@ -29,11 +35,69 @@ The Face Recognition System uses a centralized configuration system that allows 
 
 Settings are loaded in this order (highest to lowest priority):
 
-1. **Environment Variables** - Highest priority
-2. **`.env` File** - If exists in project root
-3. **`config.py` Defaults** - Fallback values
+1. **Environment Variables** (Docker/compose) — highest priority
+2. **`.env` File** — if it exists in the project root
+3. **`config.py` Defaults** — the declared value
 
-**Note:** The web interface (Settings page) stores values in the database and applies them as environment variables, so they take precedence over `config.py` defaults.
+An admin change made on the Settings page sits **above** all three. It is
+stored in the database and pushed onto the live settings object; it does **not**
+become an environment variable, and it is re-applied at startup
+(`hydrate_from_db`) so it survives a restart. What "applied" means for each
+setting — immediately, at the next job run, or at the next restart — is in
+[78_SETTINGS_RUNTIME_MATRIX.md](78_SETTINGS_RUNTIME_MATRIX.md).
+
+Startup hydration applies **every** stored value, whatever its apply mode.
+A setting labelled "requires an API restart" really does take effect on the next
+restart; it previously did not, because hydration skipped every non-dynamic key
+and the restart re-read env/defaults instead. The two exceptions are deliberate:
+security-critical keys are never applied in-process, and `container_recreate`
+keys describe how the container was launched, so applying them would make the
+reported value disagree with reality.
+
+### `config.py` is the only interface
+
+Nothing else declares configuration. No module calls `os.getenv` for a setting,
+none supplies its own default via `getattr(settings, "X", fallback)`, and
+nothing writes to `os.environ`. This is enforced by
+`tests/test_config_single_source.py`, which scans the source rather than the
+behaviour — the failures it prevents are silent at runtime.
+
+Three further shapes count as a second declaration and are equally forbidden:
+
+* **A literal that overrides the setting.** `min(settings.X, 10)` means the
+  operator can raise X to anything and still be capped at 10, with nothing on
+  the page to explain why.
+* **A default argument.** `def search_known(..., threshold: float = 0.4)` wins
+  for every caller that omits the argument, so the setting governs only the
+  call sites that happen to pass it. Use `= None` and resolve from `settings`
+  in the body.
+* **A value captured at import.** `self.x = settings.X` inside the `__init__`
+  of a module-level singleton runs exactly once. Use a property.
+  `tests/test_runtime_editability.py` treats such an `__init__` as frozen.
+
+Values are **refused, never clamped**. An out-of-range or inverted pair fails
+validation (or startup, via `backend/security/config_guard.py`) with a message
+naming the field. Silently correcting it would mean the operator who typed it
+never learns that the configuration they wrote does not exist.
+
+`tests/test_settings_change_behavior.py` closes the loop from the other side:
+it changes each setting through the real runtime path and asserts the real
+consumer's behaviour moved.
+
+That matters because the alternative was not theoretical. `config.py` said the
+vector backend was `pgvector` while fourteen call sites defaulted it to
+`faiss`, three of them frozen at import; two maintenance scripts built their
+DSN from raw `os.getenv` with the password defaulting to the literal `admin`,
+so on any deployment using Docker secrets they connected as a different user
+than the service they were maintaining; and `utils/performance_config.py`
+wrote fifteen values into `os.environ` *after* the settings object had been
+built, where nothing could ever read them.
+
+The few files allowed to read the environment are listed in that test with the
+reason for each — a Docker-secret reader that cannot import `config` without a
+cycle, GPU/driver probes, the logging bootstrap (it must work when `config.py`
+is the thing that is broken), and the settings API's own "what did the
+container start with?" introspection.
 
 ---
 
@@ -159,6 +223,16 @@ Controls PostgreSQL database connection:
 | `POSTGRES_PASSWORD` | `admin` | Database password |
 | `DB_POOL_SIZE` | `50` | Connection pool size |
 | `DB_MAX_OVERFLOW` | `100` | Maximum overflow connections |
+| `DB_POOL_TIMEOUT` | `60` | Seconds to wait for a free pooled connection |
+| `DB_CONNECT_TIMEOUT` | `30` | Seconds to wait when opening a new connection |
+| `DB_COMMAND_TIMEOUT` | `120` | Seconds asyncpg waits for one command |
+| `DB_STATEMENT_TIMEOUT_MS` | `120000` | PostgreSQL `statement_timeout` (ms) |
+| `DB_IDLE_TX_TIMEOUT_MS` | `300000` | PostgreSQL `idle_in_transaction_session_timeout` (ms) |
+
+> The last five used to be literals in `db_connection.py`, sitting directly
+> beside the pool settings above — half the pool was configurable and half was
+> not. `DB_STATEMENT_TIMEOUT_MS` is the ceiling that
+> `INTEL_QUERY_TIMEOUT_SECONDS` must stay below.
 
 **For 50+ Cameras:**
 ```bash
@@ -174,9 +248,7 @@ Controls Redis caching:
 |---------|---------|-------------|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL (use `redis` for Docker) |
 | `REDIS_MAX_CONNECTIONS` | `100` | Maximum Redis connections |
-| `REDIS_POOL_SIZE` | `50` | Redis connection pool size |
 | `CACHE_TTL` | `3600` | Cache time-to-live (seconds) |
-| `CACHE_LOCAL_SIZE` | `50000` | Local in-memory cache size |
 
 ### 6. Face Recognition Models
 
@@ -188,61 +260,65 @@ Controls AI model behavior:
 | `RECOGNITION_MODEL` | `/app/weights/w600k_r50.onnx` | Path to face recognition model |
 | `SIMILARITY_THRESHOLD` | `0.4` | Minimum similarity to match faces (0.0-1.0) |
 | `CONFIDENCE_THRESHOLD` | `0.5` | Minimum confidence for face detection (0.0-1.0) |
-| `FACES_DIR` | `/app/assets/faces` | Directory for known face images |
-| `DB_PATH` | `/app/database/face_database` | Path to face database |
+| `FACES_DIR` | `<STORAGE_DIR>/faces` | **Derived, not settable.** Known face images |
 
 **Tuning Similarity Threshold:**
 - **Lower (0.3-0.4)**: More matches, but may have false positives
 - **Higher (0.5-0.6)**: Fewer matches, but more accurate
 - **Recommended**: Start with 0.4, adjust based on results
 
-### 7. FAISS Index Configuration
+#### Enrollment review bands
 
-Controls the face recognition index system:
+When an uploaded photo is enrolled **by name** and that name is new, the face is
+compared against everyone already on file before an identity is created. These
+decide what happens next.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| `ENROLL_STRONG_MATCH_MIN` | `0.75` | At/above this, adding to the matched person is the recommended action |
+| `ENROLL_CANDIDATE_MIN` | `0.40` | Below this, the upload enrolls directly with no review |
+| `ENROLL_CANDIDATE_POOL` | `25` | Nearest embeddings retrieved before collapsing to one row per person |
+| `ENROLL_MAX_CANDIDATES` | `5` | Candidate people shown to the administrator |
+
+`ENROLL_CANDIDATE_MIN` defaults to exactly `SIMILARITY_THRESHOLD`: anything
+recognition would treat as the same person, enrollment must ask about. Raising
+it above `SIMILARITY_THRESHOLD` creates a range where recognition says "same
+person" and enrollment stays silent — the duplicate identity is created without
+a prompt, and recognition then reports either name for that face. Startup
+reports that configuration (`ENROLL_CANDIDATE_MIN_ABOVE_RECOGNITION`).
+
+Measured on the enrollment fixtures: two different photos of one person score
+**0.4299**; unrelated faces score below **0.05**.
+
+Two relationships abort startup rather than being silently corrected —
+`ENROLL_CANDIDATE_MIN <= ENROLL_STRONG_MATCH_MIN` (otherwise the "uncertain"
+band is empty and nothing is ever sent for review) and `ENROLL_CANDIDATE_POOL >
+ENROLL_MAX_CANDIDATES` (otherwise one person's several photos can fill the pool
+and hide every other candidate).
+
+### 7. Vector Index Configuration
+
+Controls the similarity-search index:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `VECTOR_BACKEND` | `pgvector` | `pgvector` (search in PostgreSQL) or `faiss` (in-memory exact index) |
 | `IDENTITY_EMBEDDING_SIZE` | `512` | Size of face embedding vectors |
-| `IDENTITY_INDEX_DB_PATH` | `/app/database/identity_indexes` | Path to FAISS index files |
-| `IDENTITY_INDEX_AUTO_SAVE_INTERVAL` | `300` | Auto-save interval (seconds) |
-| `REPAIR_FAISS_ON_STARTUP` | `true` | Repair indexes on startup |
-| `REPAIR_FAISS_INTERVAL_HOURS` | `24` | Background repair interval (hours) |
-| `FAISS_LAZY_MARKING_THRESHOLD` | `1` | Lazy marking threshold (for demo: 1, production: 100+) |
+| `IDENTITY_INDEX_DB_PATH` | `/app/database/identity_indexes` | FAISS snapshot directory (faiss backend only) |
+| `KNOWN_INDEX_TYPE` | `flat` | FAISS index type; `flat` (exact) is the only supported value |
 
-**Index Types:**
+The shipped FAISS implementation (`FlatFaissIndex`) is an exact, disposable
+acceleration layer rebuilt entirely from `identity_embeddings.embedding`. The
+retired knob family — `REPAIR_FAISS_*`, `KNOWN_INDEX_{NLIST,NPROBE,HNSW_*,PQ_*}`,
+`UNKNOWN_INDEX_TYPE`, `FAISS_LAZY_MARKING_THRESHOLD`,
+`IDENTITY_INDEX_AUTO_SAVE_INTERVAL`, `DB_PATH` — was removed 2026-08: those
+settings configured index types the code refuses to build, drove a repair loop
+replaced by reconciliation, or pointed at the deleted display-name FaceDatabase.
+Setting any of them in the environment has no effect. Autosave/reconcile cadence
+lives in `VECTOR_INDEX_AUTOSAVE_INTERVAL_SECONDS` /
+`VECTOR_INDEX_RECONCILE_INTERVAL_SECONDS`.
 
-| Type | Best For | Speed | Memory | Accuracy |
-|------|----------|-------|--------|----------|
-| `flat` | <100K faces | Medium | High | 100% |
-| `ivf` | 100K-1M faces | Fast | Medium | 95-99% |
-| `hnsw` | 1M-10M faces | Fastest | High | 95-99% |
-| `ivfpq` | 10M+ faces | Medium | Low | 90-95% |
-
-**Index Type Settings:**
-
-For `ivf` (IndexIVFFlat):
-```bash
-KNOWN_INDEX_TYPE=ivf
-KNOWN_INDEX_NLIST=1000      # sqrt(N) recommended
-KNOWN_INDEX_NPROBE=20       # 10-50, higher = better accuracy
-```
-
-For `hnsw` (IndexHNSWFlat):
-```bash
-KNOWN_INDEX_TYPE=hnsw
-KNOWN_INDEX_HNSW_M=32       # 16-64, higher = better accuracy
-KNOWN_INDEX_HNSW_EF_CONSTRUCTION=200
-KNOWN_INDEX_HNSW_EF_SEARCH=64
-```
-
-For `ivfpq` (IndexIVFPQ):
-```bash
-KNOWN_INDEX_TYPE=ivfpq
-KNOWN_INDEX_PQ_M=64         # 8, 16, 32, 64
-KNOWN_INDEX_PQ_BITS=8       # Standard: 8
-```
-
-**See:** `30_FAISS_PRODUCTION_SCALING.md` for detailed scaling guide
+**See:** `70_VECTOR_INDEX_CONTRACT.md` for the authoritative contract
 
 ### 8. Queue & Processing Configuration
 
@@ -252,17 +328,14 @@ Controls image processing queue:
 |---------|---------|-------------|
 | `MAX_QUEUE_SIZE` | `10000` | Maximum queue size |
 | `QUEUE_WORKERS` | `50` | Number of queue workers |
-| `BATCH_SIZE` | `20` | Batch processing size |
 | `MAX_CONCURRENT_REQUESTS` | `500` | Maximum concurrent requests |
-| `GPU_BATCH_SIZE` | `32` | Batch size for GPU processing |
-| `CPU_BATCH_SIZE` | `10` | Batch size for CPU processing |
 | `PIPELINE_BATCH_SIZE` | `5` | Batch size per pipeline |
 
 **For 50+ Cameras:**
 ```bash
 QUEUE_WORKERS=100
 MAX_QUEUE_SIZE=50000
-BATCH_SIZE=50
+PIPELINE_BATCH_SIZE=20
 ```
 
 ### 9. Storage Configuration
@@ -273,18 +346,20 @@ Controls image storage:
 |---------|---------|-------------|
 | `STORAGE_DIR` | `/app/storage` | Directory for storing images |
 | `SAVE_IMAGES` | `true` | Enable image saving |
-| `MAX_STORAGE_GB` | `500` | Maximum storage size (GB) |
+| `MAX_STORAGE_GB` | `500` (compose sets `5000`) | **Reporting-only soft budget.** Enforces nothing — no code deletes, blocks or rejects on it. It is the denominator of `storage.app_usage_percent` ("how much of my allowance am I using"). Real capacity comes from the filesystem: `storage.disk_total_gb` / `disk_free_gb`, and `storage.usage_percent` is the volume's true utilisation. |
 | `MAX_PHOTOS_PER_PERSON` | `1` | Maximum photos per person |
 | `SAVE_UNKNOWN_FACES` | `false` | Save unknown face images |
 | `MAX_FILE_SIZE` | `10485760` | Maximum file size (10MB) |
 
 **Debug Settings:**
 ```bash
-SAVE_WEBHOOK_IMAGES=true          # Save raw webhook images
-WEBHOOK_IMAGES_DIR=./debug/webhook_images
-SAVE_CROPPED_IMAGES=true          # Save cropped person images
-CROPPED_IMAGES_DIR=./debug/cropped
+SAVE_WEBHOOK_IMAGES=true          # -> <STORAGE_DIR>/debug/webhook_images
+SAVE_CROPPED_IMAGES=true          # -> <STORAGE_DIR>/debug/cropped
 ```
+
+The destinations are derived from `STORAGE_DIR`; only the switches are
+settings. Setting `WEBHOOK_IMAGES_DIR` or `CROPPED_IMAGES_DIR` in the
+environment aborts startup -- see *Derived paths* below.
 
 ### 10. Face Tracking Configuration
 
@@ -299,7 +374,6 @@ Controls face tracking optimization:
 | `SKIP_UNKNOWN_FACES` | `false` | Skip processing unknown faces |
 | `SHOW_UNKNOWN_FACES_ON_DASHBOARD` | `false` | Show unknown faces on dashboard |
 | `FACE_TRACKING_MAX_MEMORY_MB` | `2000` | Maximum memory for tracking (MB) |
-| `FACE_TRACKING_CLEANUP_INTERVAL` | `300` | Cleanup interval (seconds) |
 
 **Dashboard Visibility:**
 - `SHOW_UNKNOWN_FACES_ON_DASHBOARD=false`: Unknown faces only in "Unknown Faces Center"
@@ -311,11 +385,18 @@ Controls face tracking optimization:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `CLUSTER_STARTUP_DELAY_HOURS` | `0` | Hours to wait after startup before first clustering (0 = immediate) |
+| `CLUSTER_STARTUP_DELAY_HOURS` | `7` | Hours to wait after startup before first clustering (0 = immediate). **Float** — `0.5` is valid; it used to be rejected as an integer. |
 | `CLUSTER_INTERVAL_HOURS` | `24` | How often to generate merge suggestions |
 | `CLUSTER_MIN_SIZE` | `2` | Minimum cluster size |
 | `CLUSTER_EPS` | `0.35` | Clustering epsilon (similarity threshold) |
 | `CLUSTER_MIN_SAMPLES` | `2` | Minimum samples per cluster |
+| `CLUSTER_ACTIVE_WINDOW_DAYS` | `90` | How far back an unknown identity must have been seen to be clustered |
+| `CLUSTER_TRAINED_MODEL_MARGIN` | `0.05` | How far below the configured threshold a **trained** similarity model may merge. Derived, so raising the threshold raises this too — it used to be two independent literals (0.30/0.45) that ignored the settings entirely. |
+| `SIMILARITY_QUALITY_FLOOR` | `0.7` | Fraction of a heuristic similarity score that survives when both faces score zero on quality. `1.0` disables the penalty. |
+
+> The cross-camera/cross-pipeline merge bar is `CROSS_PIPELINE_SIMILARITY_THRESHOLD`
+> and the same-camera bar is `UNKNOWN_SIMILARITY_THRESHOLD`. Three clustering
+> sites previously hard-coded `0.50`/`0.35` and never consulted either.
 
 **Pipeline-Aware ML Clustering (NEW):**
 
@@ -381,9 +462,9 @@ Controls advanced search features including quality scoring, confidence bands, w
 | `SEARCH_QUALITY_WARNING_THRESHOLD` | `0.6` | Quality threshold (0-1) below which a warning is shown | 0-1 |
 | `FACE_QUALITY_ENABLED` | `true` | Enable face quality scoring | bool |
 | `FACE_QUALITY_THRESHOLD_BLUR` | `0.5` | Blur threshold for quality assessment | 0-1 |
-| `FACE_QUALITY_THRESHOLD_SIZE` | `64` | Minimum face size (pixels) for quality assessment | pixels |
+| `FACE_QUALITY_THRESHOLD_SIZE` | `50` | Smallest face (shorter side, px) still worth scoring | pixels |
 | `FACE_QUALITY_THRESHOLD_ANGLE` | `30.0` | Maximum face angle (degrees) for quality assessment | degrees |
-| `FACE_QUALITY_THRESHOLD_LIGHTING` | `0.4` | Lighting threshold for quality assessment | 0-1 |
+| `FACE_QUALITY_THRESHOLD_LIGHTING` | `0.5` | Lighting score below which a quality warning is raised | 0-1 |
 
 #### Confidence Bands
 
@@ -399,15 +480,49 @@ Controls advanced search features including quality scoring, confidence bands, w
 | Setting | Default | Description | Unit |
 |---------|---------|-------------|------|
 | `BATCH_SEARCH_MAX_IMAGES` | `20` | Maximum number of images allowed per batch search | count |
-| `BATCH_SEARCH_TIMEOUT_SECONDS` | `300` | Timeout in seconds for batch search operations | seconds |
-| `BATCH_SEARCH_ENABLED` | `true` | Enable batch search functionality | bool |
+| `BATCH_SEARCH_TIMEOUT_SECONDS` | `300` | Timeout for a batch search. **Enforced** — the batch aborts with `TimeoutError`. | seconds |
+| `BATCH_SEARCH_MAX_CONCURRENCY` | `5` | Images processed concurrently within one batch (also bounded by `DB_POOL_SIZE`) | count |
+| `BATCH_SEARCH_ENABLED` | `true` | Enable batch search. When `false`, `/api/search/batch` returns **403**. | bool |
+
+#### Result Depth
+
+One default for every search surface. Single and batch search previously had
+their own literals (10 and 5), so a batch driven from the same UI control ran at
+half the requested depth.
+
+| Setting | Default | Description | Unit |
+|---------|---------|-------------|------|
+| `SEARCH_DEFAULT_TOP_K` | `10` | Matches per query face when the caller does not specify | count |
+| `SEARCH_MAX_TOP_K` | `100` | Hard ceiling; a larger `top_k` is rejected with **422** | count |
+| `SEARCH_RETRIEVAL_FLOOR` | `0.2` | Similarity floor used when asking the vector index for candidates, before the display threshold filters them. Must be **≤ `SIMILARITY_THRESHOLD`** or startup is refused. | 0-1 |
+| `SEARCH_CANDIDATE_MULTIPLIER` | `2` | Over-fetch factor for an unfiltered search | factor |
+| `SEARCH_FILTERED_CANDIDATE_MULTIPLIER` | `6` | Over-fetch factor when database filters will discard candidates after retrieval | factor |
+
+**Retrieval floor vs display threshold.** `SEARCH_RETRIEVAL_FLOOR` decides how
+deep the index is searched; `SIMILARITY_THRESHOLD` decides what an operator is
+allowed to see. Retrieval must sit at or below display — inverted, nothing
+between the two bars is ever retrieved, so lowering `SIMILARITY_THRESHOLD` would
+appear to do nothing. `backend/security/config_guard.py` refuses to start rather
+than clamping either value.
+
+#### API Pagination
+
+| Setting | Default | Description | Unit |
+|---------|---------|-------------|------|
+| `API_DEFAULT_PAGE_SIZE` | `25` | Rows per page when a listing endpoint's caller does not specify | rows |
+| `API_MAX_PAGE_SIZE` | `100` | Hard ceiling; a larger `page_size`/`limit` is rejected with **422** | rows |
+
+Applied through `backend/utils/pagination.py`. Four route groups previously
+accepted any page size at all: `/api/identities/admin/unknown`, `/api/detections`,
+`/conversations` and `/api/cache/warm/{pipeline_id}`. A few export endpoints
+declare a deliberately higher bound explicitly.
 
 #### Search History
 
 | Setting | Default | Description | Unit |
 |---------|---------|-------------|------|
 | `SEARCH_HISTORY_RETENTION_DAYS` | `90` | Days to retain search history records | days |
-| `SEARCH_HISTORY_MAX_PER_USER` | `1000` | Maximum search history records per user | count |
+| `SEARCH_HISTORY_MAX_PER_USER` | `1000` | Maximum search history records per user. **Enforced** by the retention sweep (previously a no-op). | count |
 
 #### Live Alerts
 
@@ -415,7 +530,23 @@ Controls advanced search features including quality scoring, confidence bands, w
 |---------|---------|-------------|------|
 | `LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES` | `30` | Default cooldown period (minutes) between live alert triggers. Prevents alert spam when same person detected multiple times | minutes |
 | `LIVE_ALERT_MAX_PER_USER` | `50` | Maximum number of active live alerts per user. Prevents resource exhaustion | count |
+| `LIVE_ALERT_MAX_PER_IDENTITY` | `5` | Maximum active alerts for one identity. Previously clamped to 10 by a literal in the service, so raising this past 10 did nothing. | count |
+| `LIVE_ALERT_MIN_SIMILARITY` | `0.75` | Default similarity an appearance must reach to trigger an alert, when the alert does not set its own | 0-1 |
+| `LIVE_ALERT_CLIP_DURATION_SECONDS` | `60` | Default length of the clip recorded when an alert fires | seconds |
 | `LIVE_ALERTS_ENABLED` | `true` | Enable/disable live search alerts feature globally | bool |
+
+**Notification transports** — empty disables the channel. These are read by the
+readiness probe on the live-alerts page, which reported both channels as
+unconfigured forever because the names were declared nowhere:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `SMTP_HOST` | *(empty)* | SMTP server hostname for email alerts |
+| `SMS_PROVIDER_URL` | *(empty)* | HTTP endpoint of the SMS provider |
+| `TWILIO_ACCOUNT_SID` | *(empty)* | Twilio account SID for SMS alerts |
+
+> `SMTP_PORT` was **removed** — there is no SMTP sender in the codebase, so a
+> port for it was a knob wired to nothing.
 
 **Live Alert Configuration Details:**
 
@@ -498,7 +629,6 @@ Controls automatic data cleanup:
 | `CLEANUP_INTERVAL_HOURS` | `24` | Cleanup job interval |
 | `BATCH_WRITE_SIZE` | `50` | Batch write size |
 | `BATCH_WRITE_INTERVAL` | `1.0` | Batch write interval (seconds) |
-| `BATCH_WRITE_MAX_WAIT` | `5.0` | Maximum wait time (seconds) |
 
 ---
 
@@ -535,7 +665,6 @@ environment:
 **Docker (default paths):**
 ```bash
 DETECTION_MODEL=/app/weights/det_10g.onnx
-FACES_DIR=/app/assets/faces
 STORAGE_DIR=/app/storage
 LOG_DIR=/var/log/face-recognition
 ```
@@ -543,10 +672,37 @@ LOG_DIR=/var/log/face-recognition
 **Local Development:**
 ```bash
 DETECTION_MODEL=./weights/det_10g.onnx
-FACES_DIR=./assets/faces
-STORAGE_DIR=./storage
+STORAGE_DIR=/absolute/path/to/storage
 LOG_DIR=./logs
 ```
+
+`STORAGE_DIR` must be absolute. A relative root makes every stored path
+depend on the working directory, which differs between gunicorn, alembic
+and a maintenance script -- so the preflight rejects it.
+
+### Derived paths
+
+These are computed from `STORAGE_DIR` and have no setter. A compose file,
+`.env`, module or admin API cannot point them elsewhere:
+
+| Derived | Resolves to |
+|---------|-------------|
+| `FACES_DIR` | `<STORAGE_DIR>/faces` |
+| `UPLOAD_TEMP_DIR` | `<STORAGE_DIR>/faces/.incoming` |
+| `PENDING_UPLOAD_DIR` | `<STORAGE_DIR>/pending` |
+| `WEBHOOK_IMAGES_DIR` | `<STORAGE_DIR>/debug/webhook_images` |
+| `CROPPED_IMAGES_DIR` | `<STORAGE_DIR>/debug/cropped` |
+| `MODEL_CANDIDATE_DIR` | `<ML_ARTIFACT_DIR>/candidates` |
+
+Leaving one of these in the environment is reported rather than ignored:
+a matching value is a warning (inert -- it will not track a `STORAGE_DIR`
+change), a divergent value aborts startup with exit code 78. Silently
+ignoring it is the worse outcome: `.env` once shipped
+`FACES_DIR=./assets/faces` while compose set `/app/storage/faces`, so the
+two halves of the application disagreed about where a person's photos
+lived -- and `./assets` is a read-only mount, so enrollment simply failed.
+
+To move face storage, move `STORAGE_DIR`. Everything follows.
 
 ---
 
@@ -608,8 +764,6 @@ DEBUG=false
 WORKERS=8
 LOG_LEVEL=INFO
 SIMILARITY_THRESHOLD=0.4
-REPAIR_FAISS_ON_STARTUP=true
-REPAIR_FAISS_INTERVAL_HOURS=24
 ```
 
 ### Scenario 2: Development/Testing
@@ -637,14 +791,10 @@ MAX_CONCURRENT_REQUESTS=1000
 
 ### Scenario 4: Large-Scale (1M+ Known Faces)
 
-```bash
-KNOWN_INDEX_TYPE=ivf
-KNOWN_INDEX_NLIST=1000
-KNOWN_INDEX_NPROBE=20
-REPAIR_FAISS_ON_STARTUP=false  # Faster startup
-REPAIR_FAISS_INTERVAL_HOURS=12
-FAISS_LAZY_MARKING_THRESHOLD=100
-```
+Use `VECTOR_BACKEND=pgvector` with the `PGVECTOR_HNSW_*` parameters — the
+pgvector HNSW index is the supported approximate-search path at this scale.
+The old FAISS ivf/hnsw/ivfpq knobs were removed; the shipped FAISS index is
+exact-only.
 
 ### Scenario 5: Show Unknown Faces on Dashboard
 
@@ -688,13 +838,14 @@ SIMILARITY_THRESHOLD=0.3  # Lower threshold for testing
 
 **Problem:** Path errors in Docker
 
-**Solution:** Use Docker paths (starting with `/app/`):
+**Solution:** Use absolute Docker paths (starting with `/app/`), and set
+only the root -- the gallery and debug stores are derived from it:
 ```bash
-# Wrong (local path)
-FACES_DIR=./assets/faces
+# Wrong: relative, and FACES_DIR is not settable at all
+FACES_DIR=./storage/faces
 
-# Correct (Docker path)
-FACES_DIR=/app/assets/faces
+# Correct
+STORAGE_DIR=/app/storage      # FACES_DIR becomes /app/storage/faces
 ```
 
 ### FAISS Index Not Working
@@ -714,8 +865,8 @@ FACES_DIR=/app/assets/faces
 **Solutions:**
 1. Reduce `FACE_TRACKING_MAX_ENTRIES`
 2. Reduce `FACE_TRACKING_MAX_MEMORY_MB`
-3. Use `ivfpq` index type (smaller memory footprint)
-4. Reduce `CACHE_LOCAL_SIZE`
+3. Reduce `REDIS_MAX_CONNECTIONS`
+4. Lower `API_MAX_PAGE_SIZE` so listing endpoints return smaller pages
 
 ### Slow Recognition
 
@@ -723,9 +874,12 @@ FACES_DIR=/app/assets/faces
 
 **Solutions:**
 1. Enable GPU: `USE_GPU=true`
-2. Use faster index type: `KNOWN_INDEX_TYPE=hnsw`
+2. Reduce `SEARCH_RETRIEVAL_FLOOR` scope or `SEARCH_MAX_TOP_K` (a smaller candidate pool per query)
 3. Increase `QUEUE_WORKERS`
-4. Reduce `SIMILARITY_THRESHOLD` (fewer comparisons)
+4. Raise `SIMILARITY_THRESHOLD` (fewer results survive the display filter)
+
+> The FAISS index-type knobs (`KNOWN_INDEX_TYPE=hnsw`, `ivfpq`) were removed:
+> the shipped index refuses to build anything but `flat`. See §Vector Search.
 
 ---
 
@@ -817,9 +971,9 @@ Commit `.env.example` (without secrets) to version control, but never commit act
 ## Related Documentation
 
 - **Settings Management Guide**: `24_SETTINGS_MANAGEMENT_GUIDE.md`
-- **FAISS Production Scaling**: `30_FAISS_PRODUCTION_SCALING.md`
+- **FAISS Production Scaling**: `70_VECTOR_INDEX_CONTRACT.md`
 - **50 Cameras Scalability**: `32_50_CAMERAS_SCALABILITY_ANALYSIS.md`
-- **FAISS Repair Guide**: `33_FAISS_REPAIR_AND_SYNCHRONIZATION.md`
+- **FAISS Repair Guide**: `70_VECTOR_INDEX_CONTRACT.md`
 - **Multi-Identity Merge Guide**: `28_MULTI_IDENTITY_MERGE_GUIDE.md`
 - **Advanced Merge Flow Guide**: `37_ADVANCED_MERGE_FLOW_GUIDE.md`
 - **Search by Image Guide**: `38_SEARCH_BY_IMAGE_GUIDE.md` - Quick search functionality

@@ -1,122 +1,85 @@
-# GPU-enabled requirements
-# This file is used when GPU (NVIDIA CUDA) is detected
+# GPU deployment — everything shared lives in requirements-base.txt.
+#
+# Installed by docker/Dockerfile.gpu, under its real name. That Dockerfile used
+# to COPY this file *as* requirements.txt, which is why a /app/requirements.txt
+# appeared to exist at runtime although no such file is in the repository.
+# Only add a package here if it genuinely differs between CPU and GPU.
+#
+# This file used to be a standalone copy of the CPU list — 51 of its ~55 lines
+# were byte-identical — and it had already drifted: it was missing
+# `sentence-transformers` and `tqdm`, and it left `Pillow` unpinned while CPU
+# pinned it. Inheritance is what stops that recurring.
 
-# Core ML/CV Dependencies (GPU)
+-r requirements-base.txt
+
+# ---------------------------------------------------------------------------
+# ONNX Runtime — the CUDA build. This is the acceleration that matters:
+# SCRFD detection and ArcFace recognition both run on ONNX Runtime.
 #
 # PINNED, and pinned to match the base image's CUDA major version.
 # `onnxruntime-gpu>=1.16.3` resolved to whatever was newest at build time,
 # which is built against CUDA 12 — on the old CUDA 11.8 base image the CUDA
-# execution provider then failed to register and ONNX Runtime fell back to
-# the CPU silently. Inference stayed correct, logs stayed clean, and the
-# service was an order of magnitude slower with nothing reporting it.
+# execution provider then failed to register and ONNX Runtime fell back to the
+# CPU silently. Inference stayed correct, logs stayed clean, and the service
+# was an order of magnitude slower with nothing reporting it.
 #
-# 1.20.1 targets CUDA 12.x + cuDNN 9, matching docker/Dockerfile.gpu.
+# 1.20.2 targets CUDA 12.x + cuDNN 9, matching docker/Dockerfile.gpu.
+#
+# NOT 1.20.1 — that version WAS NEVER RELEASED. The 1.20 line on PyPI is
+# 1.20.0 and 1.20.2 only, so pinning 1.20.1 fails the GPU build outright with
+# "No matching distribution found". This file carried that pin, and nothing
+# caught it because the GPU image was never built. Verify a change here before
+# committing it:
+#
+#   docker run --rm python:3.11-slim sh -c \
+#     'pip install --dry-run --no-deps onnxruntime-gpu==<version>'
+#
 # If you change this version, change the base image in the same commit and
 # re-run the CUDA verification in Docs/61_DEPLOYMENT_RUNBOOK.md.
-onnxruntime-gpu==1.20.1
-opencv-python-headless==4.9.0.80
-numpy==1.26.4
-scikit-image
-faiss-gpu  # GPU version of FAISS
+# tests/test_gpu_runtime.py enforces that this stays exactly pinned, and that
+# docker/Dockerfile.gpu does not keep a second copy of the number.
+# ---------------------------------------------------------------------------
+onnxruntime-gpu==1.20.2
 
-# Web Framework - Production Ready
-fastapi
-uvicorn[standard]
-python-multipart
-websockets
+# ---------------------------------------------------------------------------
+# FAISS, GPU build.
+#
+# Resolves on the Python 3.11 that docker/Dockerfile.gpu installs — verified,
+# because it is easy to assume otherwise. faiss-gpu 1.15.0 ships a single
+# `cp310-abi3` wheel: the stable-ABI tag means CPython 3.10 *and later*, and the
+# package declares `requires_python >=3.10`. It is a manylinux_2_27/2_28 wheel
+# and the base image is Ubuntu 22.04 (glibc 2.35), so the platform tag is
+# satisfied too. Check with:
+#
+#   docker run --rm python:3.11-slim sh -c \
+#     'pip install --dry-run --no-deps --only-binary=:all: faiss-gpu'
+#
+# If a future release ever does drop the ABI tag, the fix is faiss-cpu here —
+# the default vector backend is pgvector and FAISS is a disposable accelerator
+# (Docs/70_VECTOR_INDEX_CONTRACT.md) — NOT downgrading Python.
+# ---------------------------------------------------------------------------
+faiss-gpu
 
-# Database & Caching
-sqlalchemy
-asyncpg
-redis
-aioredis
-pgvector>=0.2.4  # PostgreSQL vector similarity search
-
-# Background Tasks & Queues
-celery
-kombu
-
-# Monitoring & Logging
-prometheus-client
-python-json-logger
-
-# Performance
-orjson
-
-# Utils
-python-dotenv
-pydantic
-pydantic-settings
-
-# Core Web Framework
-gunicorn
-
-# ASGI Server
-uvloop
-httptools
-
-# Database (Async PostgreSQL)
-psycopg2-binary
-alembic
-
-# Redis Cache
-redis[asyncio]
-hiredis
-
-# SQL AST parsing. REQUIRED, not optional: sql_agent/security/sql_guard.py
-# fails closed without it, because a regex fallback reintroduces the
-# bypasses it exists to prevent (`BEGIN READ WRITE; DELETE ...` and
-# unrestricted table access).
-sqlglot==25.34.1
-
-# Image Processing
-# opencv-contrib-python removed: it installs a SECOND, unpinned OpenCV
-# distribution alongside opencv-python-headless==4.9.0.80 above. Two
-# OpenCV builds in one environment shadow each other's cv2 module, so the
-# effective version depended on installation order.
-Pillow
-
-# Face Recognition Models (GPU)
-# (onnxruntime-gpu is pinned once at the top of this file)
-scikit-image
-
-# Utilities
-python-multipart
-websockets
-aiofiles
-httpx
-
-# Security
-python-jose[cryptography]
-passlib[bcrypt]
-PyJWT
-bcrypt
-
-# Logging
-python-json-logger
-colorlog
-
-# LangChain & SQL Agent
-langchain
-langchain-ollama
-langchain-community
-langgraph
-langchain-experimental
-
-# SQL Agent specific
-sqlalchemy-utils
-chromadb
-fuzzywuzzy[speedup]
-
-# Vana AI
-pandas
-vanna[chromadb,postgres,ollama]
-requests
-
-# Document Export (PDF & Word)
-reportlab
-python-docx
-
-# Identity Clustering (for merge suggestions)
-scikit-learn>=1.3.0
-
+# ---------------------------------------------------------------------------
+# PyTorch — CPU wheels ON THE GPU IMAGE TOO, deliberately.
+#
+# This looks wrong and is not. Torch is never imported by this application;
+# it exists solely because `sentence-transformers` requires it, and that
+# library is used for exactly one thing: embedding a chatbot question into a
+# 384-dim MiniLM vector for semantic search over query history. That runs
+# fine on CPU in milliseconds.
+#
+# Installing the CUDA torch build here would add several GB to the image and
+# contend for the same GPU that SCRFD and ArcFace need, to accelerate a
+# feature that does not need acceleration. If a future feature genuinely
+# trains or infers on torch, revisit this line deliberately — do not "fix" it
+# by removing the index URL.
+#
+# sentence-transformers was ABSENT from this file entirely, so
+# generate_query_embedding() always hit its ImportError branch and semantic
+# query-history search was permanently dead on GPU deployments — while
+# docker/Dockerfile.gpu provisioned a HuggingFace cache for it.
+# ---------------------------------------------------------------------------
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+sentence-transformers

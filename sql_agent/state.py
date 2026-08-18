@@ -65,7 +65,12 @@ class AgentState(TypedDict):
     name_corrections: Optional[Dict[str, str]]
     
     # Security: Flag to indicate user should be blocked
+    # A DETECTION, not a verdict: sql_agent/security_policy.py decides whether
+    # the account is actually blocked. The name predates that split.
     security_block_user: Optional[bool]
+    # Deterministic server-side code (e.g. FORBIDDEN_SQL_ATTEMPT). This, never
+    # model prose, is what reaches blocked_reason and the audit trail.
+    security_reason_code: Optional[str]
     security_block_reason: Optional[str]
     security_block_user_id: Optional[int]  # User ID to block (if available)
     # Owner of this turn. Scopes knowledge-base retrieval and learning so

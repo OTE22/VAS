@@ -30,6 +30,11 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# Bound the per-camera appearance scan feeding the pairwise movement search.
+# learn_all_camera_pairs iterates O(cameras²) pairs; each pair used to pull
+# BOTH cameras' full appearance history.
+THRESHOLD_MAX_APPEARANCES_PER_CAMERA = 2000
+
 
 class ThresholdLearner:
     """
@@ -38,7 +43,19 @@ class ThresholdLearner:
     
     def __init__(self):
         self.learned_thresholds: Dict[Tuple[str, str], Dict] = {}
-        self.min_samples_for_learning = 10  # Minimum movements needed to learn
+
+    # Module-level singleton: these must be read per call, not captured in
+    # __init__, or an admin edit never reaches them.
+    @property
+    def enabled(self) -> bool:
+        return bool(settings.AUTO_THRESHOLD_LEARNING_ENABLED)
+
+    @property
+    def min_samples_for_learning(self) -> int:
+        """Minimum movements needed to learn. Duplicated the declared
+        THRESHOLD_MIN_SAMPLES_FOR_ACTIVATION setting as a literal 10."""
+        return int(settings.THRESHOLD_MIN_SAMPLES_FOR_ACTIVATION)
+
     
     async def learn_thresholds_for_pair(
         self,
@@ -52,6 +69,10 @@ class ThresholdLearner:
         Returns:
             Dict with 'time_window_minutes' and 'distance_meters', or None if insufficient data
         """
+        # The declared feature flag now gates the feature; it used to be
+        # rendered as an editable switch that nothing read.
+        if not self.enabled:
+            return None
         try:
             # Get pipeline coordinates
             pipeline_query = select(Pipeline).where(
@@ -95,20 +116,35 @@ class ThresholdLearner:
             
             # Calculate travel times
             travel_times = [m['time_diff_minutes'] for m in movements]
-            
+
             # Learn optimal time window (95th percentile + buffer)
             # This covers 95% of actual travel times
             if NUMPY_AVAILABLE:
-                optimal_time_window = np.percentile(travel_times, 95) if len(travel_times) > 0 else 10.0
+                p95_minutes = np.percentile(travel_times, 95) if len(travel_times) > 0 else 10.0
             else:
-                optimal_time_window = percentile(travel_times, 95) if len(travel_times) > 0 else 10.0
-            optimal_time_window = max(optimal_time_window * 1.2, 5.0)  # 20% buffer, min 5min
-            
+                p95_minutes = percentile(travel_times, 95) if len(travel_times) > 0 else 10.0
+            optimal_time_window = max(p95_minutes * 1.2, 5.0)  # 20% buffer, min 5min
+
             # Learn optimal distance (actual distance + 20% buffer for GPS inaccuracy)
             optimal_distance = distance * 1.2
-            
-            confidence = min(len(movements) / 50.0, 1.0)  # More data = higher confidence (max 1.0)
-            
+
+            # Dispersion of the observed travel times. The old confidence was
+            # literally samples/50 — a sample COUNT dressed up as a confidence
+            # (50 wildly-scattered transits scored 1.0; 20 metronomic ones
+            # scored 0.4). Report the ingredients separately and derive the
+            # headline number from both sufficiency AND tightness:
+            #   sample_term     = samples / (samples + min_samples)   -> 0..1
+            #   dispersion_term = 1 / (1 + CV)   (CV = std/mean, scale-free)
+            #   confidence      = sample_term * dispersion_term
+            mean_minutes = sum(travel_times) / len(travel_times)
+            spread_minutes = (
+                sum((t - mean_minutes) ** 2 for t in travel_times) / len(travel_times)
+            ) ** 0.5
+            cv = (spread_minutes / mean_minutes) if mean_minutes > 0 else float('inf')
+            dispersion_term = 1.0 / (1.0 + cv) if cv != float('inf') else 0.0
+            sample_term = len(movements) / (len(movements) + self.min_samples_for_learning)
+            confidence = sample_term * dispersion_term
+
             learned = {
                 'camera_pair': (camera_1, camera_2),
                 'optimal_time_window_minutes': float(optimal_time_window),
@@ -116,6 +152,9 @@ class ThresholdLearner:
                 'actual_distance_meters': float(distance),
                 'confidence': float(confidence),
                 'sample_count': len(movements),
+                'p95_minutes': float(p95_minutes),
+                'spread_minutes': float(spread_minutes),
+                'mean_minutes': float(mean_minutes),
                 'learned_at': datetime.utcnow()
             }
             
@@ -147,28 +186,26 @@ class ThresholdLearner:
         Returns movements where same identity appeared at both cameras.
         """
         cutoff_date = datetime.utcnow() - timedelta(days=days_back)
-        
-        # Get all appearances at camera_1
-        query_1 = select(IdentityAppearance).where(
-            and_(
-                IdentityAppearance.pipeline_id == camera_1,
-                IdentityAppearance.start_time >= cutoff_date
+
+        # Bounded scans: newest-first under the cap, re-sorted ascending so
+        # "first movement per appearance" (the break below) keeps meaning
+        # "earliest subsequent sighting".
+        async def _camera_appearances(camera_id):
+            result = await db.execute(
+                select(IdentityAppearance).where(
+                    and_(
+                        IdentityAppearance.pipeline_id == camera_id,
+                        IdentityAppearance.start_time >= cutoff_date
+                    )
+                ).order_by(IdentityAppearance.start_time.desc())
+                .limit(THRESHOLD_MAX_APPEARANCES_PER_CAMERA)
             )
-        ).order_by(IdentityAppearance.identity_id, IdentityAppearance.start_time)
-        
-        result_1 = await db.execute(query_1)
-        appearances_1 = result_1.scalars().all()
-        
-        # Get all appearances at camera_2
-        query_2 = select(IdentityAppearance).where(
-            and_(
-                IdentityAppearance.pipeline_id == camera_2,
-                IdentityAppearance.start_time >= cutoff_date
-            )
-        ).order_by(IdentityAppearance.identity_id, IdentityAppearance.start_time)
-        
-        result_2 = await db.execute(query_2)
-        appearances_2 = result_2.scalars().all()
+            rows = list(result.scalars().all())
+            rows.sort(key=lambda r: r.start_time)
+            return rows
+
+        appearances_1 = await _camera_appearances(camera_1)
+        appearances_2 = await _camera_appearances(camera_2)
         
         # Group by identity
         appearances_by_identity_1 = defaultdict(list)
@@ -226,8 +263,8 @@ class ThresholdLearner:
         
         # Fallback to defaults
         return (
-            getattr(settings, 'MULTI_CAMERA_TIME_WINDOW_MINUTES', 10),
-            getattr(settings, 'MULTI_CAMERA_DISTANCE_METERS', 500.0)
+            settings.MULTI_CAMERA_TIME_WINDOW_MINUTES,
+            settings.MULTI_CAMERA_DISTANCE_METERS
         )
     
     async def learn_all_camera_pairs(

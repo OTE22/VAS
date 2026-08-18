@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 NO_STORE = "no-store, no-cache, must-revalidate"
 
 
+def require_settings_csrf(request: Request):
+    """CSRF defense-in-depth for cookie-authenticated setting changes.
+
+    Six sibling admin routers (watchlists, live_alerts, intelligence,
+    conversations, identities, search) already carry this check; the settings
+    writer — the one endpoint that can change recognition thresholds, retention
+    windows and feature flags for the whole deployment — was the outlier.
+
+    Bearer-token clients (curl, tests) are exempt: a browser cannot attach an
+    Authorization header cross-site on its own.
+    """
+    if request.headers.get("authorization"):
+        return
+    if request.headers.get("x-requested-with", "").lower() != "xmlhttprequest":
+        raise HTTPException(
+            status_code=403,
+            detail="CSRF check failed: X-Requested-With header required",
+        )
+
+
 def _setting_payload(setting: Setting) -> Dict[str, Any]:
     """Typed, honest per-setting payload: stored vs effective value, source,
     apply mode, restart requirements. Legacy fields kept for compatibility."""
@@ -318,49 +338,81 @@ async def sync_settings_from_config(db: AsyncSession):
         "security": ["JWT_SECRET_KEY", "JWT_ALGORITHM", "ACCESS_TOKEN_EXPIRE_MINUTES"],
         "database": ["DATABASE_URL", "DB_HOST", "DB_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", 
                     "DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_RECYCLE", "DB_POOL_PRE_PING"],
-        "cache": ["REDIS_URL", "REDIS_MAX_CONNECTIONS", "REDIS_POOL_SIZE", "CACHE_TTL", "CACHE_LOCAL_SIZE", 
-                 "CACHE_VERSION", "CACHE_WARNING_ENABLED", "CACHE_WARNING_INTERVAL"],
+        # REDIS_POOL_SIZE, CACHE_LOCAL_SIZE, CACHE_VERSION and CACHE_WARNING_*
+        # are deliberately absent: nothing in the codebase reads them, so
+        # rendering them here offered editable knobs wired to nothing.
+        # REDIS_MAX_CONNECTIONS is the pool size that is actually used.
+        "cache": ["REDIS_URL", "REDIS_MAX_CONNECTIONS", "CACHE_TTL"],
+        # FACES_DIR is absent deliberately: it is derived from STORAGE_DIR
+        # (config.Settings) and has no setter, so listing it here would show an
+        # editable field whose edits can never take effect.
         "models": ["DETECTION_MODEL", "RECOGNITION_MODEL", "SIMILARITY_THRESHOLD", "UNKNOWN_SIMILARITY_THRESHOLD",
-                  "CONFIDENCE_THRESHOLD", "FACES_DIR", "DB_PATH"],
-        "processing": ["MAX_QUEUE_SIZE", "QUEUE_WORKERS", "BATCH_SIZE", "MAX_CONCURRENT_REQUESTS",
-                      "GPU_BATCH_SIZE", "CPU_BATCH_SIZE", "PIPELINE_BATCH_SIZE",
+                  "CONFIDENCE_THRESHOLD"],
+        # BATCH_SIZE/GPU_BATCH_SIZE/CPU_BATCH_SIZE are absent: superseded by
+        # PIPELINE_BATCH_SIZE, which is the one the pipeline reads.
+        "processing": ["MAX_QUEUE_SIZE", "QUEUE_WORKERS", "MAX_CONCURRENT_REQUESTS",
+                      "PIPELINE_BATCH_SIZE",
                       "INFERENCE_WORKERS", "MAX_CONCURRENT_INFERENCE", "MAX_CONCURRENT_INFERENCE_PER_PIPELINE",
                       "WEBHOOK_MAX_BODY_MB", "WEBHOOK_DEDUP_TTL_SECONDS"],
-        "storage": ["STORAGE_DIR", "SAVE_IMAGES", "MAX_STORAGE_GB", "MAX_PHOTOS_PER_PERSON", 
-                   "SAVE_UNKNOWN_FACES", "MAX_FILE_SIZE", "SAVE_WEBHOOK_IMAGES", "WEBHOOK_IMAGES_DIR",
-                   "SAVE_CROPPED_IMAGES", "CROPPED_IMAGES_DIR"],
+        # The *_DIR companions of these flags are derived from STORAGE_DIR and
+        # are therefore not listed — only the on/off switches are settings.
+        "storage": ["STORAGE_DIR", "SAVE_IMAGES", "MAX_STORAGE_GB", "MAX_PHOTOS_PER_PERSON",
+                   "SAVE_UNKNOWN_FACES", "MAX_FILE_SIZE", "SAVE_WEBHOOK_IMAGES",
+                   "SAVE_CROPPED_IMAGES"],
         "tracking": ["FACE_TRACKING_ENABLED", "FACE_TRACKING_WINDOW_SECONDS", "FACE_TRACKING_MAX_ENTRIES",
                      "FACE_TRACKING_SIMILARITY_THRESHOLD", "SKIP_UNKNOWN_FACES", "SHOW_UNKNOWN_FACES_ON_DASHBOARD",
-                     "FACE_TRACKING_MAX_MEMORY_MB", "FACE_TRACKING_CLEANUP_INTERVAL",
+                     "FACE_TRACKING_MAX_MEMORY_MB",
                      "DASHBOARD_FACE_DISPLAY_HOURS", "UNKNOWN_FACE_DISPLAY_HOURS",
                      "ALERT_NOTIFICATION_WINDOW_HOURS"],
-        "identity": ["IDENTITY_ENRICH_MIN_SIMILARITY", "IDENTITY_ENRICH_MIN_QUALITY", "IDENTITY_MAX_EMBEDDINGS",
+        "identity": ["ENROLL_STRONG_MATCH_MIN", "ENROLL_CANDIDATE_MIN",
+                    "ENROLL_CANDIDATE_POOL", "ENROLL_MAX_CANDIDATES",
+                    "IDENTITY_ENRICH_MIN_SIMILARITY", "IDENTITY_ENRICH_MIN_QUALITY",
+                    "IDENTITY_NEAR_DUPLICATE_MIN", "IDENTITY_INGEST_TOP_K",
+                    "IDENTITY_AUTO_ENRICH_ENABLED", "IDENTITY_SNAPSHOT_REPLACE_MIN_SIMILARITY",
                     "CLUSTER_INTERVAL_HOURS", "CLUSTER_STARTUP_DELAY_HOURS", "CLUSTER_MIN_SIZE", "CLUSTER_EPS", "CLUSTER_MIN_SAMPLES",
+                    "CLUSTER_ACTIVE_WINDOW_DAYS", "CLUSTER_TRAINED_MODEL_MARGIN", "SIMILARITY_QUALITY_FLOOR",
                     "SNAPSHOT_RETENTION_DAYS", "EMBEDDING_RETENTION_MONTHS", "INACTIVE_THRESHOLD_DAYS",
                     "IDENTITY_CLEANUP_INTERVAL_HOURS", "MAX_EMBEDDINGS_PER_IDENTITY", "IDENTITY_EMBEDDING_SIZE",
-                    "IDENTITY_INDEX_DB_PATH", "IDENTITY_INDEX_AUTO_SAVE_INTERVAL", 
-                    # Vector Search Backend Configuration
+                    "IDENTITY_INDEX_DB_PATH",
+                    # Vector Search Backend Configuration. The retired FAISS
+                    # knob family (REPAIR_FAISS_*, KNOWN_INDEX_{NLIST,NPROBE,
+                    # HNSW_*,PQ_*}, UNKNOWN_INDEX_TYPE, FAISS_LAZY_MARKING_
+                    # THRESHOLD) is deliberately absent: those fields were
+                    # deleted from config.py — they configured index types the
+                    # shipped FlatFaissIndex refuses to build, and listing them
+                    # here rendered them as live knobs in the admin UI.
                     "VECTOR_BACKEND", "PGVECTOR_INDEX_TYPE", "PGVECTOR_HNSW_M", "PGVECTOR_HNSW_EF_CONSTRUCTION",
                     "PGVECTOR_IVFFLAT_LISTS", "PGVECTOR_IVFFLAT_PROBES",
-                    # FAISS Configuration
-                    "REPAIR_FAISS_ON_STARTUP",
-                    "REPAIR_FAISS_INTERVAL_HOURS", "FAISS_LAZY_MARKING_THRESHOLD", "KNOWN_INDEX_TYPE",
-                    "UNKNOWN_INDEX_TYPE", "KNOWN_INDEX_NLIST", "KNOWN_INDEX_NPROBE", "KNOWN_INDEX_HNSW_M",
-                    "KNOWN_INDEX_HNSW_EF_CONSTRUCTION", "KNOWN_INDEX_HNSW_EF_SEARCH", "KNOWN_INDEX_PQ_M",
-                    "KNOWN_INDEX_PQ_BITS", "PIPELINE_AWARE_CLUSTERING_ENABLED", "PIPELINE_SIMILARITY_WEIGHT",
+                    "KNOWN_INDEX_TYPE",
+                    "PIPELINE_AWARE_CLUSTERING_ENABLED", "PIPELINE_SIMILARITY_WEIGHT",
                     "EMBEDDING_SIMILARITY_WEIGHT", "CROSS_PIPELINE_SIMILARITY_THRESHOLD", "SIMILARITY_MODEL_PATH",
                     "SIMILARITY_MODEL_MIN_SAMPLES", "SIMILARITY_MODEL_AUTO_TRAIN"],
+        # BATCH_WRITE_MAX_WAIT is absent: batch_writer.py reads only
+        # BATCH_WRITE_INTERVAL and BATCH_WRITE_SIZE.
+        #
+        # BACKUP_* ARE listed. They have no Python consumer, which is why a
+        # Python-only scan wrongly called them dead — they are read by
+        # scripts/backup/backup.sh and backup-loop.sh, and passed to the
+        # separate `backup` service in docker-compose.prod.yml. They are
+        # registered container_recreate below, because an edit made here
+        # mutates THIS process and can never reach that container.
         "retention": ["DATA_RETENTION_DAYS", "CLEANUP_INTERVAL_HOURS", "AUDIT_LOG_RETENTION_DAYS",
-                     "BATCH_WRITE_SIZE", "BATCH_WRITE_INTERVAL", "BATCH_WRITE_MAX_WAIT"],
+                     "TASK_HISTORY_RETENTION_DAYS",
+                     "BACKUP_RETENTION_DAYS", "BACKUP_INTERVAL_SECONDS",
+                     "BATCH_WRITE_SIZE", "BATCH_WRITE_INTERVAL"],
         "ollama": ["OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_SQL_MODEL", "OLLAMA_TEMPERATURE", "OLLAMA_TIMEOUT"],
         "sql_agent": ["CHROMADB_PATH", "CHROMA_COLLECTION_NAME", "RAG_TOP_K", "RAG_SIMILARITY_THRESHOLD",
                      "SQL_AGENT_MAX_CONCURRENT", "SQL_AGENT_TOTAL_TIMEOUT"],
         "advanced_search": [
             "SEARCH_MIN_QUALITY_THRESHOLD", "SEARCH_QUALITY_WARNING_THRESHOLD",
             "CONFIDENCE_VERY_HIGH_MIN", "CONFIDENCE_HIGH_MIN", "CONFIDENCE_MEDIUM_MIN", "CONFIDENCE_LOW_MIN",
-            "BATCH_SEARCH_MAX_IMAGES", "BATCH_SEARCH_TIMEOUT_SECONDS",
+            "SEARCH_DEFAULT_TOP_K", "SEARCH_MAX_TOP_K", "SEARCH_RETRIEVAL_FLOOR",
+            "SEARCH_CANDIDATE_MULTIPLIER", "SEARCH_FILTERED_CANDIDATE_MULTIPLIER",
+            "BATCH_SEARCH_MAX_IMAGES", "BATCH_SEARCH_TIMEOUT_SECONDS", "BATCH_SEARCH_MAX_CONCURRENCY",
             "SEARCH_HISTORY_RETENTION_DAYS", "SEARCH_HISTORY_MAX_PER_USER",
             "LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES", "LIVE_ALERT_MAX_PER_USER", "LIVE_ALERT_MAX_PER_IDENTITY",
+            "LIVE_ALERT_MIN_SIMILARITY", "LIVE_ALERT_CLIP_DURATION_SECONDS",
+            "SMTP_HOST", "SMS_PROVIDER_URL", "TWILIO_ACCOUNT_SID",
             "RELATED_IDENTITY_MIN_CO_APPEARANCES", "RELATED_IDENTITY_TIME_WINDOW_MINUTES",
             "FACE_QUALITY_ENABLED", "WATCHLIST_ENABLED", "LIVE_ALERTS_ENABLED",
             "RELATED_IDENTITIES_ENABLED", "TEMPORAL_PATTERNS_ENABLED",
@@ -369,8 +421,41 @@ async def sync_settings_from_config(db: AsyncSession):
             "FACE_QUALITY_THRESHOLD_BLUR", "FACE_QUALITY_THRESHOLD_SIZE",
             "FACE_QUALITY_THRESHOLD_ANGLE", "FACE_QUALITY_THRESHOLD_LIGHTING"
         ],
+        "ml_ops": [
+            "ML_DECISION_MODE", "ML_INFERENCE_TIMEOUT_MS", "ML_SHADOW_TIMEOUT_MS",
+            "ML_MODEL_CACHE_TTL_SECONDS", "ML_SUPERVISED_MIN_LABELS",
+            "ML_SUPERVISED_MIN_PER_CLASS", "ML_COLLECTOR_LATE_GRACE_MINUTES",
+            "ML_FEATURE_SAMPLED_FULL_VECTOR_RATE",
+            "ML_GRAPH_MIN_NODES", "ML_GRAPH_MIN_EDGES",
+            "ML_GRAPH_MIN_OBSERVATION_DAYS", "ML_GRAPH_MIN_PAIR_APPEARANCES",
+            "ML_DRIFT_CHECK_INTERVAL_HOURS",
+            "ML_DRIFT_MIN_SAMPLES", "ML_DRIFT_PSI_WARNING", "ML_DRIFT_PSI_CRITICAL",
+            "ML_PREDICTION_RETENTION_DAYS", "ML_SNAPSHOT_RETENTION_DAYS",
+            "ML_DRIFT_REPORT_RETENTION_DAYS", "ML_MAX_ARTIFACT_MB",
+            "MLFLOW_ENABLED", "OPTUNA_ENABLED", "XGBOOST_ENABLED", "SHAP_ENABLED",
+        ],
     }
-    
+
+    # Reconcile against the runtime registry.
+    #
+    # SETTINGS_REGISTRY is the list of settings whose runtime behaviour this
+    # system GUARANTEES — each entry states a type, a range and an apply mode.
+    # This map is hand-maintained, and 25 registered keys had drifted out of
+    # it: no row was ever seeded for them, so they rendered nowhere and
+    # PUT /api/settings/<key> answered 404 for a setting the registry
+    # advertised as editable. Anything registered but unlisted lands in
+    # `advanced` rather than silently disappearing.
+    _listed = {key for keys in categories.values() for key in keys}
+    _unlisted = sorted(
+        key for key in runtime_settings.SETTINGS_REGISTRY
+        if key not in _listed and runtime_settings.has_key(key)
+    )
+    if _unlisted:
+        categories.setdefault("advanced", []).extend(_unlisted)
+        logger.info("[SETTINGS] %d registered setting(s) not in the category map, "
+                    "filed under 'advanced': %s", len(_unlisted), ", ".join(_unlisted))
+
+
     # Determine value types
     def get_value_type(key: str, value: Any) -> str:
         if isinstance(value, bool):
@@ -412,14 +497,15 @@ async def sync_settings_from_config(db: AsyncSession):
                 
                 # Get custom description for specific settings
                 custom_descriptions = {
+                    "ENROLL_STRONG_MATCH_MIN": "Similarity (0-1) at or above which an uploaded photo is treated as an already-enrolled person, and adding it to that person is the recommended action. Must not be below ENROLL_CANDIDATE_MIN — startup refuses an inverted pair. Default: 0.75",
+                    "ENROLL_CANDIDATE_MIN": "Similarity (0-1) below which no candidate is offered and the upload enrolls directly as a new person. Between this and ENROLL_STRONG_MATCH_MIN the administrator is asked to choose. Default: 0.45",
+                    "ENROLL_CANDIDATE_POOL": "How many nearest face embeddings to retrieve before collapsing them to one row per person. Must exceed ENROLL_MAX_CANDIDATES, because one person with many photos would otherwise fill the pool and hide the others. Default: 25",
+                    "ENROLL_MAX_CANDIDATES": "How many possible matches to show the administrator when an upload needs review. Default: 5",
                     "LOGS_LIFE_TIME_HOURS": "Log retention period in hours. Log entries older than this will be automatically deleted. Default: 48 hours.",
                     "LOG_DIR": "Directory where log files are stored",
                     "LOG_LEVEL": "Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL",
                     "BACKGROUND_TASK_NOTIFICATIONS_ENABLED": "Enable real-time WebSocket notifications for background tasks (log cleanup, data retention, clustering, etc.). Admins receive alerts 1 minute before tasks start. Default: true",
                     "BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS": "Seconds before background task starts to send notification. Default: 60 (1 minute). Increase for longer warning, decrease for shorter.",
-                    "REPAIR_FAISS_ON_STARTUP": "Enable/disable FAISS index repair on application startup. When enabled, orphaned entries are cleaned up automatically. Disable for faster startup on large datasets. Default: true",
-                    "REPAIR_FAISS_INTERVAL_HOURS": "Background repair interval in hours. FAISS indexes are automatically repaired in the background to remove orphaned entries. Default: 24 hours. Set to 0 to disable background repair.",
-                    "FAISS_LAZY_MARKING_THRESHOLD": "Threshold for FAISS lazy marking approach. If mismatch count is below this threshold, orphaned vectors are lazy-marked (skipped during search) instead of rebuilding the entire index. Default: 1 (for demo). For production with large datasets, use 100 or higher.",
                     "CLUSTER_STARTUP_DELAY_HOURS": "Hours to wait after system startup before running the first clustering job. This allows the system to collect some data before generating merge suggestions. Default: 0 (immediate). Set to 1.0 for delayed startup.",
                     "CLUSTER_INTERVAL_HOURS": "Hours between clustering runs. The clustering job finds duplicate unknown identities and generates merge suggestions. Default: 24 hours. Set to 0 to disable automatic clustering.",
                     "PIPELINE_AWARE_CLUSTERING_ENABLED": "Enable pipeline-aware ML clustering for merge suggestions. When enabled, suggestions are filtered by user's accessible pipelines and use ML-based similarity scoring. Default: true",
@@ -433,10 +519,8 @@ async def sync_settings_from_config(db: AsyncSession):
                     "DASHBOARD_FACE_DISPLAY_HOURS": "How many hours of face detections to show on the dashboard. Faces older than this are hidden but still stored in the database. Default: 3 hours. Increase for longer visibility, decrease for faster dashboard loading.",
                     "UNKNOWN_FACE_DISPLAY_HOURS": "How many hours unknown faces stay visible on the Unknown Faces page (display-only — data stays stored until retention deletes it). Default: 24 hours. Set to 0 to always show all. The page's Show-all toggle reveals older ones on demand.",
                     "ALERT_NOTIFICATION_WINDOW_HOURS": "Minimum time (in hours) between alert popups for the same person on the same camera. Default: 1 hour. Set to 0 to alert on every detection (not recommended - very noisy). Set higher to reduce alert frequency.",
-                    "SAVE_WEBHOOK_IMAGES": "Save all images received via webhook for debugging purposes. When enabled, images are saved to WEBHOOK_IMAGES_DIR. Default: true",
-                    "WEBHOOK_IMAGES_DIR": "Directory to save webhook images for debugging. Default: ./debug/webhook_images",
-                    "SAVE_CROPPED_IMAGES": "Save all cropped person images for debugging. When enabled, cropped images are saved to CROPPED_IMAGES_DIR. Default: true",
-                    "CROPPED_IMAGES_DIR": "Directory to save cropped person images for debugging. Default: ./debug/cropped",
+                    "SAVE_WEBHOOK_IMAGES": "Save all images received via webhook for debugging purposes. When enabled, images are saved to <STORAGE_DIR>/debug/webhook_images. The location is derived from STORAGE_DIR and cannot be set separately. Default: true",
+                    "SAVE_CROPPED_IMAGES": "Save all cropped person images for debugging. When enabled, cropped images are saved to <STORAGE_DIR>/debug/cropped. The location is derived from STORAGE_DIR and cannot be set separately. Default: true",
                     # pgvector Configuration
                     "VECTOR_BACKEND": "Vector search backend: 'faiss' (default, fast in-memory search) or 'pgvector' (PostgreSQL-based, simpler architecture, ACID compliant). Changing this requires restart. Default: faiss",
                     "PGVECTOR_INDEX_TYPE": "pgvector index type: 'hnsw' (fast, recommended) or 'ivfflat' (memory efficient). Only used when VECTOR_BACKEND=pgvector. Default: hnsw",
@@ -446,14 +530,6 @@ async def sync_settings_from_config(db: AsyncSession):
                     "PGVECTOR_IVFFLAT_PROBES": "pgvector IVFFlat probes (clusters to search, 1-lists). Higher = better accuracy, slower search. Only used when PGVECTOR_INDEX_TYPE=ivfflat. Default: 10",
                     # FAISS Configuration
                     "KNOWN_INDEX_TYPE": "FAISS index type for KNOWN identities. Options: flat (exact search, best accuracy), ivf (fast, good for 1M+), hnsw (fastest, more memory), ivfpq (smallest, good for 10M+). Only used when VECTOR_BACKEND=faiss. Default: flat",
-                    "UNKNOWN_INDEX_TYPE": "FAISS index type for UNKNOWN identities. Recommended: flat (exact search, best for small dynamic datasets). Only used when VECTOR_BACKEND=faiss. Default: flat",
-                    "KNOWN_INDEX_NLIST": "Number of clusters for FAISS IVF index (sqrt(N) recommended, e.g., 1000 for 1M vectors). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=ivf. Default: 1000",
-                    "KNOWN_INDEX_NPROBE": "Number of clusters to search in FAISS IVF (10-50, higher = better accuracy, slower). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=ivf. Default: 20",
-                    "KNOWN_INDEX_HNSW_M": "FAISS HNSW M parameter (16-64, higher = better accuracy, more memory). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=hnsw. Default: 32",
-                    "KNOWN_INDEX_HNSW_EF_CONSTRUCTION": "FAISS HNSW efConstruction parameter (200-400). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=hnsw. Default: 200",
-                    "KNOWN_INDEX_HNSW_EF_SEARCH": "FAISS HNSW efSearch parameter (16-128). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=hnsw. Default: 64",
-                    "KNOWN_INDEX_PQ_M": "FAISS PQ m parameter (8, 16, 32, 64). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=ivfpq. Default: 64",
-                    "KNOWN_INDEX_PQ_BITS": "FAISS PQ bits per subquantizer (8 is standard). Only used when VECTOR_BACKEND=faiss and KNOWN_INDEX_TYPE=ivfpq. Default: 8",
                     # Advanced Search Settings
                     "SEARCH_MIN_QUALITY_THRESHOLD": "Minimum quality score (0-1) to attempt search. Faces below this are skipped. Default: 0.3. Lower values allow more faces to be searched but may reduce accuracy.",
                     "SEARCH_QUALITY_WARNING_THRESHOLD": "Quality threshold (0-1) below which a warning is shown. Default: 0.6. Faces below this may have reduced search accuracy.",
@@ -509,6 +585,33 @@ async def sync_settings_from_config(db: AsyncSession):
                     if setting.is_readonly != (key in readonly_keys):
                         setting.is_readonly = key in readonly_keys
 
+    # Drop rows for keys the application no longer declares.
+    #
+    # Two ways a row goes stale: a path became DERIVED (WEBHOOK_IMAGES_DIR et
+    # al. — computed from STORAGE_DIR, no setter), or the field was deleted
+    # outright (the retired FAISS knob family, DB_PATH, ENABLE_METRICS...).
+    # Either way the stored value is something the process never reads, and
+    # showing it as an editable setting misleads the operator — which is the
+    # exact failure both retirements existed to remove. Sync runs on every
+    # GET, so upgrades heal without a migration.
+    #
+    # The predicate is against DECLARED CONFIGURATION — model fields plus
+    # read-only properties — never against the category map above, so a key
+    # that is declared but deliberately unlisted (secrets, derived paths) is
+    # not collateral damage.
+    from backend.security.config_guard import DERIVED_PATHS
+
+    declared = set(type(config_settings).model_fields) | {
+        name for name in dir(type(config_settings))
+        if isinstance(getattr(type(config_settings), name, None), property)
+    }
+    stale = await db.execute(select(Setting).where(
+        ~Setting.key.in_(declared) | Setting.key.in_(DERIVED_PATHS)))
+    for row in stale.scalars().all():
+        logger.info("[SETTINGS] Removing obsolete settings row %s=%r "
+                    "(no longer a declared, settable field)", row.key, row.value)
+        await db.delete(row)
+
     await db.commit()
 
 
@@ -541,7 +644,7 @@ async def sync_settings_from_config(db: AsyncSession):
     - `processing`: Queue and batch processing (QUEUE_WORKERS, BATCH_SIZE, etc.)
     - `storage`: Image storage settings (STORAGE_DIR, SAVE_IMAGES, SAVE_WEBHOOK_IMAGES, SAVE_CROPPED_IMAGES, etc.)
     - `tracking`: Face tracking optimization (SHOW_UNKNOWN_FACES_ON_DASHBOARD, FACE_TRACKING_ENABLED, etc.)
-    - `identity`: Identity management and FAISS (KNOWN_INDEX_TYPE, REPAIR_FAISS_ON_STARTUP, FAISS_LAZY_MARKING_THRESHOLD, etc.)
+    - `identity`: Identity management and vector search (VECTOR_BACKEND, PGVECTOR_*, clustering, etc.)
     - `retention`: Data cleanup settings (DATA_RETENTION_DAYS, etc.)
     - `ollama`: Ollama configuration (for SQL agent)
     - `sql_agent`: SQL agent settings (ChromaDB, etc.)
@@ -551,8 +654,6 @@ async def sync_settings_from_config(db: AsyncSession):
     - `SHOW_UNKNOWN_FACES_ON_DASHBOARD` (tracking): Show unknown faces on main dashboard
     - `SAVE_WEBHOOK_IMAGES` (storage): Save webhook images for debugging
     - `SAVE_CROPPED_IMAGES` (storage): Save cropped images for debugging
-    - `KNOWN_INDEX_TYPE`, `UNKNOWN_INDEX_TYPE` (identity): FAISS index types (flat, ivf, hnsw, ivfpq)
-    - `REPAIR_FAISS_ON_STARTUP`, `REPAIR_FAISS_INTERVAL_HOURS`, `FAISS_LAZY_MARKING_THRESHOLD` (identity): FAISS repair settings
     - `SEARCH_MIN_QUALITY_THRESHOLD`, `SEARCH_QUALITY_WARNING_THRESHOLD` (advanced_search): Quality thresholds for search
     - `CONFIDENCE_VERY_HIGH_MIN`, `CONFIDENCE_HIGH_MIN`, `CONFIDENCE_MEDIUM_MIN`, `CONFIDENCE_LOW_MIN` (advanced_search): Confidence band thresholds
     - `BATCH_SEARCH_MAX_IMAGES`, `BATCH_SEARCH_TIMEOUT_SECONDS` (advanced_search): Batch search limits
@@ -719,23 +820,27 @@ def _get_value_hint(value_type: str) -> str:
     }
 )
 async def get_categories(
+    response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(["admin"]))
 ):
     """
     Get all setting categories.
-    
+
     Returns a list of distinct category names used to organize settings.
     Categories are automatically synced from config.py.
     """
     try:
         # Sync settings first
         await sync_settings_from_config(db)
-        
+
         result = await db.execute(
             select(Setting.category).distinct().order_by(Setting.category)
         )
         categories = [row[0] for row in result.all()]
+        # Every sibling settings endpoint sets this; this one did not, so a
+        # newly-seeded category could stay invisible behind a cached response.
+        response.headers["Cache-Control"] = NO_STORE
         return categories
     except Exception as e:
         logger.error(f"Error getting categories: {e}", exc_info=True)
@@ -989,10 +1094,6 @@ async def get_setting(
     - `SHOW_UNKNOWN_FACES_ON_DASHBOARD` (bool): Show unknown faces on main dashboard (default: false)
     - `SAVE_WEBHOOK_IMAGES` (bool): Save webhook images for debugging (default: true)
     - `SAVE_CROPPED_IMAGES` (bool): Save cropped images for debugging (default: true)
-    - `KNOWN_INDEX_TYPE` (string): FAISS index type - flat, ivf, hnsw, ivfpq (default: flat)
-    - `FAISS_LAZY_MARKING_THRESHOLD` (int): Lazy marking threshold (default: 1, production: 100+)
-    - `REPAIR_FAISS_ON_STARTUP` (bool): Enable startup repair (default: true)
-    - `REPAIR_FAISS_INTERVAL_HOURS` (int): Background repair interval (default: 24)
     
     **Example Requests:**
     
@@ -1061,7 +1162,8 @@ async def update_setting(
     update_data: SettingUpdateRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role(["admin"]))
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_settings_csrf)
 ):
     """
     Update a setting value with audit logging.
@@ -1099,6 +1201,23 @@ async def update_setting(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(ve)
             )
+
+        # Cross-config guard: nginx terminates the webhook body FIRST. Accepting
+        # a receiver limit above nginx's client_max_body_size would silently
+        # convert every large frame into an nginx 413 the receiver never sees.
+        # Route-level (not typed_parse) so DB hydration of a pre-existing
+        # oversized value cannot brick boot - lifespan warns on that instead.
+        if setting_key == "WEBHOOK_MAX_BODY_MB":
+            nginx_limit = runtime_settings.expected_nginx_webhook_body_limit_mb()
+            if nginx_limit is not None and typed_value > nginx_limit:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"WEBHOOK_MAX_BODY_MB={typed_value} exceeds the expected nginx "
+                        f"client_max_body_size={nginx_limit}m on the webhook route; nginx "
+                        f"would reject the body first. Raise nginx first."
+                    )
+                )
 
         meta = runtime_settings.get_meta(setting_key, setting.category)
 
@@ -1161,14 +1280,13 @@ async def update_setting(
                 from backend.core.websocket_manager import ws_manager
                 from config import settings as config_settings
                 
-                # Calculate updated config values
-                if setting_key == "DASHBOARD_FACE_DISPLAY_HOURS":
-                    display_hours = int(setting.value) if setting.value else 3
-                    notification_window_hours = getattr(config_settings, 'ALERT_NOTIFICATION_WINDOW_HOURS', 1.0)
-                else:  # ALERT_NOTIFICATION_WINDOW_HOURS
-                    display_hours = getattr(config_settings, 'DASHBOARD_FACE_DISPLAY_HOURS', 3)
-                    notification_window_hours = float(setting.value) if setting.value else 1.0
-                
+                # Read both values off the live settings object. The save path
+                # has already applied and validated them, so re-parsing the raw
+                # string here only re-introduced a second parser (int() on a
+                # float string threw) and a second set of default literals.
+                display_hours = float(config_settings.DASHBOARD_FACE_DISPLAY_HOURS)
+                notification_window_hours = float(config_settings.ALERT_NOTIFICATION_WINDOW_HOURS)
+
                 # Build config response
                 config_response = {
                     "success": True,

@@ -120,6 +120,7 @@ def test_model_status_strictly_typed_and_path_free(token):
     config = body["configuration"]
     assert isinstance(config["auto_train"], bool)
     assert config["effective_at"].endswith("Z")
+    assert not config["effective_at"].endswith("+00:00Z"), "double suffix"
     assert "no-store" in (headers.get("Cache-Control") or "").lower()
 
 
@@ -235,12 +236,19 @@ async def _seed_training_rows(count_per_class=30):
     async with db_manager.get_session() as db:
         ids = [r[0] for r in await db.execute(
             text("SELECT id FROM identities WHERE status='ACTIVE' LIMIT 30"))]
-        if len(ids) < 6:
-            return None  # not enough identities to build pairs
         pairs = []
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
                 pairs.append((ids[i], ids[j]))
+        # Guard on PAIRS, not on identity count. `len(ids) < 6` let 7
+        # identities through while yielding only C(7,2)=21 rows — below the
+        # 50-sample training-readiness floor — so the test proceeded to a
+        # guaranteed assertion failure instead of skipping. Needs C(n,2) >= 60,
+        # i.e. 12 identities. Surfaced when the demo-data wipe shrank the
+        # dataset; the pair count also drifts with whatever other modules have
+        # seeded, which is why the count-based guard was unreliable.
+        if len(pairs) < count_per_class * 2:
+            return None  # not enough identities to build a learnable pair set
         pairs = pairs[: count_per_class * 2]
         for index, (a, b) in enumerate(pairs):
             approved = index % 2 == 0

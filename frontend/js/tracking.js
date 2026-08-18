@@ -271,9 +271,36 @@
     // ------------------------------------------------------------------
     let blockingModalOpen = false;
 
+    /**
+     * ACCOUNT_BLOCKED means the account really is deactivated server-side — the
+     * backend only sends that code after the database transaction commits. So
+     * every cached credential and privilege here is now worthless: drop them
+     * rather than leave the page acting signed-in against a server that will
+     * refuse it. The modal explains; this makes the client's state true.
+     *
+     * Deliberately NOT called for QUERY_DENIED (a refused query, session intact)
+     * or for ENFORCEMENT_FAILED, which the backend downgrades to QUERY_DENIED
+     * precisely so it can never log anyone out over a block that did not happen.
+     */
+    function clearBlockedSession() {
+        try {
+            localStorage.removeItem('access_token');
+            sessionStorage.removeItem('navbar_privileges');
+        } catch (e) { /* storage unavailable — the server still refuses the token */ }
+        // Best-effort: clears the httpOnly cookie the browser holds.
+        try {
+            fetch('/api/auth/logout', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+            }).catch(function () { /* the account is already inactive */ });
+        } catch (e) { /* ignore */ }
+    }
+
     function showBlockingModal(safeMessage, referenceId) {
         if (blockingModalOpen) return;   // never stack duplicates
         blockingModalOpen = true;
+        clearBlockedSession();
 
         const opener = document.activeElement;
         const modal = document.createElement('div');

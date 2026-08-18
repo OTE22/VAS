@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 import cv2
+import hashlib
 import numpy as np
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Form, Request
 from fastapi.responses import Response
@@ -19,12 +20,17 @@ from sqlalchemy import select, and_
 from db_connection import get_db
 from backend.auth.auth_service import get_current_user, require_admin
 from backend.core.batch_search_service import batch_search_service
+# The search routers share one CSRF dependency; defined next to the primary
+# search route rather than duplicated.
+from backend.routes.advanced_search import require_search_csrf
 from backend.core.export_service import export_service
+from backend.core.rate_limiter import rate_limited
 from db_models import SearchHistory
 from config import settings
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(tags=["Export"])
 
 
 # =====================================================
@@ -98,13 +104,30 @@ async def batch_search(
     request: Request,
     images: List[UploadFile] = File(..., description="Image files to search"),
     scope: str = Form(default="both", description="Search scope: known, unknown, both"),
-    top_k: int = Form(default=5, ge=1, le=50, description="Results per face"),
+    # Resolved from SEARCH_DEFAULT_TOP_K/SEARCH_MAX_TOP_K below. The literal
+    # default of 5 here ran a batch at half the depth of the single-image
+    # search (10), from the same control on the search page.
+    top_k: int = Form(default=None, ge=1, description="Results per face"),
     min_quality: float = Form(default=None, ge=0, le=1, description="Minimum quality threshold"),
     check_watchlist: bool = Form(default=True, description="Check against watchlists"),
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_admin())
-):
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_search_csrf)
+,
+    _rl: None = Depends(rate_limited("batch_search", heavy=True))):
     """Perform batch face search across multiple images."""
+    if not settings.BATCH_SEARCH_ENABLED:
+        raise HTTPException(
+            status_code=403, detail="Batch search is disabled (BATCH_SEARCH_ENABLED)")
+
+    max_top_k = int(settings.SEARCH_MAX_TOP_K)
+    if top_k is None:
+        top_k = int(settings.SEARCH_DEFAULT_TOP_K)
+    elif top_k > max_top_k:
+        raise HTTPException(
+            status_code=422,
+            detail=f"top_k must not exceed the configured maximum of {max_top_k}")
+
     if not batch_search_service.is_initialized:
         raise HTTPException(
             status_code=503,
@@ -130,7 +153,7 @@ async def batch_search(
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if img is not None:
-                image_data.append((img_file.filename, img))
+                image_data.append((img_file.filename, img, hashlib.sha256(contents).hexdigest()))
         except Exception as e:
             logger.warning(f"[BATCH_SEARCH] Failed to load {img_file.filename}: {e}")
     
@@ -186,9 +209,14 @@ async def export_search_results(
     results: dict,
     format: str = Query(default="csv", description="Export format: csv, json, pdf"),
     include_images: bool = Query(default=False, description="Include images (json only)"),
-    current_user: dict = Depends(require_admin())
-):
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_search_csrf)
+,
+    _rl: None = Depends(rate_limited("export", heavy=True))):
     """Export search results."""
+    if not settings.EXPORT_RESULTS_ENABLED:
+        raise HTTPException(
+            status_code=403, detail="Result export is disabled (EXPORT_RESULTS_ENABLED)")
     try:
         export = export_service.export_search_results(
             results=results,
@@ -219,8 +247,10 @@ async def export_search_results(
 async def export_batch_results(
     results: dict,
     format: str = Query(default="csv", description="Export format: csv, json"),
-    current_user: dict = Depends(require_admin())
-):
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_search_csrf)
+,
+    _rl: None = Depends(rate_limited("export", heavy=True))):
     """Export batch search results."""
     try:
         export = export_service.export_batch_results(
@@ -295,7 +325,7 @@ async def get_search_history(
             "unique_identities_count": h.unique_identities_count,
             "watchlist_alerts_count": h.watchlist_alerts_count,
             "processing_time_ms": h.processing_time_ms,
-            "created_at": h.created_at.isoformat()
+            "created_at": iso_utc(h.created_at)
         }
         for h in history
     ]
@@ -335,7 +365,7 @@ async def export_search_history(
             "unique_identities_count": h.unique_identities_count,
             "watchlist_alerts_count": h.watchlist_alerts_count,
             "processing_time_ms": h.processing_time_ms,
-            "created_at": h.created_at.isoformat()
+            "created_at": iso_utc(h.created_at)
         }
         for h in history
     ]

@@ -95,14 +95,18 @@ _sql_agent_available = False
 # every query MUST run in its own thread — never on the event loop — and the
 # number of simultaneous queries must be small (each one monopolizes Ollama).
 # ---------------------------------------------------------------------------
-try:
-    from config import settings as _app_settings
-    SQL_AGENT_MAX_CONCURRENT = int(getattr(_app_settings, 'SQL_AGENT_MAX_CONCURRENT', 2))
-    SQL_AGENT_TOTAL_TIMEOUT = float(getattr(_app_settings, 'SQL_AGENT_TOTAL_TIMEOUT', 300))
-except Exception:
-    SQL_AGENT_MAX_CONCURRENT = 2
-    SQL_AGENT_TOTAL_TIMEOUT = 300.0
+# Read the declared fields directly. The old shape wrapped them in
+# getattr(..., 2) / getattr(..., 300) inside a try/except that supplied the
+# same two numbers again — three declarations of each setting, any of which
+# could drift from config.py without anything noticing.
+from config import settings as _app_settings
 
+SQL_AGENT_MAX_CONCURRENT = int(_app_settings.SQL_AGENT_MAX_CONCURRENT)
+SQL_AGENT_TOTAL_TIMEOUT = float(_app_settings.SQL_AGENT_TOTAL_TIMEOUT)
+
+# The semaphore is sized once, at import — the concurrency cap is registered
+# api_restart for exactly that reason, and boot hydration now applies stored
+# values before this module loads.
 _sql_agent_semaphore = asyncio.Semaphore(SQL_AGENT_MAX_CONCURRENT)
 _SEMAPHORE_WAIT_SECONDS = 5.0
 _BUSY_MESSAGE = (
@@ -312,85 +316,76 @@ def require_sql_agent_csrf(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Security policy: a denied query is Denied -> Audited -> Explained safely.
-# Account blocking requires an EXPLICIT policy threshold — never a single
-# model hallucination, and NEVER substring-matching the model's prose.
+# Security policy.
+#
+# The decision now lives in sql_agent/security_policy.py — ONE function that
+# every transport calls, so REST, SSE and WebSocket cannot drift apart again.
+#
+# What used to be here: a process-local counter (which made the effective
+# threshold 3 x WORKERS) and a handler that returned ACCOUNT_BLOCKED whether or
+# not the database write succeeded. Worse, the streaming transports only reached
+# this code when the agent's PROSE started with "Security:" — which it never did
+# — so on SSE and WebSocket no violation was ever recorded and no account was
+# ever blocked, while the user was told on every attempt that theirs had been.
 # ---------------------------------------------------------------------------
-_SECURITY_VIOLATION_THRESHOLD = 3          # explicit denials before blocking
-_SECURITY_VIOLATION_WINDOW_SECONDS = 3600.0
-_security_violations: Dict[int, list] = {}  # user_id -> [monotonic timestamps]
+from sql_agent.security_policy import (                        # noqa: E402
+    OUTCOME_BLOCKED,
+    OUTCOME_ENFORCEMENT_FAILED,
+    REASON_FORBIDDEN_SQL,
+    TRANSPORT_REST,
+    TRANSPORT_SSE,
+    TRANSPORT_WEBSOCKET,
+    SecurityDecision,
+    apply_security_policy,
+)
 
-
-def _record_security_violation(user_id: int) -> int:
-    """Record one explicit denied operation; returns violations in window."""
-    now = asyncio.get_event_loop().time()
-    times = [t for t in _security_violations.get(user_id, [])
-             if now - t < _SECURITY_VIOLATION_WINDOW_SECONDS]
-    times.append(now)
-    _security_violations[user_id] = times[-20:]
-    return len(times)
+_SECURITY_VIOLATION_THRESHOLD = 3          # kept for existing imports/tests
 
 
 async def _handle_security_denial(current_user, query: str, reason: str,
-                                  execution_time_ms: float, session_id=None) -> dict:
-    """Structured outcome for an explicitly denied operation.
+                                  execution_time_ms: float, session_id=None,
+                                  transport: str = TRANSPORT_REST,
+                                  reason_code: str = REASON_FORBIDDEN_SQL) -> dict:
+    """Apply the policy and return the transport-agnostic error body.
 
-    QUERY_DENIED for isolated denials (audited, safe explanation);
-    ACCOUNT_BLOCKED only after the policy threshold is crossed.
-    The rejected SQL is written to the AUDIT LOG, never to the client.
+    Thin by design: the decision belongs to security_policy.apply_security_policy
+    so that all three transports produce the same outcome for the same violation.
     """
-    import uuid as _uuid
-    reference_id = f"SEC-{_uuid.uuid4().hex[:8]}"
-
     if not (AUTH_AVAILABLE and current_user):
-        return _error_body("QUERY_DENIED",
-                           "This operation is not permitted. The assistant is read-only.",
-                           reference_id)
+        current_user = None
 
-    count = _record_security_violation(current_user.id)
-    logger.warning(
-        "[SECURITY] outcome=QUERY_DENIED user_id=%s violations_in_window=%d reference_id=%s",
-        current_user.id, count, reference_id)
+    outcome = await apply_security_policy(
+        user=current_user,
+        decision=SecurityDecision(violation=True, action="DENY",
+                                  reason_code=reason_code, reason=reason),
+        transport=transport,
+        query=query,
+        execution_time_ms=execution_time_ms,
+        session_id=session_id,
+    )
 
-    try:
-        await log_chatbot_query(
-            user_id=current_user.id,
-            username=current_user.username,
-            query=query,
-            response=None,
-            success=False,
-            error_message=f"SECURITY_WARNING [{reference_id}]: denied operation - {reason[:300]}",
-            processing_time_ms=execution_time_ms,
-            session_id=session_id,
-        )
-    except Exception as audit_error:
-        logger.error(f"[SECURITY] audit write failed: {audit_error}")
+    body = _error_body(outcome.error_code, outcome.message, outcome.reference_id)
+    # Transports need to know whether to hang up; the CLIENT is told only
+    # error_code/message. ENFORCEMENT_FAILED never surfaces as ACCOUNT_BLOCKED —
+    # PolicyOutcome.error_code downgrades it to QUERY_DENIED.
+    body["_policy"] = {
+        "outcome": outcome.outcome,
+        "blocked": outcome.blocked,
+        "close_connection": outcome.close_connection,
+    }
+    return body
 
-    if count >= _SECURITY_VIOLATION_THRESHOLD:
-        logger.error(
-            "[SECURITY] outcome=ACCOUNT_BLOCKED user_id=%s threshold=%d reference_id=%s",
-            current_user.id, _SECURITY_VIOLATION_THRESHOLD, reference_id)
-        try:
-            await block_user_for_forbidden_sql(
-                user_id=current_user.id,
-                username=current_user.username,
-                sql_query=query,
-                reason=f"{_SECURITY_VIOLATION_THRESHOLD} denied operations within "
-                       f"{int(_SECURITY_VIOLATION_WINDOW_SECONDS / 60)} minutes [{reference_id}]",
-            )
-        except Exception as block_error:
-            logger.error(f"[SECURITY] blocking failed: {block_error}")
-        return _error_body(
-            "ACCOUNT_BLOCKED",
-            "Your access to the SQL assistant is temporarily restricted. "
-            "Please contact an administrator.",
-            reference_id)
 
-    return _error_body(
-        "QUERY_DENIED",
-        "That operation is not permitted — the assistant can only read data. "
-        "Repeated attempts will restrict your access.",
-        reference_id)
+def _policy_says_close(body: dict) -> bool:
+    """Whether the transport should terminate the connection after this body."""
+    return bool((body or {}).get("_policy", {}).get("close_connection"))
+
+
+def _client_body(body: dict) -> dict:
+    """Strip the internal policy annotation before serializing to a client."""
+    if not isinstance(body, dict):
+        return body
+    return {k: v for k, v in body.items() if k != "_policy"}
 
 
 class _StageTimer:
@@ -764,6 +759,20 @@ async def _enrich_query_history(user_id, query_history_id, query, response, sess
                         db=db, query_history_id=query_history_id,
                         user_id=user_id, embedding=embedding,
                     )
+                else:
+                    # `generate_query_embedding` catches its own failures and
+                    # returns None, so without this the outcome is invisible:
+                    # no row is written, no warning is logged, and semantic
+                    # recall just never matches anything. That is how a model
+                    # cache the process could not write (PermissionError on
+                    # HF_HOME) disabled the feature indefinitely with nothing
+                    # but a single ERROR at first use to show for it.
+                    logger.warning(
+                        "[HISTORY_ENRICH] no embedding produced for query %s — "
+                        "semantic query-history search will not match it. "
+                        "Check the [EMBEDDING] records for the cause "
+                        "(model download, HF_HOME writability, disk space).",
+                        query_history_id)
             except Exception as emb_err:
                 logger.warning(f"[HISTORY_ENRICH] embedding failed for query {query_history_id}: {emb_err}")
             await db.commit()
@@ -825,53 +834,28 @@ async def log_chatbot_query(
         logger.warning(f"[AUDIT] Failed to log chatbot query: {e}")
 
 
-async def block_user_for_forbidden_sql(
-    user_id: int,
-    username: str,
-    sql_query: str,
-    reason: str
-):
+async def block_user_for_forbidden_sql(user_id: int, username: str,
+                                       sql_query: str, reason: str) -> bool:
+    """Deprecated shim. Blocking lives in sql_agent/security_policy.py.
+
+    Kept so nothing that still imports this name silently does nothing, and
+    because the name reads like it enforces something. It does not decide policy
+    and it does not swallow failure: it returns whether the account is actually
+    blocked, which is the property the caller must not guess at.
+
+    The version this replaces caught every exception and returned None, while
+    the caller returned ACCOUNT_BLOCKED to the user regardless — so a failed
+    UPDATE still told someone they had been blocked.
     """
-    Block a user from using the system when they attempt forbidden SQL operations.
-    This runs asynchronously to avoid blocking the main request.
-    Also notifies all admins about the security incident.
-    """
-    try:
-        from backend.services.user_service import UserService
-        from db_connection import get_db
-        
-        async with db_manager.get_session() as db:
-            blocked_reason = f"Attempted forbidden SQL operation: {reason}. Query: {sql_query[:200]}"
-            blocked_user = await UserService.block_user(
-                user_id=user_id,
-                reason=blocked_reason,
-                db=db
-            )
-            logger.error(f"[SECURITY] ⚠️ BLOCKED USER: {username} (ID: {user_id}) for forbidden SQL: {reason}")
-            logger.error(f"[SECURITY] Blocked query: {sql_query[:200]}")
-            
-            # Notify all admins about the security incident
-            try:
-                from sqlalchemy import select
-                from db_models import User
-                admin_result = await db.execute(
-                    select(User).where(User.role == "admin")
-                )
-                admins = admin_result.scalars().all()
-                
-                for admin in admins:
-                    logger.error(f"[SECURITY] 🔔 ADMIN NOTIFICATION: User {username} (ID: {user_id}) was blocked for attempting forbidden SQL operation: {reason}")
-                    logger.error(f"[SECURITY] Admin {admin.username} (ID: {admin.id}) should review this incident in the admin panel")
-                
-                # NOTE: Audit log is NOT created here to avoid duplicates
-                # The audit log is created in the main query endpoint after security checks
-                # This function only handles blocking and admin notifications
-            except Exception as notify_error:
-                logger.error(f"[SECURITY] Failed to notify admins: {notify_error}", exc_info=True)
-            
-    except Exception as e:
-        # Log but don't fail - blocking is important but shouldn't break the error response
-        logger.error(f"[SECURITY] Failed to block user {username}: {e}", exc_info=True)
+    from sql_agent.security_policy import _persist_block
+
+    logger.warning(
+        "[SECURITY] block_user_for_forbidden_sql is deprecated; "
+        "use security_policy.apply_security_policy (user_id=%s)", user_id)
+    succeeded, _already = await _persist_block(
+        user_id=user_id, username=username,
+        reference_id="SEC-legacy", transport="legacy")
+    return succeeded
 
 
 @router.post("/query")
@@ -1060,9 +1044,14 @@ async def sql_agent_query(
                     current_user, query, block_reason, execution_time_ms,
                     session_id=agent_instance.conversation_memory.current_session_id
                     if hasattr(agent_instance, "conversation_memory") else None,
+                    transport=TRANSPORT_REST,
+                    reason_code=result_dict.get("security_reason_code",
+                                                REASON_FORBIDDEN_SQL),
                 )
                 security_violation_detected = True
-                return JSONResponse(status_code=403, content=denial)
+                # _client_body strips the internal _policy annotation; the client
+                # sees only error.code / message / reference_id.
+                return JSONResponse(status_code=403, content=_client_body(denial))
         except Exception as agent_error:
             logger.error(f"[SQL_AGENT_API] Agent execution error: {str(agent_error)}", exc_info=True)
             error_message = str(agent_error)
@@ -1431,6 +1420,35 @@ async def sql_agent_query_stream(
                     stages.observe(update)
 
                     try:
+                        # A detected violation is NOT forwarded verbatim: the
+                        # agent describes what it refused, the policy layer
+                        # decides what happens to the account. Intercept BEFORE
+                        # yielding, or the agent's own wording reaches the
+                        # browser — which is how users were told they were
+                        # blocked while nothing had happened.
+                        if update.get("type") == "error" and update.get("security_violation"):
+                            decision = await _handle_security_denial(
+                                current_user, query,
+                                update.get("security_reason") or "",
+                                (asyncio.get_event_loop().time() - stream_start_time) * 1000,
+                                session_id=getattr(
+                                    getattr(agent_instance, "conversation_memory", None),
+                                    "current_session_id", None),
+                                transport=TRANSPORT_SSE,
+                                reason_code=update.get("security_reason_code",
+                                                       REASON_FORBIDDEN_SQL),
+                            )
+                            err = decision["error"]
+                            yield evt({"type": "error",
+                                       "error_code": err["code"],
+                                       "message": err["message"],
+                                       "reference_id": err["reference_id"],
+                                       "retryable": False})
+                            yield evt({"type": "complete", "success": False})
+                            completion_sent = True
+                            stream_success = False
+                            break
+
                         # Format as SSE (request_id + sequence on every event)
                         yield evt(update)
 
@@ -1459,19 +1477,11 @@ async def sql_agent_query_stream(
                             final_response += content_chunk
                             logger.debug(f"[SQL_AGENT_API] Content chunk received: {len(content_chunk)} chars, total accumulated: {len(final_response)} chars")
                         elif update.get("type") == "error":
+                            # Security violations were handled above, keyed on a
+                            # structured flag. Nothing here inspects wording:
+                            # prose-based authorization is what broke this path.
                             stream_success = False
                             final_response = update.get("message", "An error occurred")
-                            # A denied operation is Denied -> Audited -> Explained.
-                            # "Security:" here is OUR validator's deterministic
-                            # prefix (sql_agent/database.py), not model prose.
-                            # It records a violation; blocking only happens at
-                            # the explicit threshold inside the policy handler.
-                            error_message = update.get("message", "")
-                            if error_message.startswith("Security:") and AUTH_AVAILABLE and current_user:
-                                await _handle_security_denial(
-                                    current_user, query, error_message,
-                                    (asyncio.get_event_loop().time() - stream_start_time) * 1000,
-                                )
                             # Send completion after error to properly close stream
                             yield evt({"type": "complete", "success": False})
                             completion_sent = True
@@ -1920,6 +1930,43 @@ async def sql_agent_websocket(websocket: WebSocket):
                     if update is _STREAM_SENTINEL:
                         break
 
+                    # Intercept a detected violation BEFORE relaying it: the
+                    # agent states what it refused, the policy layer states what
+                    # happened to the account. Keyed on a structured flag, never
+                    # on wording.
+                    if update.get("type") == "error" and update.get("security_violation"):
+                        query_success = False
+                        decision = await _handle_security_denial(
+                            current_user, query,
+                            update.get("security_reason") or "",
+                            (asyncio.get_event_loop().time() - ws_start_time) * 1000,
+                            session_id=getattr(
+                                getattr(agent_instance, "conversation_memory", None),
+                                "current_session_id", None),
+                            transport=TRANSPORT_WEBSOCKET,
+                            reason_code=update.get("security_reason_code",
+                                                   REASON_FORBIDDEN_SQL),
+                        )
+                        err = decision["error"]
+                        await websocket.send_json(ws_evt({
+                            "type": "error",
+                            "error_code": err["code"],
+                            "message": err["message"],
+                            "reference_id": err["reference_id"],
+                            "retryable": False,
+                        }))
+                        await websocket.send_json(ws_evt({"type": "complete", "success": False}))
+                        # The socket that earned the block hangs up immediately.
+                        # Other sockets for this account are not reachable from
+                        # here; they die at their next message, when
+                        # check_authorization_fresh() re-reads is_active.
+                        if _policy_says_close(decision):
+                            invalidate_user_sql_agent(
+                                getattr(current_user, "id", 0), "user_blocked")
+                            await websocket.close(code=1008, reason="ACCOUNT_BLOCKED")
+                            return
+                        break
+
                     await websocket.send_json(ws_evt(update))
 
                     # Capture final response
@@ -1931,13 +1978,6 @@ async def sql_agent_websocket(websocket: WebSocket):
                         accumulated_response += update.get("content", "")
                     elif update.get("type") == "error":
                         query_success = False
-                        # Denied -> audited -> explained (threshold policy, never
-                        # instant blocking; "Security:" is our validator's prefix)
-                        error_message = update.get("message", "")
-                        if error_message.startswith("Security:") and AUTH_AVAILABLE and current_user:
-                            await _handle_security_denial(
-                                current_user, query, error_message,
-                                (asyncio.get_event_loop().time() - ws_start_time) * 1000)
 
                     # Break if complete or error
                     if update.get("type") in ["complete", "error"]:

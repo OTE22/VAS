@@ -15,7 +15,7 @@ The Settings Management system allows administrators to view, modify, and track 
 ## What Are Settings?
 
 Settings are configuration variables that control how the system behaves. Examples include:
-- `CACHE_LOCAL_SIZE`: How many items to cache in memory
+- `CACHE_TTL`: How long cached entries stay valid (seconds)
 - `SIMILARITY_THRESHOLD`: How similar faces must be to match
 - `DATA_RETENTION_DAYS`: How long to keep old data
 - `CLUSTER_INTERVAL_HOURS`: How often to generate merge suggestions
@@ -44,7 +44,7 @@ The settings page is organized into three main sections:
 
 Each setting card displays:
 
-- **Setting Key**: The configuration variable name (e.g., `CACHE_LOCAL_SIZE`)
+- **Setting Key**: The configuration variable name (e.g., `SIMILARITY_THRESHOLD`)
 - **Value**: Current setting value (hidden if sensitive)
 - **Type**: Data type (string, integer, boolean, etc.)
 - **Category**: Grouping category
@@ -137,23 +137,23 @@ Each setting card displays:
 
 Settings are organized into categories:
 
-- **Environment & Server**: Host, port, workers, debug mode
-- **Database**: Connection settings, pool size
-- **Redis**: Cache configuration
-- **Face Recognition Models**: Model paths, thresholds
-- **Queue & Processing**: Batch sizes, workers
-- **Rate Limiting**: Request limits
-- **Storage**: File paths, size limits
-- **Monitoring & Metrics**: Metrics collection
-- **CORS**: Cross-origin settings
-- **Data Retention & Cleanup**: Cleanup intervals
-- **Batch Processing**: Batch write settings
-- **Face Tracking**: Optimization settings
-- **Identity Management**: Clustering, retention
-- **Ollama**: AI model configuration
-- **SQL Agent**: Database query agent
-- **Security & Authentication**: JWT, tokens
-- **File Upload**: Allowed extensions
+| Category | Covers |
+|---|---|
+| `server` | Host, port, workers, debug, logging |
+| `security` | JWT secret, algorithm, token expiry |
+| `database` | Connection URL, pool sizing, statement timeouts |
+| `cache` | Redis URL, max connections, cache TTL |
+| `models` | Detection/recognition model paths, match thresholds |
+| `processing` | Queue size, workers, concurrency, pipeline batch size |
+| `storage` | Storage root, image-saving flags, max upload size |
+| `tracking` | Face tracking window, memory, dashboard display hours |
+| `identity` | Enrollment bands, clustering, retention, vector backend |
+| `retention` | Data/audit/task-history retention, backup cadence, batch writes |
+| `ollama` | Local LLM base URL, model, temperature, timeout |
+| `sql_agent` | Chatbot RAG and concurrency limits |
+| `advanced_search` | Result depth, quality gates, confidence bands, live alerts, notification transports |
+| `ml_ops` | ML decision mode, drift, retention, feature flags |
+| `advanced` | Auto-filled. Any key in `SETTINGS_REGISTRY` that is not in the hand-maintained map above lands here, so a registered setting can never render nowhere. ~30 keys currently. |
 
 ## Sensitive Settings
 
@@ -177,9 +177,15 @@ Some settings are marked as **Readonly**:
 - Edit button is disabled
 
 **To change readonly settings:**
-- Modify the `.env` file directly
-- Restart the system
-- Settings will sync from `.env` to database
+- Modify the `.env` file (or compose environment) directly
+- Recreate the container
+
+> **Precedence is admin DB value → environment → default.** A value saved on
+> this page **outranks `.env`** and is re-applied on every startup. Editing
+> `.env` will NOT override a setting an admin has already changed here — clear
+> the stored value first if you want the environment to win again. The API
+> exposes `env_value` and `overridden` whenever the two disagree, so the
+> divergence is visible rather than mysterious.
 
 ## Audit Log
 
@@ -203,8 +209,8 @@ The audit log tracks all setting changes:
 
 ### Performance Tuning
 - `WORKERS`: Number of worker processes (default: 4)
-- `BATCH_SIZE`: Processing batch size (default: 20)
-- `CACHE_LOCAL_SIZE`: Cache size (default: 50000)
+- `PIPELINE_BATCH_SIZE`: Frames processed per pipeline batch (default: 5)
+- `REDIS_MAX_CONNECTIONS`: Redis connection pool size (default: 100)
 - `DB_POOL_SIZE`: Database connection pool (default: 50)
 
 ### Face Recognition
@@ -251,10 +257,20 @@ The audit log tracks all setting changes:
 - **Check permissions**: Ensure you're logged in as admin
 
 ### Setting Not Taking Effect
-- **Restart required**: Some settings need system restart
-- **Check .env file**: Settings sync from `.env` on startup
-- **Check logs**: Look for errors in system logs
-- **Verify value**: Check if value was actually saved
+- **Check `apply_mode` in the PUT response.** `immediate` / `next_request` /
+  `next_job_run` are live already; `api_restart` and `index_rebuild` take effect
+  when the API container next starts; `container_recreate` needs the environment
+  changed and the container recreated.
+- **Restart-required settings really do apply now.** Startup hydration loads every
+  stored value regardless of apply_mode, before any component is built. This was
+  previously broken — hydration skipped all non-dynamic keys, so a setting
+  labelled "requires restart" was stored and then ignored forever.
+- **403 on save?** Cookie-authenticated callers must send
+  `X-Requested-With: XMLHttpRequest`. Bearer-token clients are exempt.
+- **422 on save?** The value is out of range; the message names the field and the
+  bound. Values are refused, never silently corrected.
+- **Check logs**: Look for `[SETTINGS]` lines in the system logs
+- **Verify value**: Check if the value was actually saved (audit log)
 
 ### Can't See Setting Value
 - **Sensitive setting**: Value is hidden for security
@@ -288,6 +304,7 @@ Authorization: Bearer YOUR_TOKEN
 PUT /api/settings/{setting_key}
 Authorization: Bearer YOUR_TOKEN
 Content-Type: application/json
+X-Requested-With: XMLHttpRequest      # required for cookie auth; harmless with a Bearer token
 
 {
   "value": "new_value",
@@ -303,15 +320,23 @@ Authorization: Bearer YOUR_TOKEN
 
 ## Settings Sync
 
-Settings are synchronized between:
-1. **`.env` file**: Source of truth on disk
-2. **Database**: Stored in `settings` table
-3. **Application**: Loaded into `config.py`
+Three layers, with the database on top:
 
-**Sync happens:**
-- On system startup
-- When settings are updated via API/web interface
-- Automatically when `.env` changes (if file watcher enabled)
+1. **`config.py`**: declares every setting and its default. The only interface —
+   nothing else reads the environment for a setting.
+2. **Environment / `.env`**: overrides the default at process start.
+3. **Database (`settings` table)**: an admin edit here outranks both, and is
+   re-applied at every startup so it survives restarts.
+
+**What happens when:**
+- **On startup** — `hydrate_from_db` applies every admin-modified stored value
+  to the running configuration, before any component is constructed.
+- **On save** — the value is validated, persisted, and (for dynamic modes)
+  pushed into the running process immediately.
+- **On a settings-page load** — `sync_settings_from_config` *seeds* rows for any
+  newly declared setting and removes rows for settings that no longer exist. It
+  is seed-only: it never overwrites a stored value. There is no `.env` file
+  watcher.
 
 ## Related Documentation
 

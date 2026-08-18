@@ -637,7 +637,7 @@ Input: Search for "John Doe"
 ┌─────────────────────────────────────────────────────────────────┐
 │  STEP 2: Find other faces detected within ±5 minutes            │
 │  ─────────────────────────────────────────────────              │
-│  Time Window: Configurable (default: ±5 minutes)                │
+│  Time Window: `RELATED_IDENTITY_TIME_WINDOW_MINUTES` (default: ±30 minutes)                │
 │  Same Camera: Yes (spatial proximity)                           │
 └─────────────────────────────────────────────────────────────────┘
                     │
@@ -1815,14 +1815,14 @@ LIVE_ALERT_MAX_PER_USER: int = Field(default=50)
 
 # Search History
 SEARCH_HISTORY_RETENTION_DAYS: int = Field(default=90)
-SEARCH_HISTORY_MAX_PER_USER: int = Field(default=10000)
+SEARCH_HISTORY_MAX_PER_USER: int = Field(default=1000)   # enforced by the retention sweep
 
 # Related Identities
-RELATED_IDENTITY_TIME_WINDOW_MINUTES: int = Field(default=5)
+RELATED_IDENTITY_TIME_WINDOW_MINUTES: int = Field(default=30)
 RELATED_IDENTITY_MIN_CO_APPEARANCES: int = Field(default=3)
 
 # Batch Search
-BATCH_SEARCH_MAX_IMAGES: int = Field(default=100)
+BATCH_SEARCH_MAX_IMAGES: int = Field(default=20)
 BATCH_SEARCH_TIMEOUT_SECONDS: int = Field(default=300)
 
 # Export

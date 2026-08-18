@@ -53,9 +53,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             // If navbar-loader has not loaded, fall through to the button's
             // default behaviour rather than faking a logout that did not happen.
         });
-    } else {
-        console.error('[INIT] Logout button not found!');
     }
+    // No else: the navbar is injected asynchronously by navbar-loader.js and
+    // binds its own logout handler (admin-navbar.js) when it lands. Every other
+    // admin page guards with `if (logoutBtn)` and says nothing; only this one
+    // logged console.error, so a late navbar — a race, not a fault — surfaced
+    // as an error on a page that was working correctly.
 });
 
 async function loadPipelines() {
@@ -78,33 +81,70 @@ async function loadUsers() {
         });
         
         if (!response.ok) throw new Error('Failed to load users');
-        
+
         currentUsers = await response.json();
         renderUsersTable();
+        updateSystemPrincipalNotice();
     } catch (error) {
-        document.getElementById('users-table-body').innerHTML = 
+        document.getElementById('users-table-body').innerHTML =
             `<tr><td colspan="8" class="loading">Error loading users: ${error.message}</td></tr>`;
     }
 }
 
-function renderUsersTable() {
-    const tbody = document.getElementById('users-table-body');
-    
-    if (currentUsers.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="loading">No users found</td></tr>';
-        return;
+// ---------------------------------------------------------------------------
+// The `system` audit principal
+//
+// Not a human account. It exists so machine-initiated actions (vector index
+// rebuild, reconciliation, corruption recovery) have a valid actor for
+// identity_audit_log.user_id, which is NOT NULL. It cannot sign in: is_active
+// is false, its password hash is the literal "!" which no password can match,
+// and its role grants nothing.
+//
+// It is rendered read-only here. The backend refuses to edit, re-password or
+// delete it regardless — this only stops the controls being offered.
+// ---------------------------------------------------------------------------
+const SYSTEM_USERNAME = 'system';
+
+function isSystemAccount(user) {
+    const username = String(user.username || '').trim().toLowerCase();
+    const role = String(user.role || '').trim().toLowerCase();
+    // Either identifies it: the two can be edited apart, and a half-tampered
+    // row is still the principal.
+    return username === SYSTEM_USERNAME || role === SYSTEM_USERNAME;
+}
+
+// Single row renderer, used by BOTH the full table and the blocked-only filter.
+// They previously carried separate copies of this markup, so any change had to
+// be made twice — and a protected row applied to only one of them would still
+// offer Delete on `system` in the other view.
+function renderUserRow(user) {
+    const isBlocked = user.blocked_reason || user.blocked_at;
+    const blockedBadge = isBlocked
+        ? `<span class="badge badge-danger" title="${user.blocked_reason || 'Blocked'}">BLOCKED</span>`
+        : '';
+
+    if (isSystemAccount(user)) {
+        return `
+        <tr class="user-system">
+            <td>${user.username} <i class="fas fa-lock" aria-hidden="true" title="Protected account"></i></td>
+            <td>${user.email}</td>
+            <td>${user.full_name || '-'}</td>
+            <td><span class="badge badge-system">System</span></td>
+            <td><span class="badge badge-no">No</span></td>
+            <td>${user.pipeline_ids.length} pipeline(s)</td>
+            <td><span class="badge badge-nonlogin">Non-login</span></td>
+            <td>
+                <span class="protected-note" title="Audit principal for automated actions. It cannot sign in and is not editable.">Protected 🔒</span>
+            </td>
+        </tr>
+    `;
     }
 
-    tbody.innerHTML = currentUsers.map(user => {
-        const isBlocked = user.blocked_reason || user.blocked_at;
-        const blockedBadge = isBlocked 
-            ? `<span class="badge badge-danger" title="${user.blocked_reason || 'Blocked'}">BLOCKED</span>` 
-            : '';
-        const statusBadge = user.is_active 
-            ? `<span class="badge badge-active">Active</span>` 
-            : `<span class="badge badge-inactive">Inactive</span>`;
-        
-        return `
+    const statusBadge = user.is_active
+        ? `<span class="badge badge-active">Active</span>`
+        : `<span class="badge badge-inactive">Inactive</span>`;
+
+    return `
         <tr ${isBlocked ? 'class="user-blocked"' : ''}>
             <td>${user.username} ${blockedBadge}</td>
             <td>${user.email}</td>
@@ -121,7 +161,61 @@ function renderUsersTable() {
             </td>
         </tr>
     `;
-    }).join('');
+}
+
+// Shown only when the principal is absent, which means machine-generated audit
+// rows are currently being dropped.
+function updateSystemPrincipalNotice() {
+    const notice = document.getElementById('system-principal-notice');
+    if (!notice) return;
+    const present = currentUsers.some(isSystemAccount);
+    notice.style.display = present ? 'none' : 'flex';
+    if (!present) {
+        console.warn('[SYSTEM_PRINCIPAL] absent — machine-generated audit rows are not being written');
+    }
+}
+
+async function restoreSystemPrincipal() {
+    if (!confirm(
+        'Restore the "system" audit principal?\n\n' +
+        'This recreates the non-login account that automated actions are ' +
+        'recorded against. It cannot sign in and no existing user is changed.'
+    )) return;
+
+    try {
+        const response = await fetch('/api/users/system/restore', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                // Required by require_user_admin_csrf.
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ detail: 'Failed to restore system principal' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('[SYSTEM_PRINCIPAL] restore result:', result);
+        await loadUsers();
+        alert(result.message || 'System audit principal restored.');
+    } catch (error) {
+        console.error('[SYSTEM_PRINCIPAL] restore failed:', error);
+        alert('Error restoring system principal: ' + error.message);
+    }
+}
+
+function renderUsersTable() {
+    const tbody = document.getElementById('users-table-body');
+
+    if (currentUsers.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="loading">No users found</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = currentUsers.map(renderUserRow).join('');
 }
 
 function editUser(userId) {
@@ -131,6 +225,16 @@ function editUser(userId) {
     if (!user) {
         console.error(`[EDIT_USER] User with ID ${userId} not found`);
         alert('User not found');
+        return;
+    }
+
+    // The protected row offers no Edit button, but the action is delegated by
+    // data-action and reachable from the console, so refuse here as well. The
+    // modal must never open for the principal: its role matches no <option>,
+    // which leaves the select blank and invites an accidental change.
+    if (isSystemAccount(user)) {
+        console.warn('[EDIT_USER] refused: the system audit principal is not editable');
+        alert('The "system" account is a protected audit principal and cannot be edited.');
         return;
     }
 
@@ -604,31 +708,9 @@ function filterBlockedUsers() {
         return;
     }
     const tbody = document.getElementById('users-table-body');
-    tbody.innerHTML = blockedUsers.map(user => {
-        const isBlocked = true;
-        const blockedBadge = `<span class="badge badge-danger" title="${user.blocked_reason || 'Blocked'}">BLOCKED</span>`;
-        const statusBadge = user.is_active 
-            ? `<span class="badge badge-active">Active</span>` 
-            : `<span class="badge badge-inactive">Inactive</span>`;
-        
-        return `
-        <tr class="user-blocked">
-            <td>${user.username} ${blockedBadge}</td>
-            <td>${user.email}</td>
-            <td>${user.full_name || '-'}</td>
-            <td><span class="badge badge-${user.role}">${user.role}</span></td>
-            <td><span class="badge badge-${user.can_use_chatbot ? 'yes' : 'no'}">${user.can_use_chatbot ? 'Yes' : 'No'}</span></td>
-            <td>${user.pipeline_ids.length} pipeline(s)</td>
-            <td>${statusBadge}</td>
-            <td>
-                <button class="btn-action btn-success" data-action="unblockUser" data-arg="${user.id}" title="Unblock user">Unblock</button>
-                <button class="btn-action" data-action="editUser" data-arg="${user.id}">Edit</button>
-                <button class="btn-action" data-action="resetPassword" data-arg="${user.id}">Reset Password</button>
-                <button class="btn-action btn-danger" data-action="deleteUser" data-arg="${user.id}">Delete</button>
-            </td>
-        </tr>
-    `;
-    }).join('');
+    // Same renderer as the full table, so the protected treatment cannot be
+    // present in one view and missing in the other.
+    tbody.innerHTML = blockedUsers.map(renderUserRow).join('');
 }
 
 function showAllUsers() {
@@ -658,6 +740,7 @@ function showAllUsers() {
 Actions.register({
     filterBlockedUsers,
     showAllUsers,
+    restoreSystemPrincipal,
     closeModal,
     closeDeleteModal,
     closePasswordModal,

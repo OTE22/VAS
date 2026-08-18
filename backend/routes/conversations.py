@@ -26,12 +26,14 @@ from backend.auth.auth_service import require_capability
 from backend.auth.capabilities import Capability
 from backend.services import conversation_service as svc
 from backend.services.conversation_service import ConversationAccessError
+from backend.core.rate_limiter import rate_limited
 from db_connection import get_db
+from backend.utils.pagination import resolve_page, resolve_page_size
 from db_models import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["conversations"])
+router = APIRouter(prefix="/api/v1", tags=["Conversations"])
 
 
 def require_conversation_csrf(request: Request):
@@ -96,12 +98,15 @@ class FeedbackRequest(BaseModel):
 @router.get("/conversations")
 async def list_conversations(
     include_archived: bool = False,
-    limit: int = 50,
+    limit: int = None,
     offset: int = 0,
     q: Optional[str] = None,
     current_user: User = Depends(require_capability(Capability.CHATBOT_HISTORY_READ)),
     db: AsyncSession = Depends(get_db),
 ):
+    # Bounds from configuration; this used to accept any limit a caller sent.
+    """The caller's own conversations in the default workspace, pinned first then most recently active, with optional archived inclusion and substring search over titles and message content."""
+    limit = resolve_page_size(limit, field="limit")
     workspace_id = await svc.get_default_workspace_id(db)
     await svc.ensure_membership(db, workspace_id, current_user.id)
     await db.commit()
@@ -118,7 +123,9 @@ async def create_conversation(
     body: CreateConversationRequest,
     current_user: User = Depends(require_capability(Capability.CHATBOT_USE)),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(rate_limited("chatbot", heavy=False)),
 ):
+    """Create a conversation and its primary branch; returns the conversation with primary_branch_id."""
     workspace_id = await svc.get_default_workspace_id(db)
     await svc.ensure_membership(db, workspace_id, current_user.id)
     conversation = await svc.create_conversation(db, current_user.id, workspace_id, body.title)
@@ -130,11 +137,13 @@ async def create_conversation(
 async def get_messages(
     conversation_id: str,
     branch_id: Optional[str] = None,
-    limit: int = 100,
+    limit: int = None,
     before_sequence: Optional[int] = None,
     current_user: User = Depends(require_capability(Capability.CHATBOT_HISTORY_READ)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Messages of one branch (the primary branch when branch_id is omitted), oldest first, cursor-paginated via before_sequence. A conversation that is not the caller's own is indistinguishable from a missing one: 404 CONVERSATION_NOT_FOUND."""
+    limit = resolve_page_size(limit, field="limit")
     try:
         return await svc.get_messages(
             db, current_user.id, _parse_uuid(conversation_id),
@@ -150,6 +159,7 @@ async def list_branches(
     current_user: User = Depends(require_capability(Capability.CHATBOT_HISTORY_READ)),
     db: AsyncSession = Depends(get_db),
 ):
+    """All branches of the conversation in creation order, each with its fork point and primary flag."""
     try:
         return {"branches": await svc.list_branches(db, current_user.id, _parse_uuid(conversation_id))}
     except ConversationAccessError:
@@ -164,6 +174,7 @@ async def rename_conversation(
     current_user: User = Depends(require_capability(Capability.CHATBOT_USE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Rename the caller's conversation. An all-whitespace title leaves the existing one unchanged."""
     try:
         result = await svc.rename_conversation(db, current_user.id, _parse_uuid(conversation_id), body.title)
         await db.commit()
@@ -180,6 +191,7 @@ async def set_flags(
     current_user: User = Depends(require_capability(Capability.CHATBOT_USE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Set the pinned and/or archived flags; omitted fields are left unchanged."""
     try:
         result = await svc.set_conversation_flags(
             db, current_user.id, _parse_uuid(conversation_id),
@@ -198,6 +210,7 @@ async def delete_conversation(
     current_user: User = Depends(require_capability(Capability.CHATBOT_HISTORY_DELETE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Soft delete: stamps deleted_at and hides the conversation from listings. No rows are removed."""
     try:
         await svc.soft_delete_conversation(db, current_user.id, _parse_uuid(conversation_id))
         await db.commit()
@@ -213,7 +226,9 @@ async def branch_from_message(
     body: BranchRequest,
     current_user: User = Depends(require_capability(Capability.CHATBOT_USE)),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(rate_limited("chatbot", heavy=False)),
 ):
+    """Fork the conversation at an earlier user message: copies the history before that message into a new branch and appends the edited text. The original branch is unmodified. Editing a non-user message is 400 INVALID_BRANCH_REQUEST."""
     try:
         result = await svc.branch_from_message(
             db, current_user.id, _parse_uuid(conversation_id),
@@ -238,6 +253,7 @@ async def record_feedback(
     current_user: User = Depends(require_capability(Capability.CHATBOT_USE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Rate a message +1/-1 with an optional comment. One feedback row per (message, user) — repeated calls update it. Any other rating is 400 INVALID_FEEDBACK."""
     try:
         await svc.record_feedback(db, current_user.id, _parse_uuid(conversation_id),
                                   _parse_uuid(body.message_id), body.rating, body.comment)

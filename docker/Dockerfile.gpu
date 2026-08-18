@@ -9,8 +9,12 @@
 # Base Image: Official NVIDIA CUDA image
 # Registry: https://hub.docker.com/r/nvidia/cuda
 #
-# CUDA 12.4 + cuDNN 9, matched to onnxruntime-gpu==1.20.1 in
+# CUDA 12.4 + cuDNN 9, matched to the onnxruntime-gpu pin in
 # requirements-gpu.txt. These two MUST move together.
+#
+# The version number lives in that file ONLY — deliberately not repeated here,
+# not even in a comment, so there is nothing to update in two places and no
+# stale number to mislead. tests/test_gpu_runtime.py enforces that.
 #
 # The previous pairing was CUDA 11.8 with an unpinned `onnxruntime-gpu>=1.16.3`.
 # pip resolved that to a CUDA 12 wheel, whose CUDA libraries were absent from
@@ -70,8 +74,74 @@ WORKDIR /app
 # =====================================================
 # Python dependencies (GPU version)
 # =====================================================
-COPY requirements-gpu.txt requirements.txt
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+# Copied under their real names. This used to be
+# `COPY requirements-gpu.txt requirements.txt`, i.e. a RENAME, which is why a
+# /app/requirements.txt appeared to exist at runtime while no such file exists
+# in the repository — and why Docs/01_QUICK_START.md's
+# `pip install -r requirements.txt` looked plausible but could never work.
+#
+# requirements-base.txt is REQUIRED: requirements-gpu.txt starts with
+# `-r requirements-base.txt`, resolved relative to the file, so the build fails
+# immediately without it.
+COPY requirements-base.txt requirements-gpu.txt requirements-dev.txt ./
+# BuildKit cache mount — same rationale as Dockerfile.cpu: wheel downloads
+# survive cache busts and killed builds; image content is unchanged.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    PIP_NO_CACHE_DIR=0 pip install --upgrade pip && \
+    PIP_NO_CACHE_DIR=0 pip install -r requirements-gpu.txt
+
+# ---------------------------------------------------------------------------
+# Force the CUDA ONNX Runtime to be the one on disk.
+#
+# `chromadb` HARD-DEPENDS on `onnxruntime` — the CPU build — because its default
+# embedding function runs ONNXMiniLM on it, and sql_agent/knowledge_base.py
+# creates its collection without passing an embedding_function. So this image
+# installs onnxruntime-gpu (requested) AND onnxruntime (dragged in by chromadb).
+#
+# Both distributions unpack into the SAME `onnxruntime/` package directory, so
+# with both present the build that actually loads is decided by installation
+# order — the identical hazard this repo already fixed for OpenCV, where
+# headless 4.9.0.80 was pinned while contrib 4.11.0.86 shadowed it. Losing that
+# race here means CUDAExecutionProvider is simply absent and every SCRFD/ArcFace
+# inference runs on the CPU, with correct results, clean logs and a passing
+# healthcheck — the exact silent-fallback failure the pinned CUDA version above
+# exists to prevent.
+#
+# Removing the CPU build alone is not enough: `pip uninstall onnxruntime`
+# deletes files that onnxruntime-gpu also owns, so the GPU build is reinstalled
+# afterwards to restore them. --no-deps keeps that reinstall from pulling the
+# CPU package straight back in through chromadb.
+#
+# chromadb's requirement is then unsatisfied in pip's metadata, so `pip check`
+# reports it. That is cosmetic and expected: onnxruntime-gpu provides the same
+# `onnxruntime` module that chromadb imports.
+# tests/test_gpu_runtime.py asserts this step stays here.
+# The version is READ BACK from requirements-gpu.txt rather than repeated here.
+# A second copy of the number in this file is a second thing to forget: the pin
+# and the reinstall would drift, and the reinstall silently wins.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    ORT_GPU="$(grep -E '^onnxruntime-gpu==' requirements-gpu.txt)" && \
+    test -n "$ORT_GPU" && echo "Pinned CUDA runtime: $ORT_GPU" && \
+    if pip show onnxruntime >/dev/null 2>&1; then \
+        echo "Removing the CPU onnxruntime that chromadb pulled in"; \
+        pip uninstall -y onnxruntime; \
+        PIP_NO_CACHE_DIR=0 pip install --no-deps --force-reinstall "$ORT_GPU"; \
+    fi && \
+    python -c "from importlib.metadata import distributions; \
+names = {d.metadata['Name'].lower() for d in distributions()}; \
+print('onnxruntime distributions present:', sorted(n for n in names if 'onnxruntime' in n)); \
+assert 'onnxruntime-gpu' in names, 'the CUDA ONNX Runtime is not installed'; \
+assert 'onnxruntime' not in names, \
+    'the CPU onnxruntime is still installed alongside onnxruntime-gpu'"
+
+# Test dependencies — development / CI image only, mirroring Dockerfile.cpu.
+# The GPU image had no INSTALL_DEV at all, so it could not run the suite that
+# verifies GPU behaviour — the one place those tests actually mean something.
+ARG INSTALL_DEV=false
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$INSTALL_DEV" = "true" ]; then \
+        PIP_NO_CACHE_DIR=0 pip install -r requirements-dev.txt; \
+    fi
 
 # =====================================================
 # Application code
@@ -85,9 +155,11 @@ RUN mkdir -p \
     /tmp \
     /app/storage \
     /app/weights \
-    /app/assets/faces \
-    /app/database/face_database \
-    /app/chromadb_data \
+    /app/storage/faces \
+    /app/storage/faces/.incoming \
+    /app/storage/pending \
+    /app/storage/debug/webhook_images \
+    /app/storage/debug/cropped \
     /var/log/face-recognition \
     /app/logs \
     && chmod 1777 /tmp
@@ -95,8 +167,22 @@ RUN mkdir -p \
 # =====================================================
 # Non-root user (security)
 # =====================================================
+# The model-cache tree is created HERE, while this stage is still root.
+#
+# docker-compose pins `user: "1000:1000"`, so the entrypoint runs unprivileged
+# and cannot chown anything. And when a volume is mounted at
+# /home/appuser/.cache/chroma, Docker creates the MISSING parent
+# /home/appuser/.cache itself, as root, before the entrypoint runs — leaving
+# appuser unable to create /home/appuser/.cache/huggingface. SentenceTransformer
+# then raised PermissionError and the chatbot's semantic query-history search
+# was silently disabled. Creating the parent in the image means Docker finds it
+# already present and leaves its ownership alone.
 RUN useradd -m -u 1000 -s /bin/bash appuser \
-    && chown -R appuser:appuser /app /var/log/face-recognition
+    && chown -R appuser:appuser /app /var/log/face-recognition \
+    && mkdir -p /home/appuser/.cache/huggingface \
+                /home/appuser/.cache/chroma/onnx_models \
+    && chown -R appuser:appuser /home/appuser/.cache \
+    && chmod -R 775 /home/appuser/.cache
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/

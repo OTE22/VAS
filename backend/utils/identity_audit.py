@@ -10,6 +10,7 @@ import sys
 import logging
 import json
 from datetime import datetime
+from enum import Enum
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
@@ -23,6 +24,47 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+
+class PromotionDecision(str, Enum):
+    """What the operator chose at the promote modal. Mandatory, never inferred.
+
+    An enum rather than free text because `action_details` is a security record:
+    a caller-supplied string there is both unqueryable and a place to write
+    arbitrary content into an audit trail.
+
+    This was briefly optional-and-dropped-if-invalid. That was wrong in both
+    directions: an omitted decision left the audit unable to answer the one
+    question the match-suggestion feature exists to inform, and silently
+    discarding a bad value meant the caller believed something was recorded that
+    was not. Both are now refused at the request boundary, BEFORE any mutation,
+    so a rejected request has changed nothing.
+    """
+    CREATE_NEW = "create_new"
+    MERGE_EXISTING = "merge_existing"
+
+
+DECISION_CREATE_NEW = PromotionDecision.CREATE_NEW.value
+DECISION_MERGE_EXISTING = PromotionDecision.MERGE_EXISTING.value
+ALLOWED_DECISIONS = frozenset(member.value for member in PromotionDecision)
+
+
+def coerce_decision(value: Any) -> str:
+    """Normalize and validate, or raise ValueError.
+
+    Case and surrounding whitespace are operator typing, not forgery, so
+    " CREATE_NEW " normalizes to create_new. Anything else — including None, an
+    empty string and a plausible near-miss like "manual_merge" — raises, which
+    a Pydantic validator turns into a 422 before the route body runs.
+    """
+    if value is None:
+        raise ValueError("decision is required "
+                         f"(one of: {', '.join(sorted(ALLOWED_DECISIONS))})")
+    candidate = str(value).strip().lower()
+    if candidate not in ALLOWED_DECISIONS:
+        raise ValueError(f"decision must be one of "
+                         f"{', '.join(sorted(ALLOWED_DECISIONS))}")
+    return candidate
 
 
 class IdentityAuditLogger:
@@ -135,19 +177,32 @@ class IdentityAuditLogger:
         after_state: Optional[Dict[str, Any]] = None,
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        decision: str = DECISION_CREATE_NEW
     ) -> IdentityAuditLog:
-        """Log identity promotion action"""
+        """Log identity promotion action.
+
+        `decision` records WHICH branch the operator took at the promote modal —
+        create_new here, merge_existing on the merge route. Without it the audit
+        trail cannot answer the one question the match-suggestion feature exists
+        to inform: did they merge into someone we already had, or create a
+        duplicate anyway?
+        """
+        details = {
+            "display_name": display_name,
+            "promotion_type": "unknown_to_known"
+        }
+        # Already validated at the request boundary; the mutation and this
+        # record therefore carry the identical value.
+        details["decision"] = coerce_decision(decision)
+
         return await IdentityAuditLogger.log_action(
             db=db,
             user_id=user_id,
             username=username,
             action_type="promote",
             identity_id=identity_id,
-            action_details={
-                "display_name": display_name,
-                "promotion_type": "unknown_to_known"
-            },
+            action_details=details,
             before_state=before_state,
             after_state=after_state,
             ip_address=ip_address,
@@ -167,9 +222,22 @@ class IdentityAuditLogger:
         after_state: Optional[Dict[str, Any]] = None,
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        decision: str = DECISION_MERGE_EXISTING
     ) -> IdentityAuditLog:
-        """Log identity merge action"""
+        """Log identity merge action.
+
+        `decision` is set to merge_existing when the merge was chosen from the
+        promote match-suggestion modal, and left absent for every other merge —
+        so an ordinary admin merge stays distinguishable from a promote decision.
+        """
+        details = {
+            "merge_type": "manual",
+            "from_identity_id": str(from_identity_id),
+            "to_identity_id": str(to_identity_id)
+        }
+        details["decision"] = coerce_decision(decision)
+
         return await IdentityAuditLogger.log_action(
             db=db,
             user_id=user_id,
@@ -177,11 +245,7 @@ class IdentityAuditLogger:
             action_type="merge",
             identity_id=to_identity_id,
             related_identity_id=from_identity_id,
-            action_details={
-                "merge_type": "manual",
-                "from_identity_id": str(from_identity_id),
-                "to_identity_id": str(to_identity_id)
-            },
+            action_details=details,
             before_state=before_state,
             after_state=after_state,
             ip_address=ip_address,

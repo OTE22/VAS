@@ -1,0 +1,47 @@
+# Martin tile server — explicit configuration.
+#
+# Pinned image: ghcr.io/maplibre/martin:1.13.0. This file was validated
+# against that version's own schema output (`martin /map-data/production
+# --save-config -` prints exactly the `mbtiles: paths:` shape used below), so
+# it is not a hand-guessed config. Re-validate the same way if the image tag
+# ever changes.
+#
+# Martin serves ONLY the prepared production archives. Preparation (Planetiler,
+# GDAL, downloads) never happens in this container or at `compose up`; the
+# air-gapped host receives finished .mbtiles files and nothing else.
+#
+# Source IDs default to the archive's filename stem (lebanon-streets-raster,
+# lebanon-streets-vector, lebanon-satellite, lebanon-dem). The application does
+# NOT rely on that convention: availability checks read /catalog and use the
+# IDs Martin actually reports.
+#
+# Reachability: internal only. Browsers reach Martin exclusively through nginx
+# at /maps/ (same origin), so no CORS is needed and none is enabled — Martin's
+# default is `origin: ["*"]`, which is disabled here on purpose so a permissive
+# header can never leak past the proxy.
+
+listen_addresses: "0.0.0.0:3000"
+keep_alive: 75
+worker_processes: 4
+
+# Cache sizes in MB. Tiles are already-encoded bytes, so this cache pays for
+# itself on the raster archives (a viewport bursts 30-60 tile GETs).
+cache_size_mb: 256
+
+cors: false
+
+mbtiles:
+  paths:
+    - /map-data/production
+
+# Glyphs for vector-style labels, rendered by Martin from local TTFs at
+# /font/{fontstack}/{range} (proxied as /maps/font/...). Noto Sans covers
+# Latin/Greek/Cyrillic; Noto Sans Arabic covers the Arabic place names in
+# the Lebanon OSM data. Both SIL OFL (licences alongside the files). Nothing
+# is fetched from any web font service or glyph CDN at runtime.
+fonts:
+  - /map-data/production/fonts
+
+# Deliberately no `pmtiles:` and no `geojson:` blocks: this deployment ships
+# MBTiles only, and auto-detection is off because a config file is given
+# ("If set, no tile source-related parameters are allowed").

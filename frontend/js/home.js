@@ -455,6 +455,13 @@ function renderQueue(stats) {
     setText('q-processed', formatInt(processed));
     setText('q-skipped', formatInt(skipped));
 
+    // Success rate (moved from the old dashboard stats block). An em-dash —
+    // not "0%" — when nothing has been received: no traffic is not failure.
+    setText('q-success-rate',
+        (received === null || processed === null || received <= 0)
+            ? EM_DASH
+            : formatPercent((processed / received) * 100));
+
     let status;
     let label;
     let usage = null;
@@ -506,19 +513,35 @@ function renderQueue(stats) {
 }
 
 function renderStorage(stats) {
+    // Two different questions, two different numbers — the panel used to
+    // conflate them and answer neither. `total_size_*` is what OUR files
+    // occupy; `usage_percent` / `disk_*` is what the VOLUME is doing. The
+    // meter tracks the volume, because that is the one that can run out.
     const mb = safeNumber(stats, 'storage.total_size_mb');
     const gb = safeNumber(stats, 'storage.total_size_gb');
     const files = safeNumber(stats, 'storage.file_count');
     const maxGb = safeNumber(stats, 'storage.max_storage_gb');
     const usage = safeNumber(stats, 'storage.usage_percent');
+    const appUsage = safeNumber(stats, 'storage.app_usage_percent');
+    const diskTotal = safeNumber(stats, 'storage.disk_total_gb');
+    const diskFree = safeNumber(stats, 'storage.disk_free_gb');
     const retention = safeNumber(stats, 'retention_days');
 
-    const limitText = maxGb === null ? EM_DASH : formatInt(maxGb) + ' GB';
+    // The soft budget is a policy allowance, never presented as capacity.
+    const budgetText = maxGb === null ? EM_DASH : formatInt(maxGb) + ' GB';
+    // Real capacity. Falls back to the budget wording only when the disk probe
+    // could not read the mount (capacity_source === 'configured').
+    const capacityText = diskTotal === null
+        ? budgetText
+        : formatGB(diskTotal) + ' GB';
 
     setText('st-used', formatStorage(mb, gb));
-    setText('st-max', 'of ' + limitText);
+    setText('st-max', diskFree === null
+        ? 'of ' + capacityText
+        : formatGB(diskFree) + ' GB free of ' + capacityText);
     setText('st-files', formatInt(files));
     setText('st-used-gb', formatGB(gb));
+    setText('st-budget', maxGb === null ? EM_DASH : budgetText);
     setText('st-retention', retention === null ? EM_DASH : plural(retention, 'day'));
 
     let status;
@@ -536,10 +559,12 @@ function renderStorage(stats) {
         else if (usage >= 80) { status = 'warn'; label = 'Filling'; }
         else { status = 'ok'; label = 'Healthy'; }
 
+        // 'empty' describes OUR footprint, not the disk.
         setState('storage-panel', mb === 0 ? 'empty' : 'ready');
-        setText('st-usage', formatPercent(usage) + ' of ' + limitText);
-        setMeter('st-meter', usage, formatPercent(usage) + ' of ' + limitText + ' used');
-        setText('health-storage-detail', formatPercent(usage) + ' of ' + limitText);
+        const usageText = formatPercent(usage) + ' of ' + capacityText + ' used';
+        setText('st-usage', usageText);
+        setMeter('st-meter', usage, usageText);
+        setText('health-storage-detail', usageText);
     }
 
     setStatus('storage-panel', 'st-state', status, label);
@@ -551,14 +576,17 @@ function renderStorage(stats) {
 
     setState('kpi-storage', storageState);
     setText('kpi-storage-value', formatStorage(mb, gb));
-    setText('kpi-storage-note', maxGb === null
-        ? (storageState === 'unavailable' ? NOT_REPORTED : 'Storage limit not reported')
-        : 'of ' + limitText);
+    setText('kpi-storage-note', diskFree === null
+        ? (storageState === 'unavailable' ? NOT_REPORTED : 'Free space not reported')
+        : formatGB(diskFree) + ' GB free on disk');
 
-    if (files !== null && files > 0 && usage !== null && usage < 0.01) {
+    // The callout is about OUR files against OUR budget, so it reads
+    // app_usage_percent — keying it off the disk percentage would have it
+    // announce "well within the limit" while the volume was full.
+    if (files !== null && files > 0 && appUsage !== null && appUsage < 0.01) {
         setCallout('st-note', 'idle',
             formatInt(files) + ' files using ' + formatStorage(mb, gb) +
-            ' — well within the ' + limitText + ' limit.');
+            ' — well within the ' + budgetText + ' budget.');
     } else if (files === 0) {
         setCallout('st-note', 'idle', 'No files stored yet.');
     } else {

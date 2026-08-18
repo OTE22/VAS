@@ -132,6 +132,7 @@ class Capability(str, Enum):
     AUDIT_READ = "admin.audit.read"
     PIPELINE_MANAGE = "admin.pipeline.manage"
     ML_MODEL_MANAGE = "admin.ml_model.manage"
+    ML_MANAGE = "admin.ml.manage"
     RETENTION_MANAGE = "admin.retention.manage"
 
 

@@ -1,4 +1,10 @@
 # Dynamic Promotion Flow: Unknown → Known
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 ## How the System Manages Index Migration Dynamically
 
 ### 🔄 Overview

@@ -1,297 +1,79 @@
+# =============================================================================
+# DEVELOPMENT GPU — an OVERRIDE, not a stack. Layer it on the CPU stack:
+#
+#   docker compose -f docker/docker-compose.cpu.yml \
+#                  -f docker/docker-compose.gpu.yml up -d
+#
+# Running this file alone does nothing useful: it declares no postgres, no
+# redis, no nginx. That is the point — everything except the GPU delta is
+# inherited, so a change to the dev stack cannot be forgotten here.
+#
+# PRODUCTION GPU IS A DIFFERENT PAIR:
+#   docker compose -f docker/docker-compose.prod.yml \
+#                  -f docker/docker-compose.prod.gpu.yml up -d
+#
+# ---------------------------------------------------------------------------
+# This file used to be a 442-line standalone stack with ENVIRONMENT=production,
+# file-based secrets and a migrate job — a THIRD production stack that was
+# missing the backup service, Prometheus, Grafana and the segmented networks
+# that docker-compose.prod.yml has. Every document called it "the development
+# GPU stack", which it was not, and it could not start anyway: it required
+# POSTGRES_SUPERUSER_PASSWORD and secrets/jwt_secret. So there was no working
+# GPU development path at all. This is that path.
+#
+# No top-level `name:` — the project is inherited from cpu.yml
+# (face_detector_dev), so switching between CPU and GPU development keeps the
+# SAME database. Adding a name here would silently fork your data.
+#
+# Merge semantics that make this correct:
+#   * `environment` is a map: merged key-by-key, this file wins.
+#   * `build.context` is inherited; only `dockerfile` is replaced.
+#   * `deploy.resources.reservations.devices` is a LIST and APPENDS — never
+#     add a devices entry to cpu.yml or GPUs get reserved twice.
+#   * `volumes` merge by target path, so cpu.yml's ollama mount is reused.
+#   * ollama's `environment` is LIST form in cpu.yml; it must stay list form
+#     here or the two do not merge.
+# =============================================================================
+
 services:
-  # PostgreSQL Database with pgvector extension
-  postgres:
-    image: pgvector/pgvector:pg15  # pgvector for vector similarity search
-    command:
-    - postgres
-    - -c
-    - max_connections=200
-    - -c
-    - shared_preload_libraries=pg_stat_statements
-    - -c
-    - log_statement=mod
-    - -c
-    - log_duration=on
-    - -c
-    - log_min_duration_statement=1000
-    container_name: face_recognition_db
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
-      POSTGRES_DB: face_recognition
-      POSTGRES_INITDB_ARGS: "-E UTF8"
-      POSTGRES_MAX_CONNECTIONS: 200
-      POSTGRES_SHARED_BUFFERS: 256MB
-      POSTGRES_EFFECTIVE_CACHE_SIZE: 1GB
-      POSTGRES_WORK_MEM: 16MB
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ../init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
-    # Not published. Postgres knows nothing about the application's
-    # authorization checks, so a reachable port with a weak password bypasses
-    # every one of them. Reach it via `docker compose exec postgres psql`.
-    expose:
-      - "5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d face_recognition"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    restart: unless-stopped
-    networks:
-      - face_recognition_network
-
-  # Redis Cache
-  redis:
-    image: redis:7-alpine
-    container_name: face_recognition_redis
-    environment:
-      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
-    # ACL file, not --requirepass: a command-line password is visible in
-    # `docker inspect` and in the host process list.
-    command: >
-      redis-server
-      --aclfile /etc/redis/users.acl
-      --protected-mode yes
-      --maxmemory 2gb
-      --maxmemory-policy allkeys-lru
-      --save 60 1000
-      --appendonly yes
-      --appendfsync everysec
-      --tcp-backlog 511
-      --timeout 0
-      --tcp-keepalive 300
-    volumes:
-      - redis_data:/data
-      - ../docker/redis/users.acl:/etc/redis/users.acl:ro
-    # Not published. Redis holds sessions, login rate-limit counters and the
-    # token revocation denylist — unauthenticated write access would let an
-    # attacker un-revoke tokens that had been logged out.
-    expose:
-      - "6379"
-    healthcheck:
-      # REDISCLI_AUTH is read from the environment, so the password never
-      # appears as a command-line argument.
-      test: ["CMD-SHELL", "redis-cli -u redis://fr_app@127.0.0.1:6379 ping | grep -q PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    restart: unless-stopped
-    networks:
-      - face_recognition_network
-
-  # One-shot schema migration. Runs as the migration role (DDL), exits, and
-  # gates every API replica via service_completed_successfully so N replicas
-  # cannot race each other applying the same migration.
-  migrate:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.gpu
-    restart: "no"
-    user: "1000:1000"
-    environment:
-      ENVIRONMENT: production
-      MIGRATIONS_MODE: run
-      MIGRATIONS_FAIL_CLOSED: "true"
-      MIGRATIONS_EXPECTED_HEAD: d3e4f5a6b7c8
-      # Migration role: holds DDL rights the application role does not.
-      DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
-      POSTGRES_USER: fr_migrator
-      POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
-      REDIS_URL: redis://fr_app:${REDIS_PASSWORD}@redis:6379/0
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
-      CORS_ORIGINS: ${PUBLIC_ORIGIN}
-      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
-      AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
-      AUTH_COOKIE_SECURE: "true"
-      ENABLE_API_DOCS: "false"
-      JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
-      USE_GPU: "false"
-    secrets:
-      - jwt_secret
-    command: ["python", "-m", "backend.utils.migrations", "--upgrade-head"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-      - face_recognition_network
-
-  # Face Recognition Service (GPU Version)
   face_recognition:
     build:
-      context: ..
       dockerfile: docker/Dockerfile.gpu
-    container_name: face_recognition_api
-    user: "1000:1000"
+    # Same explicit image name as the CPU stack would produce is NOT wanted:
+    # the GPU image has different contents (CUDA runtime, onnxruntime-gpu), so
+    # it gets its own tag. Otherwise a GPU build would overwrite the CPU image.
+    image: face-detector/api:dev-gpu
     environment:
-      ENVIRONMENT: production
-      DEBUG: "false"
-      # Unbuffered stdout/stderr so every log line reaches `docker logs` immediately
-      PYTHONUNBUFFERED: "1"
-      HOST: 0.0.0.0
-      PORT: 8000
-      # MUST stay 1. Runtime settings, the SQL-agent cancellation registry, the
-      # relationship/threshold/training single-flight guards, webhook dedup,
-      # FAISS autosave and the in-process token-revocation fallback are all
-      # per-process state. At 16 workers an admin settings change reached 1
-      # process in 16, "single-flight" jobs could run 16 times concurrently,
-      # cancelling a running query usually hit a worker that had never seen it,
-      # and 16 CUDA sessions competed for one GPU. See
-      # backend/core/runtime_settings.py and ALLOW_MULTI_WORKER.
-      WORKERS: 1
       USE_GPU: "true"
-      # Fail startup rather than silently running GPU inference on the CPU.
+      # Fail loudly rather than fall back. On a machine with a GPU, silently
+      # running on CPU is the worst outcome: results stay correct while
+      # throughput collapses, and every health check stays green. The startup
+      # gate in backend/core/gpu_runtime.py raises GpuUnavailableError instead.
       ALLOW_CPU_FALLBACK: "false"
-      DATABASE_URL: postgresql+asyncpg://fr_app:${FR_APP_PASSWORD:?set FR_APP_PASSWORD in .env}@postgres:5432/face_recognition
-      DB_POOL_SIZE: 50
-      DB_MAX_OVERFLOW: 100
-      DB_POOL_RECYCLE: 3600
-      DB_POOL_PRE_PING: "true"
-      REDIS_URL: redis://fr_app:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
-      REDIS_MAX_CONNECTIONS: 100
-      REDIS_POOL_SIZE: 50
-      CACHE_TTL: 3600
-      CACHE_LOCAL_SIZE: 50000
-      DETECTION_MODEL: /app/weights/det_10g.onnx
-      RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
-      SIMILARITY_THRESHOLD: 0.4
-      CONFIDENCE_THRESHOLD: 0.5
-      FACES_DIR: /app/storage/faces
-      DB_PATH: /app/database/face_database
-      VECTOR_BACKEND: pgvector
-      PGVECTOR_INDEX_TYPE: hnsw
-      PGVECTOR_HNSW_M: "32"
-      PGVECTOR_HNSW_EF_CONSTRUCTION: "128"
-      MAX_QUEUE_SIZE: 10000
-      QUEUE_WORKERS: 50
-      BATCH_SIZE: 20
-      GPU_BATCH_SIZE: 32
-      CPU_BATCH_SIZE: 10
-      MAX_CONCURRENT_REQUESTS: 500
-      PIPELINE_BATCH_SIZE: 5
-      DATA_RETENTION_DAYS: 30
-      CLEANUP_INTERVAL_HOURS: 24
-      BATCH_WRITE_SIZE: 50
-      BATCH_WRITE_INTERVAL: "1.0"
-      BATCH_WRITE_MAX_WAIT: "5.0"
-      FACE_TRACKING_MAX_ENTRIES: 5000
-      FACE_TRACKING_MAX_MEMORY_MB: 2000
-      FACE_TRACKING_CLEANUP_INTERVAL: 300
-      STORAGE_DIR: /app/storage
-      SAVE_IMAGES: "true"
-      MAX_STORAGE_GB: 5000
-      MAX_PHOTOS_PER_PERSON: 1
-      SAVE_UNKNOWN_FACES: "false"
-      # Debug image dumps OFF in production (blocking disk writes per frame)
-      SAVE_WEBHOOK_IMAGES: "false"
-      SAVE_CROPPED_IMAGES: "false"
-      # Inference executor + concurrency caps (event-loop protection)
-      INFERENCE_WORKERS: 3
-      MAX_CONCURRENT_INFERENCE: 3
-      MAX_CONCURRENT_INFERENCE_PER_PIPELINE: 2
-      # Webhook fast-path knobs
-      WEBHOOK_MAX_BODY_MB: 25
-      WEBHOOK_DEDUP_TTL_SECONDS: 60
-      # SQL agent isolation
-      SQL_AGENT_MAX_CONCURRENT: 2
-      SQL_AGENT_TOTAL_TIMEOUT: 300
-      ENABLE_METRICS: "true"
-      METRICS_PORT: 9090
-      LOG_LEVEL: INFO
-      LOG_DIR: /var/log/face-recognition
-      # Explicit origins only. A wildcard here is rejected at startup.
-      CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal}
-      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
-      AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
-      AUTH_COOKIE_SECURE: "true"
-      AUTH_COOKIE_SAMESITE: strict
-      ENABLE_API_DOCS: "false"
-      JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret
-      BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
-      # Workers only verify; the one-shot migrate job applies.
-      # Generated SQL runs as a SELECT-only role. Required in
-      # production: the config guard refuses to start without it.
-      SQL_AGENT_DB_USER: fr_readonly
-      SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:?set FR_READONLY_PASSWORD in .env}
-      MIGRATIONS_MODE: verify
-      MIGRATIONS_FAIL_CLOSED: "true"
-      MIGRATIONS_EXPECTED_HEAD: d3e4f5a6b7c8
-      OLLAMA_BASE_URL: http://ollama:11434
-      # Two-model setup: general model for chat/intent/normalization,
-      # Arctic-Text2SQL-R1-7B (Snowflake, 2025) only for SQL generation/repair
-      OLLAMA_MODEL: llama3.2:3b
-      OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
-      OLLAMA_TEMPERATURE: "0.1"
-      OLLAMA_TIMEOUT: "120"
-      CHROMADB_PATH: /app/sql_agent/chromadb_data
-      CHROMA_COLLECTION_NAME: sql_knowledge_base
-      RAG_TOP_K: "5"
-      RAG_SIMILARITY_THRESHOLD: "0.3"
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      POSTGRES_DB: face_recognition
-      POSTGRES_USER: fr_app
-      POSTGRES_PASSWORD: ${FR_APP_PASSWORD}
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-    volumes:
-      - ../weights:/app/weights:ro
-      - ../assets:/app/assets:ro
-      - ../storage:/app/storage  # Unified storage: faces/ for known faces, {pipeline_id}/ for detected faces
-      - face_database_data:/app/database
-      - chromadb_data:/app/chromadb_data
-      - chromadb_cache:/home/appuser/.cache/chroma
-    # The Dockerfile ENTRYPOINT (docker-entrypoint.sh) must run: it performs the
-    # fail-closed configuration preflight, fixes volume permissions and drops
-    # privileges via gosu. Overriding `entrypoint:` here previously skipped all
-    # three. The ChromaDB cache directory it used to create is handled by the
-    # entrypoint's own mkdir/chown, so the override is no longer needed.
-    command: ["gunicorn", "backend.main:app", "-c", "gunicorn.conf.py"]
-    secrets:
-      - jwt_secret
-      - bootstrap_admin_password
-    # Expose ports internally only (nginx will proxy)
-    expose:
-      - "8000"
-      - "9090"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      # API replicas never race on migrations: they do not start until the
-      # single one-shot migrate container has exited successfully.
-      migrate:
-        condition: service_completed_successfully
-    healthcheck:
-      # Liveness only (zero-I/O endpoint): no flapping when dependencies are slow
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    stop_grace_period: 75s
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    restart: unless-stopped
+      # A GPU absorbs far more in-flight work than the CPU defaults allow.
+      MAX_QUEUE_SIZE: 10000
+      QUEUE_WORKERS: 50
+      MAX_CONCURRENT_REQUESTS: 500
+      BATCH_SIZE: 20
+      GPU_BATCH_SIZE: 32
+      PIPELINE_BATCH_SIZE: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 16G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ollama:
+    # List form, matching cpu.yml. Do not switch to map form here.
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
     deploy:
       resources:
         reservations:
@@ -299,113 +81,3 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-          cpus: '4.0'
-          memory: 8G
-        limits:
-          cpus: '8.0'
-          memory: 16G
-    networks:
-      - face_recognition_network
-
-  # Ollama Service (GPU) - Automatically uses GPU when available
-  ollama:
-    image: ollama/ollama:latest
-    container_name: face_recognition_ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_MODELS=/root/.ollama/models
-      # Keep models loaded in memory permanently - avoids cold-start reload lag
-      - OLLAMA_KEEP_ALIVE=-1
-      # Verbose logging: model load/unload, prompt tokenization, per-request timing,
-      # generation progress - use `docker logs -f face_recognition_ollama` to debug.
-      - OLLAMA_DEBUG=1
-      # Log every HTTP request/response (GIN framework) with status and latency
-      - GIN_MODE=debug
-      - NVIDIA_VISIBLE_DEVICES=all  # Makes GPU visible to Ollama
-      # Ollama automatically detects and uses GPU when available
-      # No additional configuration needed!
-    volumes:
-      # Named volume, not a host path: the previous Windows path made this file
-      # unusable on any Linux GPU host. Override with OLLAMA_MODELS_PATH if you
-      # need to share a pre-populated model directory.
-      - ollama_models:/root/.ollama
-    # Not published: only nginx exposes a host port. Other services reach Ollama
-    # over the compose network at http://ollama:11434.
-    expose:
-      - "11434"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]  # Grants GPU access to Ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    restart: unless-stopped
-    networks:
-      - face_recognition_network
-
-  # Nginx Reverse Proxy
-  nginx:
-    image: nginx:alpine
-    container_name: face_recognition_nginx
-    volumes:
-      - ../nginx.conf:/etc/nginx/nginx.conf:ro
-      - ../frontend:/usr/share/nginx/html/frontend:ro
-      - ../icons:/usr/share/nginx/html/icons:ro
-      - ../certs:/etc/nginx/certs:ro
-    ports:
-      - "80:80"
-      - "443:443"
-    depends_on:
-      face_recognition:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "nginx", "-t"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    restart: unless-stopped
-    networks:
-      - face_recognition_network
-
-secrets:
-  jwt_secret:
-    file: ../secrets/jwt_secret
-  bootstrap_admin_password:
-    file: ../secrets/bootstrap_admin_password
-
-volumes:
-  postgres_data:
-    driver: local
-  redis_data:
-    driver: local
-  face_database_data:
-    driver: local
-  chromadb_data:
-    driver: local
-  chromadb_cache:
-    driver: local
-  ollama_models:
-    driver: local
-
-networks:
-  face_recognition_network:
-    driver: bridge
-

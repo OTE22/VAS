@@ -23,6 +23,25 @@
 # The stack refuses to start if any secret is missing. That is intended.
 # =============================================================================
 
+# The project name namespaces every volume, network and container. It is NOT
+# cosmetic: without it Compose derives the project from this file's parent
+# directory — "docker" — and so did docker-compose.cpu.yml. Both declare
+# volumes named postgres_data, redis_data, face_database_data and
+# chromadb_cache, so both resolved to docker_postgres_data &c. and STARTING
+# PRODUCTION MOUNTED THE DEVELOPMENT DATABASE.
+#
+# face_detector_dev / face_detector_prod keep the two stacks on disjoint
+# volumes. Deliberately not plain "face_detector": volumes under that prefix
+# already exist on some hosts from an older layout, and adopting them silently
+# would resurrect stale data — the same failure in a different costume.
+#
+# docker-compose.prod.gpu.yml intentionally omits `name:`. Compose merges the
+# top-level name last-wins and an absent key does not override, so the
+# prod + prod.gpu pair inherits this one.
+#
+# Never set COMPOSE_PROJECT_NAME: it outranks this key.
+name: face_detector_prod
+
 services:
   postgres:
     image: pgvector/pgvector:pg15
@@ -122,8 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_FAIL_CLOSED: "true"
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-d3e4f5a6b7c8}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-f6a7b8c9d0e1}
       DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
@@ -203,28 +221,52 @@ services:
 
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
-      MIGRATIONS_FAIL_CLOSED: "true"
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-d3e4f5a6b7c8}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-f6a7b8c9d0e1}
 
       DETECTION_MODEL: /app/weights/det_10g.onnx
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
       SIMILARITY_THRESHOLD: 0.4
       CONFIDENCE_THRESHOLD: 0.5
-      FACES_DIR: /app/storage/faces
+      # STORAGE_DIR is the only settable storage root. FACES_DIR,
+      # UPLOAD_TEMP_DIR, WEBHOOK_IMAGES_DIR and CROPPED_IMAGES_DIR are
+      # derived from it in config.py; setting them here has no effect
+      # and config_guard refuses to start on a divergent value.
       STORAGE_DIR: /app/storage
-      DB_PATH: /app/database/face_database
       VECTOR_BACKEND: pgvector
       PGVECTOR_INDEX_TYPE: hnsw
+      # Baked into the built index (apply_mode: index_rebuild), so these decide
+      # production RECALL. Both other stacks set 32/128; production was
+      # inheriting config.py's 16/100 by saying nothing, which meant the recall
+      # measured during testing was not the recall production would deliver.
+      # Stated explicitly here so the value is a decision, not an omission.
+      PGVECTOR_HNSW_M: "32"
+      PGVECTOR_HNSW_EF_CONSTRUCTION: "128"
       MAX_QUEUE_SIZE: 2000
       QUEUE_WORKERS: 15
       INFERENCE_WORKERS: 3
       MAX_CONCURRENT_INFERENCE: 3
       SAVE_WEBHOOK_IMAGES: "false"
       SAVE_CROPPED_IMAGES: "false"
+      # Ingest authentication. The key never appears here - config_guard refuses
+      # to start in production without one, and rejects weak or reused values.
+      # Senders present the credential as `Authorization: Bearer <token>` or
+      # `X-Webhook-Key: <token>`. WEBHOOK_AUTH_TOKEN is an accepted alias env
+      # var that folds into the key set above. `off` is refused in production.
+      WEBHOOK_AUTH_MODE: enforce
+      WEBHOOK_API_KEYS_FILE: /run/secrets/webhook_api_keys
       DATA_RETENTION_DAYS: 30
-      ENABLE_METRICS: "true"
+      # Reporting only: the denominator behind storage usage_percent in
+      # /api/stats. It deletes nothing. Set here so the production dashboard
+      # measures against the same ceiling as every other stack, which was not
+      # the case while prod inherited config.py's 500.
+      MAX_STORAGE_GB: 5000
       LOG_LEVEL: INFO
       LOG_DIR: /var/log/face-recognition
+      # Sentence-transformer / HuggingFace model cache. Declared here so the
+      # location is configuration rather than a library default nobody can
+      # find. Identical across cpu/gpu/prod; docker-entrypoint.sh creates it,
+      # chowns it to appuser, and refuses to start if it is not writable.
+      HF_HOME: /home/appuser/.cache/huggingface
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: qwen2.5:1.5b
       OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
@@ -232,14 +274,18 @@ services:
     secrets:
       - jwt_secret
       - bootstrap_admin_password
+      - webhook_api_keys
     volumes:
       # Named volumes and read-only mounts only. The development stack's
       # `../:/app` is deliberately absent: a production image must be
       # immutable, and that mount also injected .env into the container.
       - ../weights:/app/weights:ro
       - storage_data:/app/storage
+      # LOG_DIR on a persistent named volume — the rotating log set must
+      # survive container recreation, since /api/logs is the only way an
+      # operator reads it back.
+      - logs_data:/var/log/face-recognition
       - face_database_data:/app/database
-      - chromadb_data:/app/chromadb_data
       - chromadb_cache:/home/appuser/.cache/chroma
       # Read-only, purely so the operational metrics can report backup age and
       # certificate expiry. Without these the corresponding gauges stay unset
@@ -308,12 +354,52 @@ services:
     networks:
       - ai
 
+  # ---------------------------------------------------------------------------
+  # Martin — offline tile server for the MapLibre maps.
+  #
+  # Serves the prepared Lebanon datasets in ./map-data/production (mounted
+  # read-only; data lives outside image layers and survives down/up
+  # --force-recreate). Reachable ONLY through nginx at /maps/ — no host port,
+  # so the browser never sees martin:3000. Configuration is explicit
+  # (config/martin.yaml, validated against this exact image tag); nothing is
+  # auto-detected and nothing is downloaded at start-up.
+  #
+  # Air-gapped hosts: `docker save ghcr.io/maplibre/martin:1.13.0 -o martin.tar`
+  # on the connected machine, `docker load -i martin.tar` on the target.
+  # ---------------------------------------------------------------------------
+  martin:
+    image: ghcr.io/maplibre/martin:1.13.0
+    container_name: face_recognition_martin
+    command: ["--config", "/config/martin.yaml"]
+    volumes:
+      - ../map-data:/map-data:ro
+      - ../config/martin.yaml:/config/martin.yaml:ro
+    # A REAL readiness probe: Martin's /health only answers once the config is
+    # parsed and every configured source has been opened. wget is present in
+    # the image; curl is not.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    restart: unless-stopped
+    networks:
+      - face_recognition_network
+
   nginx:
     image: nginx:alpine
     volumes:
       - ../nginx.prod.conf:/etc/nginx/nginx.conf:ro
       - ../frontend:/usr/share/nginx/html/frontend:ro
       - ../icons:/usr/share/nginx/html/icons:ro
+      # Offline Lebanon basemap — same host directory the API mounts read-only;
+      # nginx serves it so tile bursts never touch gunicorn or rate limits.
       - ../certs:/etc/nginx/certs:ro
     # The only service that publishes host ports.
     ports:
@@ -321,6 +407,10 @@ services:
       - "443:443"
     depends_on:
       face_recognition:
+        condition: service_healthy
+      # /maps/ is proxied to Martin; do not accept traffic before it can
+      # serve tiles, or the first map view is a wall of 502s.
+      martin:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "nginx", "-t"]
@@ -338,9 +428,14 @@ services:
       options: { max-size: "50m", max-file: "5" }
     restart: unless-stopped
     # `edge` only: nginx has no route to postgres or redis, so a compromised
-    # nginx cannot reach the datastores directly.
+    # nginx cannot reach the datastores directly. webhook_integration adds the
+    # VMS webhook ingress path WITHOUT weakening that: only nginx joins it, and
+    # the segmented internal networks stay unreachable from VMS.
     networks:
-      - edge
+      edge:
+      webhook_integration:
+        aliases:
+          - face-webhook
 
   backup:
     image: postgres:15-alpine
@@ -416,13 +511,17 @@ secrets:
     file: ../secrets/jwt_secret
   bootstrap_admin_password:
     file: ../secrets/bootstrap_admin_password
+  # Comma-separated ingest keys. Multiple values are the rotation story: append
+  # the new key, roll it out to the cameras, then drop the old one.
+  webhook_api_keys:
+    file: ../secrets/webhook_api_keys
 
 volumes:
   postgres_data: { driver: local }
   redis_data: { driver: local }
   storage_data: { driver: local }
+  logs_data: { driver: local }
   face_database_data: { driver: local }
-  chromadb_data: { driver: local }
   chromadb_cache: { driver: local }
   ollama_models: { driver: local }
   backup_data: { driver: local }
@@ -440,3 +539,9 @@ networks:
   monitoring:
     driver: bridge
     internal: true
+  # Shared webhook path with the VMS project (nginx only). External so neither
+  # project owns the other's connectivity; provisioned once by deployment
+  # preflight: docker network create webhook_integration
+  webhook_integration:
+    external: true
+    name: webhook_integration

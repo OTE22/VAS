@@ -105,7 +105,7 @@ def client_ip(request: Request) -> str:
     do NOT parse X-Forwarded-For chains, which are trivially spoofable when
     the trusted-proxy list is not enforced.
     """
-    if getattr(settings, "AUTH_TRUST_PROXY_HEADERS", True):
+    if settings.AUTH_TRUST_PROXY_HEADERS:
         forwarded = request.headers.get("x-real-ip")
         if forwarded:
             return forwarded.strip()
@@ -242,12 +242,12 @@ async def _reset_counter(key: str) -> None:
 
 def _limits() -> Dict[str, int]:
     return {
-        "account_max": int(getattr(settings, "AUTH_RATE_LIMIT_ACCOUNT_MAX", 8)),
-        "account_window": int(getattr(settings, "AUTH_RATE_LIMIT_ACCOUNT_WINDOW", 900)),
-        "ip_max": int(getattr(settings, "AUTH_RATE_LIMIT_IP_MAX", 30)),
-        "ip_window": int(getattr(settings, "AUTH_RATE_LIMIT_IP_WINDOW", 900)),
-        "global_max": int(getattr(settings, "AUTH_RATE_LIMIT_GLOBAL_MAX", 600)),
-        "global_window": int(getattr(settings, "AUTH_RATE_LIMIT_GLOBAL_WINDOW", 60)),
+        "account_max": int(settings.AUTH_RATE_LIMIT_ACCOUNT_MAX),
+        "account_window": int(settings.AUTH_RATE_LIMIT_ACCOUNT_WINDOW),
+        "ip_max": int(settings.AUTH_RATE_LIMIT_IP_MAX),
+        "ip_window": int(settings.AUTH_RATE_LIMIT_IP_WINDOW),
+        "global_max": int(settings.AUTH_RATE_LIMIT_GLOBAL_MAX),
+        "global_window": int(settings.AUTH_RATE_LIMIT_GLOBAL_WINDOW),
     }
 
 
@@ -268,7 +268,7 @@ async def check_rate_limits(username: str, ip: str) -> RateLimitDecision:
     Reads current failure counters without incrementing them (increments only
     happen on an actual failure) and applies a global surge counter.
     """
-    if not getattr(settings, "AUTH_RATE_LIMIT_ENABLED", True):
+    if not settings.AUTH_RATE_LIMIT_ENABLED:
         return RateLimitDecision(allowed=True)
 
     limits = _limits()
@@ -306,7 +306,7 @@ async def check_rate_limits(username: str, ip: str) -> RateLimitDecision:
 
 async def record_failure(username: str, ip: str) -> None:
     """Increment failure counters after an unsuccessful credential check."""
-    if not getattr(settings, "AUTH_RATE_LIMIT_ENABLED", True):
+    if not settings.AUTH_RATE_LIMIT_ENABLED:
         return
     limits = _limits()
     await _incr_with_window(_account_key(username), limits["account_window"])
@@ -319,7 +319,7 @@ async def clear_failures(username: str, ip: str) -> None:
     This is why an attacker cannot permanently lock a victim out: the moment
     the real user authenticates, the throttle for them is released.
     """
-    if not getattr(settings, "AUTH_RATE_LIMIT_ENABLED", True):
+    if not settings.AUTH_RATE_LIMIT_ENABLED:
         return
     await _reset_counter(_account_key(username))
     await _reset_counter(_ip_key(ip))
@@ -388,8 +388,8 @@ def cookie_settings() -> Dict:
     `__Host-` prefixed names are only valid when Secure + Path=/ + no Domain,
     so the prefix is applied only when HTTPS is actually enabled.
     """
-    secure = bool(getattr(settings, "AUTH_COOKIE_SECURE", False))
-    samesite = str(getattr(settings, "AUTH_COOKIE_SAMESITE", "lax")).lower()
+    secure = bool(settings.AUTH_COOKIE_SECURE)
+    samesite = str(settings.AUTH_COOKIE_SAMESITE).lower()
     if samesite not in ("lax", "strict", "none"):
         samesite = "lax"
     return {
@@ -399,14 +399,14 @@ def cookie_settings() -> Dict:
         "samesite": samesite,
         "path": "/",
         "domain": None,  # host-only cookie
-        "max_age": int(getattr(settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 1440)) * 60,
+        "max_age": int(settings.ACCESS_TOKEN_EXPIRE_MINUTES) * 60,
     }
 
 
 def auth_cookie_name() -> str:
     """Cookie name; upgrades to the __Host- prefix when Secure is enabled."""
-    if bool(getattr(settings, "AUTH_COOKIE_SECURE", False)) and \
-       bool(getattr(settings, "AUTH_COOKIE_HOST_PREFIX", True)):
+    if bool(settings.AUTH_COOKIE_SECURE) and \
+       bool(settings.AUTH_COOKIE_HOST_PREFIX):
         return "__Host-access_token"
     return "access_token"
 

@@ -44,19 +44,10 @@ else
     source venv/bin/activate
 fi
 
-# Database migrations (if needed)
-echo "🗄️  Checking database..."
-python -c "
-from sqlalchemy import create_engine
-from db_models import Base
-from config import settings
-
-# Create sync engine for initial setup
-sync_url = settings.DATABASE_URL.replace('asyncpg', 'psycopg2')
-engine = create_engine(sync_url)
-Base.metadata.create_all(engine)
-print('✅ Database tables created/verified')
-" || echo "⚠️  Database check skipped (will create on startup)"
+# Database schema: Alembic only (the application never runs create_all;
+# startup refuses a database that is not at the code's migration head).
+echo "🗄️  Applying database migrations (alembic upgrade head)..."
+python -m backend.utils.migrations --upgrade-head || { echo "❌ migrations failed — refusing to start"; exit 1; }
 
 # Start the application
 echo "🔥 Starting Face Recognition API..."

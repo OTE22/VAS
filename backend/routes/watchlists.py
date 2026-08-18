@@ -37,9 +37,10 @@ from backend.core.watchlist_service import (
     WatchlistNameConflict, WatchlistVersionConflict,
 )
 from db_models import WatchlistAlertLevel, WatchlistEntryPriority
+from backend.utils.time_utils import iso_utc
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(tags=["Watchlists"])
 
 
 # =====================================================
@@ -63,8 +64,7 @@ def _reference_id() -> str:
 def _iso_z(dt) -> Optional[str]:
     if dt is None:
         return None
-    s = dt.isoformat()
-    return s + "Z" if dt.tzinfo is None else s.replace("+00:00", "Z")
+    return iso_utc(dt)
 
 
 def _safe_500(action: str, exc: Exception) -> HTTPException:
@@ -880,6 +880,7 @@ async def list_alerts(
                 "triggered_by": alert.triggered_by,
                 "similarity_score": alert.similarity_score,
                 "pipeline_id": alert.pipeline_id,
+                "detection_id": alert.detection_id,
                 "acknowledged": alert.acknowledged,
                 "acknowledged_by": alert.acknowledged_by_user.username if alert.acknowledged_by_user else None,
                 "acknowledged_at": _iso_z(alert.acknowledged_at),

@@ -10,8 +10,6 @@ import logging
 from fastapi import APIRouter, Depends, Header, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, HTMLResponse
 from typing import Optional
-import json
-import uuid
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,8 +17,9 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from config import settings
-from backend.config import FACE_TRACKING_ENABLED, DATA_RETENTION_DAYS
-from backend.auth.auth_service import AuthService, require_strict_access
+from backend.config import FACE_TRACKING_ENABLED
+from backend.auth.auth_service import (AuthService, require_chatbot_access,
+                                       require_strict_access)
 from db_models import User
 from db_connection import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +27,7 @@ from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Admin Pages"])
 
 
 async def read_file_off_loop(path: str, encoding: str = 'utf-8') -> str:
@@ -175,7 +174,7 @@ async def unknown_faces(
     """
     # LOG IMMEDIATELY TO VERIFY ROUTE IS BEING HIT
     # Use print() as well to ensure we see it even if logging is misconfigured
-    print(f"[UNKNOWN] ========== ROUTE HIT ========== GET /admin/unknown")
+    logger.info(f"[UNKNOWN] ========== ROUTE HIT ========== GET /admin/unknown")
     logger.info(f"[UNKNOWN] ========== ROUTE HIT ========== GET /admin/unknown from {request.client.host if request.client else 'unknown'}")
     logger.info(f"[UNKNOWN] Request headers: Authorization={'present' if authorization else 'missing'}, Cookies: {list(request.cookies.keys())}")
     
@@ -231,123 +230,18 @@ async def unknown_faces(
         # 3. Regular users without pipelines: REDIRECTED to /dashboard
         # ============================================
         
-        print(f"[UNKNOWN] Access check for user: {current_user.username} (ID: {current_user.id}, Role: {current_user.role})")
+        logger.info(f"[UNKNOWN] Access check for user: {current_user.username} (ID: {current_user.id}, Role: {current_user.role})")
         logger.info(f"[UNKNOWN] Access check for user: {current_user.username} (ID: {current_user.id}, Role: {current_user.role})")
         
-        # Check for ?view= parameter to auto-open identity details (BACKEND HANDLES ALL LOGIC)
-        view_identity_id = request.query_params.get("view")
-        referrer_page = request.query_params.get("from") or request.headers.get("referer", "/admin/unknown")
-        # Clean referrer to remove view parameter if present
-        if "?view=" in referrer_page:
-            referrer_page = referrer_page.split("?view=")[0]
-        if "&view=" in referrer_page:
-            referrer_page = referrer_page.split("&view=")[0]
-        identity_data = None
-        
-        if view_identity_id:
-            try:
-                # Fetch identity data from database (backend handles all logic)
-                from db_models import Identity, IdentityAppearance, IdentityEmbedding, Face, Detection
-                from sqlalchemy import func
-                
-                identity_uuid = uuid.UUID(view_identity_id)
-                result = await db.execute(
-                    select(Identity).where(Identity.id == identity_uuid)
-                )
-                identity = result.scalar_one_or_none()
-                
-                if identity:
-                    # Check access for non-admin users
-                    if current_user.role != "admin":
-                        from backend.auth.auth_service import check_identity_access
-                        has_access = await check_identity_access(view_identity_id, current_user, db)
-                        if not has_access:
-                            logger.warning(f"[UNKNOWN] Access denied to identity {view_identity_id} for user {current_user.username}")
-                            identity = None
-                    
-                    if identity:
-                        # Get appearances
-                        appearances_result = await db.execute(
-                            select(IdentityAppearance).where(
-                                IdentityAppearance.identity_id == identity_uuid
-                            ).order_by(IdentityAppearance.start_time.desc())
-                        )
-                        appearances = appearances_result.scalars().all()
-                        
-                        # Get embeddings count
-                        embeddings_result = await db.execute(
-                            select(func.count(IdentityEmbedding.id)).where(
-                                IdentityEmbedding.identity_id == identity_uuid
-                            )
-                        )
-                        embeddings_count = embeddings_result.scalar() or 0
-                        
-                        # Get faces count
-                        faces_result = await db.execute(
-                            select(func.count(Face.id)).where(
-                                Face.identity_id == identity_uuid
-                            )
-                        )
-                        faces_count = faces_result.scalar() or 0
-                        
-                        # Get pipeline IDs
-                        pipeline_ids_set = set()
-                        appearance_result = await db.execute(
-                            select(IdentityAppearance.pipeline_id).where(
-                                IdentityAppearance.identity_id == identity_uuid
-                            ).distinct()
-                        )
-                        for row in appearance_result:
-                            if row[0]:
-                                pipeline_ids_set.add(row[0])
-                        
-                        if not pipeline_ids_set:
-                            embedding_result = await db.execute(
-                                select(IdentityEmbedding.pipeline_id).where(
-                                    IdentityEmbedding.identity_id == identity_uuid
-                                ).distinct()
-                            )
-                            for row in embedding_result:
-                                if row[0]:
-                                    pipeline_ids_set.add(row[0])
-                        
-                        pipeline_ids = sorted(list(pipeline_ids_set))
-                        
-                        # Get best snapshot path
-                        best_snapshot_path = None
-                        if identity.best_snapshot_path and os.path.exists(identity.best_snapshot_path):
-                            best_snapshot_path = identity.best_snapshot_path
-                        
-                        # Build identity data object
-                        identity_data = {
-                            "id": str(identity.id),
-                            "type": identity.type.value,
-                            "display_name": identity.display_name,
-                            "status": identity.status.value,
-                            "first_seen_at": identity.first_seen_at.isoformat() if identity.first_seen_at else None,
-                            "last_seen_at": identity.last_seen_at.isoformat() if identity.last_seen_at else None,
-                            "appearances_count": identity.appearances_count,
-                            "best_snapshot_path": best_snapshot_path,
-                            "pipeline_ids": pipeline_ids,
-                            "appearances": [
-                                {
-                                    "id": app.id,
-                                    "pipeline_id": app.pipeline_id,
-                                    "track_id": app.track_id,
-                                    "start_time": app.start_time.isoformat() if app.start_time else None,
-                                    "end_time": app.end_time.isoformat() if app.end_time else None,
-                                    "best_snapshot_path": app.best_snapshot_path if app.best_snapshot_path and os.path.exists(app.best_snapshot_path) else None
-                                }
-                                for app in appearances
-                            ],
-                            "embeddings_count": embeddings_count,
-                            "faces_count": faces_count
-                        }
-                        logger.info(f"[UNKNOWN] Identity data fetched for {view_identity_id}")
-            except (ValueError, uuid.InvalidUUIDError) as e:
-                logger.warning(f"[UNKNOWN] Invalid identity ID in view parameter: {view_identity_id}, error: {e}")
-            except Exception as e:
-                logger.error(f"[UNKNOWN] Error fetching identity data: {e}", exc_info=True)
+        # ?view= / &from= are handled CLIENT-side now (admin-unknown.js
+        # openDeepLinkedIdentity). The server used to fetch the identity here,
+        # serialize it, and string-inject an inline <script> that called
+        # viewIdentityDetails() — which (a) violated the script-src 'self'
+        # CSP, (b) duplicated the /api/admin/identity/{id} query only for its
+        # payload to be discarded (the modal re-fetches), and (c) failed
+        # SILENTLY for a missing or not-permitted identity. The API endpoint
+        # enforces the same per-identity access check, so removing the
+        # server-side path loses no protection — it gains an error message.
         
         # Rule 1: Admin always has access
         if current_user.role == "admin":
@@ -357,64 +251,6 @@ async def unknown_faces(
                 html_path = "frontend/admin/unknown.html"
                 html_content = await read_file_off_loop(html_path)
 
-                # Inject identity data if available (BACKEND HANDLES ALL LOGIC)
-                if identity_data:
-                    # Inject as JSON in a script tag before closing </body>
-                    identity_json = json.dumps(identity_data, indent=2)
-                    referrer_json = json.dumps(referrer_page)
-                    script_tag = f'''
-    <script id="backend-identity-data" type="application/json">
-{identity_json}
-    </script>
-    <script id="backend-referrer-page" type="application/json">
-{referrer_json}
-    </script>
-    <script>
-        // Backend-provided identity data and referrer - frontend just reads and displays
-        (function() {{
-            const dataScript = document.getElementById('backend-identity-data');
-            const referrerScript = document.getElementById('backend-referrer-page');
-            let referrerPage = '/admin/unknown';
-            
-            if (referrerScript) {{
-                try {{
-                    referrerPage = JSON.parse(referrerScript.textContent);
-                }} catch (e) {{
-                    console.warn('Failed to parse referrer page:', e);
-                }}
-            }}
-            
-            // Store referrer page for modal close handler
-            window.identityModalReferrer = referrerPage;
-            
-            if (dataScript) {{
-                try {{
-                    const identityData = JSON.parse(dataScript.textContent);
-                    // Wait for page to load, then open modal
-                    if (document.readyState === 'loading') {{
-                        document.addEventListener('DOMContentLoaded', function() {{
-                            setTimeout(function() {{
-                                if (typeof viewIdentityDetails === 'function') {{
-                                    viewIdentityDetails(identityData.id);
-                                }}
-                            }}, 300);
-                        }});
-                    }} else {{
-                        setTimeout(function() {{
-                            if (typeof viewIdentityDetails === 'function') {{
-                                viewIdentityDetails(identityData.id);
-                            }}
-                        }}, 300);
-                    }}
-                }} catch (e) {{
-                    console.error('Error parsing identity data:', e);
-                }}
-            }}
-        }})();
-    </script>
-'''
-                    # Insert before </body>
-                    html_content = html_content.replace('</body>', script_tag + '\n</body>')
                 
                 return HTMLResponse(content=html_content)
             except Exception as e:
@@ -425,12 +261,12 @@ async def unknown_faces(
                 )
         
         # Rule 2 & 3: Regular users - check pipeline access
-        print(f"[UNKNOWN] Regular user detected. Checking pipeline access for: {current_user.username} (ID: {current_user.id})")
+        logger.info(f"[UNKNOWN] Regular user detected. Checking pipeline access for: {current_user.username} (ID: {current_user.id})")
         logger.info(f"[UNKNOWN] Regular user detected. Checking pipeline access for: {current_user.username} (ID: {current_user.id})")
         
         try:
             user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
-            print(f"[UNKNOWN] Pipeline query result: {user_pipelines} (type: {type(user_pipelines)}, length: {len(user_pipelines) if user_pipelines else 0})")
+            logger.info(f"[UNKNOWN] Pipeline query result: {user_pipelines} (type: {type(user_pipelines)}, length: {len(user_pipelines) if user_pipelines else 0})")
             logger.info(f"[UNKNOWN] Pipeline query result: {user_pipelines} (type: {type(user_pipelines)}, length: {len(user_pipelines) if user_pipelines else 0})")
             
             # Debug: Check database directly to verify
@@ -447,69 +283,13 @@ async def unknown_faces(
             
             if has_pipeline_access:
                 # Rule 2: User has pipeline access - ALLOW ACCESS
-                print(f"[UNKNOWN] ✅ USER WITH PIPELINE ACCESS GRANTED: Regular user {current_user.username} has access to {len(user_pipelines)} pipeline(s): {user_pipelines}")
+                logger.info(f"[UNKNOWN] ✅ USER WITH PIPELINE ACCESS GRANTED: Regular user {current_user.username} has access to {len(user_pipelines)} pipeline(s): {user_pipelines}")
                 logger.info(f"[UNKNOWN] ✅ USER WITH PIPELINE ACCESS GRANTED: Regular user {current_user.username} has access to {len(user_pipelines)} pipeline(s): {user_pipelines}")
                 try:
                     # Read HTML file
                     html_path = "frontend/admin/unknown.html"
                     html_content = await read_file_off_loop(html_path)
                     
-                    # Inject identity data if available (same logic as admin, including referrer)
-                    if identity_data:
-                        identity_json = json.dumps(identity_data, indent=2)
-                        referrer_json = json.dumps(referrer_page)
-                        script_tag = f'''
-    <script id="backend-identity-data" type="application/json">
-{identity_json}
-    </script>
-    <script id="backend-referrer-page" type="application/json">
-{referrer_json}
-    </script>
-    <script>
-        // Backend-provided identity data and referrer - frontend just reads and displays
-        (function() {{
-            const dataScript = document.getElementById('backend-identity-data');
-            const referrerScript = document.getElementById('backend-referrer-page');
-            let referrerPage = '/admin/unknown';
-            
-            if (referrerScript) {{
-                try {{
-                    referrerPage = JSON.parse(referrerScript.textContent);
-                }} catch (e) {{
-                    console.warn('Failed to parse referrer page:', e);
-                }}
-            }}
-            
-            // Store referrer page for modal close handler
-            window.identityModalReferrer = referrerPage;
-            
-            if (dataScript) {{
-                try {{
-                    const identityData = JSON.parse(dataScript.textContent);
-                    // Wait for page to load, then open modal
-                    if (document.readyState === 'loading') {{
-                        document.addEventListener('DOMContentLoaded', function() {{
-                            setTimeout(function() {{
-                                if (typeof viewIdentityDetails === 'function') {{
-                                    viewIdentityDetails(identityData.id);
-                                }}
-                            }}, 300);
-                        }});
-                    }} else {{
-                        setTimeout(function() {{
-                            if (typeof viewIdentityDetails === 'function') {{
-                                viewIdentityDetails(identityData.id);
-                            }}
-                        }}, 300);
-                    }}
-                }} catch (e) {{
-                    console.error('Error parsing identity data:', e);
-                }}
-            }}
-        }})();
-    </script>
-'''
-                        html_content = html_content.replace('</body>', script_tag + '\n</body>')
                     
                     return HTMLResponse(content=html_content)
                 except Exception as e:
@@ -537,6 +317,72 @@ async def unknown_faces(
         return RedirectResponse(url="/signin", status_code=302)
     except Exception as e:
         logger.error(f"[UNKNOWN] Error checking authentication: {e}", exc_info=True)
+        return RedirectResponse(url="/signin", status_code=302)
+
+
+@router.get("/admin/identity/{identity_id}")
+async def identity_profile(
+    identity_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Identity profile page — the app's first path-parameter HTML route.
+
+    Exists because "Open full profile" had nowhere honest to land: identity
+    detail lived only in a modal on the Unknown Faces Center, so a KNOWN
+    person's profile carried an "unknown" URL and framing.
+
+    Access mirrors /admin/unknown (same audience as identity detail today):
+    admin always; regular user with >=1 pipeline; otherwise /dashboard;
+    unauthenticated /signin. Per-identity authorization is enforced by
+    GET /api/admin/identity/{id} (403), which the page surfaces.
+
+    The server deliberately does NOT fetch or inject the identity —
+    frontend/admin/identity.html is served as-is and the page JS reads the id
+    from location.pathname. Injecting data here is what the old ?view= flow
+    did, and it was both a CSP violation and duplicated work
+    (test_ml_model_system.test_page_injection_removed pins the prohibition).
+    `identity_id` is therefore intentionally unused; malformed values render
+    the page's own error state.
+    """
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "").strip()
+    if not token:
+        token = request.cookies.get("__Host-access_token") or request.cookies.get("access_token")
+    if not token:
+        return RedirectResponse(url="/signin", status_code=302)
+
+    try:
+        payload = AuthService.decode_token(token)
+        if not payload or not payload.get("sub"):
+            return RedirectResponse(url="/signin", status_code=302)
+
+        result = await db.execute(select(User).where(User.id == int(payload["sub"])))
+        current_user = result.scalar_one_or_none()
+        if not current_user or not current_user.is_active:
+            return RedirectResponse(url="/signin", status_code=302)
+
+        if current_user.role != "admin":
+            try:
+                user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
+            except Exception as pipeline_error:
+                # Fail closed, same as /admin/unknown.
+                logger.error(f"[IDENTITY_PAGE] Pipeline check failed: {pipeline_error}", exc_info=True)
+                return RedirectResponse(url="/dashboard", status_code=302)
+            if not user_pipelines:
+                return RedirectResponse(url="/dashboard", status_code=302)
+
+        logger.info(
+            f"[IDENTITY_PAGE] user={current_user.username} role={current_user.role} "
+            f"identity={identity_id}")
+        return FileResponse("frontend/admin/identity.html")
+
+    except ValueError:
+        return RedirectResponse(url="/signin", status_code=302)
+    except Exception as e:
+        logger.error(f"[IDENTITY_PAGE] Auth error: {e}", exc_info=True)
         return RedirectResponse(url="/signin", status_code=302)
 
 
@@ -784,6 +630,14 @@ async def admin_watchlists(
         return JSONResponse(content={"message": "Watchlists page not found"})
 
 
+@router.get("/admin/ml-ops")
+async def admin_ml_ops(
+    current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False))
+):
+    """ML Operations page — anomaly pipeline, shadow evaluation, drift, labels."""
+    return FileResponse("frontend/admin/ml-ops.html")
+
+
 @router.get("/admin/ml-model")
 async def admin_ml_model(
     current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False)),
@@ -898,6 +752,24 @@ async def admin_live_alerts(
         return RedirectResponse(url="/signin", status_code=302)
 
 
+@router.get("/admin/ingest-credentials")
+async def ingest_credentials_page(
+    current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False))
+):
+    """
+    Ingest credential management page - ADMIN ONLY
+
+    Issue a named credential per external sender, and revoke by deleting it.
+    The page never receives a stored token: the raw value exists only in the
+    single POST response that mints it.
+    """
+    try:
+        logger.info(f"[INGEST_CREDENTIALS] ✅ STRICT AUTH: Admin user {current_user.username} (ID: {current_user.id}) accessing ingest credentials page")
+        return FileResponse("frontend/admin/ingest-credentials.html")
+    except FileNotFoundError:
+        return JSONResponse(content={"message": "Ingest credentials page not found"})
+
+
 @router.get("/admin/logs")
 async def logs_page(
     current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False))
@@ -918,11 +790,17 @@ async def logs_page(
 
 
 @router.get("/tracking-people")
-async def tracking_people():
-    """People Tracking Intelligence page (requires chatbot access)"""
+async def tracking_people(current_user: User = Depends(require_chatbot_access())):
+    """People Tracking Intelligence page (requires chatbot access).
+
+    The docstring has always said "requires chatbot access", but the route
+    carried NO dependency at all — every other admin page in this module is
+    gated and this one was reachable by anyone who knew the path. Code now
+    matches the stated contract.
+    """
     try:
         return FileResponse("frontend/tracking-people.html")
-    except:
+    except FileNotFoundError:
         return JSONResponse(content={"message": "Tracking page not found"})
 
 
@@ -1084,7 +962,8 @@ async def api_overview():
                         "access_note": "Admin: can promote any. Regular users: only identities from their assigned pipelines",
                         "body": {
                             "display_name": "string (required)",
-                            "person_code": "string (optional)"
+                            "person_code": "string (optional)",
+                            "decision": "string (required) - 'create_new'"
                         }
                     },
                     {
@@ -1097,7 +976,8 @@ async def api_overview():
                         "body": {
                             "from_identity_id": "string (required)",
                             "to_identity_id": "string (required)",
-                            "notes": "string (optional)"
+                            "notes": "string (optional)",
+                            "decision": "string (required) - 'merge_existing'"
                         }
                     },
                     {
@@ -1747,5 +1627,6 @@ async def api_overview():
 
 @router.get("/ping")
 def ping():
+    """Constant {"status": "ok"} with no authentication and no I/O — the cheapest possible reachability probe."""
     return {"status": "ok"}
 

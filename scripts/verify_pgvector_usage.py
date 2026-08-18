@@ -31,16 +31,16 @@ def check_config():
     try:
         from config import settings
         
-        vector_backend = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower()
+        vector_backend = settings.VECTOR_BACKEND.lower()
         logger.info(f"📊 VECTOR_BACKEND: {vector_backend}")
         
         if vector_backend == 'pgvector':
             logger.info("✅ pgvector is configured as the vector backend")
             
             # Check pgvector settings
-            index_type = getattr(settings, 'PGVECTOR_INDEX_TYPE', 'hnsw')
-            ef_search = getattr(settings, 'PGVECTOR_HNSW_EF_SEARCH', 40)
-            ef_construction = getattr(settings, 'PGVECTOR_HNSW_EF_CONSTRUCTION', 64)
+            index_type = settings.PGVECTOR_INDEX_TYPE
+            ef_search = settings.PGVECTOR_HNSW_EF_SEARCH
+            ef_construction = settings.PGVECTOR_HNSW_EF_CONSTRUCTION
             
             logger.info(f"   • Index type: {index_type}")
             logger.info(f"   • HNSW ef_search: {ef_search}")

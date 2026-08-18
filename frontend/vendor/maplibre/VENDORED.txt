@@ -1,0 +1,23 @@
+﻿maplibre-gl 6.3.0 — vendored runtime distribution
+=================================================
+Source : https://registry.npmjs.org/maplibre-gl/-/maplibre-gl-6.3.0.tgz
+SHA-256: c6ff93a1e8a5dc07464c26969c24b5653af7d42a9fbddb129f2521692e5c3bef
+License: BSD-3-Clause (see LICENSE.txt)
+
+Files (the COMPLETE runtime set, verified by a dependency sweep of the dist):
+  maplibre-gl.mjs         main ESM module   — imports ./maplibre-gl-shared.mjs
+  maplibre-gl-shared.mjs  shared chunk      — imported by both main and worker
+  maplibre-gl-worker.mjs  worker module     — imports ./maplibre-gl-shared.mjs
+  maplibre-gl.css         stylesheet
+
+Not vendored: *-dev.mjs (debug builds), maplibre-gl.d.ts (types), *.map.
+
+Worker resolution (from the shipped source of 6.3.0):
+  new URL('./maplibre-gl-worker.mjs', import.meta.url) launched with
+  {type: 'module'} — a same-origin file, NOT a Blob URL. The Blob wrapper
+  paths exist only for cross-origin worker URLs, which cannot occur here.
+  setWorkerUrl(url) is the explicit override; the app sets it anyway so the
+  worker location is stated, not inferred.
+
+MIME: nginx must serve .mjs as application/javascript (or text/javascript);
+      module loading fails silently on the default text/plain fallback.

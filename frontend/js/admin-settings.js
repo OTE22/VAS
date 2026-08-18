@@ -323,7 +323,15 @@ function buildValueControl(setting) {
     container.innerHTML = '';
 
     let control;
-    const current = setting.is_sensitive ? '' : setting.stored_value;
+    // Pre-fill from the EFFECTIVE value — what the process is actually running
+    // — not the stored row. When an environment variable overrides the stored
+    // value, or a stored row predates a code change, those two differ, and
+    // pre-filling `stored_value` showed the admin a number the system was not
+    // using and offered to "keep" it.
+    const currentRaw = setting.effective_value !== undefined && setting.effective_value !== null
+        ? setting.effective_value
+        : setting.stored_value;
+    const current = setting.is_sensitive ? '' : currentRaw;
 
     if (Array.isArray(setting.allowed_values) && setting.allowed_values.length > 0) {
         control = document.createElement('select');

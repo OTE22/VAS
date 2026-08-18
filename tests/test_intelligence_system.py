@@ -103,7 +103,6 @@ INTEL_GET_ENDPOINTS = [
     "/api/identities/{iid}/cross-camera",
     "/api/identities/{iid}/analyze",
     "/api/identities/{iid}/timeline",
-    "/api/identities/{iid}/map/geojson",
 ]
 
 
@@ -156,30 +155,6 @@ def test_analyze_reports_per_section_status(token, any_identity):
     if sections["tracking"]["status"] == "ready":
         assert sections["tracking"].get("movement_count", 0) > 0
     assert body["analyzed_at"].endswith("Z"), "analysis timestamps must be timezone-aware"
-
-
-def test_map_headers_are_private_and_sandboxed(token, any_identity):
-    if not any_identity:
-        pytest.skip("no identities in test database")
-    status, _, headers = _http("GET", f"/api/identities/{any_identity}/map", token=token)
-    assert status in (200, 503)
-    cache = (headers.get("Cache-Control") or "").lower()
-    assert "no-store" in cache and "private" in cache, f"map cache headers unsafe: {cache}"
-    csp = headers.get("Content-Security-Policy") or ""
-    assert "sandbox" in csp, "map responses must carry a sandboxing CSP"
-
-
-def test_map_rejects_unknown_style(token, any_identity):
-    if not any_identity:
-        pytest.skip("no identities in test database")
-    evil = "evil-style-<script>"
-    status, body, _ = _http(
-        "GET",
-        f"/api/identities/{any_identity}/map?map_style=" + urllib.request.quote(evil),
-        token=token)
-    assert status == 400
-    raw = body.get("_raw", json.dumps(body))
-    assert "evil-style" not in raw, "rejected style value must never be echoed back"
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +226,11 @@ def test_no_raw_exception_leakage():
 
 def test_map_security_features_default_off():
     src = _read(ROUTES_PATH)
-    for flag in ("enable_security_features", "detect_patterns", "show_risk_heatmap",
-                 "show_timeline", "show_animated_avatar"):
+    # show_timeline / show_animated_avatar were rendering switches on the
+    # retired Folium endpoint; the browser now decides what to draw from the
+    # /map-data payload. These three still gate SERVER-SIDE analysis work and
+    # must stay opt-in.
+    for flag in ("enable_security_features", "detect_patterns", "show_risk_heatmap"):
         seg = src.split(f"{flag}: bool = Query(default=", 1)
         assert len(seg) == 2, f"{flag} query param missing"
         assert seg[1].startswith("False"), f"{flag} must default to False (opt-in)"
@@ -335,12 +313,18 @@ def test_js_zero_innerhtml():
     assert "document.write" not in src
 
 
-def test_js_map_iframe_sandboxed():
+def test_js_map_renders_in_page_with_maplibre_not_an_iframe():
+    """The map used to be Folium HTML in a sandboxed iframe. It is now MapLibre
+    GL JS drawing GeoJSON directly in the page (frontend/js/identity-map.js).
+    No iframe means no opaque-origin CORS trap, no double-CSP intersection,
+    no backend-rendered HTML — the whole class of bugs the old design carried.
+    """
     src = _read(JS_PATH)
-    assert "setAttribute('sandbox', 'allow-scripts')" in src, "map iframe must be sandboxed"
-    assert "allow-same-origin" not in src, "sandbox must NOT grant same-origin"
-    assert "referrerpolicy" in src.lower()
-    assert "srcdoc" in src
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith(("//", "*", "/*")))
+    assert "createElement('iframe')" not in code, "map must not be an iframe any more"
+    assert "window.IdentityMap.ready" in code, "map must go through the MapLibre controller"
+    assert "map-data" in code or "ctl.load(" in code, "map data must come from /map-data"
+    assert "buildMapUrl(" not in code, "legacy /map HTML URL builder must be gone"
 
 
 def test_js_single_authoritative_selection():
@@ -424,4 +408,4 @@ def test_html_no_inline_handlers():
     src = _read(HTML_PATH)
     for banned in ("onclick=", "onerror=", "onmouseover=", "onmouseout=", "onload="):
         assert banned not in src, f"inline handler {banned} must be removed"
-    assert "admin-intelligence.js?v=intel-2" in src, "cache-bust must force the rewritten script"
+    assert "admin-intelligence.js?v=intel-4" in src, "cache-bust must force the rewritten script"

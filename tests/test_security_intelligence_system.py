@@ -205,6 +205,11 @@ def test_no_causality_claims_in_backend():
     assert "does not prove causation" in src
     assert "insufficient_evidence" in src
     assert "CORRELATION_MIN_SEQUENCES" in src
+    # The ban extends to the core analyzer — its docstring used to open with
+    # "Detects causal relationships".
+    core = _read("/app/backend/core/activity_correlation.py")
+    assert "causal" not in core.lower(), "core correlation module claims causation"
+    assert "does not prove causation" in core
 
 
 def test_trajectory_reports_model_metadata():
@@ -233,11 +238,13 @@ def test_js_zero_innerhtml():
     assert "document.write" not in src
 
 
-def test_js_map_iframe_sandboxed():
+def test_js_map_renders_in_page_with_maplibre_not_an_iframe():
+    """See tests/test_intelligence_system.py — same migration, same rule."""
     src = _read(JS_PATH)
-    assert "setAttribute('sandbox', 'allow-scripts')" in src
-    assert "allow-same-origin" not in src
-    assert "referrerpolicy" in src.lower()
+    code = "\n".join(l for l in src.splitlines() if not l.strip().startswith(("//", "*", "/*")))
+    assert "createElement('iframe')" not in code, "map must not be an iframe any more"
+    assert "window.IdentityMap.ready" in code, "map must go through the MapLibre controller"
+    assert "buildMapUrl(" not in code, "legacy /map HTML URL builder must be gone"
 
 
 def test_js_no_thousand_identity_load():
@@ -368,7 +375,7 @@ def test_html_no_inline_handlers():
     src = _read(HTML_PATH)
     for banned in ("onclick=", "onerror=", "onmouseover=", "onmouseout=", "onload="):
         assert banned not in src, f"inline handler {banned} must be removed"
-    assert "admin-security-intelligence.js?v=sec-2" in src
+    assert "admin-security-intelligence.js?v=sec-7" in src
 
 
 def test_html_security_features_opt_in():

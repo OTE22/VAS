@@ -19,6 +19,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from config import settings
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,9 @@ class BackgroundTaskNotifier:
                 "task_name": task_name,
                 "description": description,
                 "scheduled_time": scheduled_str,
-                "scheduled_timestamp": scheduled_time.isoformat(),
+                "scheduled_timestamp": iso_utc(scheduled_time),
                 "estimated_duration": estimated_duration or "Varies",
-                "notification_sent_at": datetime.utcnow().isoformat(),
+                "notification_sent_at": iso_utc(utc_now()),
                 "starts_in_seconds": self.notification_lead_time
             }
         }
@@ -164,7 +165,7 @@ class BackgroundTaskNotifier:
                 "task_name": task_name,
                 "success": success,
                 "duration": duration_str,
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": iso_utc(utc_now()),
                 "details": details or {}
             }
         }
@@ -193,7 +194,7 @@ class BackgroundTaskNotifier:
 
 # Global instance
 background_task_notifier = BackgroundTaskNotifier(
-    enabled=getattr(settings, 'BACKGROUND_TASK_NOTIFICATIONS_ENABLED', True),
-    notification_lead_time_seconds=getattr(settings, 'BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS', 60)
+    enabled=settings.BACKGROUND_TASK_NOTIFICATIONS_ENABLED,
+    notification_lead_time_seconds=settings.BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS
 )
 

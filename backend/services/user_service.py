@@ -491,37 +491,138 @@ class UserService:
         return result.scalar_one_or_none()
 
     @staticmethod
-    async def delete_user(user_id: int, db: AsyncSession) -> bool:
-        """Delete a user (admin only)"""
+    async def delete_user(user_id: int, db: AsyncSession,
+                          actor=None,
+                          reassign_admin_to: "Optional[int]" = None) -> bool:
+        """Permanently delete a HUMAN user, preserving history.
+
+        One transaction, one commit; any failure rolls back everything —
+        no partially promoted successors, no tombstone without a deletion,
+        no deletion without its audit row.
+
+        What happens, in order:
+          1. refuse the `system` principal and the last platform administrator;
+          2. workspaces where this user is the only admin need a successor
+             (member of every affected workspace) promoted IN this transaction;
+          3. preserved rows get their historical_* attribution stamped BEFORE
+             the FKs null — after the DELETE the numeric id is unrecoverable;
+          4. tombstone + `user_deleted` audit row;
+          5. DELETE FROM users — PostgreSQL cascades the account-bound tables
+             (workspace_members, sessions, memory, feedback, pipeline access,
+             pending enrollments) and SET-NULLs the preserved ones. The ORM
+             relationships are passive (`passive_deletes="all"`), so SQLAlchemy
+             never emits the `UPDATE ... SET user_id = NULL` that used to make
+             deletion impossible;
+          6. only AFTER commit: evict the user's cached SQL agent. A rolled-back
+             deletion must not evict a live user's agent.
+        """
+        from sqlalchemy import text as sa_text
+
+        from backend.services.system_principal import is_system_principal, SYSTEM_USERNAME
+        from backend.services.user_policy import (
+            ensure_not_last_platform_administrator,
+            validate_workspace_successor,
+            workspaces_needing_admin_successor,
+        )
+        from db_models import DeletedUser, WorkspaceMember
+
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         if not user:
             return False
 
+        # Defence in depth: the route guards this too, but a guard that lives
+        # only in the HTTP layer protects only the HTTP layer.
+        if is_system_principal(user):
+            logger.warning(
+                "[DELETE_USER] ❌ Refused deletion of the protected '%s' principal (ID: %s)",
+                SYSTEM_USERNAME, user_id)
+            raise ValueError(
+                f"The '{SYSTEM_USERNAME}' account is a protected audit principal "
+                f"and cannot be deleted.")
+
+        # Raises LastAdministratorError / WorkspaceSuccessorRequired — domain
+        # exceptions the route translates to 409. Deliberately NOT caught by
+        # the blanket handler below: a policy refusal is not a failure.
+        await ensure_not_last_platform_administrator(
+            db, target_user_id=user_id, deleting=True)
+        affected = await workspaces_needing_admin_successor(db, user_id=user_id)
+        await validate_workspace_successor(
+            db, affected=affected, successor_id=reassign_admin_to,
+            deleting_user_id=user_id)
+
+        username = user.username
+        old_authz = {
+            "role": user.role,
+            "can_use_chatbot": user.can_use_chatbot,
+            "is_active": user.is_active,
+            "pipeline_ids": await UserService._current_pipeline_ids(user_id, db),
+        }
+
         try:
-            # Delete related records in order (respecting foreign key constraints)
-            
-            # 1. Delete chatbot audit logs (has foreign key to users.id)
-            await db.execute(
-                delete(ChatbotAuditLog).where(ChatbotAuditLog.user_id == user_id)
+            # Successor promotion, same transaction as the deletion.
+            if affected and reassign_admin_to is not None:
+                for workspace in affected:
+                    await db.execute(sa_text("""
+                        UPDATE workspace_members SET role = 'admin'
+                        WHERE workspace_id = CAST(:w AS uuid) AND user_id = :s
+                    """), {"w": workspace["id"], "s": reassign_admin_to})
+                logger.info(
+                    "[DELETE_USER] promoted user_id=%s to admin of %d workspace(s) "
+                    "vacated by user_id=%s",
+                    reassign_admin_to, len(affected), user_id)
+
+            # Stamp historical attribution while the id still exists. The
+            # migration backfilled existing rows; this covers rows written
+            # since, and author_username for this user's conversations.
+            for table, hist_col, src_col in (
+                ("conversations", "historical_user_id", "user_id"),
+                ("user_query_history", "historical_user_id", "user_id"),
+                ("search_history", "historical_user_id", "user_id"),
+                ("chatbot_audit_log", "historical_user_id", "user_id"),
+                ("identity_audit_log", "historical_user_id", "user_id"),
+                ("identity_merges", "historical_merged_by", "merged_by"),
+                ("live_search_alerts", "historical_created_by", "created_by"),
+            ):
+                await db.execute(sa_text(
+                    f"UPDATE {table} SET {hist_col} = {src_col} "
+                    f"WHERE {src_col} = :u AND {hist_col} IS NULL"), {"u": user_id})
+            await db.execute(sa_text("""
+                UPDATE conversations SET author_username = :n
+                WHERE user_id = :u AND author_username IS NULL
+            """), {"n": username, "u": user_id})
+
+            # Tombstone: the id -> username record every historical_* resolves
+            # against. Plain INSERT is safe: it commits atomically with the
+            # DELETE, ids are never reused, and a failed attempt rolls the
+            # tombstone back with everything else.
+            db.add(DeletedUser(
+                user_id=user_id,
+                username=username,
+                deleted_by_user_id=getattr(actor, "id", None),
+                deleted_by_username=getattr(actor, "username", None),
+            ))
+
+            # The audit row commits or rolls back WITH the deletion.
+            UserService._record_authorization_audit(
+                db=db, user=user, old=old_authz,
+                new={"role": None, "can_use_chatbot": False,
+                     "is_active": False, "pipeline_ids": []},
+                action="user_deleted", actor=actor, context=None,
             )
-            logger.debug(f"Deleted audit logs for user {user_id}")
-            
-            # 2. Delete user pipeline access (cascade should handle this, but being explicit)
-            await db.execute(
-                delete(UserPipelineAccess).where(UserPipelineAccess.user_id == user_id)
-            )
-            logger.debug(f"Deleted pipeline access for user {user_id}")
-            
-            # 3. Delete the user
+
+            # The DELETE. PostgreSQL owns everything downstream.
             await db.delete(user)
             await db.commit()
-            logger.info(f"Deleted user: {user.username} (ID: {user_id})")
-            return True
+            logger.info(f"Deleted user: {username} (ID: {user_id})")
         except Exception as e:
             await db.rollback()
             logger.error(f"Error deleting user {user_id}: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to delete user: {str(e)}")
+
+        # After commit only.
+        UserService._invalidate_sql_agent_cache(user_id, "user_deleted")
+        return True
 
     @staticmethod
     async def block_user(

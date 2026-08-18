@@ -22,12 +22,61 @@ from db_connection import db_manager
 from db_models import Detection, Face, User, UserPipelineAccess
 from sqlalchemy import select
 from backend.config import FACE_TRACKING_ENABLED
+
+# Client-went-away exceptions. A browser that refreshes, navigates away, or
+# closes the tab between opening a WebSocket and the server accepting it
+# produces one of these. It is normal traffic, not a fault: there is no server
+# defect and nothing an operator can act on. Logging it at ERROR with a stack
+# trace (which this code did, TWICE per disconnect — once here and once in the
+# caller that re-raised) inflates the error count and trains people to ignore
+# real errors.
+#
+# Resolved defensively: ClientDisconnected is uvicorn-internal and may move
+# between versions; losing the import must not break the server.
+_CLIENT_GONE: tuple = ()
+try:
+    from starlette.websockets import WebSocketDisconnect as _WSDisconnect
+    _CLIENT_GONE += (_WSDisconnect,)
+except Exception:                                              # noqa: BLE001
+    pass
+try:
+    from uvicorn.protocols.utils import ClientDisconnected as _ClientDisconnected
+    _CLIENT_GONE += (_ClientDisconnected,)
+except Exception:                                              # noqa: BLE001
+    pass
+_CLIENT_GONE += (ConnectionResetError, BrokenPipeError)
+
 from backend.core import processing_queue, face_tracker, retention_manager, ws_manager
+from backend.utils.time_utils import iso_utc, utc_now
 from backend.auth.auth_service import AuthService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["WebSocket"])
+
+
+def _bbox(face) -> "list | None":
+    """Bounding box as four floats, or None when the row does not have one.
+
+    `Face.bbox_x1..y2` are `nullable=True` in db_models.py — a NULL box is a
+    LEGAL state, not corruption. The callers below used to do
+    `float(face.bbox_x1)` unconditionally, so a single such row raised
+    TypeError inside the initial-data loop and the exception travelled ~370
+    lines to the outer handler. The result was not a missing face: the ENTIRE
+    dashboard payload for that connection was discarded, and the operator saw
+    an empty dashboard with only "Error loading initial_data" in the log.
+
+    Returning None keeps that face in the payload without its box, which is
+    what the client already handles for faces it cannot draw.
+    """
+    corners = (face.bbox_x1, face.bbox_y1, face.bbox_x2, face.bbox_y2)
+    if any(corner is None for corner in corners):
+        return None
+    try:
+        return [float(corner) for corner in corners]
+    except (TypeError, ValueError):
+        return None
+
 
 
 @router.websocket("/ws")
@@ -174,6 +223,12 @@ async def websocket_endpoint(websocket: WebSocket):
         await ws_manager.connect(websocket, user_pipelines)
         logger.info(f"[WS] ✅ WebSocket connection accepted and registered - User: {current_user.username if current_user else 'anonymous'}, Pipelines: {user_pipelines if user_pipelines is not None else 'all (admin)'}")
         logger.info(f"[WS] 📊 Total active connections after this: {len(ws_manager.active_connections)}")
+    except _CLIENT_GONE as gone:
+        # The client is already gone; there is no socket left to close and
+        # nothing to report. DEBUG, no traceback, and no second record.
+        logger.debug("[WS] Client disconnected before the connection was accepted (%s)",
+                     type(gone).__name__)
+        return
     except Exception as connect_error:
         logger.error(f"[WS] ❌ Failed to accept WebSocket connection: {connect_error}", exc_info=True)
         try:
@@ -197,7 +252,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # REDIS CACHING: Check cache first for faster page loads
             from backend.core.redis_cache import redis_cache_service
             user_id = current_user.id if current_user else None
-            display_hours = getattr(settings, 'DASHBOARD_FACE_DISPLAY_HOURS', 3)
+            display_hours = settings.DASHBOARD_FACE_DISPLAY_HOURS
             
             # Generate cache key
             cache_key_known = await redis_cache_service.get_dashboard_cache_key(
@@ -223,10 +278,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
                         if data == "ping":
-                            await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                            await websocket.send_json({"type": "pong", "timestamp": iso_utc(utc_now())})
                     except asyncio.TimeoutError:
                         try:
-                            await websocket.send_json({"type": "ping", "timestamp": datetime.utcnow().isoformat()})
+                            await websocket.send_json({"type": "ping", "timestamp": iso_utc(utc_now())})
                         except:
                             break
                     except WebSocketDisconnect:
@@ -266,17 +321,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             },
                             "tracker_stats": {"enabled": FACE_TRACKING_ENABLED},
                             "storage_stats": {"total_size_mb": 0, "file_count": 0},
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": iso_utc(utc_now())
                         })
                         # Continue to keep-alive loop
                         while True:
                             try:
                                 data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
                                 if data == "ping":
-                                    await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                                    await websocket.send_json({"type": "pong", "timestamp": iso_utc(utc_now())})
                             except asyncio.TimeoutError:
                                 try:
-                                    await websocket.send_json({"type": "ping", "timestamp": datetime.utcnow().isoformat()})
+                                    await websocket.send_json({"type": "ping", "timestamp": iso_utc(utc_now())})
                                 except:
                                     break
                             except WebSocketDisconnect:
@@ -510,10 +565,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "detection": detection,
                                     "face_data": {
                                         "name": display_name,
-                                        "similarity": float(face.similarity),
+                                        "similarity": float(face.similarity) if face.similarity is not None else None,
                                         "image": face_image_b64,
-                                        "bbox": [float(face.bbox_x1), float(face.bbox_y1), float(face.bbox_x2), float(face.bbox_y2)],
-                                        "last_seen_at": identity_for_face.last_seen_at.isoformat() if identity_for_face and identity_for_face.last_seen_at else None,
+                                        "bbox": _bbox(face),
+                                        "last_seen_at": iso_utc(identity_for_face.last_seen_at) if identity_for_face else None,
                                     }
                                 }
                         else:
@@ -536,9 +591,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "detection": detection,
                                     "face_data": {
                                         "name": display_name,
-                                        "similarity": float(face.similarity) if face.similarity else None,
+                                        "similarity": float(face.similarity) if face.similarity is not None else None,
                                         "image": face_image_b64,
-                                        "bbox": [float(face.bbox_x1), float(face.bbox_y1), float(face.bbox_x2), float(face.bbox_y2)],
+                                        "bbox": _bbox(face),
                                         "face_image_path": face.face_image_path,
                                         "identity_id": identity_id_str,
                                         "label_state": face.label_state.value if face.label_state else None,
@@ -561,7 +616,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     initial_data.append({
                         "pipeline_id": pipeline_id,
-                        "timestamp": most_recent["detection"].timestamp.isoformat(),
+                        "timestamp": iso_utc(most_recent["detection"].timestamp),
                         "processing_time_ms": most_recent["detection"].processing_time_ms,
                         "faces": [f["face_data"] for f in face_list],  # Unique faces with unique images
                     })
@@ -584,7 +639,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     initial_unknown_data.append({
                         "pipeline_id": pipeline_id,
-                        "timestamp": most_recent["detection"].timestamp.isoformat(),
+                        "timestamp": iso_utc(most_recent["detection"].timestamp),
                         "processing_time_ms": most_recent["detection"].processing_time_ms,
                         "faces": [f["face_data"] for f in face_list],  # Unique faces with unique images
                     })
@@ -656,18 +711,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     },
                     "tracker_stats": tracker_stats,
                     "storage_stats": storage_stats,
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": iso_utc(utc_now())
                 }
                 
                 # REDIS CACHING: Prepare cache data (will be stored after sending)
                 # Use different TTLs: dashboard (1 hour) and unknown (30 hours)
-                dashboard_cache_ttl = getattr(settings, 'CACHE_TTL', 3600)  # Default 1 hour for dashboard
-                unknown_cache_ttl = getattr(settings, 'CACHE_TTL_UNKNOWN', 108000)  # Default 30 hours for unknown faces
+                dashboard_cache_ttl = settings.CACHE_TTL  # Default 1 hour for dashboard
+                unknown_cache_ttl = settings.CACHE_TTL_UNKNOWN  # Default 30 hours for unknown faces
                 cache_data = {
                     "initial_data": initial_data,
                     "initial_unknown_data": initial_unknown_data,
                     "initial_data_message": initial_data_message,
-                    "cached_at": datetime.utcnow().isoformat()
+                    "cached_at": iso_utc(utc_now())
                 }
                 # ===== STEP-BY-STEP LOGGING: WebSocket Data Sending =====
                 total_faces = sum(len(d.get('faces', [])) for d in initial_data)
@@ -724,7 +779,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "total": total_unknown_faces
                                 }
                             },
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": iso_utc(utc_now())
                         }
                         
                         # Add to cache data
@@ -790,7 +845,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         unknown_cache_data = {
                             "initial_unknown_data": initial_unknown_data,
                             "initial_unknown_data_message": cache_data.get("initial_unknown_data_message"),
-                            "cached_at": datetime.utcnow().isoformat()
+                            "cached_at": iso_utc(utc_now())
                         }
                         await redis_cache_service.set(cache_key_unknown, unknown_cache_data, ttl=unknown_cache_ttl)
                         logger.info(f"[WS] [CACHE] 💾 Cached unknown data separately (TTL: {unknown_cache_ttl}s = {unknown_cache_ttl/3600:.1f} hours, key: {cache_key_unknown})")
@@ -866,7 +921,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             },
                             "tracker_stats": {"enabled": FACE_TRACKING_ENABLED, "error": "Failed to load initial data"},
                             "storage_stats": {"total_size_mb": 0, "file_count": 0, "error": "Failed to load initial data"},
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": iso_utc(utc_now()),
                             "error": str(initial_data_error)  # Include error for debugging
                         })
                         logger.warning(f"[WS] ⚠️ Sent empty initial_data due to error (frontend will use API fallback)")
@@ -940,7 +995,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if data == "ping":
                     logger.debug(f"[WS] 📥 Received ping, sending pong")
                     try:
-                        await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                        await websocket.send_json({"type": "pong", "timestamp": iso_utc(utc_now())})
                     except (WebSocketDisconnect, ConnectionError, RuntimeError) as e:
                         logger.warning(f"[WS] ⚠️ Connection closed while sending pong: {e}")
                         break
@@ -952,7 +1007,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_json({
                             "type": "subscription_confirmed",
                             "channel": channel,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": iso_utc(utc_now())
                         })
                     except (WebSocketDisconnect, ConnectionError, RuntimeError) as e:
                         logger.warning(f"[WS] ⚠️ Connection closed while sending subscription confirmation: {e}")
@@ -976,7 +1031,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     pass
                 
                 try:
-                    await websocket.send_json({"type": "ping", "timestamp": datetime.utcnow().isoformat()})
+                    await websocket.send_json({"type": "ping", "timestamp": iso_utc(utc_now())})
                     logger.debug(f"[WS] ✅ Ping sent successfully")
                 except (WebSocketDisconnect, ConnectionError, RuntimeError) as ping_error:
                     logger.warning(f"[WS] ⚠️ Connection closed while sending ping: {ping_error}")

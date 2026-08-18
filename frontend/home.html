@@ -284,6 +284,9 @@
                         <div class="hp-defs__row"><dt>Received</dt><dd id="q-received">—</dd></div>
                         <div class="hp-defs__row"><dt>Processed</dt><dd id="q-processed">—</dd></div>
                         <div class="hp-defs__row"><dt>Skipped</dt><dd id="q-skipped">—</dd></div>
+                        <!-- Moved from the old dashboard stats: the one figure
+                             home did not already show. -->
+                        <div class="hp-defs__row"><dt>Success rate</dt><dd id="q-success-rate">—</dd></div>
                     </dl>
                     <p class="hp-callout" id="q-anomaly" data-status="idle" hidden>
                         <i class="hp-callout__icon fas fa-circle-info" aria-hidden="true"></i>
@@ -312,6 +315,7 @@
                     <dl class="hp-defs">
                         <div class="hp-defs__row"><dt>Files</dt><dd id="st-files">—</dd></div>
                         <div class="hp-defs__row"><dt>Used (GB)</dt><dd id="st-used-gb">—</dd></div>
+                        <div class="hp-defs__row"><dt>Soft budget</dt><dd id="st-budget">—</dd></div>
                         <div class="hp-defs__row"><dt>Retention</dt><dd id="st-retention">—</dd></div>
                     </dl>
                     <p class="hp-callout" id="st-note" data-status="idle" hidden>
@@ -362,22 +366,26 @@
                 <div class="hp-action-grid">
 
                     <a class="hp-action" href="/dashboard">
-                        <span class="hp-action__icon"><i class="fas fa-gauge-high" aria-hidden="true"></i></span>
+                        <span class="hp-action__icon"><i class="fas fa-video" aria-hidden="true"></i></span>
                         <span class="hp-action__text">
-                            <span class="hp-action__title">Dashboard</span>
-                            <span class="hp-action__sub">Live detections</span>
+                            <span class="hp-action__title">Live Feeds</span>
+                            <span class="hp-action__sub">Real-time detections &amp; alerts</span>
                         </span>
                         <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
                     </a>
 
-                    <a class="hp-action" href="/dashboard">
+                    <!-- Opens the shared upload modal in place (registered by
+                         upload-modal.js, injected via upload-modal-loader.js).
+                         Used to link to /dashboard, which no longer hosts the
+                         form — it is the live-feeds page now. -->
+                    <button type="button" class="hp-action" data-action="openUploadModal">
                         <span class="hp-action__icon"><i class="fas fa-user-plus" aria-hidden="true"></i></span>
                         <span class="hp-action__text">
                             <span class="hp-action__title">Add person</span>
                             <span class="hp-action__sub">Enrol a new face</span>
                         </span>
-                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
-                    </a>
+                        <i class="hp-action__arrow fas fa-plus" aria-hidden="true"></i>
+                    </button>
 
                     <a class="hp-action" href="/admin/unknown">
                         <span class="hp-action__icon"><i class="fas fa-user-secret" aria-hidden="true"></i></span>
@@ -459,7 +467,9 @@
     </footer>
 
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
-    <script src="/frontend/js/home.js?v=home-3"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
+    <script src="/frontend/js/upload-modal-loader.js"></script>
+    <!-- <script src="/frontend/js/upload-modal.js?v=upload-3"></script> -->
+    <script src="/frontend/js/home.js?v=home-4"></script>
 </body>
 </html>

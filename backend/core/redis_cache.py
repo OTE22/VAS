@@ -61,8 +61,8 @@ class RedisCacheService:
             return self._enabled
         
         try:
-            redis_url = getattr(settings, 'REDIS_URL', "redis://redis:6379/0")
-            cache_ttl = getattr(settings, 'CACHE_TTL', 3600)  # Default 1 hour
+            redis_url = settings.REDIS_URL
+            cache_ttl = settings.CACHE_TTL  # Default 1 hour
             
             from backend.security.redaction import redact_url
             logger.info(f"[REDIS_CACHE] 🔗 Initializing Redis cache (URL: {redact_url(redis_url)}, TTL: {cache_ttl}s)")
@@ -74,7 +74,7 @@ class RedisCacheService:
                 socket_keepalive=True,
                 socket_connect_timeout=5,
                 retry_on_timeout=True,
-                max_connections=getattr(settings, 'REDIS_MAX_CONNECTIONS', 100),
+                max_connections=settings.REDIS_MAX_CONNECTIONS,
             )
             
             # Test connection
@@ -125,7 +125,7 @@ class RedisCacheService:
         
         try:
             if ttl is None:
-                ttl = getattr(settings, 'CACHE_TTL', 3600)  # Default 1 hour
+                ttl = settings.CACHE_TTL  # Default 1 hour
             
             serialized = json.dumps(value, default=str)
             await self.redis_client.setex(key, ttl, serialized)

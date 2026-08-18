@@ -82,6 +82,8 @@ def test_dashboard_config_contract():
     # different owners. Frontend must not derive one from the other.
     assert "source" in config and "effective_at" in config
     assert config["effective_at"].endswith("Z"), "config timestamps must be timezone-aware"
+    assert not config["effective_at"].endswith("+00:00Z"), (
+        "double suffix: an aware datetime reached a '+ \"Z\"' site")
     assert config["cleanup_interval_ms"] == 60000, "frontend sweeps must run every minute"
     assert "no-store" in (headers.get("Cache-Control") or "").lower()
 
@@ -211,7 +213,7 @@ def test_js_no_unsafe_html_or_inline_handlers():
     assert "onclick=" not in html, "no inline handlers in dashboard.html"
     assert "onsubmit=" not in html and "onchange=" not in html
     assert "Enable Alert Sound" in html
-    assert "?v=dash-10" in html
+    assert "?v=dash-12" in html
 
 
 def test_js_element_registries_and_bounds():
@@ -234,11 +236,24 @@ def test_js_access_model_and_name_authority():
 
 
 def test_js_metric_ownership():
+    """Ownership inverted by the live-feeds split: /dashboard renders ONLY what
+    arrives over the socket; every /api/stats figure lives on /home (home.js,
+    pinned by test_home_dashboard.py). A stats call creeping back here would
+    quietly re-create the duplicated, disagreeing numbers the split removed."""
     src = _js()
-    assert "currentlyVisibleKnownFaces" in src
-    # totalDetections is backend-owned: written only in updateStats
-    assert "setText('totalDetections', q.total_processed" in src
-    assert "backend-owned" in src or "BACKEND persistent total" in src
+    assert "/api/stats" not in src, "the feeds page polls stats again"
+    assert "updateStats" not in src, "stats rendering returned to dashboard.js"
+    assert "pollStats" not in src
+
+    html = _html()
+    for stale_id in ("stats-grid", "system-metrics", "totalDetections",
+                     "successRate", "totalFaces"):
+        assert stale_id not in html, f"stats markup is back on the feeds page: {stale_id}"
+
+    # What the page IS: the feed and its alert machinery.
+    for kept in ("pipelineGrid", "sound-toggle-btn", "alertOverlay",
+                 "alertHistoryPanel", "connectionStatus"):
+        assert kept in html, f"the feeds page lost {kept}"
 
 
 def test_stats_queue_shape_and_js_normalization(token):
@@ -252,10 +267,13 @@ def test_stats_queue_shape_and_js_normalization(token):
         assert key in body["queue"], f"/api/stats queue missing {key}"
         assert isinstance(body["queue"][key], int)
 
-    src = _js()
-    assert "stats.queue && typeof stats.queue === 'object'" in src, \
-        "updateStats must normalize the nested /api/stats shape"
-    assert "q.total_received" in src and "q.total_processed" in src
+    # The consumer moved: home.js is now the only page reading /api/stats.
+    with open("/app/frontend/js/home.js", encoding="utf-8") as fh:
+        home_src = fh.read()
+    assert "'queue.total_received'" in home_src and "'queue.total_processed'" in home_src, \
+        "home.js no longer reads the nested queue counters"
+    assert "q-success-rate" in home_src, \
+        "the success-rate figure (moved from the old dashboard grid) is gone"
 
 
 # ---------------------------------------------------------------------------
@@ -373,8 +391,9 @@ def test_unknown_window_source_contract():
     with open("/app/frontend/admin/unknown.html", encoding="utf-8") as f:
         html = f.read()
     assert "show-all-toggle-btn" in html
-    # unknown-7: adds the CSRF header to the add-to-watchlist mutation
-    assert "?v=unknown-7" in html
+    # unknown-8: centralized modal stack (ModalStack) replaces per-modal
+    # display toggles and the z-index 99999 face-alert special case
+    assert "?v=unknown-8" in html
 
 
 def test_js_ordered_initialization():

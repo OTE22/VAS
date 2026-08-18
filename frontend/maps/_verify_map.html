@@ -1,0 +1,14 @@
+<!doctype html>
+<!--
+  Headless-browser verification harness for the MapLibre map stack.
+  Served same-origin (nginx /frontend/) so cookies, CSP and MIME behave exactly
+  as on the real pages. Logs structured lines to console.log which
+  chrome --headless --enable-logging captures. Removed after phase 4.
+-->
+<html><head><meta charset="utf-8"><title>map verify</title>
+<link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
+<style>html,body{margin:0;height:100%}#m{width:800px;height:600px}</style>
+</head><body>
+<div id="m"></div>
+<script type="module" src="/frontend/maps/_verify_map.js"></script>
+</body></html>

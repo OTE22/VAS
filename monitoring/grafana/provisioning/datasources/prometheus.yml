@@ -2,6 +2,10 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    # A STABLE uid, so a dashboard exported from the UI (which bakes the uid
+    # in) still resolves on a freshly provisioned volume. Without this Grafana
+    # generates a random uid per install and exported dashboards break.
+    uid: prometheus
     type: prometheus
     access: proxy
     # Compose service name on the internal monitoring network.

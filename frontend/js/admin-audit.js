@@ -198,7 +198,7 @@ async function viewDetails(logId) {
             </div>
             <div class="form-group">
                 <label>User</label>
-                <div>${log.username} (ID: ${log.user_id})</div>
+                <div>${escapeHtml(String(log.username ?? ''))} (ID: ${escapeHtml(String(log.user_id ?? (log.historical_user_id != null ? log.historical_user_id + ' — account deleted' : '—')))})</div>
             </div>
             <div class="form-group">
                 <label>Date & Time</label>

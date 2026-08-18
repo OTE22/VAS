@@ -50,9 +50,33 @@ class FaceQualityScorer:
         'unusable': (0.00, 0.29)
     }
     
-    def __init__(self):
-        self.min_threshold = settings.SEARCH_MIN_QUALITY_THRESHOLD
-        self.warning_threshold = settings.SEARCH_QUALITY_WARNING_THRESHOLD
+    # Properties, not __init__ assignments: this class is instantiated as the
+    # module-level `face_quality_scorer` singleton below, so capturing these in
+    # __init__ froze them at first import and no settings edit could reach them.
+    @property
+    def min_threshold(self) -> float:
+        return float(settings.SEARCH_MIN_QUALITY_THRESHOLD)
+
+    @property
+    def warning_threshold(self) -> float:
+        return float(settings.SEARCH_QUALITY_WARNING_THRESHOLD)
+
+    @property
+    def blur_threshold(self) -> float:
+        return float(settings.FACE_QUALITY_THRESHOLD_BLUR)
+
+    @property
+    def lighting_threshold(self) -> float:
+        return float(settings.FACE_QUALITY_THRESHOLD_LIGHTING)
+
+    @property
+    def min_face_pixels(self) -> int:
+        return int(settings.FACE_QUALITY_THRESHOLD_SIZE)
+
+    @property
+    def max_roll_degrees(self) -> float:
+        return float(settings.FACE_QUALITY_THRESHOLD_ANGLE)
+
     
     def assess_quality(
         self,
@@ -79,13 +103,13 @@ class FaceQualityScorer:
         # 1. Blur Detection
         blur_score, blur_info = self._assess_blur(face_image)
         details['blur'] = blur_info
-        if blur_score < 0.5:
+        if blur_score < self.blur_threshold:
             warnings.append(f"⚠️ {blur_info.get('issue', 'Image appears blurry')}")
         
         # 2. Lighting Analysis
         lighting_score, lighting_info = self._assess_lighting(face_image)
         details['lighting'] = lighting_info
-        if lighting_score < 0.5:
+        if lighting_score < self.lighting_threshold:
             warnings.append(f"⚠️ {lighting_info.get('issue', 'Poor lighting detected')}")
         
         # 3. Face Size
@@ -292,24 +316,32 @@ class FaceQualityScorer:
             h, w = face_crop.shape[:2]
             pixels = h * w
             
-            # Optimal: 100x100 to 300x300
-            if 112 <= min(h, w) <= 400:
+            # 112 and 400 describe ArcFace's input geometry, not an operator
+            # preference: the recognition model consumes a 112x112 crop, so a
+            # face at least that wide needs no upscaling, and past ~400 the
+            # extra pixels are discarded by the resize. Those stay constants.
+            # FACE_QUALITY_THRESHOLD_SIZE is the operator's knob: the smallest
+            # face worth assessing at all.
+            smallest = min(h, w)
+            min_pixels = self.min_face_pixels
+            if 112 <= smallest <= 400:
                 score = 1.0
-            elif 80 <= min(h, w) < 112:
+            elif 80 <= smallest < 112:
                 score = 0.7
-            elif 50 <= min(h, w) < 80:
+            elif min_pixels <= smallest < 80:
                 score = 0.5
             else:
                 score = 0.3
-            
+
             info = {
                 'score': round(score, 3),
                 'width': w,
                 'height': h,
-                'pixels': pixels
+                'pixels': pixels,
+                'min_face_pixels': min_pixels
             }
-            
-            if min(h, w) < 80:
+
+            if smallest < 80:
                 info['issue'] = 'Face resolution too low'
                 info['recommendation'] = 'Use a higher resolution image'
             
@@ -346,7 +378,9 @@ class FaceQualityScorer:
             
             # Score based on deviation from frontal
             yaw_score = max(0, 1 - yaw_ratio * 2)
-            roll_score = max(0, 1 - roll_degrees / 30)
+            # FACE_QUALITY_THRESHOLD_ANGLE is 'maximum face angle (degrees)':
+            # the tilt at which the roll component of the score reaches zero.
+            roll_score = max(0, 1 - roll_degrees / max(1e-6, self.max_roll_degrees))
             
             score = (yaw_score + roll_score) / 2
             
@@ -442,3 +476,85 @@ def assess_face_quality(
     return face_quality_scorer.assess_quality(face_image, bbox, landmarks, full_image)
 
 
+
+
+# ---------------------------------------------------------------------------
+# Detection path
+# ---------------------------------------------------------------------------
+
+# Bump when the scoring changes in a way that makes new values incomparable to
+# old ones. Stored alongside every score as `quality_scorer_version`.
+QUALITY_SCORER_VERSION = "fq1"
+LEGACY_SCORER_VERSION = "legacy"
+
+
+def quality_score_for_detection(crop, face_bbox, landmarks, det_score=None):
+    """Score the real face inside a person crop. Always returns a number.
+
+    Returns (score, details, scorer_version).
+
+    Which image is scored matters more than it looks:
+
+      * NOT `full_image=crop` + bbox. That path scores face area as a FRACTION
+        of the image; a face is 1-3% of a full-body person crop, which lands in
+        the bottom branch and returns a constant 0.2 regardless of the face.
+      * NOT the aligned 112x112 face. Alignment resamples to a fixed size, so
+        the size term becomes a constant 1.0 and blur is measured on
+        interpolated pixels rather than captured ones.
+      * The true face sub-crop, cut with SCRFD's own box, scored with no
+        `bbox`/`full_image`. That routes to absolute pixel-resolution scoring
+        (112-400px -> 1.0, 80-112 -> 0.7, 50-80 -> 0.5, else 0.3), which is the
+        right question for surveillance: how many real pixels of face are there?
+
+    `det_score` is recorded for diagnostics but deliberately NOT blended in:
+    FaceQualityScorer.WEIGHTS already sums to 1.0 across blur/lighting/size/
+    angle, and adding a fifth term would silently recalibrate the same scorer
+    the admin search endpoints depend on.
+    """
+    import numpy as np
+
+    details = {"det_score": float(det_score) if det_score is not None else None}
+
+    if not settings.FACE_QUALITY_ENABLED:
+        return None, details, LEGACY_SCORER_VERSION
+    if str(settings.FACE_QUALITY_SCORER).lower() == "legacy":
+        return None, details, LEGACY_SCORER_VERSION
+
+    try:
+        height, width = crop.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in face_bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(width, x2), min(height, y2)
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return None, details, LEGACY_SCORER_VERSION
+
+        face_bgr = crop[y1:y2, x1:x2]
+        if face_bgr.size == 0:
+            return None, details, LEGACY_SCORER_VERSION
+
+        # Landmarks are in crop coordinates; the scorer needs them relative to
+        # the face sub-crop it is handed.
+        local_landmarks = None
+        if landmarks is not None:
+            local_landmarks = np.asarray(landmarks, dtype=np.float32).copy()
+            local_landmarks[:, 0] -= x1
+            local_landmarks[:, 1] -= y1
+
+        assessment = assess_face_quality(face_image=face_bgr,
+                                         landmarks=local_landmarks)
+        score = float(assessment.overall_score)
+        details.update({
+            "band": assessment.band,
+            "face_pixels": [int(x2 - x1), int(y2 - y1)],
+            **{k: v for k, v in (assessment.details or {}).items()},
+        })
+        return max(0.0, min(1.0, score)), details, QUALITY_SCORER_VERSION
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning("[FACE_QUALITY] scoring failed, falling back to the "
+                       "legacy score: %s", exc)
+        details["error"] = f"{type(exc).__name__}"
+        # None means "use the legacy scorer" — the CALLER must still produce a
+        # number. Every downstream gate reads
+        # `if quality_score is not None and quality_score < threshold`, so a
+        # None that reached the database would bypass all of them.
+        return None, details, LEGACY_SCORER_VERSION

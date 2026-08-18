@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!--
+        Identity Profile — /admin/identity/{id}
+
+        The app's first dedicated identity page. Until it existed, "Open full
+        profile" had nowhere honest to land: identity detail lived only in a
+        modal on the Unknown Faces Center, so a KNOWN person's profile carried
+        an "unknown" URL and framing.
+
+        The server serves this file as-is for any {id}; admin-identity.js reads
+        the id from location.pathname. No data is ever injected server-side
+        (that pattern was removed as a CSP violation).
+    -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <title>Identity Profile | Face Recognition Service</title>
+    <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
+    <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-identity.css?v=identity-3">
+</head>
+<body>
+    <div id="navbar-placeholder"></div>
+
+    <main class="identity-page">
+        <a id="identity-back" class="identity-back-link" href="#" hidden>&larr; Back</a>
+
+        <!-- Loading -->
+        <section id="identity-loading" class="identity-state">
+            <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+            <p>Loading identity&hellip;</p>
+        </section>
+
+        <!-- Error -->
+        <section id="identity-error" class="identity-state" hidden>
+            <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+            <h2 id="identity-error-title">Could not load this identity</h2>
+            <p id="identity-error-message"></p>
+        </section>
+
+        <!-- Profile -->
+        <article id="identity-profile" hidden>
+            <header class="profile-header">
+                <img id="profile-snapshot" class="profile-snapshot" src="" alt="Identity snapshot">
+                <div class="profile-heading">
+                    <h1 id="profile-name" class="profile-name"></h1>
+                    <div class="profile-badges">
+                        <span id="profile-type-badge" class="profile-badge"></span>
+                        <span id="profile-status-badge" class="profile-badge status"></span>
+                    </div>
+                    <div class="profile-id-row">
+                        <code id="profile-id" title="Identity ID"></code>
+                        <button type="button" class="intelligence-admin-btn small" data-action="copyProfileIdentityId"
+                                title="Copy Identity ID" aria-label="Copy identity ID">
+                            <i class="fas fa-copy" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Actions -->
+            <nav class="profile-actions" aria-label="Identity actions">
+                <button type="button" class="intelligence-admin-btn" data-action="openWatchlistModal">
+                    <i class="fas fa-list-alt" aria-hidden="true"></i> Add to Watchlist
+                </button>
+                <button type="button" class="intelligence-admin-btn" data-action="openLiveAlertModal">
+                    <i class="fas fa-bell" aria-hidden="true"></i> Create Live Alert
+                </button>
+                <a id="profile-analyze-link" class="intelligence-admin-btn" href="#">
+                    <i class="fas fa-shield-halved" aria-hidden="true"></i> Analyze Threats
+                </a>
+                <!-- Promote / Merge are unknown-triage workflows; they stay in
+                     the Unknown Faces Center. Shown only for unknown identities. -->
+                <a id="profile-manage-link" class="intelligence-admin-btn" href="#" hidden>
+                    <i class="fas fa-user-secret" aria-hidden="true"></i> Manage in Unknown Faces Center
+                </a>
+            </nav>
+
+            <!-- Facts -->
+            <section class="profile-section">
+                <h2 class="profile-section-title">Overview</h2>
+                <div id="profile-facts" class="profile-facts"></div>
+            </section>
+
+            <!-- Watchlists -->
+            <section class="profile-section">
+                <h2 class="profile-section-title">Watchlists</h2>
+                <div id="profile-watchlists"></div>
+            </section>
+
+            <!-- Movement timeline.
+                 The rendered track is a fixed 2880px (24h x 120px/h) wide;
+                 .advanced-timeline-container (admin.css) is the overflow-x
+                 scroll wrapper that keeps it from blowing the page width —
+                 same structure as the Unknown page's modal. -->
+            <section class="profile-section">
+                <h2 class="profile-section-title" id="profile-timeline-title">Movement Timeline</h2>
+                <div class="detail-timeline-advanced">
+                    <div id="identity-timeline" class="advanced-timeline-container"></div>
+                </div>
+            </section>
+        </article>
+    </main>
+
+    <!-- Add to Watchlist Modal (ported from the Unknown Faces Center) -->
+    <div id="add-to-watchlist-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-list-alt" aria-hidden="true"></i> Add to Watchlist</h2>
+                <button class="modal-close" id="close-watchlist-modal" aria-label="Close">
+                    <i class="fas fa-times" aria-hidden="true"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="add-to-watchlist-form">
+                    <div class="modal-identity-banner">
+                        <p>
+                            <i class="fas fa-info-circle" aria-hidden="true"></i>
+                            <strong>Identity:</strong> <span id="watchlist-identity-name">Unknown</span>
+                        </p>
+                    </div>
+                    <div class="form-group">
+                        <label for="watchlist-select">Select Watchlist *</label>
+                        <select id="watchlist-select" class="intelligence-input" required></select>
+                    </div>
+                    <div class="form-group">
+                        <label for="watchlist-priority">Priority</label>
+                        <select id="watchlist-priority" class="intelligence-input">
+                            <option value="low">Low</option>
+                            <option value="normal" selected>Normal</option>
+                            <option value="high">High</option>
+                            <option value="urgent">Urgent</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="watchlist-notes">Notes</label>
+                        <textarea id="watchlist-notes" class="intelligence-input" rows="3"
+                                  placeholder="Add notes about why this person is on the watchlist..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="watchlist-action-instructions">Action Instructions</label>
+                        <textarea id="watchlist-action-instructions" class="intelligence-input" rows="3"
+                                  placeholder="What should be done when this person is detected?"></textarea>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-watchlist-btn">Cancel</button>
+                        <button type="submit" class="intelligence-admin-btn primary">
+                            <i class="fas fa-plus" aria-hidden="true"></i> Add to Watchlist
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Live Alert Modal (ported from the Unknown Faces Center) -->
+    <div id="create-live-alert-modal" class="security-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-bell" aria-hidden="true"></i> Create Live Alert</h2>
+                <button class="modal-close" id="close-live-alert-modal" aria-label="Close">
+                    <i class="fas fa-times" aria-hidden="true"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <form id="create-live-alert-form">
+                    <div class="modal-identity-banner">
+                        <p>
+                            <i class="fas fa-info-circle" aria-hidden="true"></i>
+                            <strong>Tracking:</strong> <span id="live-alert-identity-name">Unknown</span>
+                        </p>
+                        <div class="modal-identity-id-row">
+                            <code id="live-alert-identity-id" data-action="copyIdentityIdFromAlert"
+                                  title="Click to copy Identity ID">Loading...</code>
+                            <button type="button" class="intelligence-admin-btn small" data-action="copyIdentityIdFromAlert"
+                                    title="Copy Identity ID" aria-label="Copy identity ID">
+                                <i class="fas fa-copy" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="live-alert-name">Alert Name *</label>
+                        <input type="text" id="live-alert-name" class="intelligence-input" required
+                               placeholder="e.g., Track John Doe - Investigation #123">
+                    </div>
+                    <div class="form-group">
+                        <label for="live-alert-min-similarity">Minimum Similarity</label>
+                        <input type="range" id="live-alert-min-similarity" min="0.5" max="1" step="0.05" value="0.75"
+                               class="intelligence-input">
+                        <div class="similarity-readout">
+                            <span id="live-alert-similarity-value">75%</span>
+                        </div>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="live-alert-notify-dashboard" checked>
+                            Notify on dashboard
+                        </label>
+                        <label>
+                            <input type="checkbox" id="live-alert-sound-alert" checked>
+                            Sound alert
+                        </label>
+                        <label>
+                            <input type="checkbox" id="live-alert-auto-capture" checked>
+                            Auto-capture snapshot
+                        </label>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="intelligence-admin-btn" id="cancel-live-alert-btn">Cancel</button>
+                        <button type="submit" class="intelligence-admin-btn primary">
+                            <i class="fas fa-bell" aria-hidden="true"></i> Create Alert
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="/frontend/js/actions.js?v=actions-1"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
+    <script src="/frontend/js/admin-identity.js?v=identity-1"></script>
+</body>
+</html>

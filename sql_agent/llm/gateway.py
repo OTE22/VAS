@@ -153,14 +153,12 @@ class LLMGateway:
         apart: raising SQL_AGENT_TOTAL_TIMEOUT widens this automatically, and
         lowering it tightens this rather than silently inverting the hierarchy.
         """
-        outer = 0.0
-        try:
-            from config import settings as _settings
-            outer = float(getattr(_settings, "SQL_AGENT_TOTAL_TIMEOUT", 0) or 0)
-        except Exception:
-            outer = 0.0
-        if outer <= 0:
-            outer = 300.0  # matches the SQL_AGENT_TOTAL_TIMEOUT default
+        # Read the declared field directly. The old shape read it through a
+        # getattr default of 0, then substituted a literal 300.0 "matching the
+        # SQL_AGENT_TOTAL_TIMEOUT default" — a second declaration of the same
+        # setting that would silently diverge the moment the default moved.
+        from config import settings as _settings
+        outer = float(_settings.SQL_AGENT_TOTAL_TIMEOUT)
         # Never below a single attempt: a budget that cannot fit one call would
         # fail every request before the model was even given a chance.
         return max(spec.timeout_seconds, outer * self.LLM_BUDGET_FRACTION)

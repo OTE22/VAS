@@ -51,7 +51,6 @@ class DatabaseManager:
                     {"column_name": "pipeline_id", "data_type": "varchar", "is_nullable": "NO", "description": "Camera/pipeline identifier (varchar) - matches pipelines.pipeline_id, NOT pipelines.id"},
                     {"column_name": "timestamp", "data_type": "timestamp", "is_nullable": "NO", "description": "When the detection occurred"},
                     {"column_name": "uuid", "data_type": "varchar", "is_nullable": "NO", "description": "Unique identifier for the detection"},
-                    {"column_name": "image_path", "data_type": "varchar", "is_nullable": "YES", "description": "Path to the captured image"},
                 ],
                 "primary_keys": ["id"],
                 "foreign_keys": [{"column_name": "pipeline_id", "foreign_table_name": "pipelines", "foreign_column_name": "pipeline_id"}]
@@ -126,9 +125,9 @@ class DatabaseManager:
             return conn  # Return the OPEN connection
         except Exception as e:
             logger.error(f"[DB] Connection failed: {type(e).__name__}: {str(e)}", exc_info=True)
-            print("❌ CONNECTION ERROR:")
-            print(type(e).__name__)
-            print(e)
+            logger.error("❌ CONNECTION ERROR:")
+            logger.info(type(e).__name__)
+            logger.info(e)
             raise  # Re-raise the exception so caller knows connection failed
 
     def fetch_schema(self) -> dict:

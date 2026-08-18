@@ -25,7 +25,7 @@ from backend.core import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Health"])
 
 # SQL Agent state lives in backend.lifespan and is assigned during startup.
 # Import the MODULE (not the names) so we read the live values at request time —
@@ -78,7 +78,7 @@ async def readiness_check():
 
     async def _check_queue():
         stats = await processing_queue.get_stats()
-        return stats["processing"] < getattr(settings, 'MAX_CONCURRENT_REQUESTS', 100) * 2
+        return stats["processing"] < settings.MAX_CONCURRENT_REQUESTS * 2
 
     results = dict(await asyncio.gather(
         _bounded("database", db_manager.health_check, required=True),
@@ -143,7 +143,7 @@ async def health_check():
         queue_healthy = True
         try:
             queue_stats = await processing_queue.get_stats()
-            queue_healthy = queue_stats["processing"] < getattr(settings, 'MAX_CONCURRENT_REQUESTS', 100) * 2
+            queue_healthy = queue_stats["processing"] < settings.MAX_CONCURRENT_REQUESTS * 2
         except:
             queue_healthy = False
 
@@ -180,7 +180,7 @@ async def health_check():
             sql_agent_status = "not_available"
 
         # Check vector backend health
-        vector_backend = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower()
+        vector_backend = settings.VECTOR_BACKEND.lower()
         vector_backend_healthy = True
         vector_backend_status = "healthy"
         
@@ -198,10 +198,10 @@ async def health_check():
                 vector_backend_status = f"error: {str(e)}"
                 vector_backend_healthy = False
         else:
-            # FAISS - check if identity index is available
+            # FAISS - check if the configured vector index is available
             try:
-                from backend.core.identity_index import identity_index
-                if identity_index:
+                from backend.core.vector_index.access import get_vector_index
+                if get_vector_index() is not None:
                     vector_backend_status = "healthy"
                     vector_backend_healthy = True
                 else:
@@ -217,7 +217,7 @@ async def health_check():
 
         return {
             "status": overall_status,
-            "version": getattr(settings, 'VERSION', '5.1'),
+            "version": settings.VERSION,
             "timestamp": datetime.utcnow().isoformat(),
             "components": {
                 "database": "healthy" if db_healthy else "unhealthy",
@@ -295,11 +295,19 @@ async def detailed_health_check():
         # Queue health
         queue_stats = await processing_queue.get_stats()
         checks["queue"] = {
-            "healthy": queue_stats["processing"] < getattr(settings, 'MAX_CONCURRENT_REQUESTS', 100) * 2,
+            "healthy": queue_stats["processing"] < settings.MAX_CONCURRENT_REQUESTS * 2,
             "stats": queue_stats
         }
 
-        # Storage health
+        # Storage health.
+        #
+        # usage_percent is the REAL volume utilisation (disk used / disk total).
+        # It used to be our own footprint divided by the MAX_STORAGE_GB soft
+        # budget, which meant this check reported healthy on a 97%-full disk:
+        # the numerator counted only files we wrote, so everything else on the
+        # volume was invisible to it. The threshold is unchanged; what it
+        # measures is not, and a volume that is genuinely nearly full will now
+        # fail here — which is the point.
         storage_stats = await retention_manager.get_storage_stats()
         checks["storage"] = {
             "healthy": storage_stats["usage_percent"] < 95,
@@ -312,9 +320,21 @@ async def detailed_health_check():
             for check in checks.values()
         )
 
+        # Runtime fingerprint: which code/config is actually serving this
+        # response. Runtime drift (stale image, stale env, DB-overridden
+        # setting) has shipped here twice while every health check stayed
+        # green — this makes "what exactly is running?" answerable with one
+        # curl. Credentials are stripped by construction; see the module.
+        # Deliberately NOT a health check: it carries no "healthy" key, so
+        # the all(...) above ignores it.
+        from backend.core.runtime_fingerprint import build_fingerprint
         return {
             "healthy": overall_healthy,
             "timestamp": datetime.utcnow().isoformat(),
+            "runtime": build_fingerprint(),
+            # Offline basemap datasets — the cached verdict, never a fresh
+            # probe (that would make health calls hammer Martin).
+            "map_datasets": _map_datasets_block(),
             "components": checks
         }
     except Exception as e:
@@ -325,3 +345,20 @@ async def detailed_health_check():
             "timestamp": datetime.utcnow().isoformat()
         }
 
+
+def _map_datasets_block() -> dict:
+    """Per-style availability from the cached Martin deep-check."""
+    try:
+        from backend.core import map_availability
+        snap = map_availability.cached()
+        if snap is None:
+            return {"status": "unchecked"}
+        return {
+            "martin_reachable": snap.martin_reachable,
+            "checked_at": snap.checked_at,
+            "styles": {name: v["state"] for name, v in snap.styles.items()},
+            "sources": {sid: {"usable": st.usable, "error": st.error}
+                        for sid, st in snap.sources.items()},
+        }
+    except Exception as exc:                                       # noqa: BLE001
+        return {"status": "error", "error": type(exc).__name__}

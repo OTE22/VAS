@@ -24,7 +24,7 @@
     <!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
-    <link rel="stylesheet" href="/frontend/css/tutorial.css">
+    <link rel="stylesheet" href="/frontend/css/tutorial.css?v=tutorial-3">
 </head>
 <body class="tutorial-page">
     <!-- Skip to Main Content for Accessibility -->
@@ -45,43 +45,69 @@
                         <div class="header-icon-glow"></div>
                     </div>
                     <div class="header-text">
-                        <h1 class="page-title">Admin Tutorial & Learning Guide</h1>
+                        <h1 class="page-title">Admin Tutorial &amp; Learning Guide</h1>
                         <p class="page-description">Comprehensive guide to using the Face Recognition System</p>
+                        <!-- The tutorial content is served by the API, so it is
+                             always the running build's copy. This states WHICH
+                             build, from /health/detailed's runtime fingerprint,
+                             so "matches the running build" is verifiable rather
+                             than asserted. Filled in by admin-tutorial.js. -->
+                        <p class="tutorial-build" id="tutorial-build" hidden>
+                            <i class="fas fa-code-branch" aria-hidden="true"></i>
+                            <span id="tutorial-build-text"></span>
+                        </p>
                     </div>
                 </div>
             </header>
 
             <div class="tutorial-container">
-                <div class="tutorial-nav">
-                    <button class="active" data-action="showSection" data-section="quick-start">Quick Start</button>
-                    <button data-action="showSection" data-section="authentication">API Authentication</button>
-                    <button data-action="showSection" data-section="understanding">Understanding Unknown Faces</button>
-                    <button data-action="showSection" data-section="promote">Promote to Known</button>
-                    <button data-action="showSection" data-section="merge">Merge Identities</button>
-                    <button data-action="showSection" data-section="search">Quick Search</button>
-                    <button data-action="showSection" data-section="advanced-search">Advanced Search</button>
-                    <button data-action="showSection" data-section="settings">System Settings</button>
-                    <button data-action="showSection" data-section="workflow">System Workflow</button>
-                    <button data-action="showSection" data-section="advanced-sna">Advanced SNA Features</button>
-                    <button data-action="showSection" data-section="examples">API Examples</button>
+                <!-- Built from the API response by renderNav() in
+                     admin-tutorial.js. It used to be hardcoded here and had
+                     drifted: five sections had no button (including Platform
+                     Hardening) and two buttons pointed at nothing. The single
+                     placeholder button is what a reader sees before the
+                     content loads. -->
+                <div class="tutorial-nav" role="tablist" aria-label="Tutorial sections">
+                    <button class="active" role="tab" aria-selected="true" data-action="showSection" data-section="quick-start">Quick Start</button>
                 </div>
 
-                <div id="loading" class="loading">
+                <!-- aria-busy tells a screen reader the region is still
+                     populating; aria-live announces the section change that
+                     follows, which is otherwise silent because the nav swaps
+                     content in place rather than navigating. -->
+                <div id="loading" class="loading" role="status" aria-live="polite">
                     <p>Loading tutorial content...</p>
                 </div>
 
-                <div id="error" class="error" style="display: none;"></div>
+                <div id="error" class="error" style="display: none;" role="alert"></div>
 
-                <div id="tutorial-content" style="display: none;">
+                <div id="tutorial-content" style="display: none;" aria-live="polite" aria-busy="true">
                     <!-- Content will be loaded here -->
                 </div>
             </div>
+
+            <!-- Where to go when the tutorial is not enough. These are the
+                 operator-facing documents; the tutorial deliberately does not
+                 duplicate them. Paths, not links: Docs/ is not served over
+                 HTTP, so a hyperlink here would 404. -->
+            <aside class="tutorial-further-reading" aria-labelledby="further-reading-heading">
+                <h2 id="further-reading-heading">
+                    <i class="fas fa-book" aria-hidden="true"></i> Further reading
+                </h2>
+                <ul>
+                    <li><strong>Deploy to production</strong> — <code>Docs/61_DEPLOYMENT_RUNBOOK.md</code> (the authority; anything contradicting it is wrong)</li>
+                    <li><strong>Day-to-day commands</strong> — <code>Docs/72_ADMIN_CHEAT_SHEET.md</code></li>
+                    <li><strong>Something broke</strong> — <code>Docs/73_TROUBLESHOOTING.md</code></li>
+                    <li><strong>Harden before go-live</strong> — <code>Docs/74_SECURITY_CHECKLIST.md</code></li>
+                    <li><strong>Every endpoint</strong> — <code>Docs/75_API_REFERENCE.md</code>, generated from this build's own OpenAPI document</li>
+                </ul>
+            </aside>
         </div>
     </main>
 
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
-    <script src="/frontend/js/admin-tutorial.js"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
+    <script src="/frontend/js/admin-tutorial.js?v=tutorial-3"></script>
 </body>
 </html>
 

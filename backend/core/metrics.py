@@ -10,6 +10,13 @@ from prometheus_client import Counter, Histogram, Gauge
 metrics_requests_total = None
 metrics_processing_time = None
 metrics_queue_size = None
+metrics_queue_capacity = None
+metrics_db_pool_in_use = None
+metrics_db_pool_size = None
+metrics_db_operation_failures = None
+metrics_vector_search = None
+metrics_identity_ops = None
+metrics_inference_in_flight = None
 metrics_faces_detected = None
 metrics_faces_skipped = None
 metrics_faces_batch_skipped = None
@@ -32,7 +39,28 @@ metrics_request_duration = None
 metrics_bg_last_success = None
 metrics_bg_failures = None
 metrics_bg_service_up = None
+metrics_map_availability_invalid = None
+metrics_vector_index_size = None
+metrics_vector_index_drift = None
+metrics_vector_index_pending = None
+metrics_vector_index_last_rebuild = None
+metrics_vector_index_recovery_failures = None
 metrics_process_rss = None
+# Security-intelligence endpoints (set below; observed in routes/intelligence):
+# per-feature request counts and latency — these five endpoints previously ran
+# with zero observability.
+metrics_intel_requests = None
+metrics_intel_duration = None
+# Risk platform (assessments, distributed locks, rate limiting):
+metrics_assessments = None
+metrics_assessment_duration = None
+metrics_lock_contention = None
+metrics_rate_limited = None
+# Ingest credential checks. Deliberately NOT labelled by pipeline_id:
+# the caller chooses that value, so it would be an unbounded-cardinality
+# lever pointed straight at the metrics registry.
+metrics_webhook_auth = None
+metrics_webhook_auth_source = None
 
 
 def initialize_metrics():
@@ -45,7 +73,23 @@ def initialize_metrics():
     global metrics_cache_write_behind, metrics_cache_circuit_state
     global metrics_event_loop_lag, metrics_request_duration
     global metrics_bg_last_success, metrics_bg_failures, metrics_bg_service_up
+    global metrics_map_availability_invalid
+    # Without these globals the assignments below bind function-locals: the
+    # collectors still land in the Prometheus REGISTRY (so /metrics prints their
+    # HELP lines) while the module attributes stay None, and every publisher
+    # silently no-ops. A metric that exists but never gets a value is worse than
+    # a missing one — it reads as "index size is zero".
+    global metrics_vector_index_size, metrics_vector_index_drift
+    global metrics_vector_index_pending, metrics_vector_index_last_rebuild
+    global metrics_vector_index_recovery_failures
     global metrics_process_rss
+    global metrics_intel_requests, metrics_intel_duration
+    global metrics_assessments, metrics_assessment_duration
+    global metrics_lock_contention, metrics_rate_limited
+    global metrics_webhook_auth, metrics_webhook_auth_source
+    global metrics_queue_capacity, metrics_db_pool_in_use, metrics_db_pool_size
+    global metrics_db_operation_failures, metrics_vector_search
+    global metrics_identity_ops, metrics_inference_in_flight
 
     # Helper function to safely create metrics
     def safe_metric(metric_class, name, documentation, **kwargs):
@@ -78,12 +122,66 @@ def initialize_metrics():
         Gauge, 'fr_background_service_up',
         '1 while the supervised loop is alive, 0 once stopped', labelnames=['service']
     )
+    # An availability verdict that says "unavailable" without a registered
+    # reason code is a bug in map_availability, not a data fault. The style is
+    # still reported closed, so nothing breaks visibly — which is exactly why
+    # it needs a counter to be noticed at all.
+    metrics_map_availability_invalid = safe_metric(
+        Counter, 'fr_map_availability_state_invalid_total',
+        'Times a basemap style was unavailable with no composable reason',
+        labelnames=['style']
+    )
+    # -- Vector search index -------------------------------------------------
+    # PostgreSQL is authoritative; the index is a derived cache. Before these,
+    # nothing anywhere answered "how many vectors are indexed?" or "does the
+    # index match the database?" — that was only discoverable by hand.
+    metrics_vector_index_size = safe_metric(
+        Gauge, 'fr_vector_index_size',
+        'Vectors currently held by the search index', labelnames=['backend']
+    )
+    metrics_vector_index_drift = safe_metric(
+        Gauge, 'fr_vector_index_drift',
+        'Entries that disagree with PostgreSQL (missing + stale + mismatched) '
+        'at the last reconciliation', labelnames=['backend']
+    )
+    metrics_vector_index_pending = safe_metric(
+        Gauge, 'fr_vector_index_pending',
+        'Embedding rows committed to PostgreSQL but not confirmed in the index '
+        '(vector_index_sync_state <> synced)', labelnames=['backend']
+    )
+    metrics_vector_index_last_rebuild = safe_metric(
+        Gauge, 'fr_vector_index_last_rebuild_timestamp',
+        'Unix time of the last successful rebuild from PostgreSQL',
+        labelnames=['backend']
+    )
+    metrics_vector_index_recovery_failures = safe_metric(
+        Counter, 'fr_vector_index_recovery_failures_total',
+        'Snapshots rejected on load (checksum, ntotal/keys mismatch, parse '
+        'failure) and quarantined', labelnames=['backend', 'reason']
+    )
     metrics_process_rss = safe_metric(
         Gauge, 'fr_process_rss_bytes',
         'Worker process resident set size (from /proc/self/status)'
     )
     metrics_queue_size = safe_metric(
         Gauge, 'face_recognition_queue_size', 'Current queue size'
+    )
+    # Capacity next to depth, so utilization is computable in PromQL
+    # (queue_size / queue_capacity) instead of hardcoding MAX_QUEUE_SIZE
+    # into every dashboard and alert.
+    metrics_queue_capacity = safe_metric(
+        Gauge, 'face_recognition_queue_capacity',
+        'Configured maximum queue size (MAX_QUEUE_SIZE)'
+    )
+    # The DB pool was only visible in /health/detailed JSON; exhaustion had no
+    # Prometheus signal at all while every scrape itself takes a connection.
+    metrics_db_pool_in_use = safe_metric(
+        Gauge, 'fr_db_pool_in_use',
+        'Database connections currently checked out (incl. overflow)'
+    )
+    metrics_db_pool_size = safe_metric(
+        Gauge, 'fr_db_pool_size',
+        'Configured database pool size (excl. overflow)'
     )
     metrics_event_loop_lag = safe_metric(
         Gauge, 'face_recognition_event_loop_lag_seconds',
@@ -114,6 +212,30 @@ def initialize_metrics():
     metrics_db_operations = safe_metric(
         Histogram, 'face_recognition_db_operations_seconds', 'Database operation time'
     )
+    metrics_db_operation_failures = safe_metric(
+        Counter, 'face_recognition_db_operation_failures_total',
+        'Batch write flushes that failed or timed out',
+        labelnames=['reason']  # timeout | error — bounded
+    )
+    # The query that runs on every recognized face had no timing at all —
+    # the index gauges say how BIG the index is, nothing said how SLOW it is.
+    metrics_vector_search = safe_metric(
+        Histogram, 'fr_vector_search_seconds',
+        'pgvector similarity search duration (identity matching hot path)'
+    )
+    # Destructive identity operations were invisible to Prometheus entirely.
+    # op is a fixed enum — NEVER an identity id.
+    metrics_identity_ops = safe_metric(
+        Counter, 'fr_identity_ops_total',
+        'Identity lifecycle operations executed',
+        labelnames=['op']  # promote | merge | merge_multiple | unmerge
+    )
+    # Utilization of the 3-thread inference bottleneck: in-flight crops
+    # currently holding the inference semaphore.
+    metrics_inference_in_flight = safe_metric(
+        Gauge, 'fr_inference_in_flight',
+        'Face crops currently in the inference pool (bounded by MAX_CONCURRENT_INFERENCE)'
+    )
     metrics_cleanup_operations = safe_metric(
         Counter, 'face_recognition_cleanup_total', 'Total cleanup operations'
     )
@@ -129,11 +251,61 @@ def initialize_metrics():
     metrics_cache_size = safe_metric(
         Gauge, 'face_recognition_cache_size', 'Cache size', labelnames=['type']
     )
+    # Was a Counter fed the queue DEPTH every 30s — a monotonically climbing
+    # number with no meaning. The quantity is a level, so it is a Gauge.
     metrics_cache_write_behind = safe_metric(
-        Counter, 'face_recognition_cache_write_behind_total', 'Write-behind operations'
+        Gauge, 'face_recognition_cache_write_behind_queue',
+        'Write-behind queue depth (pending deferred cache writes)'
     )
     metrics_cache_circuit_state = safe_metric(
         Gauge, 'face_recognition_cache_circuit_state', 'Cache circuit breaker state (0=closed, 1=open, 2=half_open)'
+    )
+    metrics_intel_requests = safe_metric(
+        Counter, 'fr_intel_requests_total',
+        'Security-intelligence endpoint requests',
+        labelnames=['feature', 'result']  # result: success | error | timeout
+    )
+    metrics_intel_duration = safe_metric(
+        Histogram, 'fr_intel_duration_seconds',
+        'Security-intelligence endpoint duration', labelnames=['feature'],
+        buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
+    )
+    metrics_assessments = safe_metric(
+        Counter, 'fr_assessments_total',
+        'Threat-assessment outcomes',
+        # result: created | deduplicated | persist_error | insufficient_data
+        # | acknowledged | resolved | reopened
+        labelnames=['result']
+    )
+    metrics_assessment_duration = safe_metric(
+        Histogram, 'fr_assessment_scoring_seconds',
+        'Unified risk-engine scoring + persistence duration',
+        buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
+    )
+    metrics_lock_contention = safe_metric(
+        Counter, 'fr_distributed_lock_contention_total',
+        'Distributed lock acquisition conflicts', labelnames=['lock']
+    )
+    metrics_rate_limited = safe_metric(
+        Counter, 'fr_rate_limit_rejections_total',
+        'Requests rejected with 429', labelnames=['scope']
+    )
+    metrics_webhook_auth = safe_metric(
+        Counter, 'fr_webhook_auth_total',
+        'Pipeline ingest credential checks by outcome '
+        '(ok, missing, invalid, would_reject, unenforced)',
+        labelnames=['result']
+    )
+    metrics_webhook_auth_source = safe_metric(
+        Counter, 'fr_webhook_auth_source_total',
+        'Successful ingest auth by credential source. Answers the one question '
+        'a per-credential label would have served - "can the environment keys '
+        'be retired yet?" - at a cardinality of exactly two. Deliberately NOT '
+        'labelled by credential name: prometheus_client never reclaims a series '
+        'within a process, so issuing and revoking would grow it monotonically '
+        'per worker. Per-credential attribution lives in the logs and in '
+        'webhook_credentials.last_used_at.',
+        labelnames=['source']
     )
 
 

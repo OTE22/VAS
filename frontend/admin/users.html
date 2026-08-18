@@ -79,6 +79,24 @@
                         <p class="section-subtitle">System User Registry</p>
                     </div>
                 </div>
+                <!--
+                    Shown by admin-users.js only when the `system` audit
+                    principal is missing from the account list. While it is
+                    absent, machine-initiated actions (vector index rebuild,
+                    reconciliation, corruption recovery) cannot write their
+                    audit rows at all — identity_audit_log.user_id is NOT NULL
+                    and has nothing valid to point at.
+                -->
+                <div id="system-principal-notice" class="system-principal-notice" role="status" style="display: none;">
+                    <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+                    <div class="system-principal-text">
+                        <strong>System Audit Principal</strong>
+                        <span>Status: Missing &mdash; automated actions are not being recorded in the audit log.</span>
+                    </div>
+                    <button class="btn-secondary" data-action="restoreSystemPrincipal" id="btn-restore-system-principal">
+                        <i class="fas fa-shield-halved" aria-hidden="true"></i> RESTORE SYSTEM PRINCIPAL
+                    </button>
+                </div>
                 <div class="table-container">
                     <table class="intelligence-data-table" role="table" aria-label="User accounts list">
                     <thead>
@@ -473,9 +491,9 @@
 
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
-    <script src="/frontend/js/admin-users.js" defer></script>
+    <script src="/frontend/js/admin-users.js?v=users-1" defer></script>
         <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>

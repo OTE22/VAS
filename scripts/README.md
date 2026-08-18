@@ -25,8 +25,7 @@ All helper scripts live here, organized by purpose. The project root contains on
 
 | Script | Purpose |
 |---|---|
-| `run_migrations_in_container.sh` / `.ps1` | Check migration status and run pending Alembic migrations inside the running container (Linux/Mac and Windows versions) |
-| `run_migration.py` | Manual `create_all` for User/UserPipelineAccess/ChatbotAuditLog tables (pre-Alembic era) |
+| ~~`run_migrations_in_container.sh` / `.ps1`~~ | **Removed.** Nothing referenced them, and they `docker cp`'d two migration files by name, so any newer migration was silently skipped. Migrations now run as the `migrate` service at startup; use `docker/run_alembic_migration.sh` to inspect or run them by hand. |
 | `add_blocked_columns_migration.py` | One-off: add `blocked_reason`/`blocked_at` columns to users |
 | `add_identity_id_column.py` | One-off: add `identity_id`/`label_state` columns to faces |
 | `fix_database_types.py` | One-off: clean up PostgreSQL type conflicts blocking table creation |
@@ -36,13 +35,31 @@ All helper scripts live here, organized by purpose. The project root contains on
 | Script | Purpose |
 |---|---|
 | `cleanup_unknown_identities.py` | Remove all unknown identities and their related data (interactive, destructive) |
-| `../clear_all_data.py` | Wipe all detection data (destructive) |
-| `../backfill_pgvector_embeddings.py` | Backfill missing pgvector embeddings |
-| `../backfill_unknown_embeddings.py` | Backfill embeddings for unknown faces |
-| `../fix_null_embeddings.py` | Repair faces rows with NULL embeddings |
-| `../remove_backfilled_embeddings.py` | Undo a backfill run |
-| `../migrate_faiss_to_pgvector.py` | One-time FAISS → pgvector migration |
-| `../download_lebanon_tiles.py` | Download offline map tiles (see `README_LEBANON_TILES.md`) |
+
+## 📁 map_data/ — Offline basemaps
+
+Full documentation: [`Docs/46_MAP_SERVICE_GUIDE.md`](../Docs/46_MAP_SERVICE_GUIDE.md).
+Builders run in preparation containers (GDAL, Planetiler); gates and probes run
+inside the api container, which has the decoders they need.
+
+| Script | Purpose |
+|---|---|
+| `build_streets_vector.sh` | Build the Light/Dark vector archive (Planetiler from a Geofabrik OSM extract) |
+| `build_dem.sh` | Build the Terrain archive (Copernicus DEM GLO-30, terrarium-encoded) |
+| `build_satellite.sh` | Build the Satellite archive (Sentinel-2 L2A via AWS Open Data) |
+| `build_all.sh` | Run every builder independently; non-zero exit only if a requested dataset failed |
+| `build_helpers.py` | Shared disk preflight, hardened download, atomic promotion (stdlib only) |
+| `install_dataset.sh` / `.py` | Install an archive as one crash-safe transaction, then verify Martin serves it |
+| `coverage_check.py` | Structure **and content** validation; the install gate |
+| `tile_probe.py` | Derive a probe tile from an archive and check the served bytes match |
+| `production_gate.py` | Every production rule, with the measured value behind each |
+| `make_test_fixtures.py` | Build the immutable map fixtures the isolated regression serves |
+| `build_vector_styles.py` | Generate `light.json` / `dark.json` from one layer definition |
+
+> `download_lebanon_tiles.py` and `tiles_to_mbtiles.py` were **deleted and must
+> never be recreated**. They scraped `tile.openstreetmap.org` ~145,000 times
+> against its usage policy; OSM refused, and 145,718 refusals were saved as a
+> basemap. See [`Docs/89_OFFLINE_MAP_REMEDIATION.md`](../Docs/89_OFFLINE_MAP_REMEDIATION.md).
 
 ## 📁 debug/ — Diagnostics & Verification
 
@@ -52,20 +69,30 @@ All helper scripts live here, organized by purpose. The project root contains on
 | `verify_intelligence_router_simple.py` | Syntax-only check of the intelligence router file |
 | `../check_dashboard_data.py` | Inspect what the dashboard queries return |
 | `../check_embedding_norms.py` | Validate embedding normalization |
-| `../check_identity_types.py` | Inspect identity type distribution |
 | `../check_known_faces_status.py` | Verify known faces are loaded correctly |
-| `../check_null_embeddings.py` | Count faces with NULL embeddings |
-| `../check_startup_embeddings.py` | Verify embeddings load at startup |
-| `../check_unknown_embeddings.py` | Inspect unknown-face embeddings |
-| `../debug_pgvector_search.py` | Debug pgvector similarity search results |
-| `../show_database_stats.py` | Print database table statistics |
 | `../verify_pgvector_usage.py` | Confirm pgvector is the active vector backend |
 
-## 📁 legacy/ — Archived Code
+## Retired scripts (2026-08 demo-data cleanup)
 
-| Script | Purpose |
-|---|---|
-| `app_production.py` | The original monolithic application (v1.0) — superseded by the modular `backend/` package. Kept for reference only; do not run. |
+* `scripts/migrations/run_migration.py` — pre-Alembic `create_all` for three tables; the application no longer calls `Base.metadata.create_all()` anywhere (Alembic is the only schema initializer, verified at boot).
+
+Deleted rather than archived — git history has all of them. Two groups:
+
+- **pgvector-migration era one-offs**, all obsolete now that the migration is
+  complete and `identity_embeddings.embedding` is authoritative:
+  `migrate_faiss_to_pgvector.py` (read v1 index files no deployment has),
+  `backfill_pgvector_embeddings.py` / `fix_null_embeddings.py` (matched
+  identities by display-name-as-filename, a representation the UUID gallery
+  layout eliminated), `backfill_unknown_embeddings.py`,
+  `remove_backfilled_embeddings.py`, and the `check_identity_types` /
+  `check_null_embeddings` / `check_startup_embeddings` /
+  `check_unknown_embeddings` / `debug_pgvector_search` diagnostics.
+- **Superseded tools**: `clear_all_data.py` (would abort on RESTRICT FKs it
+  never handled; `purge_face_storage.py` is the safe replacement),
+  `show_database_stats.py` (duplicated by `/api/stats` and the purge dry-run),
+  and earlier `scripts/legacy/app_production.py`, the v1.0 monolith.
+
+`tests/test_legacy_retirement.py` pins that none of them come back.
 
 ---
 

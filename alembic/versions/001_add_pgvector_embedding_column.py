@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '001_pgvector'
-down_revision = None
+down_revision = '000_baseline'   # baseline of the create_all-era tables (added 2026-08)
 branch_labels = None
 depends_on = None
 

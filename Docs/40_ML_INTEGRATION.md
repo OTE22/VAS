@@ -1,4 +1,16 @@
 # ML Integration & Architecture
+
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
+> **Storage note (2026-08):** face enrollment now lives ONLY in
+> `storage/faces/<identity_uuid>/image_NNN.ext`. The old flat
+> `assets/faces/<Name>.jpg` gallery was removed and is no longer read
+> at startup; enroll through the upload API instead.
+
 ## How Machine Learning Works in the Face Detection System
 
 ---
@@ -130,7 +142,7 @@ await run_in_threadpool(model_manager.initialize)
 # 3. ModelManager.initialize() does:
 #    - Load SCRFD detector
 #    - Load ArcFace recognizer
-#    - Build face database from assets/faces/
+#    - Build face database from storage/faces/<identity_uuid>/
 #    - Load FAISS/pgvector indexes
 ```
 
@@ -146,11 +158,11 @@ await run_in_threadpool(model_manager.initialize)
 
 ### **Purpose**: Store embeddings of known people for recognition
 
-**Location**: `assets/faces/` directory
+**Location**: `storage/faces/<identity_uuid>/` directory
 
 **How It Works**:
 ```python
-# 1. On startup, scan assets/faces/ directory
+# 1. On startup, scan storage/faces/<identity_uuid>/ directory
 # 2. For each image:
 #    - Detect face (SCRFD)
 #    - Generate embedding (ArcFace)
@@ -158,7 +170,7 @@ await run_in_threadpool(model_manager.initialize)
 # 3. Save index to disk
 
 # Example structure:
-assets/faces/
+storage/faces/<identity_uuid>/
   ├─ john_doe.jpg      → Added to index as "john_doe"
   ├─ jane_smith.jpg    → Added to index as "jane_smith"
   └─ ...
@@ -305,14 +317,13 @@ model_manager.health_check()  # Returns: True/False
 # Verify components
 - detector is not None
 - recognizer is not None
-- face_db is initialized
 ```
 
 ### **Adding New Known Faces**:
 ```python
 # Incremental addition (best practice)
 model_manager.add_face_from_image(
-    image_path="assets/faces/new_person.jpg",
+    image_path="storage/faces/<identity_uuid>/new_person.jpg",
     person_name="new_person"
 )
 # Automatically:
@@ -365,3 +376,49 @@ model_manager.add_face_from_image(
 
 **All models run on ONNX Runtime** with automatic GPU/CPU detection and fallback.
 
+
+---
+
+## 🧬 ML-Ops lineage (behavioural anomaly models) — corrective pass 2026-08-16
+
+The behavioural ML-Ops layer (`backend/ml/*`, tables `ml_*`) is a separate
+system from the face-recognition models above. Since the 2026-08-16 corrective
+pass every declared lineage column is WRITTEN, and the database refuses the
+states that used to be silent.
+
+### The chain, and where each link is written
+
+```
+identity_appearances ─collector─▶ ml_feature_snapshots ─build_dataset─▶ ml_datasets (Parquet rows carry snapshot_id [+label_id];
+        (24 frozen definitions,     (features never {})      read-back checksum; lineage_summary JSONB)
+         verified at boot)                                          │
+                                                                    ▼ trainer
+ml_models (stage graph) ◀── ml_model_thresholds (threshold SETS: cutpoints JSONB per model/scope/version;
+   │  shadow-approve activates   candidate → active → retired; one active per scope; advisory-locked writers)
+   ▼ inference (ACTIVE set only)
+ml_predictions: model_id + threshold_id + threshold_version + event_time (= assessment.last_assessed)
+   │            + outcome_label_id / outcome_label / outcome_recorded_at (written INSIDE label transactions)
+   ├─▶ ml_shadow_comparisons (model_id RESTRICT)      ├─▶ threat_assessments.ml_prediction_id
+   └─▶ ml_labels (supersedes_id chains; POST /api/ml/labels/{id}/supersede)
+ml_drift_reports: model_id NOT NULL — one data + one prediction report PER SHADOW MODEL (`?model_id=` filter)
+```
+
+### Threshold registries — two, on purpose
+| Registry | Owner | Meaning |
+|---|---|---|
+| `learned_thresholds` | risk platform (`backend/core/threshold_store.py`) | learned co-appearance SIGNAL parameters, versioned + activation |
+| `ml_model_thresholds` | `backend/ml/threshold_service.py` | per-model anomaly BAND cutpoints `{elevated, unusual, highly_unusual}` — one row = one set per (model, scope_type, scope_id, version); `scope_type='global'` ⇔ `scope_id=''` (bidirectional CHECK); unique version per scope; partial unique one `active` per scope; source ∈ training/manual/recalibration; `retired_at/by`; `activated_by` is a String actor (same convention as `learned_thresholds`) |
+
+Lifecycle: training writes ONE `candidate` set from the artifact's `band_cutpoints`; `shadow-approve` activates it (artifact cutpoints must equal the candidate's or `THRESHOLD_ARTIFACT_MISMATCH`), retiring the displaced shadow model's set; reject / archive / fail retire every set. Every mutating call takes `pg_advisory_xact_lock(hashtext('ml_threshold:<model>'))` + `FOR UPDATE` on the model, so concurrent version allocation / activation is linearised (8 concurrent creates → versions 1..8; 8 concurrent activations → one active, one audit row — `tests/test_ml_thresholds.py`).
+
+### Invariants the database now enforces
+* a successful shadow prediction (`actual_mode_used='shadow' AND fallback_reason IS NULL`) always names its `model_id`, `threshold_id`, `threshold_version` — at write time (no active set ⇒ explicit `THRESHOLD_UNRESOLVED` failure row; a vanished FK ⇒ explicit failure row, never a lineage-less success) and at delete time (`ml_predictions.model_id`, `.threshold_id`, `ml_shadow_comparisons.model_id` are **ON DELETE RESTRICT**: a model / set with prediction history is archived / retired, never deleted);
+* `ml_drift_reports.model_id` NOT NULL, CASCADE with the model; no shadow model ⇒ nothing written and `{"skipped": "NO_SHADOW_MODEL"}`;
+* `ml_feature_definitions` seeded only by Alembic (frozen literal in `d4e5f6a7b8c9`); `feature_store.verify_definitions()` fails the boot on missing/drifted rows; feature-less snapshots are refused (`MLConfigurationError`);
+* outcome linkage: candidate predictions for a label = `assessment_id` match ∪ same subject in the label's UTC-day bucket (predictions with NULL `event_time` only via assessment); eligible label = active and not disputed; rank manual > reviewed > newest; dispute/retract unlink and re-resolve; confirm re-links; supersession re-points; predictions never point at an ineligible label (`tests/test_ml_outcome_linkage.py`).
+
+### API surface (all in `/api/ml/*`, see `Docs/75`)
+`GET /models/{id}` → `thresholds[]` sets (`id, scope_type, scope_id, version, version_label, status, cutpoints, quantiles, source, sample_count, expected_metrics, notes, created_at, activated_at, activated_by, retired_at, retired_by`) — the old `threshold` / `objective` fields are gone (intentional; `admin-ml-ops.js` renders sets); `GET /predictions` → `threshold_id, threshold_version, event_time, outcome_label_id, outcome_label, outcome_recorded_at, model_id, snapshot_id, assessment_id`; `GET /drift/reports?model_id=`; `POST /labels/{id}/supersede`; `GET /datasets` → `lineage_summary`; shadow-approve 409 codes gain `THRESHOLD_CANDIDATE_MISSING`, `THRESHOLD_ARTIFACT_MISMATCH`, `THRESHOLD_VERSION_CONFLICT`.
+
+### Demo seed and verification
+`scripts/seed_ml_ops_demo.py --apply --yes-i-understand` (dev / isolated scratch only; refuses production and any other database name; `--remove` cleans in RESTRICT-safe order) drives the REAL pipeline end to end: 3 cameras through the live registration contract → 120 identities / ~400 appearances → collector → 40 assessments → 60 labels (reviewed / superseded) → datasets → two trainings → shadow-approve v1 → 120 shadow predictions → shadow-approve v2 (v1 archived, its set retired) → 120 more → post-prediction labels (outcomes) → drift, then asserts every invariant above and prints ~1,750 rows. `tests/test_ml_ops_lineage.py` verifies every `/api/ml/*` GET against SQL and reconstructs the full chain with one join. Only `behavior_anomaly_model` is implemented in this release (the other anomaly types are reserved interfaces → 422 `MODEL_TYPE_NOT_IMPLEMENTED`).

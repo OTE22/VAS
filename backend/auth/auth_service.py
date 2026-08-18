@@ -60,8 +60,8 @@ class AuthService:
                 "exp": expire,
                 "iat": now,
                 "jti": uuid.uuid4().hex,
-                "iss": getattr(settings, "JWT_ISSUER", "face-recognition-service"),
-                "aud": getattr(settings, "JWT_AUDIENCE", "face-recognition-api"),
+                "iss": settings.JWT_ISSUER,
+                "aud": settings.JWT_AUDIENCE,
             })
 
             encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -95,9 +95,9 @@ class AuthService:
 
             decode_kwargs = {"algorithms": [ALGORITHM]}
             if unverified_claims.get("aud"):
-                decode_kwargs["audience"] = getattr(settings, "JWT_AUDIENCE", "face-recognition-api")
+                decode_kwargs["audience"] = settings.JWT_AUDIENCE
             if unverified_claims.get("iss"):
-                decode_kwargs["issuer"] = getattr(settings, "JWT_ISSUER", "face-recognition-service")
+                decode_kwargs["issuer"] = settings.JWT_ISSUER
 
             payload = jwt.decode(token, SECRET_KEY, **decode_kwargs)
             return payload

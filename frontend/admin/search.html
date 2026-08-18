@@ -25,7 +25,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-search.css">
+    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=search-2">
 </head>
 <body>
     <!-- Skip to Main Content for Accessibility -->
@@ -92,12 +92,16 @@
                     <!-- Image Upload -->
                     <div class="search-section">
                         <h3><i class="fas fa-image"></i> Upload Image</h3>
-                        <div class="upload-area" id="upload-area">
-                            <i class="fas fa-cloud-upload-alt"></i>
-                            <p>Drag & drop image here</p>
-                            <small>or click to browse</small>
-                        </div>
-                        <input type="file" id="image-input" accept="image/*" style="display: none;">
+                        <!-- A <button>, not a <div>: the file inputs are
+                             display:none, so with a div this — the page's only
+                             way in — could not be reached by keyboard at all. -->
+                        <button type="button" class="upload-area" id="upload-area"
+                                aria-describedby="upload-area-hint">
+                            <i class="fas fa-cloud-upload-alt" aria-hidden="true"></i>
+                            <p>Drag &amp; drop image here</p>
+                            <small id="upload-area-hint">or click to browse</small>
+                        </button>
+                        <input type="file" id="image-input" accept=".jpg,.jpeg,.png,.webp,image/*" style="display: none;">
                         <div class="image-preview" id="image-preview">
                             <img id="preview-img" src="" alt="Preview">
                             <button class="remove-image" id="remove-image" title="Remove image">
@@ -114,7 +118,7 @@
                             </label>
                         </div>
                         <div id="batch-files-container" style="display: none;">
-                            <input type="file" id="batch-input" accept="image/*" multiple style="display: none;">
+                            <input type="file" id="batch-input" accept=".jpg,.jpeg,.png,.webp,image/*" multiple style="display: none;">
                             <div class="batch-files-list" id="batch-files-list"></div>
                         </div>
                     </div>
@@ -134,9 +138,14 @@
 
                         <div class="form-group">
                             <label>Max Results Per Face</label>
+                            <!-- No `selected` attribute: the default comes from
+                                 SEARCH_DEFAULT_TOP_K via /api/search/config, and
+                                 options above SEARCH_MAX_TOP_K are removed on load.
+                                 A `selected="10"` here was a second copy of the
+                                 server default that could silently diverge. -->
                             <select class="form-control" id="top-k">
                                 <option value="5">5 matches</option>
-                                <option value="10" selected>10 matches</option>
+                                <option value="10">10 matches</option>
                                 <option value="20">20 matches</option>
                                 <option value="50">50 matches</option>
                             </select>
@@ -152,9 +161,14 @@
                     </div>
 
                     <!-- Filters -->
-                    <div class="search-section">
+                    <div class="search-section" data-batch-unsupported>
                         <h3><i class="fas fa-filter"></i> Filters</h3>
-                        
+                        <p class="batch-unsupported-note" role="note" hidden>
+                            <i class="fas fa-circle-info" aria-hidden="true"></i>
+                            Not applied in batch mode — batch search accepts scope, matches
+                            and watchlist checking only.
+                        </p>
+
                         <div class="form-group">
                             <label>Date From</label>
                             <input type="date" class="form-control" id="date-from">
@@ -166,7 +180,10 @@
                         </div>
 
                         <div class="form-group">
-                            <label>Pipeline / Camera</label>
+                            <!-- Labelled by location, because that is what the
+                                 options now show; the value submitted is still
+                                 the pipeline_id. -->
+                            <label for="pipeline-filter">Camera / Location</label>
                             <select class="form-control" id="pipeline-filter">
                                 <option value="">All Cameras</option>
                             </select>
@@ -174,7 +191,7 @@
                     </div>
 
                     <!-- Negative Search (Exclude) -->
-                    <div class="search-section exclude-section">
+                    <div class="search-section exclude-section" data-batch-unsupported>
                         <div class="section-header-enhanced">
                             <div class="section-icon">
                                 <i class="fas fa-ban"></i>
@@ -184,7 +201,11 @@
                                 <p class="section-subtitle">Filter out specific identities or watchlists</p>
                             </div>
                         </div>
-                        
+                        <p class="batch-unsupported-note" role="note" hidden>
+                            <i class="fas fa-circle-info" aria-hidden="true"></i>
+                            Exclusions are not applied in batch mode.
+                        </p>
+
                         <!-- Exclude Identities -->
                         <div class="exclude-group">
                             <label class="exclude-label">
@@ -316,6 +337,41 @@
         </div>
     </main>
 
+    <!-- Identity detail.
+         Opens in place over the results. Clicking a match used to navigate to
+         /admin/unknown ("Unknown Faces Center") — wrong for a known person, and
+         it threw away the search, which lives only in memory. The body is built
+         by admin-search.js from /api/admin/identity/{id}. -->
+    <div class="modal" id="identity-modal" role="dialog" aria-modal="true"
+         aria-labelledby="identity-modal-title">
+        <div class="modal-content identity-modal-content">
+            <div class="modal-header">
+                <h3 id="identity-modal-title">Identity</h3>
+                <button class="modal-close" id="close-identity-modal" aria-label="Close identity details">
+                    <i class="fas fa-times" aria-hidden="true"></i>
+                </button>
+            </div>
+            <div class="modal-body" id="identity-modal-body"></div>
+            <div class="modal-footer">
+                <!-- Promote / Merge / Create-alert live only in admin-unknown.js;
+                     this keeps them reachable without making a full page load
+                     the default for "who is this?". -->
+                <a class="btn-secondary" id="identity-analyze" href="#" rel="noopener">
+                    <i class="fas fa-shield-halved" aria-hidden="true"></i>
+                    Analyze threats
+                </a>
+                <!-- New tab: the results behind this panel live only in this
+                     tab's memory, so navigating away would destroy them. -->
+                <a class="btn-secondary" id="identity-full-profile" href="#"
+                   target="_blank" rel="noopener">
+                    <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                    Open full profile
+                </a>
+                <button class="btn-primary" id="identity-modal-done">Done</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Export Modal -->
     <div class="modal" id="export-modal">
         <div class="modal-content">
@@ -331,8 +387,13 @@
                     <select id="export-format" class="form-control">
                         <option value="csv">CSV (Spreadsheet)</option>
                         <option value="json">JSON (Structured Data)</option>
+                        <!-- Batch export supports csv/json only (export_service.py);
+                             admin-search.js disables this option for batch results. -->
                         <option value="pdf">PDF (Formatted Report)</option>
                     </select>
+                    <p class="form-hint" id="export-format-hint" hidden>
+                        PDF is not available for batch results.
+                    </p>
                 </div>
                 <div class="form-group">
                     <label>Options:</label>
@@ -341,10 +402,10 @@
                             <input type="checkbox" id="export-include-images">
                             Include Images (JSON only)
                         </label>
-                        <label style="display: flex; align-items: center; gap: 0.5rem; font-weight: normal;">
-                            <input type="checkbox" id="export-include-quality" checked>
-                            Include Quality Scores
-                        </label>
+                        <!-- "Include Quality Scores" was removed: no export route
+                             accepts include_quality and quality is always written,
+                             so the checkbox did nothing in either direction. -->
+                        <p class="form-hint">Quality scores are always included.</p>
                     </div>
                 </div>
             </div>
@@ -397,9 +458,9 @@
 
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-navbar.js"></script>
-    <script src="/frontend/js/admin-search.js"></script>
+    <script src="/frontend/js/admin-search.js?v=search-2"></script>
 </body>
 </html>

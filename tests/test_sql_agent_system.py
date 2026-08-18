@@ -146,21 +146,33 @@ def test_structured_error_contract_shape():
 
 
 def test_denial_policy_blocks_only_at_threshold():
-    from sql_agent.api import routes as r
-    r._security_violations.clear()
-    import asyncio
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        counts = [loop.run_until_complete(_fake_count(r)) for _ in range(3)]
-        assert counts == [1, 2, 3], "violations must accumulate in the window"
-    finally:
-        r._security_violations.clear()
-        loop.close()
+    """Violations accumulate toward the threshold rather than blocking on the
+    first denial.
 
+    Retargeted: the counter used to be `routes._security_violations`, a
+    module-level dict, whose effective threshold was 3 x WORKERS because each
+    process counted alone. It now lives in sql_agent/security_policy.py as
+    `record_violation()`, Redis-backed with an in-process fallback, so the same
+    user's denials accumulate wherever they land. The shared event loop is
+    mandatory here — record_violation may touch the loop-bound Redis client.
+    """
+    from conftest import run_on_shared_loop
+    from sql_agent import security_policy as sp
 
-async def _fake_count(r):
-    return r._record_security_violation(999999)
+    probe_user_id = 999999
+
+    async def _run():
+        await sp.reset_violations(probe_user_id)
+        try:
+            return [await sp.record_violation(probe_user_id) for _ in range(3)]
+        finally:
+            await sp.reset_violations(probe_user_id)
+
+    counts = run_on_shared_loop(_run())
+    assert counts == [1, 2, 3], "violations must accumulate in the window"
+    assert sp.VIOLATION_THRESHOLD == 3, (
+        "the policy threshold moved; update the denial-flow tests that assume "
+        "the third violation blocks")
 
 
 # ---------------------------------------------------------------------------

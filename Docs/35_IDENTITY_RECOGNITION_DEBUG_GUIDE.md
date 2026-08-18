@@ -1,5 +1,17 @@
 # Identity Recognition Debug Guide
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
+> **Storage note (2026-08):** face enrollment now lives ONLY in
+> `storage/faces/<identity_uuid>/image_NNN.ext`. The old flat
+> `assets/faces/<Name>.jpg` gallery was removed and is no longer read
+> at startup; enroll through the upload API instead.
+
+
 **Face Recognition Surveillance System**  
 **ITDIR-AI DEPARTMENT**
 
@@ -43,7 +55,7 @@ Face (N) ──> (1) Identity
 ### Relationship Flow
 
 ```
-1. Identity (KNOWN) ← Created from assets/faces
+1. Identity (KNOWN) ← Created from storage/faces/<identity_uuid>
    └── display_name: "Joey"
    
 2. IdentityEmbedding ← Created when face detected

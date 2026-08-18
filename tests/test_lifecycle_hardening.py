@@ -100,11 +100,24 @@ def test_generic_stop_dispatch_is_bounded():
     assert "_bounded_stop" in stop_branch, "generic stop() dispatch is unbounded again"
     close_branch = src.split("elif hasattr(component, 'close'):", 1)[1][:400]
     assert "_bounded_stop" in close_branch, "generic close() dispatch is unbounded again"
-    # The three FAISS task-stops are bounded too.
-    for method in ("stop_auto_save", "stop_background_repair", "stop_background_rebuild"):
-        assert f"asyncio.wait_for(component.{method}(), timeout=" in src, (
-            f"{method} shutdown call is unbounded"
-        )
+    # The index shutdown snapshot is bounded too.
+    #
+    # This used to name three legacy stops (stop_auto_save,
+    # stop_background_repair, stop_background_rebuild). Those loops are gone —
+    # they saved an empty index on a timer. One bounded snapshot replaces them,
+    # and it matters MORE than they did: serialising 100k vectors measures at
+    # 2.0s on the configured volume and up to ~21s on slower storage, so an
+    # unbounded call here could stall shutdown until gunicorn SIGABRTs the
+    # worker.
+    assert 'component.save_once(trigger="shutdown"), timeout=' in src, (
+        "the shutdown snapshot is unbounded"
+    )
+    assert "asyncio.wait_for(" in src.split('component.save_once(trigger="shutdown")', 1)[0][-200:], (
+        "the shutdown snapshot is not wrapped in asyncio.wait_for"
+    )
+    for gone in ("stop_auto_save", "stop_background_repair", "stop_background_rebuild"):
+        assert gone not in src, (
+            f"{gone} is back — those legacy loops snapshotted an empty index")
 
 
 def test_timeouts_are_aggregated_into_one_warning():

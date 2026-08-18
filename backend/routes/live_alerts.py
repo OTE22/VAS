@@ -32,9 +32,10 @@ from db_connection import get_db, db_manager
 from db_models import User, LiveSearchAlert, LiveAlertAuditLog, LiveAlertStatus, LiveAlertExpirationType
 from backend.auth.auth_service import get_current_user, require_admin, require_unknown_faces_access
 from backend.core.live_alert_service import live_alert_service
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(tags=["Live Alerts"])
 
 NO_STORE = "no-store, no-cache, must-revalidate"
 
@@ -579,8 +580,8 @@ async def get_alert_triggers(
             "snapshot_path": t.snapshot_path,
             "acknowledged": t.acknowledged,
             "acknowledged_by": t.acknowledged_by_user.username if t.acknowledged_by_user else None,
-            "acknowledged_at": t.acknowledged_at.isoformat() if t.acknowledged_at else None,
-            "created_at": t.created_at.isoformat()
+            "acknowledged_at": iso_utc(t.acknowledged_at),
+            "created_at": iso_utc(t.created_at)
         }
         for t in page_data["items"]
     ]
@@ -651,8 +652,12 @@ async def acknowledge_trigger(
 def _channel_config_status() -> dict:
     """What notification infrastructure is actually configured?"""
     from config import settings as cfg
-    smtp_ready = bool(getattr(cfg, 'SMTP_HOST', None))
-    sms_ready = bool(getattr(cfg, 'SMS_PROVIDER_URL', None) or getattr(cfg, 'TWILIO_ACCOUNT_SID', None))
+    # These three are declared fields now. They were read through getattr
+    # against names that existed NOWHERE in config.py, so both probes returned
+    # False unconditionally: email and SMS readiness could never be true, no
+    # matter how the deployment was configured.
+    smtp_ready = bool(cfg.SMTP_HOST)
+    sms_ready = bool(cfg.SMS_PROVIDER_URL or cfg.TWILIO_ACCOUNT_SID)
     return {"email": smtp_ready, "sms": sms_ready}
 
 
@@ -854,7 +859,7 @@ def _format_alert(alert) -> dict:
     identity_snapshot_path = None
     if alert.identity:
         best_snapshot_path = alert.identity.best_snapshot_path
-        storage_dir = getattr(settings, 'STORAGE_DIR', './storage')
+        storage_dir = settings.STORAGE_DIR
         storage_dir_abs = os.path.abspath(storage_dir)
 
         if best_snapshot_path:
@@ -903,10 +908,10 @@ def _format_alert(alert) -> dict:
         "webhook_url": alert.webhook_url,
         "sound_alert": alert.sound_alert,
         "expiration_type": alert.expiration_type.value,
-        "expiration_date": alert.expiration_date.isoformat() if alert.expiration_date else None,
+        "expiration_date": iso_utc(alert.expiration_date),
         "expiration_detections": alert.expiration_detections,
         "triggers_count": alert.triggers_count,
-        "last_triggered_at": alert.last_triggered_at.isoformat() if alert.last_triggered_at else None,
-        "created_at": alert.created_at.isoformat(),
-        "updated_at": alert.updated_at.isoformat() if alert.updated_at else None
+        "last_triggered_at": iso_utc(alert.last_triggered_at),
+        "created_at": iso_utc(alert.created_at),
+        "updated_at": iso_utc(alert.updated_at)
     }

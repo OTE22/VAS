@@ -51,20 +51,22 @@ class DatabaseManager:
                 # --- Pool configuration (OPTIMIZED FOR 50+ CAMERAS AND 20 USERS)
                 pool_size=settings.DB_POOL_SIZE,  # Default: 50 for GPU, 30 for CPU
                 max_overflow=settings.DB_MAX_OVERFLOW,  # Default: 100 for GPU, 60 for CPU
-                pool_timeout=60,  # Wait up to 60 seconds for connection
-                pool_recycle=getattr(settings, 'DB_POOL_RECYCLE', 3600),  # Recycle every hour
-                pool_pre_ping=getattr(settings, 'DB_POOL_PRE_PING', True),  # Verify connections
+                pool_timeout=settings.DB_POOL_TIMEOUT,  # Wait for a free connection
+                pool_recycle=settings.DB_POOL_RECYCLE,  # Recycle every hour
+                pool_pre_ping=settings.DB_POOL_PRE_PING,  # Verify connections
                 pool_reset_on_return='rollback',  # Reset connections on return
 
-                # --- asyncpg tuning (INCREASED TIMEOUTS)
+                # --- asyncpg tuning. These were literals sitting beside the
+                # settings-driven pool sizing above; they are settings now, so
+                # the whole pool is described in one place.
                 connect_args={
-                    "timeout": 30,  # INCREASED from 10 to 30 seconds
-                    "command_timeout": 120,  # INCREASED from 60 to 120 seconds
+                    "timeout": settings.DB_CONNECT_TIMEOUT,
+                    "command_timeout": settings.DB_COMMAND_TIMEOUT,
                     "server_settings": {
                         "application_name": settings.APP_NAME,
                         "jit": "off",
-                        "statement_timeout": "120000",  # 120 seconds in milliseconds
-                        "idle_in_transaction_session_timeout": "300000",  # 5 minutes
+                        "statement_timeout": str(settings.DB_STATEMENT_TIMEOUT_MS),
+                        "idle_in_transaction_session_timeout": str(settings.DB_IDLE_TX_TIMEOUT_MS),
                     },
                 },
 
@@ -81,39 +83,13 @@ class DatabaseManager:
                 autocommit=False,
             )
 
-            # Create tables (checkfirst=True skips existing tables)
-            try:
-                async with self.engine.begin() as conn:
-                    await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
-                logger.info("✅ Database tables verified/created")
-            except Exception as table_error:
-                # Check if it's a type conflict error (table/type already exists)
-                error_str = str(table_error)
-                if "duplicate key value violates unique constraint" in error_str or "already exists" in error_str:
-                    logger.warning(f"⚠️  Table creation conflict (tables may already exist): {error_str}")
-                    logger.warning("   This is usually safe to ignore if tables already exist.")
-                    # Try to verify tables exist by querying one
-                    try:
-                        async with self.engine.begin() as conn:
-                            result = await conn.execute(text("""
-                                SELECT EXISTS (
-                                    SELECT FROM information_schema.tables 
-                                    WHERE table_schema = 'public' 
-                                    AND table_name = 'pipelines'
-                                )
-                            """))
-                            table_exists = result.scalar()
-                            if table_exists:
-                                logger.info("✅ Tables already exist, skipping creation")
-                            else:
-                                logger.error("❌ Tables don't exist but creation failed - manual intervention needed")
-                                raise table_error
-                    except Exception as verify_error:
-                        logger.error(f"❌ Failed to verify table existence: {verify_error}")
-                        raise table_error
-                else:
-                    # Re-raise if it's a different error
-                    raise table_error
+            # Schema comes ONLY from Alembic. The application never calls
+            # Base.metadata.create_all(): a database created that way would lack
+            # the migration-only constraints and drift from production. Instead
+            # the schema head is verified — fail-closed in every environment.
+            from backend.utils.migrations import verify_database_head
+            head = await verify_database_head(self.engine)
+            logger.info(f"✅ Database schema verified at Alembic head {head}")
 
             self._initialized = True
             logger.info("✅ Database initialized successfully")

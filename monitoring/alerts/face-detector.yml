@@ -17,30 +17,48 @@ groups:
             with code 78 the configuration preflight is rejecting the config —
             the reason is printed on stderr.
 
-      - alert: PrometheusTargetMissing
-        expr: absent(up{job="face_recognition_api"})
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "API scrape target has disappeared entirely"
-          description: "The target is not just down, it is absent from service discovery."
+      # NOTE: a PrometheusTargetMissing alert using absent(up{...}) used to
+      # live here. With a static_configs target the series only disappears if
+      # the scrape config itself is edited — a stopped container is `up == 0`,
+      # which APIDown above already pages on. The absent() form was inert.
 
   # ==========================================================================
   # Errors and latency
   # ==========================================================================
   - name: errors
     rules:
+      # Built on the HTTP middleware histogram, whose `status` label is the
+      # numeric HTTP code. The previous version filtered
+      # face_recognition_requests_total{status=~"5.."} — but that counter's
+      # `status` holds webhook outcome words (queued/duplicate/queue_full/...),
+      # never an HTTP code, so the numerator was empty and the alert could not
+      # fire under any circumstances.
       - alert: High5xxRate
         expr: |
-          sum(rate(face_recognition_requests_total{status=~"5.."}[5m]))
+          sum(rate(face_recognition_request_duration_seconds_count{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(face_recognition_request_duration_seconds_count[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Over 5% of HTTP requests are returning 5xx"
+          description: "{{ $value | humanizePercentage }} of requests are failing."
+
+      - alert: WebhookQueueRejections
+        # The ingest-specific failure the generic 5xx alert cannot see: the
+        # webhook answers 503 queue_full when the processing queue is at
+        # capacity, counted on the webhook outcome counter.
+        expr: |
+          sum(rate(face_recognition_requests_total{status="queue_full"}[5m]))
             / clamp_min(sum(rate(face_recognition_requests_total[5m])), 0.001) > 0.05
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Over 5% of requests are returning 5xx"
-          description: "{{ $value | humanizePercentage }} of requests are failing."
+          summary: "Ingest is rejecting frames (queue full)"
+          description: >-
+            More than 5% of webhook frames are being refused with 503.
+            Cameras are sending faster than inference can drain the queue.
 
       - alert: HighRequestLatency
         expr: histogram_quantile(0.95, sum(rate(face_recognition_request_duration_seconds_bucket[5m])) by (le)) > 5
@@ -107,13 +125,9 @@ groups:
             version mismatch: check that the pinned onnxruntime-gpu matches the
             base image CUDA major version.
 
-      - alert: InferenceRunningOnCPUInGpuMode
-        expr: face_detector_cpu_fallback_active == 1
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "GPU mode requested but inference fell back to CPU"
+      # NOTE: a second alert (InferenceRunningOnCPUInGpuMode) used to duplicate
+      # CudaProviderUnavailable byte for byte — same expr, same duration, same
+      # severity. One condition, one page.
 
       - alert: GpuMemoryNearlyExhausted
         expr: |
@@ -133,13 +147,72 @@ groups:
   - name: capacity
     rules:
       - alert: ProcessingQueueBacklog
-        expr: face_recognition_queue_size > 1000
+        # Percentage of the CONFIGURED capacity, not a hardcoded item count —
+        # the old `> 1000` threshold silently meant 50% on the dev stack
+        # (MAX_QUEUE_SIZE=2000) and 10% at the config default (10000).
+        expr: |
+          face_recognition_queue_capacity > 0
+            and face_recognition_queue_size / face_recognition_queue_capacity > 0.5
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Processing queue backing up"
-          description: "{{ $value }} items queued; ingestion is outrunning inference."
+          summary: "Processing queue above 50% of capacity"
+          description: "Queue at {{ $value | humanizePercentage }} of MAX_QUEUE_SIZE; ingestion is outrunning inference."
+
+      - alert: ProcessingQueueNearFull
+        expr: |
+          face_recognition_queue_capacity > 0
+            and face_recognition_queue_size / face_recognition_queue_capacity > 0.8
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Processing queue above 80% — 503s imminent"
+          description: "At 100% every webhook frame is refused with 503 queue_full."
+
+      - alert: EventLoopBlocked
+        # WORKERS=1 is load-bearing: one blocked event loop stalls every
+        # request, WebSocket and background task in the process at once.
+        expr: face_recognition_event_loop_lag_seconds > 0.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "asyncio event loop lag above 0.5s"
+          description: "Something is blocking the single worker's event loop; all endpoints degrade together."
+
+      - alert: DatabasePoolNearExhaustion
+        expr: |
+          fr_db_pool_size > 0
+            and fr_db_pool_in_use / fr_db_pool_size > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB connection pool above 90% (incl. overflow use)"
+          description: "New queries will start waiting on the pool; recognition latency follows."
+
+      - alert: BackgroundServiceDown
+        expr: fr_background_service_up == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Background service {{ $labels.service }} is not running"
+          description: >-
+            A supervised loop has been down for 10 minutes. These loops fail
+            unevenly — retention or reconciliation stalling shows up nowhere
+            else until data quietly ages or drifts.
+
+      - alert: ProcessMemoryHigh
+        expr: fr_process_rss_bytes > 6 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API process RSS above 6 GiB"
+          description: "The container limit is 8 GiB; sustained growth here ends in the OOM killer."
 
       - alert: DiskSpaceLow
         expr: |

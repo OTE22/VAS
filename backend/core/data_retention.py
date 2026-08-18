@@ -93,11 +93,11 @@ class DataRetentionManager:
     # --- live setting reads (apply_mode = next_job_run) ---------------------
     @property
     def retention_days(self) -> int:
-        return int(getattr(settings, 'DATA_RETENTION_DAYS', 30))
+        return int(settings.DATA_RETENTION_DAYS)
 
     @property
     def cleanup_interval_hours(self) -> int:
-        return int(getattr(settings, 'CLEANUP_INTERVAL_HOURS', 24))
+        return int(settings.CLEANUP_INTERVAL_HOURS)
 
     async def start(self):
         """Start periodic cleanup"""
@@ -209,7 +209,7 @@ class DataRetentionManager:
 
             logger.info(f"[RETENTION] job_id={jid} {'DRY RUN' if dry_run else 'Run'} starting: cutoff={effective_cutoff} (days={retention_days})")
             loop = asyncio.get_running_loop()
-            faces_dir = os.path.realpath(getattr(settings, 'FACES_DIR', os.path.join(settings.STORAGE_DIR, 'faces')))
+            faces_dir = os.path.realpath(settings.FACES_DIR)
 
             try:
                 # Cross-process overlap guard (Postgres advisory lock) on a
@@ -405,11 +405,13 @@ class DataRetentionManager:
     async def _cleanup_auxiliary(self, db, dry_run: bool) -> dict:
         """Retentions that were documented but never enforced anywhere:
         search history, background-task history, audit logs."""
-        extra = {"search_history_deleted": 0, "task_history_deleted": 0, "audit_logs_deleted": 0}
+        extra = {"search_history_deleted": 0, "search_history_over_cap": 0,
+                 "task_history_deleted": 0, "audit_logs_deleted": 0}
         now = datetime.utcnow()
 
         try:
-            sh_days = int(getattr(settings, 'SEARCH_HISTORY_RETENTION_DAYS', 90))
+          async with db.begin_nested():   # savepoint: isolate a failure here
+            sh_days = int(settings.SEARCH_HISTORY_RETENTION_DAYS)
             sh_cutoff = now - timedelta(days=sh_days)
             if dry_run:
                 extra["search_history_deleted"] = (await db.execute(sa_text(
@@ -422,7 +424,9 @@ class DataRetentionManager:
             logger.warning(f"[RETENTION] search_history cleanup failed: {e}")
 
         try:
-            th_cutoff = now - timedelta(days=30)
+          async with db.begin_nested():
+            th_days = int(settings.TASK_HISTORY_RETENTION_DAYS)
+            th_cutoff = now - timedelta(days=th_days)
             if dry_run:
                 extra["task_history_deleted"] = (await db.execute(sa_text(
                     "SELECT count(*) FROM background_task_history WHERE created_at < :c"), {"c": th_cutoff})).scalar() or 0
@@ -434,7 +438,8 @@ class DataRetentionManager:
             logger.warning(f"[RETENTION] task_history cleanup failed: {e}")
 
         try:
-            al_days = int(getattr(settings, 'AUDIT_LOG_RETENTION_DAYS', 180))
+          async with db.begin_nested():
+            al_days = int(settings.AUDIT_LOG_RETENTION_DAYS)
             al_cutoff = now - timedelta(days=al_days)
             deleted = 0
             for table in ("chatbot_audit_log", "identity_audit_log", "settings_audit_log"):
@@ -448,6 +453,77 @@ class DataRetentionManager:
             extra["audit_logs_deleted"] = deleted
         except Exception as e:
             logger.warning(f"[RETENTION] audit-log cleanup failed: {e}")
+
+        # ML pipeline tables: predictions (shadow comparisons cascade with
+        # them), feature snapshots, drift reports. ml_labels, ml_datasets,
+        # ml_models and ml_audit_log are deliberately NOT swept — labels and
+        # registry rows are the system's provenance record.
+        # The timestamp column is named per table — ml_feature_snapshots records
+        # `computed_at`, not `created_at`. Sweeping it by `created_at` raised
+        # UndefinedColumn on every run, so ML_SNAPSHOT_RETENTION_DAYS had never
+        # deleted a single row; and because a failed statement aborts the whole
+        # PostgreSQL transaction, it took the ml_drift_reports sweep down with
+        # it. Both failures were swallowed by the except below and reported as
+        # zero rows, which is indistinguishable from "nothing was expired".
+        ml_sweeps = (
+            ("ml_predictions_deleted", "ml_predictions", "created_at",
+             int(settings.ML_PREDICTION_RETENTION_DAYS)),
+            ("ml_snapshots_deleted", "ml_feature_snapshots", "computed_at",
+             int(settings.ML_SNAPSHOT_RETENTION_DAYS)),
+            ("ml_drift_reports_deleted", "ml_drift_reports", "created_at",
+             int(settings.ML_DRIFT_REPORT_RETENTION_DAYS)),
+        )
+        for key, table, column, days in ml_sweeps:
+            # SAVEPOINT per sweep. Without one, a single bad statement poisons
+            # the transaction and every later sweep in this function fails with
+            # InFailedSQLTransactionError — the failure spreads instead of
+            # staying local to the table that caused it.
+            try:
+                async with db.begin_nested():
+                    # No max(7, days) floor here. It silently overrode any
+                    # ML_*_RETENTION_DAYS below 7, so an operator who set 3 got
+                    # 7 and was never told. The registry minimum rejects an
+                    # out-of-range value at save time instead, with a message.
+                    cutoff = now - timedelta(days=days)
+                    if dry_run:
+                        extra[key] = (await db.execute(sa_text(
+                            f"SELECT count(*) FROM {table} WHERE {column} < :c"),
+                            {"c": cutoff})).scalar() or 0
+                    else:
+                        r = await db.execute(sa_text(
+                            f"DELETE FROM {table} WHERE {column} < :c"), {"c": cutoff})
+                        extra[key] = r.rowcount or 0
+            except Exception as e:
+                logger.warning(f"[RETENTION] {table} cleanup failed: {e}")
+                extra.setdefault(key, 0)
+
+        # Per-user search-history cap. SEARCH_HISTORY_MAX_PER_USER was declared,
+        # registered as next_job_run and reported back on the search page, but
+        # no job ever trimmed anything — the setting was a promise with no
+        # implementation. Keep the newest N rows per user; the age-based sweep
+        # above handles everything older than the retention window.
+        try:
+          async with db.begin_nested():
+            max_per_user = int(settings.SEARCH_HISTORY_MAX_PER_USER)
+            over_cap = sa_text("""
+                SELECT id FROM (
+                    SELECT id, row_number() OVER (
+                        PARTITION BY user_id ORDER BY created_at DESC, id DESC
+                    ) AS rn
+                    FROM search_history
+                ) ranked WHERE rn > :cap
+            """)
+            if dry_run:
+                extra["search_history_over_cap"] = len(
+                    (await db.execute(over_cap, {"cap": max_per_user})).scalars().all())
+            else:
+                r = await db.execute(sa_text(
+                    f"DELETE FROM search_history WHERE id IN ({over_cap.text})"),
+                    {"cap": max_per_user})
+                extra["search_history_over_cap"] = r.rowcount or 0
+        except Exception as e:
+            logger.warning(f"[RETENTION] search_history per-user cap failed: {e}")
+            extra.setdefault("search_history_over_cap", 0)
 
         if not dry_run:
             await db.commit()
@@ -490,14 +566,61 @@ class DataRetentionManager:
                 except Exception:
                     pass
 
-        max_storage_gb = getattr(settings, 'MAX_STORAGE_GB', 100)
+        gb = 1024 * 1024 * 1024
+        max_storage_gb = settings.MAX_STORAGE_GB
+
+        # What OUR files occupy, measured against the configured soft budget.
+        # MAX_STORAGE_GB enforces nothing — no code deletes, blocks or rejects
+        # on it — so this answers "how much am I using of my allowance", not
+        # "am I about to run out of disk".
+        app_usage_percent = (
+            min(100, (total_size / gb) / max_storage_gb * 100)
+            if max_storage_gb > 0 else 0
+        )
+
+        # What the VOLUME is doing. This is the number that can page someone.
+        #
+        # usage_percent used to be the app-vs-budget figure above, which meant
+        # the dashboard read "< 0.01% of 5000 GB — Healthy" on a disk that was
+        # 97% full, and backend/routes/health.py:305 (usage_percent < 95)
+        # agreed with it. The app's own footprint says nothing about free
+        # space: everything else on the volume is invisible to an os.walk of
+        # STORAGE_DIR.
+        from backend.core.operational_metrics import disk_capacity
+
+        capacity = disk_capacity(settings.STORAGE_DIR)
+        if capacity is not None:
+            disk_total, disk_used, disk_free = capacity
+            usage_percent = (disk_used / disk_total * 100) if disk_total > 0 else 0
+            capacity_source = "disk"
+            disk_fields = {
+                "disk_total_gb": disk_total / gb,
+                "disk_used_gb": disk_used / gb,
+                "disk_free_gb": disk_free / gb,
+            }
+        else:
+            # Unreadable mount: fall back to the historical meaning rather than
+            # reporting nothing, and say so so the UI can label it.
+            usage_percent = app_usage_percent
+            capacity_source = "configured"
+            disk_fields = {
+                "disk_total_gb": None,
+                "disk_used_gb": None,
+                "disk_free_gb": None,
+            }
 
         return {
+            # App footprint (unchanged meaning)
             "total_size_mb": total_size / (1024 * 1024),
-            "total_size_gb": total_size / (1024 * 1024 * 1024),
+            "total_size_gb": total_size / gb,
             "file_count": file_count,
+            # Soft budget (reporting only)
             "max_storage_gb": max_storage_gb,
-            "usage_percent": min(100, (total_size / (1024 * 1024 * 1024)) / max_storage_gb * 100) if max_storage_gb > 0 else 0
+            "app_usage_percent": app_usage_percent,
+            # Real volume
+            "usage_percent": usage_percent,
+            "capacity_source": capacity_source,
+            **disk_fields,
         }
 
     async def get_storage_stats(self) -> dict:

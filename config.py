@@ -8,7 +8,7 @@ Loads from .env file in the root directory.
 import json
 import os
 from typing import List, Optional
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, model_validator
 
 
@@ -54,84 +54,146 @@ class Settings(BaseSettings):
     # =====================================================
     # Environment & Server Configuration
     # =====================================================
-    ENVIRONMENT: str = Field(default="production", env="ENVIRONMENT")
-    DEBUG: bool = Field(default=False, env="DEBUG")
+    ENVIRONMENT: str = Field(default="production")
+    DEBUG: bool = Field(default=False)
     
-    HOST: str = Field(default="0.0.0.0", env="HOST")
-    PORT: int = Field(default=8000, env="PORT")
-    WORKERS: int = Field(default=4, env="WORKERS")
+    HOST: str = Field(default="0.0.0.0")
+    PORT: int = Field(default=8000)
+    WORKERS: int = Field(default=4)
     
     # GPU Configuration
-    USE_GPU: bool = Field(default=False, env="USE_GPU")
+    USE_GPU: bool = Field(default=False)
     
     # Application Info
     APP_NAME: str = "Face Recognition Service"
     VERSION: str = "5.0.0"
+
+    # Runtime provenance — reported by the startup fingerprint and by
+    # /health/detailed so that "is the runtime what the repository says?" is
+    # answerable without docker inspect. Declared here rather than read from
+    # os.environ because config.py is the ONE module allowed to touch the
+    # environment; a second reader is a second source of truth.
+    #
+    # GIT_COMMIT is injected at build or run time (there is no git binary in
+    # the production image). Empty means "not injected" — the fingerprint then
+    # falls back to reading .git directly, which works in the dev stack because
+    # it bind-mounts the repository.
+    GIT_COMMIT: str = Field(default="")
+    # Docker sets HOSTNAME to the container's short id. It is what maps a log
+    # line back to a row of `docker ps`; it is NOT the image digest.
+    HOSTNAME: str = Field(default="")
     
+    # =====================================================
     # Logging
-    LOG_DIR: str = Field(default="/var/log/face-recognition", env="LOG_DIR")  # Docker path
-    LOG_LEVEL: str = Field(default="INFO", env="LOG_LEVEL")
-    LOGS_LIFE_TIME_HOURS: int = Field(default=48, env="LOGS_LIFE_TIME_HOURS", description="Log retention period in hours (default: 48 hours)")
-    
+    # =====================================================
+    # ONE rotating file, written by utils/logging.py, read by GET /api/logs.
+    # Both ends resolve the path from these settings — neither hard-codes it,
+    # and the API never accepts a path from a client.
+    LOG_DIR: str = Field(default="/var/log/face-recognition")  # Docker path
+    LOG_LEVEL: str = Field(default="INFO")
+    LOG_FILE_NAME: str = Field(
+        default="app.log",
+        description="Active log file inside LOG_DIR. Rotated siblings are app.log.1, app.log.2, ..."
+    )
+    LOG_MAX_BYTES: int = Field(
+        default=10 * 1024 * 1024,
+        description="Rotate the active log file once it reaches this size. Default: 10 MiB"
+    )
+    LOG_BACKUP_COUNT: int = Field(
+        default=5,
+        description="How many rotated files to keep (app.log.1 ... app.log.N). Default: 5"
+    )
+    # Normally equal to LOG_LEVEL, so stdout and the file carry identical
+    # records. Lower it ONLY to keep a verbose trace on disk that would drown
+    # `docker logs` — the [UPLOAD_MATCH] per-candidate stages are the reason
+    # this exists. Empty string means "same as LOG_LEVEL".
+    LOG_FILE_LEVEL: str = Field(
+        default="",
+        description="Level for the rotating file. Empty = same as LOG_LEVEL (the default)."
+    )
+    LOGS_LIFE_TIME_HOURS: int = Field(default=48, description="Log retention period in hours (default: 48 hours)")
+
+    # Bounds for GET /api/logs. A log read must never become a way to pin the
+    # event loop or exhaust memory on a multi-gigabyte file.
+    LOG_API_DEFAULT_PAGE_SIZE: int = Field(
+        default=50,
+        description="Log lines per page when the caller does not specify. Default: 50"
+    )
+    LOG_API_MAX_PAGE_SIZE: int = Field(
+        default=500,
+        description="Hard ceiling on log lines per page; larger requests are rejected. Default: 500"
+    )
+    LOG_API_MAX_SCAN_FILES: int = Field(
+        default=6,
+        description="Most files (active + rotated) a single log query may open. Default: 6"
+    )
+    LOG_API_MAX_SCAN_BYTES: int = Field(
+        default=64 * 1024 * 1024,
+        description="Most bytes a single log query may read across all files. Default: 64 MiB"
+    )
+    LOG_API_TIMEOUT_SECONDS: float = Field(
+        default=10.0,
+        description="Wall-clock budget for one log query; exceeded returns a partial-scan flag. Default: 10"
+    )
+
     # Background Task Notifications
-    BACKGROUND_TASK_NOTIFICATIONS_ENABLED: bool = Field(default=True, env="BACKGROUND_TASK_NOTIFICATIONS_ENABLED", description="Enable real-time notifications for background tasks (default: True)")
-    BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS: int = Field(default=60, env="BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS", description="Seconds before task start to send notification (default: 60 = 1 minute)")
+    BACKGROUND_TASK_NOTIFICATIONS_ENABLED: bool = Field(default=True, description="Enable real-time notifications for background tasks (default: True)")
+    BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS: int = Field(default=60, description="Seconds before task start to send notification (default: 60 = 1 minute)")
 
     # =====================================================
     # Security & Authentication
     # =====================================================
     JWT_SECRET_KEY: str = Field(
-        default="your-secret-key-change-in-production",
-        env="JWT_SECRET_KEY"
+        default="your-secret-key-change-in-production"
     )
     # Docker-secret file paths. When set, the file contents replace the inline
     # value above, so the secret never appears in compose files, `docker
     # inspect`, or the process environment.
-    JWT_SECRET_KEY_FILE: str = Field(default="", env="JWT_SECRET_KEY_FILE")
-    JWT_ALGORITHM: str = Field(default="HS256", env="JWT_ALGORITHM")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=1440, env="ACCESS_TOKEN_EXPIRE_MINUTES")  # 24 hours
-    JWT_ISSUER: str = Field(default="face-recognition-service", env="JWT_ISSUER", description="JWT 'iss' claim — tokens from other issuers are rejected")
-    JWT_AUDIENCE: str = Field(default="face-recognition-api", env="JWT_AUDIENCE", description="JWT 'aud' claim — tokens minted for another audience are rejected")
+    JWT_SECRET_KEY_FILE: str = Field(default="")
+    JWT_ALGORITHM: str = Field(default="HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=1440)  # 24 hours
+    JWT_ISSUER: str = Field(default="face-recognition-service", description="JWT 'iss' claim — tokens from other issuers are rejected")
+    JWT_AUDIENCE: str = Field(default="face-recognition-api", description="JWT 'aud' claim — tokens minted for another audience are rejected")
 
     # --- Authentication cookie ---
-    AUTH_COOKIE_SECURE: bool = Field(default=False, env="AUTH_COOKIE_SECURE", description="Set True in production (HTTPS). Enables the Secure flag and the __Host- cookie prefix")
-    AUTH_COOKIE_SAMESITE: str = Field(default="lax", env="AUTH_COOKIE_SAMESITE", description="Auth cookie SameSite policy: lax, strict or none")
-    AUTH_COOKIE_HOST_PREFIX: bool = Field(default=True, env="AUTH_COOKIE_HOST_PREFIX", description="Use the __Host- cookie prefix when Secure is enabled")
+    AUTH_COOKIE_SECURE: bool = Field(default=False, description="Set True in production (HTTPS). Enables the Secure flag and the __Host- cookie prefix")
+    AUTH_COOKIE_SAMESITE: str = Field(default="lax", description="Auth cookie SameSite policy: lax, strict or none")
+    AUTH_COOKIE_HOST_PREFIX: bool = Field(default=True, description="Use the __Host- cookie prefix when Secure is enabled")
 
     # --- Login CSRF / origin validation ---
-    AUTH_ALLOWED_ORIGINS: str = Field(default="", env="AUTH_ALLOWED_ORIGINS", description="Comma-separated hosts allowed to submit credentials (the request Host is always allowed)")
-    AUTH_TRUST_PROXY_HEADERS: bool = Field(default=True, env="AUTH_TRUST_PROXY_HEADERS", description="Trust X-Real-IP from the reverse proxy for client IP attribution")
-    AUTH_SAME_HOST_ORIGIN_TRUSTED: bool = Field(default=True, env="AUTH_SAME_HOST_ORIGIN_TRUSTED", description="Treat the request Host as a valid credential-submission origin. Set False in production once AUTH_ALLOWED_ORIGINS lists every real hostname")
+    AUTH_ALLOWED_ORIGINS: str = Field(default="", description="Comma-separated hosts allowed to submit credentials (the request Host is always allowed)")
+    AUTH_TRUST_PROXY_HEADERS: bool = Field(default=True, description="Trust X-Real-IP from the reverse proxy for client IP attribution")
+    AUTH_SAME_HOST_ORIGIN_TRUSTED: bool = Field(default=True, description="Treat the request Host as a valid credential-submission origin. Set False in production once AUTH_ALLOWED_ORIGINS lists every real hostname")
 
     # --- Brute-force / credential-stuffing protection ---
-    AUTH_RATE_LIMIT_ENABLED: bool = Field(default=True, env="AUTH_RATE_LIMIT_ENABLED", description="Enable login rate limiting (Redis-backed, shared across replicas)")
-    AUTH_RATE_LIMIT_ACCOUNT_MAX: int = Field(default=8, env="AUTH_RATE_LIMIT_ACCOUNT_MAX", description="Failed logins per account before throttling")
-    AUTH_RATE_LIMIT_ACCOUNT_WINDOW: int = Field(default=900, env="AUTH_RATE_LIMIT_ACCOUNT_WINDOW", description="Account throttle window in seconds")
-    AUTH_RATE_LIMIT_IP_MAX: int = Field(default=30, env="AUTH_RATE_LIMIT_IP_MAX", description="Failed logins per source IP before throttling")
-    AUTH_RATE_LIMIT_IP_WINDOW: int = Field(default=900, env="AUTH_RATE_LIMIT_IP_WINDOW", description="Source-IP throttle window in seconds")
-    AUTH_RATE_LIMIT_GLOBAL_MAX: int = Field(default=600, env="AUTH_RATE_LIMIT_GLOBAL_MAX", description="Global login attempts per window (surge protection)")
-    AUTH_RATE_LIMIT_GLOBAL_WINDOW: int = Field(default=60, env="AUTH_RATE_LIMIT_GLOBAL_WINDOW", description="Global surge window in seconds")
+    AUTH_RATE_LIMIT_ENABLED: bool = Field(default=True, description="Enable login rate limiting (Redis-backed, shared across replicas)")
+    AUTH_RATE_LIMIT_ACCOUNT_MAX: int = Field(default=8, description="Failed logins per account before throttling")
+    AUTH_RATE_LIMIT_ACCOUNT_WINDOW: int = Field(default=900, description="Account throttle window in seconds")
+    AUTH_RATE_LIMIT_IP_MAX: int = Field(default=30, description="Failed logins per source IP before throttling")
+    AUTH_RATE_LIMIT_IP_WINDOW: int = Field(default=900, description="Source-IP throttle window in seconds")
+    AUTH_RATE_LIMIT_GLOBAL_MAX: int = Field(default=600, description="Global login attempts per window (surge protection)")
+    AUTH_RATE_LIMIT_GLOBAL_WINDOW: int = Field(default=60, description="Global surge window in seconds")
 
     # =====================================================
     # Bootstrap administrator
     # =====================================================
     # Used once, only when no administrator account exists. The password is
     # never logged and never generated-and-printed.
-    BOOTSTRAP_ADMIN_ENABLED: bool = Field(default=True, env="BOOTSTRAP_ADMIN_ENABLED", description="Allow creating the first administrator when none exists")
-    BOOTSTRAP_ADMIN_USERNAME: str = Field(default="admin", env="BOOTSTRAP_ADMIN_USERNAME")
-    BOOTSTRAP_ADMIN_EMAIL: str = Field(default="admin@example.com", env="BOOTSTRAP_ADMIN_EMAIL")
-    BOOTSTRAP_ADMIN_PASSWORD: str = Field(default="", env="BOOTSTRAP_ADMIN_PASSWORD", description="First-admin password. Prefer BOOTSTRAP_ADMIN_PASSWORD_FILE")
-    BOOTSTRAP_ADMIN_PASSWORD_FILE: str = Field(default="", env="BOOTSTRAP_ADMIN_PASSWORD_FILE", description="Path to a Docker secret holding the first-admin password")
-    BOOTSTRAP_ADMIN_REQUIRE_ROTATION: bool = Field(default=True, env="BOOTSTRAP_ADMIN_REQUIRE_ROTATION", description="Force a password change on the bootstrapped account's first login")
+    BOOTSTRAP_ADMIN_ENABLED: bool = Field(default=True, description="Allow creating the first administrator when none exists")
+    BOOTSTRAP_ADMIN_USERNAME: str = Field(default="admin")
+    BOOTSTRAP_ADMIN_EMAIL: str = Field(default="admin@example.com")
+    BOOTSTRAP_ADMIN_PASSWORD: str = Field(default="", description="First-admin password. Prefer BOOTSTRAP_ADMIN_PASSWORD_FILE")
+    BOOTSTRAP_ADMIN_PASSWORD_FILE: str = Field(default="", description="Path to a Docker secret holding the first-admin password")
+    BOOTSTRAP_ADMIN_REQUIRE_ROTATION: bool = Field(default=True, description="Force a password change on the bootstrapped account's first login")
 
     # =====================================================
     # Production posture
     # =====================================================
     # Consumed by backend/security/config_guard.py. In production the guard
     # refuses to start the process when these are unsafe.
-    ENABLE_API_DOCS: bool = Field(default=True, env="ENABLE_API_DOCS", description="Serve /docs, /redoc and /openapi.json. Must be false in production")
-    ALLOW_MULTI_WORKER: bool = Field(default=False, env="ALLOW_MULTI_WORKER", description="Escape hatch for WORKERS>1. Only set once process-local state is externalized — see backend/core/runtime_settings.py")
-    ALLOW_CPU_FALLBACK: bool = Field(default=True, env="ALLOW_CPU_FALLBACK", description="Permit silent CPU inference when USE_GPU is set but CUDA is unavailable. Set False on real GPU deployments")
+    ENABLE_API_DOCS: bool = Field(default=True, description="Serve /docs, /redoc and /openapi.json. Must be false in production")
+    ALLOW_MULTI_WORKER: bool = Field(default=False, description="Escape hatch for WORKERS>1. Only set once process-local state is externalized — see backend/core/runtime_settings.py")
+    ALLOW_CPU_FALLBACK: bool = Field(default=True, description="Permit silent CPU inference when USE_GPU is set but CUDA is unavailable. Set False on real GPU deployments")
 
     # =====================================================
     # Database migrations
@@ -139,100 +201,205 @@ class Settings(BaseSettings):
     # run    -> apply `alembic upgrade head`
     # verify -> compare current revision against head; a mismatch is fatal
     # skip   -> do nothing (the entrypoint already verified)
-    MIGRATIONS_MODE: str = Field(default="run", env="MIGRATIONS_MODE")
-    MIGRATIONS_FAIL_CLOSED: bool = Field(default=False, env="MIGRATIONS_FAIL_CLOSED", description="Abort startup on migration failure even outside production")
-    MIGRATIONS_EXPECTED_HEAD: str = Field(default="", env="MIGRATIONS_EXPECTED_HEAD", description="Pin the expected Alembic head so a drifted schema cannot serve traffic")
+    MIGRATIONS_MODE: str = Field(default="run")
+    MIGRATIONS_EXPECTED_HEAD: str = Field(default="", description="Pin the expected Alembic head so a drifted schema cannot serve traffic")
+    # How long the migration job waits for PostgreSQL to accept connections.
+    # Read via os.getenv at backend/utils/migrations.py:281-282 with no central
+    # declaration, and set by no compose file or .env — invisible configuration.
+    MIGRATION_DB_WAIT_SECONDS: int = Field(
+        default=60, description="Seconds to wait for the database before a migration gives up")
+    MIGRATION_DB_RETRY_INTERVAL_SECONDS: int = Field(
+        default=2, description="Seconds between database connection attempts during migration")
 
     # =====================================================
     # Database Configuration (PostgreSQL)
     # =====================================================
     DATABASE_URL: str = Field(
         default="postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition",  # Docker: postgres hostname
-        env="DATABASE_URL"
     )
-    DB_HOST: str = Field(default="postgres", env="DB_HOST")
-    DB_PORT: int = Field(default=5432, env="DB_PORT")
-    POSTGRES_DB: str = Field(default="face_recognition", env="POSTGRES_DB")
-    POSTGRES_USER: str = Field(default="postgres", env="POSTGRES_USER")
-    POSTGRES_PASSWORD: str = Field(default="admin", env="POSTGRES_PASSWORD")
-    POSTGRES_PASSWORD_FILE: str = Field(default="", env="POSTGRES_PASSWORD_FILE")
-    DATABASE_URL_FILE: str = Field(default="", env="DATABASE_URL_FILE")
+    DB_HOST: str = Field(default="postgres")
+    DB_PORT: int = Field(default=5432)
+    POSTGRES_DB: str = Field(default="face_recognition")
+    POSTGRES_USER: str = Field(default="postgres")
+    POSTGRES_PASSWORD: str = Field(default="admin")
+    POSTGRES_PASSWORD_FILE: str = Field(default="")
+    DATABASE_URL_FILE: str = Field(default="")
     
     # Connection Pool Settings
     # Database Connection Pool
     # For 50 cameras: Recommended DB_POOL_SIZE=75, DB_MAX_OVERFLOW=150
     # Default values are conservative for smaller deployments
-    DB_POOL_SIZE: int = Field(default=50, env="DB_POOL_SIZE")
-    DB_MAX_OVERFLOW: int = Field(default=100, env="DB_MAX_OVERFLOW")
-    DB_POOL_RECYCLE: int = Field(default=3600, env="DB_POOL_RECYCLE")
-    DB_POOL_PRE_PING: bool = Field(default=True, env="DB_POOL_PRE_PING")
+    DB_POOL_SIZE: int = Field(default=50)
+    DB_MAX_OVERFLOW: int = Field(default=100)
+    DB_POOL_RECYCLE: int = Field(default=3600)
+    DB_POOL_PRE_PING: bool = Field(default=True)
+    # These four sat as literals in db_connection.py, directly beside the four
+    # above that were already settings — so half the pool was configurable and
+    # half was not. DB_STATEMENT_TIMEOUT_MS is the 120 s ceiling the
+    # intelligence endpoints reason about when choosing their own timeout.
+    DB_POOL_TIMEOUT: int = Field(
+        default=60,
+        description="Seconds to wait for a free pooled connection before failing. Default: 60"
+    )
+    DB_CONNECT_TIMEOUT: int = Field(
+        default=30,
+        description="Seconds to wait when opening a new database connection. Default: 30"
+    )
+    DB_COMMAND_TIMEOUT: int = Field(
+        default=120,
+        description="Seconds asyncpg waits for a single command to return. Default: 120"
+    )
+    DB_STATEMENT_TIMEOUT_MS: int = Field(
+        default=120000,
+        description="PostgreSQL statement_timeout in milliseconds. Default: 120000 (120s)"
+    )
+    DB_IDLE_TX_TIMEOUT_MS: int = Field(
+        default=300000,
+        description=("PostgreSQL idle_in_transaction_session_timeout in milliseconds. "
+                     "Default: 300000 (5 min)")
+    )
+    # Host substituted for "postgres" when running OUTSIDE the container
+    # (alembic/env.py and backend/utils/migrations.py both detect the absence of
+    # /.dockerenv). Previously read straight from os.getenv in two places with
+    # no central declaration.
+    LOCAL_DB_HOST: str = Field(
+        default="localhost",
+        description="Database host used when running outside Docker (alembic, CLI migrations)")
 
     # =====================================================
     # Redis Cache Configuration
     # =====================================================
-    REDIS_URL: str = Field(default="redis://redis:6379/0", env="REDIS_URL")  # Docker: redis hostname
-    REDIS_URL_FILE: str = Field(default="", env="REDIS_URL_FILE")
-    REDIS_MAX_CONNECTIONS: int = Field(default=100, env="REDIS_MAX_CONNECTIONS")
-    REDIS_POOL_SIZE: int = Field(default=50, env="REDIS_POOL_SIZE")
-    CACHE_TTL: int = Field(default=3600, env="CACHE_TTL", description="Cache TTL for dashboard data in seconds (default: 3600 = 1 hour)")
-    CACHE_TTL_UNKNOWN: int = Field(default=108000, env="CACHE_TTL_UNKNOWN", description="Cache TTL for unknown faces page in seconds (default: 108000 = 30 hours)")
-    CACHE_LOCAL_SIZE: int = Field(default=50000, env="CACHE_LOCAL_SIZE")
-    CACHE_VERSION: str = Field(default="v1", env="CACHE_VERSION")
-    CACHE_WARNING_ENABLED: bool = Field(default=True, env="CACHE_WARNING_ENABLED")
-    CACHE_WARNING_INTERVAL: int = Field(default=300, env="CACHE_WARNING_INTERVAL")
+    REDIS_URL: str = Field(default="redis://redis:6379/0")  # Docker: redis hostname
+    REDIS_URL_FILE: str = Field(default="")
+    REDIS_MAX_CONNECTIONS: int = Field(default=100)
+    REDIS_POOL_SIZE: int = Field(default=50)
+    CACHE_TTL: int = Field(default=3600, description="Cache TTL for dashboard data in seconds (default: 3600 = 1 hour)")
+    CACHE_TTL_UNKNOWN: int = Field(default=108000, description="Cache TTL for unknown faces page in seconds (default: 108000 = 30 hours)")
+    CACHE_LOCAL_SIZE: int = Field(default=50000)
+    CACHE_VERSION: str = Field(default="v1")
+    CACHE_WARNING_ENABLED: bool = Field(default=True)
+    CACHE_WARNING_INTERVAL: int = Field(default=300)
     
     # =====================================================
     # Map Service Configuration
     # =====================================================
-    MAP_CACHE_TTL: int = Field(default=3600, env="MAP_CACHE_TTL", description="Cache TTL for generated maps in seconds (default: 3600 = 1 hour)")
-    MAP_CACHE_ENABLED: bool = Field(default=True, env="MAP_CACHE_ENABLED", description="Enable caching for map generation (default: True)")
-    MAP_MAX_COORDINATES: int = Field(default=10000, env="MAP_MAX_COORDINATES", description="Maximum coordinates per map to prevent memory issues (default: 10000)")
-    MAP_GENERATION_TIMEOUT: int = Field(default=30, env="MAP_GENERATION_TIMEOUT", description="Timeout for map generation in seconds (default: 30)")
-    MAP_MAX_TRACKS: int = Field(default=100, env="MAP_MAX_TRACKS", description="Maximum tracks per map request (default: 100)")
-    MAP_DEFAULT_STYLE: str = Field(default="light", env="MAP_DEFAULT_STYLE", description="Default map style: dark, light, satellite, terrain (default: light)")
-    
-    # Offline Map Tiles Configuration
-    MAP_OFFLINE_TILES_PATH: Optional[str] = Field(default="./tiles", env="MAP_OFFLINE_TILES_PATH", description="Path to offline map tiles directory (format: {z}/{x}/{y}.png) or MBTiles file")
-    MAP_OFFLINE_TILES_ENABLED: bool = Field(default=True, env="MAP_OFFLINE_TILES_ENABLED", description="Enable offline map tiles (requires MAP_OFFLINE_TILES_PATH to be set)")
-    MAP_ENABLE_SECURITY_FEATURES: bool = Field(default=True, env="MAP_ENABLE_SECURITY_FEATURES", description="Enable security intelligence features by default (default: True)")
-    MAP_DETECT_PATTERNS: bool = Field(default=True, env="MAP_DETECT_PATTERNS", description="Enable pattern detection by default (default: True)")
-    MAP_SHOW_RISK_HEATMAP: bool = Field(default=True, env="MAP_SHOW_RISK_HEATMAP", description="Show risk heatmap by default (default: True)")
-    MAP_SHOW_TIMELINE: bool = Field(default=False, env="MAP_SHOW_TIMELINE", description="Show timeline playback control by default (default: False)")
+    MAP_MAX_COORDINATES: int = Field(default=10000, description="Maximum coordinates per map to prevent memory issues (default: 10000)")
+
+    # --- MapLibre + Martin (offline basemaps) ---------------------------------
+    # Root of the map dataset tree. The ONLY settable map path: production/ and
+    # metadata/ are derived from it, so a deployment cannot point the archives
+    # at one directory and their content ledger at another — a split that would
+    # let an unverified archive be authorized by someone else's verdict file.
+    # The isolated regression stack sets this to its own fixture tree.
+    MAP_DATA_DIR: str = Field(
+        default="/app/map-data",
+        description="Root of the map dataset tree (production/ and metadata/ are derived from it)")
+    # Free space that must REMAIN after a dataset is installed. Installing
+    # stages a full copy and retains the archive it replaces, so a dataset
+    # costs about twice its size in transit; without a floor a large install
+    # can fill the volume out from under PostgreSQL and the logs.
+    MAP_INSTALL_DISK_RESERVE_GB: float = Field(
+        default=2.0, ge=0.0,
+        description="Gigabytes that must remain free after installing a map dataset")
+    # Martin's INTERNAL address, used only by the backend for availability
+    # deep-checks (catalog + probe tile). Browsers never see it: they reach
+    # Martin through nginx at /maps/ on the site origin.
+    MAP_MARTIN_INTERNAL_URL: str = Field(
+        default="http://martin:3000",
+        description="Internal URL of the Martin tile server (backend-only; browsers use /maps/)")
+    # How often the cached style-availability verdict is re-derived from
+    # Martin's catalog + a representative tile. The deep check is deliberately
+    # NOT run per request — /api/maps/availability returns the cached result.
+    MAP_AVAILABILITY_REFRESH_SECONDS: int = Field(
+        default=300, ge=30,
+        description="Seconds between map-dataset availability deep-checks against Martin")
+    MAP_DEFAULT_LAT: float = Field(default=33.87, description="Tileset center latitude (Lebanon)")
+    MAP_DEFAULT_LON: float = Field(default=35.85, description="Tileset center longitude (Lebanon)")
+    MAP_DEFAULT_ZOOM: int = Field(default=10)
+    # Panning bounds = the tileset's actual footprint (from the z10 tile
+    # numbering). Without these the map lets you pan off the dataset into
+    # blank space that looks like a broken map.
+    MAP_BOUNDS_SOUTH: float = Field(default=32.84)
+    MAP_BOUNDS_WEST: float = Field(default=34.80)
+    MAP_BOUNDS_NORTH: float = Field(default=34.89)
+    MAP_BOUNDS_EAST: float = Field(default=36.92)
     
     # Animated Map Features
-    MAP_SHOW_ANIMATED_AVATAR: bool = Field(default=False, env="MAP_SHOW_ANIMATED_AVATAR", description="Show animated avatar moving along route by default (default: False)")
-    MAP_ANIMATION_PERIOD_SECONDS: int = Field(default=1, env="MAP_ANIMATION_PERIOD_SECONDS", description="Animation period: seconds of real time per frame (default: 1)")
-    MAP_ANIMATION_MAX_DURATION_SECONDS: int = Field(default=600, env="MAP_ANIMATION_MAX_DURATION_SECONDS", description="Maximum animation duration in seconds (default: 600 = 10 minutes)")
-    MAP_ANIMATION_MIN_SPEED: float = Field(default=0.5, env="MAP_ANIMATION_MIN_SPEED", description="Minimum animation playback speed multiplier (default: 0.5x)")
-    MAP_ANIMATION_MAX_SPEED: float = Field(default=10.0, env="MAP_ANIMATION_MAX_SPEED", description="Maximum animation playback speed multiplier (default: 10x)")
-    MAP_ANIMATION_TRANSITION_TIME_MS: int = Field(default=300, env="MAP_ANIMATION_TRANSITION_TIME_MS", description="Transition time between frames in milliseconds (default: 300)")
     
     # Co-Appearance Detection
-    MAP_CO_APPEARANCE_TIME_WINDOW_SECONDS: int = Field(default=10, env="MAP_CO_APPEARANCE_TIME_WINDOW_SECONDS", description="Time window for detecting co-appearances in seconds (default: 10)")
-    MAP_CO_APPEARANCE_DISTANCE_METERS: float = Field(default=100.0, env="MAP_CO_APPEARANCE_DISTANCE_METERS", description="Distance threshold for co-appearance detection in meters (default: 100)")
-    MAP_CO_APPEARANCE_ENABLED: bool = Field(default=True, env="MAP_CO_APPEARANCE_ENABLED", description="Enable co-appearance detection for multi-identity tracking (default: True)")
 
     # =====================================================
     # Face Recognition Models
     # =====================================================
-    DETECTION_MODEL: str = Field(default="/app/weights/det_10g.onnx", env="DETECTION_MODEL")  # Docker path
-    RECOGNITION_MODEL: str = Field(default="/app/weights/w600k_r50.onnx", env="RECOGNITION_MODEL")  # Docker path
-    SIMILARITY_THRESHOLD: float = Field(default=0.4, env="SIMILARITY_THRESHOLD")
-    UNKNOWN_SIMILARITY_THRESHOLD: float = Field(default=0.35, env="UNKNOWN_SIMILARITY_THRESHOLD", description="Cosine similarity to match an existing UNKNOWN identity (below SIMILARITY_THRESHOLD creates fewer duplicate unknowns)")
+    DETECTION_MODEL: str = Field(default="/app/weights/det_10g.onnx")  # Docker path
+    RECOGNITION_MODEL: str = Field(default="/app/weights/w600k_r50.onnx")  # Docker path
+    SIMILARITY_THRESHOLD: float = Field(default=0.4)
+    UNKNOWN_SIMILARITY_THRESHOLD: float = Field(default=0.35, description="Cosine similarity to match an existing UNKNOWN identity (below SIMILARITY_THRESHOLD creates fewer duplicate unknowns)")
 
     # --- Performance / concurrency ------------------------------------------
     # Threads dedicated to CPU-bound inference (ONNX + OpenCV release the GIL,
     # so a thread pool gives real parallelism without duplicating model memory).
-    INFERENCE_WORKERS: int = Field(default=3, env="INFERENCE_WORKERS")
+    INFERENCE_WORKERS: int = Field(default=3)
     # Max frames being inferred simultaneously (global) and per pipeline
-    MAX_CONCURRENT_INFERENCE: int = Field(default=3, env="MAX_CONCURRENT_INFERENCE")
-    MAX_CONCURRENT_INFERENCE_PER_PIPELINE: int = Field(default=2, env="MAX_CONCURRENT_INFERENCE_PER_PIPELINE")
+    MAX_CONCURRENT_INFERENCE: int = Field(default=3)
+    MAX_CONCURRENT_INFERENCE_PER_PIPELINE: int = Field(default=2)
     # Webhook ingress limits
-    WEBHOOK_MAX_BODY_MB: int = Field(default=25, env="WEBHOOK_MAX_BODY_MB")
-    WEBHOOK_DEDUP_TTL_SECONDS: int = Field(default=60, env="WEBHOOK_DEDUP_TTL_SECONDS")
+    WEBHOOK_MAX_BODY_MB: int = Field(default=25)
+    # Must cover the sender's worst-case same-event retry horizon so a retried
+    # event_id still deduplicates. VMS: 6 attempts x (5s connect + 30s read)
+    # + 5 waits x max(backoff, Retry-After<=30) = 210 + 150 = 360s worst case;
+    # 600 = 360 x ~1.67 safety margin. (Its re-arm path mints a NEW event_id,
+    # so longer windows buy nothing.)
+    WEBHOOK_DEDUP_TTL_SECONDS: int = Field(default=600)
+    # Webhook ingress authentication. The endpoint had none: nginx rate-limits
+    # it but does not authenticate it, so anyone who could reach the port could
+    # enqueue frames and create identities.
+    WEBHOOK_API_KEYS: str = Field(
+        default="",
+        description="Comma-separated ingest keys. A SET, so a key can be rotated "
+                    "by appending the new one, rolling cameras, then dropping the old.")
+    WEBHOOK_API_KEYS_FILE: str = Field(
+        default="",
+        description="Path to a Docker secret holding WEBHOOK_API_KEYS")
+    WEBHOOK_AUTH_MODE: str = Field(
+        default="enforce",
+        description="enforce | log_only | off. log_only exists purely to migrate "
+                    "a fleet of already-deployed cameras; production refuses to "
+                    "start on anything but enforce unless the risk is acknowledged.")
+    WEBHOOK_AUTH_TOKEN: str = Field(
+        default="",
+        description="Bearer token for external senders that present "
+                    "`Authorization: Bearer <token>`. An ALIAS, not a second "
+                    "credential store: it is appended to WEBHOOK_API_KEYS during "
+                    "Settings construction, so there is exactly one credential set "
+                    "at runtime and rotation, redaction and the weak/reused/published "
+                    "checks all apply to it unchanged. Consequence: guard violations "
+                    "report it positionally under WEBHOOK_API_KEYS, not by this name.")
+    WEBHOOK_AUTH_TOKEN_FILE: str = Field(
+        default="",
+        description="Path to a Docker secret holding WEBHOOK_AUTH_TOKEN")
+    WEBHOOK_AUTH_HEADER: str = Field(
+        default="X-Webhook-Key",
+        description="Header carrying the ingest key. Some camera firmware can only "
+                    "send one fixed custom header name. `Authorization: Bearer <key>` "
+                    "is ALWAYS accepted regardless of this value.")
+    WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS: int = Field(
+        default=30,
+        description="How long a worker may serve issued ingest credentials from "
+                    "its in-process cache. This IS the revocation latency: "
+                    "deleting a credential in the admin UI takes effect on every "
+                    "worker within this window. Lower means faster revocation and "
+                    "more queries; the query is one indexed SELECT over a table "
+                    "with tens of rows. Matches the pipeline-alias cache TTL so "
+                    "the ingest path has ONE staleness number, not two.")
+    WEBHOOK_AUTH_INSECURE_ACK: bool = Field(
+        default=False,
+        description="Explicitly acknowledge running the ingest webhook unauthenticated. "
+                    "Turns a startup refusal into a logged warning. Same shape as "
+                    "VECTOR_INDEX_FALLBACK: a weaker posture must be chosen, not defaulted into.")
     # SQL agent isolation
-    SQL_AGENT_MAX_CONCURRENT: int = Field(default=2, env="SQL_AGENT_MAX_CONCURRENT")
-    SQL_AGENT_TOTAL_TIMEOUT: int = Field(default=300, env="SQL_AGENT_TOTAL_TIMEOUT")
+    SQL_AGENT_MAX_CONCURRENT: int = Field(default=2)
+    SQL_AGENT_TOTAL_TIMEOUT: int = Field(default=300)
 
     # --- Credentials used to execute LLM-generated SQL ---------------------
     # Deliberately separate from the application's own database role. The AST
@@ -242,25 +409,65 @@ class Settings(BaseSettings):
     #
     # Left empty the agent falls back to the application role and logs a
     # warning. In production the config guard rejects that fallback.
-    SQL_AGENT_DB_USER: str = Field(default="", env="SQL_AGENT_DB_USER", description="Read-only role used to execute generated SQL. Must differ from POSTGRES_USER")
-    SQL_AGENT_DB_PASSWORD: str = Field(default="", env="SQL_AGENT_DB_PASSWORD", description="Password for SQL_AGENT_DB_USER. Prefer SQL_AGENT_DB_PASSWORD_FILE")
-    SQL_AGENT_DB_PASSWORD_FILE: str = Field(default="", env="SQL_AGENT_DB_PASSWORD_FILE", description="Path to a Docker secret holding the read-only role's password")
+    SQL_AGENT_DB_USER: str = Field(default="", description="Read-only role used to execute generated SQL. Must differ from POSTGRES_USER")
+    SQL_AGENT_DB_PASSWORD: str = Field(default="", description="Password for SQL_AGENT_DB_USER. Prefer SQL_AGENT_DB_PASSWORD_FILE")
+    SQL_AGENT_DB_PASSWORD_FILE: str = Field(default="", description="Path to a Docker secret holding the read-only role's password")
 
     # --- Identity auto-enrichment: confidently-matched runtime embeddings are added
     # to the identity so it learns the person's appearance range over time.
-    IDENTITY_ENRICH_MIN_SIMILARITY: float = Field(default=0.55, env="IDENTITY_ENRICH_MIN_SIMILARITY")
-    IDENTITY_ENRICH_MIN_QUALITY: float = Field(default=0.5, env="IDENTITY_ENRICH_MIN_QUALITY")
-    IDENTITY_MAX_EMBEDDINGS: int = Field(default=20, env="IDENTITY_MAX_EMBEDDINGS")
-    CONFIDENCE_THRESHOLD: float = Field(default=0.5, env="CONFIDENCE_THRESHOLD")
-    FACES_DIR: str = Field(default="/app/storage/faces", env="FACES_DIR")  # Unified storage: known faces in storage/faces
-    DB_PATH: str = Field(default="/app/database/face_database", env="DB_PATH")  # Docker path
+    # Auto-enrichment writes a RUNTIME observation permanently into an enrolled
+    # person. Off by default: the upstream admission bar is SIMILARITY_THRESHOLD
+    # (0.4), so one wrong attribution becomes a stored vector, and every later
+    # photo of that wrong person then matches the identity at ~1.0. No column
+    # distinguishes an auto-learned vector from an operator-enrolled one, so the
+    # mistake is invisible afterwards. Turn on only with review in place.
+    IDENTITY_AUTO_ENRICH_ENABLED: bool = Field(
+        default=False,
+        description=("Let recognition add high-confidence runtime embeddings to an "
+                     "enrolled identity. Off by default: a single mis-attribution "
+                     "becomes permanent and self-reinforcing. Default: false")
+    )
+    IDENTITY_ENRICH_MIN_SIMILARITY: float = Field(
+        default=0.75,
+        description=("Similarity an auto-enrichment candidate must clear. Raised to "
+                     "match CONFIDENCE_HIGH_MIN: at the old 0.55 this sat only 0.15 "
+                     "above the match threshold itself. Default: 0.75")
+    )
+    IDENTITY_ENRICH_MIN_QUALITY: float = Field(default=0.5)
+    IDENTITY_INGEST_TOP_K: int = Field(
+        default=5,
+        description=("Candidate depth when matching an ingested face against known "
+                     "identities. Raising it widens the pool the threshold filters. Default: 5")
+    )
+    # How similar a new view must already be to an identity's stored views
+    # before enrichment treats it as redundant and skips it.
+    IDENTITY_NEAR_DUPLICATE_MIN: float = Field(
+        default=0.95,
+        description=("Similarity at/above which an enrichment candidate is considered "
+                     "a duplicate of a view this identity already has. Default: 0.95")
+    )
+    # IDENTITY_MAX_EMBEDDINGS was removed here: it capped enrichment growth at
+    # 20 while MAX_EMBEDDINGS_PER_IDENTITY capped retention pruning at 10, so
+    # enrichment grew an identity to 20 views and the nightly job cut it back
+    # to 10 — two knobs disagreeing about one quantity. See that field below.
+
+    # How good a match must be before it replaces an identity's displayed face,
+    # when no quality score is available to compare. This branch previously
+    # triggered on `similarity > 0.0`, i.e. always, so an identity's avatar
+    # became whatever arrived last — a CORRECT match could show a different
+    # person entirely, because best_snapshot_path feeds every search result card.
+    IDENTITY_SNAPSHOT_REPLACE_MIN_SIMILARITY: float = Field(
+        default=0.75,
+        description=("Similarity required to replace an identity's best snapshot "
+                     "when no quality score is available. Default: 0.75")
+    )
+    CONFIDENCE_THRESHOLD: float = Field(default=0.5)
     
     # =====================================================
     # Identity Index Configuration (FAISS / pgvector)
     # =====================================================
-    IDENTITY_EMBEDDING_SIZE: int = Field(default=512, env="IDENTITY_EMBEDDING_SIZE")
-    IDENTITY_INDEX_DB_PATH: str = Field(default="/app/database/identity_indexes", env="IDENTITY_INDEX_DB_PATH")  # Docker path
-    IDENTITY_INDEX_AUTO_SAVE_INTERVAL: int = Field(default=300, env="IDENTITY_INDEX_AUTO_SAVE_INTERVAL")  # 5 minutes
+    IDENTITY_EMBEDDING_SIZE: int = Field(default=512)
+    IDENTITY_INDEX_DB_PATH: str = Field(default="/app/database/identity_indexes")  # Docker path
     
     # Vector Search Backend Selection
     # Options: "pgvector" (RECOMMENDED for production) or "faiss" (faster but more complex)
@@ -278,87 +485,102 @@ class Settings(BaseSettings):
     # - You have resources for FAISS maintenance
     VECTOR_BACKEND: str = Field(
         default="pgvector",
-        env="VECTOR_BACKEND",
         description="Vector search backend: 'pgvector' (RECOMMENDED for production) or 'faiss' (faster but requires sync logic)"
+    )
+    VECTOR_INDEX_AUTOSAVE_INTERVAL_SECONDS: float = Field(
+        default=900.0,
+        description=(
+            "Seconds between vector-index snapshots. A 100k flat index takes "
+            "~21s and ~201MB to write (measured), so this must be MUCH larger "
+            "than one save or the loop saves continuously. Default 900s (15 "
+            "min) is ~43x the measured save. Values below 120s are clamped. "
+            "Overlapping runs are SKIPPED, never queued — losing a snapshot is "
+            "not data loss, since the index rebuilds from PostgreSQL."
+        )
+    )
+    VECTOR_INDEX_RECONCILE_INTERVAL_SECONDS: float = Field(
+        default=3600.0,
+        description="Seconds between index/PostgreSQL reconciliation passes."
+    )
+    VECTOR_INDEX_FALLBACK: str = Field(
+        default="",
+        description=(
+            "Explicit opt-in to degrade when VECTOR_BACKEND=faiss cannot start "
+            "(faiss missing, or an unimplemented index type). Empty (default) "
+            "means FAIL STARTUP — a silent downgrade would serve searches from "
+            "a different index than the operator configured. Set to 'pgvector' "
+            "to allow degradation; it is logged at CRITICAL and reported as "
+            "degraded health."
+        )
     )
     
     # pgvector Configuration
     PGVECTOR_INDEX_TYPE: str = Field(
         default="hnsw",
-        env="PGVECTOR_INDEX_TYPE",
         description="pgvector index type: 'hnsw' (fast, recommended) or 'ivfflat' (memory efficient)"
     )
-    PGVECTOR_HNSW_M: int = Field(default=16, env="PGVECTOR_HNSW_M", description="HNSW M parameter (connections per node, 16-64)")
-    PGVECTOR_HNSW_EF_CONSTRUCTION: int = Field(default=100, env="PGVECTOR_HNSW_EF_CONSTRUCTION", description="HNSW efConstruction (build-time search width, 64-200, higher = better index quality)")
-    PGVECTOR_HNSW_EF_SEARCH: int = Field(default=100, env="PGVECTOR_HNSW_EF_SEARCH", description="HNSW efSearch (search-time accuracy, 20-200, higher = more accurate but slower. RECOMMENDED: 100 for face recognition to match FAISS accuracy)")
-    PGVECTOR_IVFFLAT_LISTS: int = Field(default=100, env="PGVECTOR_IVFFLAT_LISTS", description="IVFFlat lists (clusters, sqrt(N) is good)")
-    PGVECTOR_IVFFLAT_PROBES: int = Field(default=10, env="PGVECTOR_IVFFLAT_PROBES", description="IVFFlat probes (clusters to search, 1-lists)")
+    PGVECTOR_HNSW_M: int = Field(default=16, description="HNSW M parameter (connections per node, 16-64)")
+    PGVECTOR_HNSW_EF_CONSTRUCTION: int = Field(default=100, description="HNSW efConstruction (build-time search width, 64-200, higher = better index quality)")
+    PGVECTOR_HNSW_EF_SEARCH: int = Field(default=100, description="HNSW efSearch (search-time accuracy, 20-200, higher = more accurate but slower. RECOMMENDED: 100 for face recognition to match FAISS accuracy)")
+    PGVECTOR_IVFFLAT_LISTS: int = Field(default=100, description="IVFFlat lists (clusters, sqrt(N) is good)")
+    PGVECTOR_IVFFLAT_PROBES: int = Field(default=10, description="IVFFlat probes (clusters to search, 1-lists)")
     
-    # FAISS Repair Configuration (only used when VECTOR_BACKEND=faiss)
-    REPAIR_FAISS_ON_STARTUP: bool = Field(default=True, env="REPAIR_FAISS_ON_STARTUP")  # Enable/disable repair on startup
-    REPAIR_FAISS_INTERVAL_HOURS: int = Field(default=24, env="REPAIR_FAISS_INTERVAL_HOURS")  # Background repair interval (hours)
-    
-    # Index Type Configuration
-    # Options: "flat" (IndexFlatIP), "ivf" (IndexIVFFlat), "hnsw" (IndexHNSWFlat), "ivfpq" (IndexIVFPQ)
-    KNOWN_INDEX_TYPE: str = Field(default="flat", env="KNOWN_INDEX_TYPE", description="Index type for KNOWN identities: flat, ivf, hnsw, ivfpq")
-    UNKNOWN_INDEX_TYPE: str = Field(default="flat", env="UNKNOWN_INDEX_TYPE", description="Index type for UNKNOWN identities: flat (recommended)")
-    
-    # IVF Configuration (for IndexIVFFlat)
-    KNOWN_INDEX_NLIST: int = Field(default=1000, env="KNOWN_INDEX_NLIST", description="Number of clusters for IVF index (sqrt(N) recommended, e.g., 1000 for 1M vectors)")
-    KNOWN_INDEX_NPROBE: int = Field(default=20, env="KNOWN_INDEX_NPROBE", description="Number of clusters to search in IVF (10-50, higher = better accuracy, slower)")
-    
-    # HNSW Configuration (for IndexHNSWFlat)
-    KNOWN_INDEX_HNSW_M: int = Field(default=32, env="KNOWN_INDEX_HNSW_M", description="HNSW M parameter (16-64, higher = better accuracy, more memory)")
-    KNOWN_INDEX_HNSW_EF_CONSTRUCTION: int = Field(default=200, env="KNOWN_INDEX_HNSW_EF_CONSTRUCTION", description="HNSW efConstruction (200-400)")
-    KNOWN_INDEX_HNSW_EF_SEARCH: int = Field(default=64, env="KNOWN_INDEX_HNSW_EF_SEARCH", description="HNSW efSearch (16-128)")
-    
-    # IVFPQ Configuration (for IndexIVFPQ)
-    KNOWN_INDEX_PQ_M: int = Field(default=64, env="KNOWN_INDEX_PQ_M", description="PQ m parameter (8, 16, 32, 64)")
-    KNOWN_INDEX_PQ_BITS: int = Field(default=8, env="KNOWN_INDEX_PQ_BITS", description="PQ bits per subquantizer (8 is standard)")
+    # The shipped FAISS implementation is FlatFaissIndex: exact search, one
+    # supported index type. The ivf/hnsw/ivfpq knob family that used to sit
+    # here configured index types base.py refuses to build, and the REPAIR_*
+    # pair drove a repair loop replaced by reconcile — all were advertised as
+    # editable in the admin UI while doing nothing (retired 2026-08).
+    KNOWN_INDEX_TYPE: str = Field(default="flat", description="FAISS index type; 'flat' (exact) is the only supported value")
 
     # =====================================================
     # Queue & Processing Configuration
     # =====================================================
-    MAX_QUEUE_SIZE: int = Field(default=10000, env="MAX_QUEUE_SIZE")
-    QUEUE_WORKERS: int = Field(default=50, env="QUEUE_WORKERS")
-    BATCH_SIZE: int = Field(default=20, env="BATCH_SIZE")
-    MAX_CONCURRENT_REQUESTS: int = Field(default=500, env="MAX_CONCURRENT_REQUESTS")
-    GPU_BATCH_SIZE: int = Field(default=32, env="GPU_BATCH_SIZE")
-    CPU_BATCH_SIZE: int = Field(default=10, env="CPU_BATCH_SIZE")
-    PIPELINE_BATCH_SIZE: int = Field(default=5, env="PIPELINE_BATCH_SIZE")
+    MAX_QUEUE_SIZE: int = Field(default=10000)
+    QUEUE_WORKERS: int = Field(default=50)
+    BATCH_SIZE: int = Field(default=20)
+    MAX_CONCURRENT_REQUESTS: int = Field(default=500)
+    GPU_BATCH_SIZE: int = Field(default=32)
+    CPU_BATCH_SIZE: int = Field(default=10)
+    PIPELINE_BATCH_SIZE: int = Field(default=5)
     
-    # Rate Limiting
-    RATE_LIMIT_ENABLED: bool = Field(default=False, env="RATE_LIMIT_ENABLED")
-    RATE_LIMIT_INTERVAL: float = Field(default=1.0, env="RATE_LIMIT_INTERVAL")
 
     # =====================================================
     # Storage Configuration
     # =====================================================
-    STORAGE_DIR: str = Field(default="/app/storage", env="STORAGE_DIR")  # Docker path
-    SAVE_IMAGES: bool = Field(default=True, env="SAVE_IMAGES")
-    MAX_STORAGE_GB: int = Field(default=500, env="MAX_STORAGE_GB")
-    MAX_PHOTOS_PER_PERSON: int = Field(default=1, env="MAX_PHOTOS_PER_PERSON")
-    SAVE_UNKNOWN_FACES: bool = Field(default=False, env="SAVE_UNKNOWN_FACES")
-    MAX_FILE_SIZE: int = Field(default=10485760, env="MAX_FILE_SIZE")  # 10MB in bytes
+    STORAGE_DIR: str = Field(default="/app/storage")  # Docker path
+    SAVE_IMAGES: bool = Field(default=True)
+    MAX_STORAGE_GB: int = Field(default=500)
+    MAX_PHOTOS_PER_PERSON: int = Field(default=1)
+    SAVE_UNKNOWN_FACES: bool = Field(default=False)
+    MAX_FILE_SIZE: int = Field(default=10485760)  # 10MB in bytes
     
     # Webhook Debug Configuration
-    SAVE_WEBHOOK_IMAGES: bool = Field(default=True, env="SAVE_WEBHOOK_IMAGES", description="Save all images received via webhook for debugging")
-    WEBHOOK_IMAGES_DIR: str = Field(default="./debug/webhook_images", env="WEBHOOK_IMAGES_DIR", description="Directory to save webhook images")
+    SAVE_WEBHOOK_IMAGES: bool = Field(default=True, description="Save all images received via webhook for debugging")
     
     # Crop Debug Configuration
-    SAVE_CROPPED_IMAGES: bool = Field(default=True, env="SAVE_CROPPED_IMAGES", description="Save cropped person images for debugging")
-    CROPPED_IMAGES_DIR: str = Field(default="./debug/cropped", env="CROPPED_IMAGES_DIR", description="Directory to save cropped images")
+    SAVE_CROPPED_IMAGES: bool = Field(default=True, description="Save cropped person images for debugging")
 
-    # =====================================================
-    # Monitoring & Metrics
-    # =====================================================
-    ENABLE_METRICS: bool = Field(default=True, env="ENABLE_METRICS")
-    METRICS_PORT: int = Field(default=9090, env="METRICS_PORT")
+    # -----------------------------------------------------------------
+    # Operational surfaces observed by /metrics
+    #
+    # These were read directly from os.environ in backend/core/operational_metrics.py
+    # with defaults that existed nowhere else, so the values Prometheus reported
+    # could not be configured or even discovered from config.py.
+    # -----------------------------------------------------------------
+    BACKUP_DIR: str = Field(
+        default="/backups", description="Directory the backup job writes to; age is exported as a metric")
+    BACKUP_RETENTION_DAYS: int = Field(
+        default=14, description="Days of backups to keep (also consumed by scripts/backup/backup.sh)")
+    BACKUP_INTERVAL_SECONDS: int = Field(
+        default=86400, description="Interval between backup runs (also consumed by backup-loop.sh)")
+    TLS_CERT_PATH: str = Field(
+        default="/etc/nginx/certs/server.crt",
+        description="Certificate whose expiry is exported as a metric")
 
     # =====================================================
     # CORS Configuration
     # =====================================================
-    CORS_ORIGINS: str = Field(default="*", env="CORS_ORIGINS")
+    CORS_ORIGINS: str = Field(default="*")
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -397,6 +619,81 @@ class Settings(BaseSettings):
             return explicit
         return [origin for origin in self.cors_origins_list if origin != "*"]
 
+    # =====================================================
+    # Derived filesystem layout
+    # =====================================================
+    # STORAGE_DIR is the ONLY externally settable root. Everything beneath it is
+    # computed here and is read-only, so a compose file, a .env, a module or the
+    # admin settings API cannot point one of them somewhere else.
+    #
+    # This is not hypothetical tidiness. `.env` once shipped
+    # FACES_DIR=./assets/faces while compose set /app/storage/faces, and the two
+    # halves of the application then disagreed about where a person's photos
+    # lived. backend/security/config_guard.py rejects any environment that still
+    # tries to set these, naming the variable — silently ignoring the value would
+    # leave the same confusion with none of the evidence.
+
+    @property
+    def FACES_DIR(self) -> str:
+        """Enrolled face images: <STORAGE_DIR>/faces/<identity_uuid>/image_NNN.ext"""
+        return os.path.join(self.STORAGE_DIR, "faces")
+
+    @property
+    def UPLOAD_TEMP_DIR(self) -> str:
+        """Staging area for in-flight uploads.
+
+        Deliberately INSIDE faces/ so the final placement is an atomic
+        os.replace on the same filesystem rather than a cross-device copy.
+        """
+        return os.path.join(self.FACES_DIR, ".incoming")
+
+    @property
+    def PENDING_UPLOAD_DIR(self) -> str:
+        """Uploads awaiting an administrator's identity decision.
+
+        Deliberately OUTSIDE faces/: the gallery holds one directory per
+        identity UUID and nothing else, and an upload parked for review has no
+        identity yet. Same filesystem as faces/, so the confirmed photo still
+        reaches the gallery by rename rather than a cross-device copy.
+        """
+        return os.path.join(self.STORAGE_DIR, "pending")
+
+    @property
+    def WEBHOOK_IMAGES_DIR(self) -> str:
+        """Raw ingested frames, when SAVE_WEBHOOK_IMAGES is on (debug only)."""
+        return os.path.join(self.STORAGE_DIR, "debug", "webhook_images")
+
+    @property
+    def CROPPED_IMAGES_DIR(self) -> str:
+        """Person crops, when SAVE_CROPPED_IMAGES is on (debug only)."""
+        return os.path.join(self.STORAGE_DIR, "debug", "cropped")
+
+    @property
+    def MODEL_CANDIDATE_DIR(self) -> str:
+        """Candidate models awaiting promotion; was hard-coded in the trainer."""
+        return os.path.join(self.ML_ARTIFACT_DIR, "candidates")
+
+    @property
+    def MAP_PRODUCTION_DIR(self) -> str:
+        """The archives Martin serves. Martin mounts this same directory."""
+        return os.path.join(self.MAP_DATA_DIR, "production")
+
+    @property
+    def MAP_METADATA_DIR(self) -> str:
+        """Provenance and verdicts: datasets.json, checksums.txt, the ledger."""
+        return os.path.join(self.MAP_DATA_DIR, "metadata")
+
+    @property
+    def MAP_CONTENT_LEDGER_PATH(self) -> str:
+        """Which archives have had their CONTENT measured and passed.
+
+        Derived rather than settable so the ledger can never be pointed at a
+        different tree than the archives it authorizes: a verdict file that
+        describes some other deployment's data would authorize bytes nobody
+        here has ever inspected.
+        """
+        return os.path.join(self.MAP_METADATA_DIR, "content_verdicts.json")
+
     @property
     def is_production(self) -> bool:
         return str(self.ENVIRONMENT).strip().lower() in ("production", "prod")
@@ -404,80 +701,121 @@ class Settings(BaseSettings):
     # =====================================================
     # Data Retention & Cleanup
     # =====================================================
-    DATA_RETENTION_DAYS: int = Field(default=30, env="DATA_RETENTION_DAYS")
-    CLEANUP_INTERVAL_HOURS: int = Field(default=24, env="CLEANUP_INTERVAL_HOURS")
+    DATA_RETENTION_DAYS: int = Field(default=30)
+    CLEANUP_INTERVAL_HOURS: int = Field(default=24)
 
     # =====================================================
     # Batch Processing
     # =====================================================
-    BATCH_WRITE_SIZE: int = Field(default=50, env="BATCH_WRITE_SIZE")
-    BATCH_WRITE_INTERVAL: float = Field(default=1.0, env="BATCH_WRITE_INTERVAL")
-    BATCH_WRITE_MAX_WAIT: float = Field(default=5.0, env="BATCH_WRITE_MAX_WAIT")
+    BATCH_WRITE_SIZE: int = Field(default=50)
+    BATCH_WRITE_INTERVAL: float = Field(default=1.0)
+    BATCH_WRITE_MAX_WAIT: float = Field(default=5.0)
 
     # =====================================================
     # Face Tracking (Optimization)
     # =====================================================
-    FACE_TRACKING_ENABLED: bool = Field(default=True, env="FACE_TRACKING_ENABLED")
-    FACE_TRACKING_WINDOW_SECONDS: int = Field(default=0, env="FACE_TRACKING_WINDOW_SECONDS")
-    FACE_TRACKING_MAX_ENTRIES: int = Field(default=5000, env="FACE_TRACKING_MAX_ENTRIES")
-    FACE_TRACKING_SIMILARITY_THRESHOLD: float = Field(default=0.95, env="FACE_TRACKING_SIMILARITY_THRESHOLD")
-    SKIP_UNKNOWN_FACES: bool = Field(default=False, env="SKIP_UNKNOWN_FACES")
-    SHOW_UNKNOWN_FACES_ON_DASHBOARD: bool = Field(default=False, env="SHOW_UNKNOWN_FACES_ON_DASHBOARD", description="If True, unknown faces will appear on the main dashboard. If False (default), unknown faces are only visible in the Unknown Faces Center page.")
-    FAISS_LAZY_MARKING_THRESHOLD: int = Field(default=1, env="FAISS_LAZY_MARKING_THRESHOLD", description="Threshold for FAISS lazy marking approach. If mismatch count is below this threshold, orphaned vectors are lazy-marked (skipped during search) instead of rebuilding the entire index. Default: 1 (for demo). For production with large datasets, use 100 or higher.")
-    FACE_TRACKING_MAX_MEMORY_MB: int = Field(default=2000, env="FACE_TRACKING_MAX_MEMORY_MB")
-    FACE_TRACKING_CLEANUP_INTERVAL: int = Field(default=300, env="FACE_TRACKING_CLEANUP_INTERVAL")
+    FACE_TRACKING_ENABLED: bool = Field(default=True)
+    FACE_TRACKING_WINDOW_SECONDS: int = Field(default=0)
+    FACE_TRACKING_MAX_ENTRIES: int = Field(default=5000)
+    FACE_TRACKING_SIMILARITY_THRESHOLD: float = Field(default=0.95)
+    SKIP_UNKNOWN_FACES: bool = Field(default=False)
+    SHOW_UNKNOWN_FACES_ON_DASHBOARD: bool = Field(default=False, description="If True, unknown faces will appear on the main dashboard. If False (default), unknown faces are only visible in the Unknown Faces Center page.")
+    FACE_TRACKING_MAX_MEMORY_MB: int = Field(default=2000)
+    FACE_TRACKING_CLEANUP_INTERVAL: int = Field(default=300)
     
     # =====================================================
     # Dashboard Display Settings
     # =====================================================
-    DASHBOARD_FACE_DISPLAY_HOURS: int = Field(default=3, env="DASHBOARD_FACE_DISPLAY_HOURS", description="How many hours of face detections to show on dashboard. Default: 3 hours. Faces older than this are hidden from the dashboard but still stored in database.")
-    UNKNOWN_FACE_DISPLAY_HOURS: float = Field(default=24, env="UNKNOWN_FACE_DISPLAY_HOURS", description="How many hours unknown faces stay visible on the Unknown Faces page (display-only — data stays stored until retention deletes it). 0 = show all. A Show-all toggle on the page reveals older ones.")
-    ALERT_NOTIFICATION_WINDOW_HOURS: float = Field(default=1.0, env="ALERT_NOTIFICATION_WINDOW_HOURS", description="Hours between alert popups for the same person on the same camera. Default: 1 hour. Set to 0 to alert on every detection (not recommended - noisy).")
+    # float, not int: the settings registry advertises this as a float with a
+    # 0.1 minimum, so the page accepts 2.5 — and an int field then made the
+    # WebSocket broadcast throw on int("2.5"), swallowed as "could not
+    # broadcast". Sub-hour windows are a legitimate thing to want.
+    DASHBOARD_FACE_DISPLAY_HOURS: float = Field(default=3, description="How many hours of face detections to show on dashboard. Default: 3 hours. Faces older than this are hidden from the dashboard but still stored in database.")
+    UNKNOWN_FACE_DISPLAY_HOURS: float = Field(default=24, description="How many hours unknown faces stay visible on the Unknown Faces page (display-only — data stays stored until retention deletes it). 0 = show all. A Show-all toggle on the page reveals older ones.")
+    ALERT_NOTIFICATION_WINDOW_HOURS: float = Field(default=1.0, description="Hours between alert popups for the same person on the same camera. Default: 1 hour. Set to 0 to alert on every detection (not recommended - noisy).")
+    DASHBOARD_CLEANUP_INTERVAL_SECONDS: int = Field(
+        default=60,
+        description=("How often the dashboard sweeps expired faces from the view. "
+                     "Published to the browser as cleanup_interval_ms. Default: 60")
+    )
 
     # =====================================================
     # Identity Management - Clustering & Merge Suggestions
     # =====================================================
     # These settings control the automatic merge suggestion system
     # The clustering job runs periodically to find duplicate identities
-    CLUSTER_INTERVAL_HOURS: int = Field(default=24, env="CLUSTER_INTERVAL_HOURS", description="Hours between clustering runs (default: 24)")
-    CLUSTER_STARTUP_DELAY_HOURS: float = Field(default=7, env="CLUSTER_STARTUP_DELAY_HOURS", description="Hours to wait after startup before first clustering run. Set to 0 for immediate. (default: 0)")
-    CLUSTER_MIN_SIZE: int = Field(default=2, env="CLUSTER_MIN_SIZE", description="Minimum cluster size for merge suggestions (default: 2)")
-    CLUSTER_EPS: float = Field(default=0.35, env="CLUSTER_EPS", description="Epsilon parameter for DBSCAN clustering. Lower = stricter matching. (default: 0.35)")
-    CLUSTER_MIN_SAMPLES: int = Field(default=2, env="CLUSTER_MIN_SAMPLES", description="Minimum samples per cluster for DBSCAN (default: 2)")
-    
+    CLUSTER_INTERVAL_HOURS: int = Field(default=24, description="Hours between clustering runs (default: 24)")
+    CLUSTER_STARTUP_DELAY_HOURS: float = Field(default=7, description="Hours to wait after startup before first clustering run. Set to 0 for immediate. (default: 0)")
+    CLUSTER_MIN_SIZE: int = Field(default=2, description="Minimum cluster size for merge suggestions (default: 2)")
+    CLUSTER_EPS: float = Field(default=0.35, description="Epsilon parameter for DBSCAN clustering. Lower = stricter matching. (default: 0.35)")
+    CLUSTER_MIN_SAMPLES: int = Field(default=2, description="Minimum samples per cluster for DBSCAN (default: 2)")
+    CLUSTER_ACTIVE_WINDOW_DAYS: int = Field(
+        default=90,
+        description=("How far back an unknown identity must have been seen to be "
+                     "considered for clustering. Default: 90")
+    )
+    CLUSTER_TRAINED_MODEL_MARGIN: float = Field(
+        default=0.05,
+        description=("How far below the configured similarity threshold a TRAINED "
+                     "similarity model is allowed to merge, since it is more "
+                     "accurate than the heuristic. Default: 0.05")
+    )
+
     # Pipeline-Aware ML Clustering
-    PIPELINE_AWARE_CLUSTERING_ENABLED: bool = Field(default=True, env="PIPELINE_AWARE_CLUSTERING_ENABLED", description="Enable pipeline-aware ML clustering for merge suggestions (default: True)")
-    PIPELINE_SIMILARITY_WEIGHT: float = Field(default=0.3, env="PIPELINE_SIMILARITY_WEIGHT", description="Weight for pipeline overlap in similarity calculation (0.0-1.0, default: 0.3)")
-    EMBEDDING_SIMILARITY_WEIGHT: float = Field(default=0.7, env="EMBEDDING_SIMILARITY_WEIGHT", description="Weight for embedding similarity in calculation (0.0-1.0, default: 0.7)")
-    CROSS_PIPELINE_SIMILARITY_THRESHOLD: float = Field(default=0.50, env="CROSS_PIPELINE_SIMILARITY_THRESHOLD", description="Minimum similarity threshold for cross-pipeline matches (default: 0.50)")
+    PIPELINE_AWARE_CLUSTERING_ENABLED: bool = Field(default=True, description="Enable pipeline-aware ML clustering for merge suggestions (default: True)")
+    SIMILARITY_QUALITY_FLOOR: float = Field(
+        default=0.7,
+        description=("Fraction of a heuristic similarity score that survives when both "
+                     "faces score zero on quality. 1.0 disables the quality penalty. "
+                     "Default: 0.7")
+    )
+    PIPELINE_SIMILARITY_WEIGHT: float = Field(default=0.3, description="Weight for pipeline overlap in similarity calculation (0.0-1.0, default: 0.3)")
+    EMBEDDING_SIMILARITY_WEIGHT: float = Field(default=0.7, description="Weight for embedding similarity in calculation (0.0-1.0, default: 0.7)")
+    CROSS_PIPELINE_SIMILARITY_THRESHOLD: float = Field(default=0.50, description="Minimum similarity threshold for cross-pipeline matches (default: 0.50)")
     
     # ML Similarity Model Training
-    SIMILARITY_MODEL_PATH: str = Field(default="models/similarity_model.pkl", env="SIMILARITY_MODEL_PATH", description="Path to save/load the trained similarity model (default: models/similarity_model.pkl)")
-    SIMILARITY_MODEL_MIN_SAMPLES: int = Field(default=50, env="SIMILARITY_MODEL_MIN_SAMPLES", description="Minimum training samples required before model can be trained (default: 50)")
-    SIMILARITY_MODEL_AUTO_TRAIN: bool = Field(default=True, env="SIMILARITY_MODEL_AUTO_TRAIN", description="Automatically train model when enough samples are collected (default: True)")
+    SIMILARITY_MODEL_PATH: str = Field(default="models/similarity_model.pkl", description="Path to save/load the trained similarity model (default: models/similarity_model.pkl)")
+    SIMILARITY_MODEL_MIN_SAMPLES: int = Field(default=50, description="Minimum training samples required before model can be trained (default: 50)")
+    SIMILARITY_MODEL_AUTO_TRAIN: bool = Field(default=True, description="Automatically train model when enough samples are collected (default: True)")
 
     # =====================================================
     # Identity Management - Quality Thresholds
     # =====================================================
     IDENTITY_QUALITY_THRESHOLD_KNOWN: float = Field(
         default=0.5,
-        env="IDENTITY_QUALITY_THRESHOLD_KNOWN",
         description="Minimum quality score (0-1) to save embedding for KNOWN identities. Higher = stricter. Default: 0.5"
     )
     IDENTITY_QUALITY_THRESHOLD_UNKNOWN: float = Field(
         default=0.1,
-        env="IDENTITY_QUALITY_THRESHOLD_UNKNOWN",
         description="Minimum quality score (0-1) to save embedding for UNKNOWN identities. Lower = save more. Default: 0.1 (saves almost all)"
+    )
+
+    # Dedicated bar for the DESTRUCTIVE merge path, deliberately its own knob
+    # rather than a silent reuse of SIMILARITY_THRESHOLD. The default is the
+    # same number, and that equality is an argued choice, not an accident: a
+    # merge asserts "these are the same person", which is exactly the claim
+    # recognition itself makes at SIMILARITY_THRESHOLD — anything recognition
+    # would call one person, a merge may combine without ceremony; anything it
+    # would not, an administrator must explicitly override. On the enrollment
+    # fixtures, two different photos of the same person score 0.4299 and
+    # unrelated faces score below 0.05, so 0.40 separates the two cases with
+    # real margin. Being a separate setting, hardening merges (e.g. to 0.55)
+    # never loosens or tightens live recognition.
+    MERGE_WARNING_MIN_SIMILARITY: float = Field(
+        default=0.40,
+        description=("Robust cross-identity similarity (0-1) below which a merge "
+                     "is refused with MERGE_CONFIRMATION_REQUIRED until explicitly "
+                     "overridden. Default: 0.40")
     )
     
     # =====================================================
     # Identity Management - Retention
     # =====================================================
-    SNAPSHOT_RETENTION_DAYS: int = Field(default=90, env="SNAPSHOT_RETENTION_DAYS")
-    EMBEDDING_RETENTION_MONTHS: int = Field(default=12, env="EMBEDDING_RETENTION_MONTHS")
-    INACTIVE_THRESHOLD_DAYS: int = Field(default=180, env="INACTIVE_THRESHOLD_DAYS")
-    IDENTITY_CLEANUP_INTERVAL_HOURS: int = Field(default=24, env="IDENTITY_CLEANUP_INTERVAL_HOURS")
-    MAX_EMBEDDINGS_PER_IDENTITY: int = Field(default=10, env="MAX_EMBEDDINGS_PER_IDENTITY")
+    SNAPSHOT_RETENTION_DAYS: int = Field(default=90)
+    EMBEDDING_RETENTION_MONTHS: int = Field(default=12)
+    INACTIVE_THRESHOLD_DAYS: int = Field(default=180)
+    IDENTITY_CLEANUP_INTERVAL_HOURS: int = Field(default=24)
+    MAX_EMBEDDINGS_PER_IDENTITY: int = Field(default=10)
 
     # =====================================================
     # Identity Management - FAISS Index
@@ -491,257 +829,552 @@ class Settings(BaseSettings):
     # Quality Scoring
     SEARCH_MIN_QUALITY_THRESHOLD: float = Field(
         default=0.3,
-        env="SEARCH_MIN_QUALITY_THRESHOLD",
         description="Minimum quality score (0-1) to attempt search. Faces below this are skipped. Default: 0.3"
     )
     SEARCH_QUALITY_WARNING_THRESHOLD: float = Field(
         default=0.6,
-        env="SEARCH_QUALITY_WARNING_THRESHOLD",
         description="Quality threshold (0-1) below which a warning is shown. Default: 0.6"
     )
     
     # Confidence Bands
     CONFIDENCE_VERY_HIGH_MIN: float = Field(
         default=0.90,
-        env="CONFIDENCE_VERY_HIGH_MIN",
         description="Minimum similarity for 'Very High' confidence band. Default: 0.90"
     )
     CONFIDENCE_HIGH_MIN: float = Field(
         default=0.75,
-        env="CONFIDENCE_HIGH_MIN",
         description="Minimum similarity for 'High' confidence band. Default: 0.75"
     )
     CONFIDENCE_MEDIUM_MIN: float = Field(
         default=0.60,
-        env="CONFIDENCE_MEDIUM_MIN",
         description="Minimum similarity for 'Medium' confidence band. Default: 0.60"
     )
     CONFIDENCE_LOW_MIN: float = Field(
         default=0.40,
-        env="CONFIDENCE_LOW_MIN",
         description="Minimum similarity for 'Low' confidence band. Default: 0.40"
     )
-    
+
+    # Enrollment review bands
+    #
+    # Enrollment used to mint a new UUID for any unseen name with no similarity
+    # check at all, so a second photo of an enrolled person under a new spelling
+    # silently became a second identity. These two values decide when the server
+    # stops and asks instead. They are NOT clamped to each other at read time:
+    # backend/security/config_guard.py refuses to start on an inverted or
+    # out-of-range pair, because silently correcting one would mean the operator
+    # who typed it never learns the band they configured does not exist.
+    ENROLL_STRONG_MATCH_MIN: float = Field(
+        default=0.75,
+        description=("Similarity (0-1) at/above which an upload is treated as an "
+                     "existing person and adding to them is recommended. Must be "
+                     ">= ENROLL_CANDIDATE_MIN. Default: 0.75")
+    )
+    # Deliberately equal to SIMILARITY_THRESHOLD, the bar at which recognition
+    # itself calls two faces the same person. Anything recognition would
+    # confuse, enrollment must ask about — a floor ABOVE it reopens the exact
+    # defect this flow exists to close, because the duplicate identity gets
+    # created silently and recognition then reports either name at random.
+    # Measured on the enrollment fixtures: two different photos of the same
+    # person score 0.4299, while unrelated faces score below 0.05. A floor of
+    # 0.45 would have missed the headline case by 0.02.
+    ENROLL_CANDIDATE_MIN: float = Field(
+        default=0.40,
+        description=("Similarity (0-1) floor for offering a candidate at all. "
+                     "Below this an upload enrolls directly with no review. "
+                     "Must be <= ENROLL_STRONG_MATCH_MIN, and should not exceed "
+                     "SIMILARITY_THRESHOLD. Default: 0.40")
+    )
+    ENROLL_CANDIDATE_POOL: int = Field(
+        default=25,
+        description=("How many nearest embeddings to retrieve before collapsing "
+                     "to one row per identity. Must exceed "
+                     "ENROLL_MAX_CANDIDATES, since several embeddings of the "
+                     "same person collapse to a single candidate. Default: 25")
+    )
+    ENROLL_MAX_CANDIDATES: int = Field(
+        default=5,
+        description=("How many candidate identities to show the administrator. "
+                     "Default: 5")
+    )
+
+    # =====================================================
+    # API pagination
+    # =====================================================
+    # One default and one ceiling for every listing endpoint. There was no
+    # page-size field anywhere: ~40 routes carried their own literals, and four
+    # groups (/admin/unknown, detections, conversations, cache-warm) had no
+    # upper bound at all, so a client could ask for any page size it liked.
+    API_DEFAULT_PAGE_SIZE: int = Field(
+        default=25,
+        description="Rows per page when a listing endpoint's caller does not specify. Default: 25"
+    )
+    API_MAX_PAGE_SIZE: int = Field(
+        default=100,
+        description=("Hard ceiling on rows per page; larger requests are rejected. "
+                     "A few export endpoints declare a higher bound explicitly. Default: 100")
+    )
+
+    # Result depth
+    #
+    # ONE default for every search surface. These used to be route-local
+    # literals: /api/search/advanced defaulted to 10 while the batch service
+    # defaulted to 5, and the search page drives both from a single control —
+    # so a batch silently ran at half the depth the operator asked for.
+    SEARCH_DEFAULT_TOP_K: int = Field(
+        default=10,
+        description="Matches returned per query face when the caller does not specify. Default: 10"
+    )
+    SEARCH_MAX_TOP_K: int = Field(
+        default=100,
+        description="Hard ceiling on matches per query face; requests above this are rejected. Default: 100"
+    )
+
+    # Retrieval floor vs display floor. SEARCH_RETRIEVAL_FLOOR is how deep the
+    # vector index is asked to look; SIMILARITY_THRESHOLD is what an operator
+    # is allowed to see. Retrieval must stay BELOW display or raising the
+    # display threshold would silently shrink the candidate pool it filters.
+    # config_guard refuses to start if that ordering is inverted.
+    SEARCH_RETRIEVAL_FLOOR: float = Field(
+        default=0.2,
+        description=("Similarity floor used when asking the vector index for "
+                     "candidates, before the display threshold filters them. "
+                     "Must be <= SIMILARITY_THRESHOLD. Default: 0.2")
+    )
+    SEARCH_CANDIDATE_MULTIPLIER: int = Field(
+        default=2,
+        description=("Over-fetch factor for an unfiltered search: the index is asked "
+                     "for top_k x this, so post-filtering still fills the page. Default: 2")
+    )
+    SEARCH_FILTERED_CANDIDATE_MULTIPLIER: int = Field(
+        default=6,
+        description=("Over-fetch factor when database filters (camera, date, type) will "
+                     "discard candidates after retrieval. Default: 6")
+    )
+
     # Batch Search
     BATCH_SEARCH_MAX_IMAGES: int = Field(
         default=20,
-        env="BATCH_SEARCH_MAX_IMAGES",
         description="Maximum number of images allowed per batch search. Default: 20"
     )
     BATCH_SEARCH_TIMEOUT_SECONDS: int = Field(
         default=300,
-        env="BATCH_SEARCH_TIMEOUT_SECONDS",
         description="Timeout in seconds for batch search operations. Default: 300 (5 minutes)"
     )
-    
+    BATCH_SEARCH_MAX_CONCURRENCY: int = Field(
+        default=5,
+        description=("Maximum images processed concurrently within one batch search. "
+                     "Bounded by the database pool. Default: 5")
+    )
+
     # Search History
     SEARCH_HISTORY_RETENTION_DAYS: int = Field(
         default=90,
-        env="SEARCH_HISTORY_RETENTION_DAYS",
         description="Days to retain search history records. Default: 90"
     )
     SEARCH_HISTORY_MAX_PER_USER: int = Field(
         default=1000,
-        env="SEARCH_HISTORY_MAX_PER_USER",
         description="Maximum search history records per user. Default: 1000"
     )
 
     # Audit log retention (chatbot/identity/settings audit tables)
     AUDIT_LOG_RETENTION_DAYS: int = Field(
         default=180,
-        env="AUDIT_LOG_RETENTION_DAYS",
         description="Days to retain audit-log records (chatbot, identity, settings). Default: 180"
+    )
+    TASK_HISTORY_RETENTION_DAYS: int = Field(
+        default=30,
+        description="Days to retain background-task history records. Default: 30"
     )
     
     # Live Alerts
     LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES: int = Field(
         default=30,
-        env="LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES",
         description="Default cooldown period (minutes) between live alert triggers. Default: 30"
     )
     LIVE_ALERT_MAX_PER_USER: int = Field(
         default=50,
-        env="LIVE_ALERT_MAX_PER_USER",
         description="Maximum number of active live alerts per user. Default: 50"
     )
     LIVE_ALERT_MAX_PER_IDENTITY: int = Field(
         default=5,
-        env="LIVE_ALERT_MAX_PER_IDENTITY",
-        description="Maximum number of active live alerts that can be created for the same identity. Default: 5, Max: 10"
+        description="Maximum number of active live alerts that can be created for the same identity. Default: 5"
     )
-    
+    LIVE_ALERT_MIN_SIMILARITY: float = Field(
+        default=0.75,
+        description=("Default similarity an appearance must reach to trigger a live "
+                     "alert, when the alert does not set its own. Default: 0.75")
+    )
+    LIVE_ALERT_CLIP_DURATION_SECONDS: int = Field(
+        default=60,
+        description="Default length of the clip recorded when a live alert fires. Default: 60"
+    )
+
+    # Notification transports. Declared (empty = not configured) so the
+    # readiness probe on the live-alerts page can ever report true; it used to
+    # read them with getattr(cfg, "SMTP_HOST", None) against fields that
+    # existed nowhere, so smtp_ready/sms_ready were permanently False.
+    SMTP_HOST: str = Field(
+        default="",
+        description="SMTP server hostname for email alerts. Empty disables email notification."
+    )
+    SMS_PROVIDER_URL: str = Field(
+        default="",
+        description="HTTP endpoint of the SMS provider. Empty disables SMS notification."
+    )
+    TWILIO_ACCOUNT_SID: str = Field(
+        default="",
+        description="Twilio account SID for SMS alerts. Empty disables Twilio."
+    )
+
+    # Intelligence endpoints
+    INTEL_QUERY_TIMEOUT_SECONDS: float = Field(
+        default=30.0,
+        description=("Seconds a heavy intelligence analysis may run before it is "
+                     "abandoned with a 503. Must stay below DB_STATEMENT_TIMEOUT_MS "
+                     "or the database kills the query first. Default: 30")
+    )
+
     # Related Identities
     RELATED_IDENTITY_MIN_CO_APPEARANCES: int = Field(
         default=3,
-        env="RELATED_IDENTITY_MIN_CO_APPEARANCES",
         description="Minimum co-appearances required to establish related identity relationship. Default: 3"
     )
     RELATED_IDENTITY_TIME_WINDOW_MINUTES: int = Field(
         default=30,
-        env="RELATED_IDENTITY_TIME_WINDOW_MINUTES",
         description="Time window (minutes) for considering identities as co-appearing. Default: 30"
     )
     
     # Multi-Camera Social Network Analysis
     MULTI_CAMERA_CO_APPEARANCE_ENABLED: bool = Field(
         default=True,
-        env="MULTI_CAMERA_CO_APPEARANCE_ENABLED",
         description="Enable cross-camera co-appearance detection for social network analysis (default: True)"
     )
     MULTI_CAMERA_DISTANCE_METERS: float = Field(
         default=500.0,
-        env="MULTI_CAMERA_DISTANCE_METERS",
         description="Maximum distance in meters between cameras to consider cross-camera co-appearance (default: 500)"
     )
     MULTI_CAMERA_TIME_WINDOW_MINUTES: int = Field(
         default=10,
-        env="MULTI_CAMERA_TIME_WINDOW_MINUTES",
         description="Time window in minutes for cross-camera co-appearance detection (default: 10, larger than same-camera)"
     )
     MULTI_CAMERA_MIN_CO_APPEARANCES: int = Field(
         default=2,
-        env="MULTI_CAMERA_MIN_CO_APPEARANCES",
         description="Minimum cross-camera co-appearances to establish relationship (default: 2, lower than same-camera)"
     )
     
     # Advanced Features
     AUTO_THRESHOLD_LEARNING_ENABLED: bool = Field(
         default=True,
-        env="AUTO_THRESHOLD_LEARNING_ENABLED",
         description="Enable automatic learning of optimal thresholds per camera pair (default: True)"
     )
     TRAJECTORY_PREDICTION_ENABLED: bool = Field(
         default=True,
-        env="TRAJECTORY_PREDICTION_ENABLED",
         description="Enable trajectory prediction for proactive relationship detection (default: True)"
     )
     ACTIVITY_CORRELATION_ENABLED: bool = Field(
         default=True,
-        env="ACTIVITY_CORRELATION_ENABLED",
-        description="Enable activity correlation analysis (xCCA) for causal relationship detection (default: True)"
+        description="Enable activity correlation analysis (xCCA) — temporal association evidence between identities (default: True)"
     )
-    
+
+    # Security Intelligence tunables (read per call via getattr — live-applyable)
+    ANOMALY_DEVIATION_SIGMA: float = Field(
+        default=2.0,
+        description="Circular-hour deviations beyond this many effective standard deviations flag an off-schedule anomaly. Default: 2.0"
+    )
+    ANOMALY_MIN_BASELINE_SAMPLES: int = Field(
+        default=5,
+        description="Minimum baseline appearances before anomaly detection reports results instead of 'insufficient baseline'. Default: 5"
+    )
+    ANOMALY_MIN_STD_HOURS: float = Field(
+        default=0.75,
+        description="Floor (hours) on the baseline circular std so a metronomic history cannot flag minute-level jitter. Default: 0.75"
+    )
+    ANOMALY_MAX_ITEMS: int = Field(
+        default=200,
+        description="Maximum anomaly items returned per request. Default: 200"
+    )
+    PATTERN_SCAN_LIMIT: int = Field(
+        default=50000,
+        description="Maximum appearance rows scanned per pattern-detection request (newest first; response flags truncation). Default: 50000"
+    )
+    PATTERN_MAX_PER_TYPE: int = Field(
+        default=100,
+        description="Maximum patterns returned per detector type. Default: 100"
+    )
+    PATTERN_OFF_HOURS_START: int = Field(
+        default=2,
+        description="Start hour (0-23, SITE-LOCAL time as stored in appearance timestamps) of the unusual-timing window. Default: 2"
+    )
+    PATTERN_OFF_HOURS_END: int = Field(
+        default=5,
+        description="End hour (0-23, INCLUSIVE whole hour — 2/5 covers 02:00-05:59; may wrap midnight, e.g. 22-5) of the unusual-timing window. Default: 5"
+    )
+    PATTERN_RAPID_WINDOW_SECONDS: int = Field(
+        default=300,
+        description="Maximum seconds between two different-camera appearances for rapid-movement analysis. Default: 300"
+    )
+    PATTERN_RAPID_MIN_SPEED_KMH: float = Field(
+        default=15.0,
+        description="Implied speed (km/h, camera coordinates permitting) above which a transit is flagged as rapid movement. Default: 15"
+    )
+    NETWORK_FALLBACK_MAX_IDENTITIES: int = Field(
+        default=200,
+        description="Identity cap (most recently seen first) for the cold-path network build when the relationship cache is empty. Default: 200"
+    )
+
+    # ML pipeline (first release: RULES is the production decision system;
+    # anomaly models cap at administrator-approved SHADOW)
+    ML_DECISION_MODE: str = Field(
+        default="rules",
+        description="Decision mode: rules (default, production-safe) | shadow (after an approved anomaly model) | hybrid/ml (GATED this release — activation returns the unmet gates). Default: rules"
+    )
+    ML_INFERENCE_TIMEOUT_MS: int = Field(
+        default=1500,
+        description="Hard timeout for one model inference; on timeout the decision falls back to rules with a recorded reason. Default: 1500"
+    )
+    ML_SHADOW_TIMEOUT_MS: int = Field(
+        default=3000,
+        description="Bound on the entire shadow evaluation (features + inference + persistence); shadow never delays the live response beyond this. Default: 3000"
+    )
+    ML_MODEL_CACHE_TTL_SECONDS: int = Field(
+        default=60,
+        description="Process-local model cache revalidation interval when Redis version keys are unavailable. Default: 60"
+    )
+    ML_SUPERVISED_MIN_LABELS: int = Field(
+        default=100,
+        description="Reviewed manual labels required before supervised training may run (trainer returns a structured refusal below this). Default: 100"
+    )
+    ML_SUPERVISED_MIN_PER_CLASS: int = Field(
+        default=25,
+        description="Reviewed labels required per class for supervised training. Default: 25"
+    )
+    ML_COLLECTOR_LATE_GRACE_MINUTES: int = Field(
+        default=120,
+        description="Late-data window re-scanned on each collection run (snapshot uniqueness makes reprocessing idempotent). Default: 120"
+    )
+    ML_FEATURE_SAMPLED_FULL_VECTOR_RATE: float = Field(
+        default=0.0,
+        description="Fraction of predictions storing the FULL feature vector for audit sampling. Default 0.0 (DISABLED) — enabling requires a documented privacy/retention justification."
+    )
+    ML_GRAPH_MIN_NODES: int = Field(
+        default=25,
+        description="Graph features are unavailable (with reason) below this node count. Default: 25"
+    )
+    ML_GRAPH_MIN_EDGES: int = Field(
+        default=50,
+        description="Graph features are unavailable (with reason) below this edge count. Default: 50"
+    )
+    ML_GRAPH_MIN_OBSERVATION_DAYS: int = Field(
+        default=14,
+        description="Graph features require at least this observation span. Default: 14"
+    )
+    ML_GRAPH_MIN_PAIR_APPEARANCES: int = Field(
+        default=3,
+        description="Pair features require at least this many co-appearances. Default: 3"
+    )
+    ML_DRIFT_CHECK_INTERVAL_HOURS: int = Field(
+        default=24,
+        description="Cadence of the report-only scheduled drift check. Default: 24"
+    )
+    ML_DRIFT_MIN_SAMPLES: int = Field(
+        default=200,
+        description="Below this sample count drift reports state insufficient_data instead of a verdict. Default: 200"
+    )
+    ML_DRIFT_PSI_WARNING: float = Field(
+        default=0.1,
+        description="PSI at or above this marks a drift report WARNING. Default: 0.1"
+    )
+    ML_DRIFT_PSI_CRITICAL: float = Field(
+        default=0.25,
+        description="PSI at or above this marks a drift report CRITICAL. Default: 0.25"
+    )
+    ML_PREDICTION_RETENTION_DAYS: int = Field(
+        default=180,
+        description="Retention for ml_predictions and shadow comparisons. Default: 180"
+    )
+    ML_SNAPSHOT_RETENTION_DAYS: int = Field(
+        default=365,
+        description="Retention for ml_feature_snapshots. Default: 365"
+    )
+    ML_DRIFT_REPORT_RETENTION_DAYS: int = Field(
+        default=365,
+        description="Retention for ml_drift_reports. Default: 365"
+    )
+    ML_ARTIFACT_DIR: str = Field(
+        default="models/ml",
+        description="Approved internal directory for ML artifacts; loads outside this prefix are refused. Default: models/ml"
+    )
+    ML_MAX_ARTIFACT_MB: int = Field(
+        default=200,
+        description="Maximum artifact size accepted at registration/load. Default: 200"
+    )
+    # Optional integrations — flags only; a flag being true does NOT mean the
+    # dependency is installed or operational (four distinct statuses are
+    # reported: configured / implemented / dependency available / operational).
+    MLFLOW_ENABLED: bool = Field(
+        default=False,
+        description="Optional MLflow experiment tracking (requires the mlflow package; app runs fully in rules mode without it). Default: False"
+    )
+    OPTUNA_ENABLED: bool = Field(
+        default=False,
+        description="Optional Optuna hyperparameter tuning (requires the optuna package). Default: False"
+    )
+    XGBOOST_ENABLED: bool = Field(
+        default=False,
+        description="Optional XGBoost model family (requires the xgboost package). Default: False"
+    )
+    SHAP_ENABLED: bool = Field(
+        default=False,
+        description="Optional SHAP explanations (requires the shap package; native importances are the fallback). Default: False"
+    )
+
+    # Risk platform: timezones, anomaly context, assessments, thresholds
+    DEFAULT_SITE_TIMEZONE: str = Field(
+        default="UTC",
+        description="IANA timezone used for business-hour evaluation when a pipeline has no timezone configured (e.g. 'Asia/Beirut'). Timestamps are ALWAYS stored in UTC; this only affects local-time interpretation. Default: UTC"
+    )
+    WEEKEND_DAYS: str = Field(
+        default="5,6",
+        description="Comma-separated weekday numbers treated as weekend (Monday=0). Default: '5,6' (Saturday, Sunday)"
+    )
+    ANOMALY_HOLIDAYS: str = Field(
+        default="",
+        description="Comma-separated ISO dates (site-local) treated as holidays by anomaly detection, e.g. '2026-12-25,2027-01-01'. Default: none"
+    )
+    ANOMALY_BASELINE_MAX_DAYS: int = Field(
+        default=365,
+        description="Rolling anomaly-baseline horizon in days — behavior older than this ages out of the baseline. Default: 365"
+    )
+    ASSESSMENT_DEDUP_WINDOW_MINUTES: int = Field(
+        default=5,
+        description="Threat assessments for the same subject within this window collapse onto one persisted row (idempotency). Default: 5"
+    )
+    THRESHOLD_MIN_SAMPLES_FOR_ACTIVATION: int = Field(
+        default=10,
+        description="Learned-threshold candidates below this sample count are refused activation. Default: 10"
+    )
+    API_RATE_LIMIT_ENABLED: bool = Field(
+        default=True,
+        description="Enable per-user + per-IP rate limiting on sensitive/expensive endpoints. Default: True. (The legacy RATE_LIMIT_ENABLED webhook knob it replaced was removed 2026-08.)"
+    )
+    RATE_LIMIT_DEFAULT_PER_MINUTE: int = Field(
+        default=300,
+        description="Per-minute request budget per user AND per IP for standard limited scopes. Default: 300"
+    )
+    RATE_LIMIT_HEAVY_PER_MINUTE: int = Field(
+        default=60,
+        description="Per-minute budget for heavy scopes (recalculation, graph/anomaly analysis, exports). Default: 60"
+    )
+
     # Feature Flags
     FACE_QUALITY_ENABLED: bool = Field(
         default=True,
-        env="FACE_QUALITY_ENABLED",
         description="Enable face quality scoring. Default: True"
+    )
+    FACE_QUALITY_SCORER: str = Field(
+        default="full",
+        description="full | legacy. 'full' measures blur, lighting, face pixel "
+                    "resolution and pose from the real SCRFD face crop. 'legacy' "
+                    "restores the old size+confidence score, which on the camera "
+                    "path could not exceed 0.5. A no-redeploy rollback if the new "
+                    "scorer ever misjudges a deployment's imagery."
     )
     WATCHLIST_ENABLED: bool = Field(
         default=True,
-        env="WATCHLIST_ENABLED",
         description="Enable watchlist functionality. Default: True"
     )
     LIVE_ALERTS_ENABLED: bool = Field(
         default=True,
-        env="LIVE_ALERTS_ENABLED",
         description="Enable live search alerts. Default: True"
     )
     RELATED_IDENTITIES_ENABLED: bool = Field(
         default=True,
-        env="RELATED_IDENTITIES_ENABLED",
         description="Enable related identities analysis. Default: True"
     )
     TEMPORAL_PATTERNS_ENABLED: bool = Field(
         default=True,
-        env="TEMPORAL_PATTERNS_ENABLED",
         description="Enable temporal pattern analysis. Default: True"
     )
     CROSS_CAMERA_TRACKING_ENABLED: bool = Field(
         default=True,
-        env="CROSS_CAMERA_TRACKING_ENABLED",
         description="Enable cross-camera tracking. Default: True"
     )
     BATCH_SEARCH_ENABLED: bool = Field(
         default=True,
-        env="BATCH_SEARCH_ENABLED",
         description="Enable batch search functionality. Default: True"
     )
     EXPORT_RESULTS_ENABLED: bool = Field(
         default=True,
-        env="EXPORT_RESULTS_ENABLED",
         description="Enable search results export (CSV, PDF, JSON). Default: True"
     )
     NEGATIVE_SEARCH_ENABLED: bool = Field(
         default=True,
-        env="NEGATIVE_SEARCH_ENABLED",
         description="Enable negative search (exclude specific identities). Default: True"
     )
     
     # Face Quality Thresholds (for quality scoring)
     FACE_QUALITY_THRESHOLD_BLUR: float = Field(
         default=0.5,
-        env="FACE_QUALITY_THRESHOLD_BLUR",
         description="Blur threshold for face quality assessment. Default: 0.5"
     )
+    # Defaults chosen to match the behaviour these fields now drive, so wiring
+    # them up changed no scores. They were declared, described, and offered on
+    # the settings page while face_quality.py used its own literals.
     FACE_QUALITY_THRESHOLD_SIZE: int = Field(
-        default=64,
-        env="FACE_QUALITY_THRESHOLD_SIZE",
-        description="Minimum face size (pixels) for quality assessment. Default: 64"
+        default=50,
+        description="Smallest face (shorter side, pixels) still worth scoring. Default: 50"
     )
     FACE_QUALITY_THRESHOLD_ANGLE: float = Field(
         default=30.0,
-        env="FACE_QUALITY_THRESHOLD_ANGLE",
         description="Maximum face angle (degrees) for quality assessment. Default: 30.0"
     )
     FACE_QUALITY_THRESHOLD_LIGHTING: float = Field(
-        default=0.4,
-        env="FACE_QUALITY_THRESHOLD_LIGHTING",
-        description="Lighting threshold for face quality assessment. Default: 0.4"
+        default=0.5,
+        description="Lighting score (0-1) below which a quality warning is raised. Default: 0.5"
     )
 
     # =====================================================
     # Ollama Configuration (for SQL Agent)
     # =====================================================
     OLLAMA_BASE_URL: str = Field(
-        default="http://ollama:11434",
-        env="OLLAMA_BASE_URL"
+        default="http://ollama:11434"
     )
     OLLAMA_MODEL: str = Field(
-        default="llama3.2:3b",
-        env="OLLAMA_MODEL"
+        default="llama3.2:3b"
     )
     # Specialist model for SQL generation steps only (falls back to OLLAMA_MODEL when empty).
     # Lets a small fast model handle chat/intent while a text-to-SQL model writes queries.
     OLLAMA_SQL_MODEL: str = Field(
-        default="",
-        env="OLLAMA_SQL_MODEL"
+        default=""
     )
     OLLAMA_TEMPERATURE: float = Field(
-        default=0.1,
-        env="OLLAMA_TEMPERATURE"
+        default=0.1
     )
     OLLAMA_TIMEOUT: int = Field(
-        default=120,
-        env="OLLAMA_TIMEOUT"
+        default=120
     )
 
     # =====================================================
     # SQL Agent Configuration
     # =====================================================
     CHROMADB_PATH: str = Field(
-        default="./sql_agent/chromadb_data",
-        env="CHROMADB_PATH"
+        default="./sql_agent/chromadb_data"
     )
     CHROMA_COLLECTION_NAME: str = Field(
-        default="sql_knowledge_base",
-        env="CHROMA_COLLECTION_NAME"
+        default="sql_knowledge_base"
     )
     RAG_TOP_K: int = Field(
-        default=5,
-        env="RAG_TOP_K"
+        default=5
     )
     RAG_SIMILARITY_THRESHOLD: float = Field(
-        default=0.3,
-        env="RAG_SIMILARITY_THRESHOLD"
+        default=0.3
     )
 
     # =====================================================
     # File Upload Configuration
     # =====================================================
     ALLOWED_IMAGE_EXTENSIONS: str = Field(
-        default=".jpg,.jpeg,.png,.webp",
-        env="ALLOWED_IMAGE_EXTENSIONS"
+        default=".jpg,.jpeg,.png,.webp"
     )
     
     @property
@@ -769,6 +1402,14 @@ class Settings(BaseSettings):
             ("DATABASE_URL", "DATABASE_URL_FILE"),
             ("REDIS_URL", "REDIS_URL_FILE"),
             ("BOOTSTRAP_ADMIN_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD_FILE"),
+            ("WEBHOOK_API_KEYS", "WEBHOOK_API_KEYS_FILE"),
+            ("WEBHOOK_AUTH_TOKEN", "WEBHOOK_AUTH_TOKEN_FILE"),
+            # sql_agent/config.py used to open this file itself, so a mounted
+            # secret was read by two different mechanisms with two different
+            # failure modes. One resolver, one behaviour; the guard reports an
+            # unreadable file at startup instead of the agent discovering it on
+            # the first question a user asks.
+            ("SQL_AGENT_DB_PASSWORD", "SQL_AGENT_DB_PASSWORD_FILE"),
         ):
             path = getattr(self, file_field, "") or ""
             if not path:
@@ -776,14 +1417,50 @@ class Settings(BaseSettings):
             resolved = resolve_secret(None, path, name=field)
             if resolved:
                 object.__setattr__(self, field, resolved)
+
+        # Fold WEBHOOK_AUTH_TOKEN into the ingest key SET.
+        #
+        # After this line there is exactly ONE credential source. That matters
+        # for more than tidiness: `utils/logging.py` harvests literal secret
+        # values from WEBHOOK_API_KEYS to redact them wherever they appear, and
+        # its field-name patterns do not match "WEBHOOK_AUTH_TOKEN" (the \b
+        # before TOKEN sits between two word characters). A token kept in its own
+        # field would be written to the log in full. Folding also means
+        # verify_key, the weak/reused/published checks and the rotation story all
+        # apply to it with no extra code.
+        #
+        # AFTER the file loop on purpose, so a token supplied by Docker secret is
+        # folded too, not just an inline one.
+        token = (getattr(self, "WEBHOOK_AUTH_TOKEN", "") or "").strip()
+        if token:
+            existing = (getattr(self, "WEBHOOK_API_KEYS", "") or "").strip()
+            # parse_keys() strips and deduplicates, so a token equal to a key
+            # already present is a no-op rather than a duplicate entry.
+            merged = f"{existing},{token}" if existing else token
+            object.__setattr__(self, "WEBHOOK_API_KEYS", merged)
         return self
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
-        # Allow reading from .env file in the same directory as this file
-        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    # Pydantic v2 settings source configuration.
+    #
+    # This replaced a v1-style inner `class Config`. Under v2 that class was
+    # still honoured for `env_file`/`case_sensitive`, but every
+    # `Field(...)` kwarg alongside it was silently IGNORED — v2
+    # spells that `validation_alias`. Binding therefore worked only because
+    # each field name happened to equal its variable name, and a single rename
+    # would have detached a setting from its environment variable with no error.
+    # The `env=` kwargs are gone; binding is by field name, and
+    # tests/test_config_contract.py proves every field still binds.
+    #
+    # `extra="ignore"`: a .env file legitimately carries keys this model does
+    # not own (compose-interpolation credentials such as FR_APP_PASSWORD,
+    # POSTGRES_SUPERUSER_PASSWORD, GRAFANA_ADMIN_PASSWORD). Forbidding extras
+    # would turn an ordinary deployment file into an import-time crash.
+    model_config = SettingsConfigDict(
+        env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
 
 
 # Create global settings instance

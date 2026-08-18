@@ -8,6 +8,7 @@ from backend.routes.webhook import router as webhook_router
 from backend.routes.detections import router as detections_router
 from backend.routes.stats import router as stats_router
 from backend.routes.upload import router as upload_router
+from backend.routes.enrollment_review import router as enrollment_review_router
 from backend.routes.health import router as health_router
 from backend.routes.metrics import router as metrics_router
 from backend.routes.websocket import router as websocket_router
@@ -43,6 +44,7 @@ __all__ = [
     'detections_router',
     'stats_router',
     'upload_router',
+    'enrollment_review_router',
     'health_router',
     'metrics_router',
     'websocket_router',

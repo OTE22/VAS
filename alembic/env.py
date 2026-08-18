@@ -23,7 +23,12 @@ config = context.config
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is NOT the default and matters here: the
+    # default (True) silences every logger configured before this point. Alembic
+    # currently runs in its own subprocess so nothing else is configured, but
+    # the moment anyone invokes it in-process that default would switch the
+    # whole application's logging off with no error.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Set target_metadata for autogenerate support
 target_metadata = Base.metadata
@@ -38,7 +43,7 @@ def get_alembic_database_url() -> str:
 
     url = make_url(database_url)
     if url.host == "postgres" and not os.path.exists("/.dockerenv"):
-        url = url.set(host=os.getenv("LOCAL_DB_HOST", "localhost"))
+        url = url.set(host=settings.LOCAL_DB_HOST)
 
     return url.render_as_string(hide_password=False)
 

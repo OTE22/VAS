@@ -27,7 +27,7 @@ Write-Host "==========================================" -ForegroundColor Cyan
 $containerRunning = docker ps --format '{{.Names}}' | Select-String -Pattern "^${CONTAINER_NAME}$"
 if (-not $containerRunning) {
     Write-Host "❌ Container '$CONTAINER_NAME' is not running!" -ForegroundColor Red
-    Write-Host "   Please start it with: docker-compose -f docker/docker-compose.cpu.yml up -d" -ForegroundColor Yellow
+    Write-Host "   Please start it with: docker compose -f docker/docker-compose.cpu.yml up -d" -ForegroundColor Yellow
     exit 1
 }
 

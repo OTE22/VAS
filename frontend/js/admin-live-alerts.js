@@ -121,11 +121,35 @@
         return s === null ? '—' : `${Math.round(s * 100)}%`;
     }
 
+    // Confidence band boundaries, fetched from GET /api/search/config.
+    //
+    // These were hard-coded 0.8 / 0.6 — numbers that matched NO backend
+    // boundary (CONFIDENCE_HIGH_MIN is 0.75, CONFIDENCE_MEDIUM_MIN is 0.60),
+    // so this page painted a 0.78 match "medium" while the search page called
+    // the same score "High". Null until loaded; the render falls back to the
+    // neutral class rather than inventing a threshold.
+    const bandThresholds = { high: null, medium: null };
+
+    async function loadBandThresholds() {
+        try {
+            const response = await fetch('/api/search/config', { credentials: 'same-origin' });
+            if (!response.ok) return;
+            const config = await response.json();
+            const high = Number(config?.confidence_bands?.HIGH?.min);
+            const medium = Number(config?.confidence_bands?.MEDIUM?.min);
+            if (Number.isFinite(high)) bandThresholds.high = high;
+            if (Number.isFinite(medium)) bandThresholds.medium = medium;
+        } catch (err) {
+            console.warn('[LIVE_ALERTS] Confidence bands unavailable:', err);
+        }
+    }
+
     function similarityClass(v) {
         const s = clampSimilarity(v);
         if (s === null) return 'low';
-        if (s >= 0.8) return 'high';
-        if (s >= 0.6) return 'medium';
+        if (bandThresholds.high === null) return 'low';
+        if (s >= bandThresholds.high) return 'high';
+        if (bandThresholds.medium !== null && s >= bandThresholds.medium) return 'medium';
         return 'low';
     }
 
@@ -172,6 +196,15 @@
             const payload = await parseResponse(resp);
             if (resp.status === 401) handleAuthExpired();
             return { ok: resp.ok, status: resp.status, payload };
+        } catch (err) {
+            // destroy() aborts every in-flight request on page teardown; that
+            // abort is intentional and must not surface as an unhandled
+            // rejection ("signal is aborted without reason"). A timeout abort
+            // (page still alive) keeps propagating so callers report it.
+            if (err && err.name === 'AbortError' && state.destroyed) {
+                return { ok: false, status: 0, payload: null, aborted: true };
+            }
+            throw err;
         } finally {
             clearTimeout(timeoutId);
             timers.delete(timeoutId);
@@ -923,10 +956,13 @@
     // WS message validation + trigger handling
     // ------------------------------------------------------------------
 
-    /** Strict schema: reject arbitrary object shapes from the wire. */
+    /** Strict schema: reject arbitrary object shapes from the wire.
+     *  Live-alert triggers arrive ONLY in `detection_alerts` — the event the
+     *  server broadcasts after the trigger rows are committed. `new_detection`
+     *  is the pre-commit detection feed and carries no alerts. */
     function validateAlertEvent(message) {
         if (!message || typeof message !== 'object') return null;
-        if (message.type !== 'new_detection' && message.type !== 'live_alert_test') return null;
+        if (message.type !== 'detection_alerts' && message.type !== 'live_alert_test') return null;
         const data = message.data;
         if (!data || typeof data !== 'object') return null;
 
@@ -951,16 +987,14 @@
         );
         if (!alerts.length) return null;
 
-        const faces = Array.isArray(data.faces) ? data.faces : [];
-        const face0 = faces[0] && typeof faces[0] === 'object' ? faces[0] : {};
         return {
             test: false,
             eventId: typeof data.event_id === 'string' ? data.event_id
-                : `${alerts[0].alert_id}:${data.timestamp || data.created_at || ''}`,
+                : `${alerts[0].alert_id}:${data.detection_id || data.timestamp || ''}`,
             alerts,
-            faceName: typeof face0.name === 'string' ? face0.name : 'Unknown',
+            faceName: typeof data.identity_name === 'string' && data.identity_name ? data.identity_name : 'Unknown',
             pipelineId: typeof data.pipeline_id === 'string' ? data.pipeline_id : 'unknown',
-            similarity: clampSimilarity(face0.similarity),
+            similarity: clampSimilarity(data.similarity),
             createdAt: typeof data.created_at === 'string' ? data.created_at
                 : (typeof data.timestamp === 'string' ? data.timestamp : null),
         };
@@ -1307,6 +1341,7 @@
         updateSoundButton(false);
         setupEventListeners();
         await checkUserRole();
+        await loadBandThresholds();
         await loadAlerts();
         connectWebSocket();
         schedulePoll();

@@ -18,8 +18,12 @@ import pytest
 
 REPO = "/app"
 PROD_COMPOSE = f"{REPO}/docker/docker-compose.prod.yml"
-GPU_COMPOSE = f"{REPO}/docker/docker-compose.gpu.yml"
 DEV_COMPOSE = f"{REPO}/docker/docker-compose.cpu.yml"
+# Hardware overrides. Neither is a stack: each is layered on a base with a
+# second -f. They add GPU reservations and cannot weaken the base's
+# security posture, so the posture assertions below target the BASES.
+DEV_GPU_OVERRIDE = f"{REPO}/docker/docker-compose.gpu.yml"
+PROD_GPU_OVERRIDE = f"{REPO}/docker/docker-compose.prod.gpu.yml"
 NGINX_DEV = f"{REPO}/nginx.conf"
 NGINX_PROD = f"{REPO}/nginx.prod.conf"
 
@@ -50,7 +54,7 @@ def published_ports(source):
 
 # ------------------------------------------------- datastores are not exposed
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 @pytest.mark.parametrize("port", ["5432", "6379", "11434"])
 def test_datastores_publish_no_host_port(compose, port):
     """Postgres, Redis and Ollama enforce none of the application's
@@ -60,7 +64,7 @@ def test_datastores_publish_no_host_port(compose, port):
             f"{compose} publishes port {port}: {mapping}"
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_only_web_ports_are_published(compose):
     for mapping in published_ports(read(compose)):
         assert re.search(r":(80|443|3000)\b", mapping), \
@@ -73,7 +77,7 @@ def test_grafana_is_bound_to_loopback_only():
 
 # --------------------------------------------------------------- secrets
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_no_default_passwords_remain(compose):
     source = read(compose)
     assert "POSTGRES_PASSWORD: admin" not in source
@@ -81,14 +85,14 @@ def test_no_default_passwords_remain(compose):
     assert "your-secret-key-change-in-production" not in source
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_secrets_come_from_files_not_environment_literals(compose):
     source = read(compose)
     assert "JWT_SECRET_KEY_FILE: /run/secrets/jwt_secret" in source
     assert "secrets:" in source
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_required_secrets_fail_the_config_when_missing(compose):
     """`${VAR:?message}` makes `docker compose config` fail rather than
     silently interpolating an empty password."""
@@ -109,14 +113,14 @@ def directives(path):
 def test_redis_password_is_not_a_command_line_argument():
     """A --requirepass value is visible in `docker inspect` and in the host
     process list; an ACL file is not."""
-    for compose in (PROD_COMPOSE, GPU_COMPOSE):
+    for compose in (PROD_COMPOSE,):
         assert not any("--requirepass" in line for line in directives(compose))
         assert "aclfile" in read(compose)
 
 
 # ------------------------------------------------------------- TLS posture
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_certificates_are_mounted_read_only(compose):
     assert "/etc/nginx/certs:ro" in read(compose)
 
@@ -161,14 +165,14 @@ def test_development_still_has_its_bind_mount():
     assert "- ../:/app" in read(DEV_COMPOSE)
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE, DEV_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE, DEV_COMPOSE])
 def test_single_worker(compose):
     """Runtime settings, the SQL-agent cancel registry, the single-flight job
     guards, webhook dedup and FAISS autosave are all process-local."""
     assert "WORKERS: 1" in read(compose)
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_entrypoint_is_not_overridden(compose):
     """The Dockerfile entrypoint runs the config preflight, fixes permissions
     and drops privileges via gosu."""
@@ -177,33 +181,34 @@ def test_entrypoint_is_not_overridden(compose):
 
 # ----------------------------------------------------------- migration job
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_migrations_run_in_a_dedicated_job(compose):
     source = read(compose)
     assert "migrate:" in source
     assert "--upgrade-head" in source
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_api_waits_for_migrations_to_finish(compose):
     """Without this gate, N replicas race to apply the same revision."""
     assert "service_completed_successfully" in read(compose)
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_api_workers_only_verify_the_schema(compose):
     assert "MIGRATIONS_MODE: verify" in read(compose)
-    assert 'MIGRATIONS_FAIL_CLOSED: "true"' in read(compose)
+    # the permissive flag was removed: no compose file may set it
+    assert "MIGRATIONS_FAIL_CLOSED" not in read(compose)
 
 
 # ------------------------------------------------------------ API surface
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_api_documentation_is_disabled(compose):
     assert 'ENABLE_API_DOCS: "false"' in read(compose)
 
 
-@pytest.mark.parametrize("compose", [PROD_COMPOSE, GPU_COMPOSE])
+@pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_cors_is_not_a_wildcard(compose):
     source = read(compose)
     assert "CORS_ORIGINS: '[\"*\"]'" not in source
@@ -301,6 +306,29 @@ def test_frontend_has_no_inline_event_handlers():
     assert not offenders, f"inline event handlers are blocked by CSP: {offenders}"
 
 
+def _registered_action_names(source):
+    """Names passed to Actions.register, wherever the call sits.
+
+    Brace-counted rather than regexed on indentation: registration is legal
+    both at top level (closing `});` at column 0) and inside a page's IIFE
+    (indented) — admin-search.js now does both, because handlers scoped inside
+    the IIFE must register from inside it. The old `\\n\\}\\);` anchor only saw
+    the first shape and reported every in-IIFE registration as a dead button.
+    """
+    names = set()
+    for m in re.finditer(r"Actions\.register\(\{", source):
+        depth, i = 1, m.end()
+        while i < len(source) and depth:
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+            i += 1
+        block = source[m.end():i]
+        names |= set(re.findall(r"^\s*([A-Za-z_$][\w$]*)\s*[,:]", block, re.M))
+    return names
+
+
 def test_every_data_action_has_a_registered_handler():
     """A data-action with no registration is a button that silently does
     nothing — exactly the regression this refactor could introduce."""
@@ -309,8 +337,7 @@ def test_every_data_action_has_a_registered_handler():
         source = read(path)
         if not path.endswith("/actions.js"):
             used |= set(re.findall(r'data-action(?:-\w+)?="([A-Za-z_$][\w$]*)"', source))
-        for block in re.findall(r"Actions\.register\(\{(.*?)\n\}\);", source, re.S):
-            registered |= set(re.findall(r"^\s{4}([A-Za-z_$][\w$]*)\s*[,:]", block, re.M))
+        registered |= _registered_action_names(source)
 
     # admin-background-tasks.js owns this one with its own delegated listener.
     unhandled = used - registered - {"details"}
@@ -366,3 +393,247 @@ def test_entrypoint_runs_the_config_preflight():
     source = read(f"{REPO}/docker-entrypoint.sh")
     assert "backend.security.config_guard" in source
     assert source.index("config_guard") < source.index('exec gosu appuser "$@"')
+
+
+# ---------------------------------------------------------------------------
+# Dependency sources and the test runner
+#
+# Recreating the container off an image built before a dependency was added is
+# indistinguishable, at the test level, from a code regression: 18 sql_guard
+# tests failed simply because the running image predated sqlglot being pinned.
+# ---------------------------------------------------------------------------
+
+DOCKERFILE_CPU = f"{REPO}/docker/Dockerfile.cpu"
+REQ_BASE = f"{REPO}/requirements-base.txt"
+REQ_CPU = f"{REPO}/requirements-cpu.txt"
+REQ_GPU = f"{REPO}/requirements-gpu.txt"
+REQ_DEV = f"{REPO}/requirements-dev.txt"
+LOCK_CPU = f"{REPO}/requirements-cpu.lock.txt"
+
+
+def resolved_requirements(path):
+    """A requirements file WITH its `-r` includes expanded.
+
+    requirements-cpu.txt and requirements-gpu.txt are thin: they `-r
+    requirements-base.txt` and add only the packages that genuinely differ by
+    hardware. Reading either file literally therefore no longer shows what the
+    image installs, and a test that did so would report a missing dependency
+    that is in fact present. Resolve the include instead of relaxing the check.
+    """
+    import os
+
+    text = read(path)
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("-r "):
+            included = os.path.join(os.path.dirname(path), stripped[3:].strip())
+            out.append(resolved_requirements(included))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def test_sql_parser_is_pinned_in_both_runtime_dependency_sources():
+    """sql_guard imports sqlglot; without it every guard test fails closed."""
+    for path in (REQ_CPU, REQ_GPU):
+        assert re.search(r"^sqlglot==", resolved_requirements(path), re.M), (
+            f"{path} does not pin sqlglot, which backend SQL validation imports")
+
+
+def test_every_runtime_import_of_sqlglot_is_satisfied():
+    """Behavioural counterpart: the parser is actually importable here."""
+    import sqlglot  # noqa: F401
+
+
+def test_the_dev_image_ships_its_own_test_runner():
+    dockerfile = read(DOCKERFILE_CPU)
+    assert "ARG INSTALL_DEV=false" in dockerfile, (
+        "no INSTALL_DEV build arg — recreating the container drops pytest")
+    assert "requirements-dev.txt" in dockerfile, (
+        "the Dockerfile never installs the development requirements")
+    assert re.search(r"pytest==", read(REQ_DEV)), (
+        "requirements-dev.txt does not pin pytest")
+
+
+def test_only_non_production_images_install_the_test_runner():
+    """A production image must not ship a test runner."""
+    assert 'INSTALL_DEV: "true"' in read(DEV_COMPOSE), (
+        "the development stack does not enable INSTALL_DEV, so the suite cannot "
+        "run after a container recreate without a manual pip install")
+    for compose in (PROD_COMPOSE,):
+        assert "INSTALL_DEV" not in read(compose), (
+            f"{compose} enables development dependencies in a production image")
+
+
+def test_no_stale_lock_artifact():
+    """A lock file must be wired into the build or absent.
+
+    A lock that nothing installs is worse than none: it looks authoritative,
+    drifts silently, and sends anyone reading it to reproduce an environment
+    that was never built.
+    """
+    import os
+
+    if not os.path.exists(LOCK_CPU):
+        return          # deleted, which is a valid resolution
+
+    dockerfile = read(DOCKERFILE_CPU)
+    assert "requirements-cpu.lock.txt" in dockerfile, (
+        "requirements-cpu.lock.txt exists but no build installs it — either "
+        "wire it into Dockerfile.cpu or delete it")
+
+    lock = read(LOCK_CPU)
+    locked = {m.group(1).lower().replace("_", "-")
+              for m in re.finditer(r"^([A-Za-z0-9_.-]+)==", lock, re.M)}
+
+    # Everything the source list pins explicitly must be in the lock. The lock
+    # silently lost sqlglot this way: it was added to requirements-cpu.txt and
+    # the lock was never regenerated, so a container rebuilt from the image had
+    # no SQL parser and 18 guard tests failed for a reason unrelated to code.
+    for match in re.finditer(r"^([A-Za-z0-9_.-]+)==", read(REQ_CPU), re.M):
+        name = match.group(1).lower().replace("_", "-")
+        assert name in locked, (
+            f"requirements-cpu.txt pins {name} but the lock does not contain it "
+            "— regenerate the lock from a clean build")
+
+    # And the lock must not drag development dependencies into production.
+    # The previous lock was frozen from a container with pytest pip-installed by
+    # hand, so wiring it would have shipped a test runner in the production
+    # image — the opposite of what INSTALL_DEV exists to control.
+    dev_only = {
+        m.group(1).lower().replace("_", "-")
+        for m in re.finditer(r"^([A-Za-z0-9_.-]+)==", read(REQ_DEV), re.M)
+    } - {"requests"}          # requests is also a genuine runtime dependency
+    leaked = sorted(dev_only & locked)
+    assert not leaked, (
+        f"the lock carries development-only packages {leaked}; regenerate it "
+        "from a build with INSTALL_DEV unset")
+
+
+# ---------------------------------------------------------------------------
+# Ingest credentials in deployment configuration
+# ---------------------------------------------------------------------------
+
+def test_no_production_compose_carries_an_inline_ingest_key():
+    """Production takes the key from a mounted secret, never from the file."""
+    for compose in (PROD_COMPOSE,):
+        source = read(compose)
+        # WEBHOOK_AUTH_TOKEN is the bearer alias. It folds into WEBHOOK_API_KEYS
+        # at startup, so pasting it inline is exactly as bad as pasting the key
+        # inline — and it would sail past a regex that only knew the old name.
+        inline = re.search(r"^\s*WEBHOOK_(API_KEYS|AUTH_TOKEN):\s*\S", source, re.M)
+        assert not inline, (
+            f"{compose} sets {inline.group(0).strip() if inline else ''} inline; "
+            "the ingest credential belongs in a mounted secret")
+        assert "WEBHOOK_API_KEYS_FILE:" in source, (
+            f"{compose} does not point at a webhook key secret file")
+
+
+def test_production_mounts_the_ingest_key_secret(compose=PROD_COMPOSE):
+    source = read(compose)
+    assert "webhook_api_keys:" in source, (
+        "the webhook_api_keys secret is not declared")
+    assert "- webhook_api_keys" in source, (
+        "the webhook_api_keys secret is declared but not mounted into the service")
+
+
+def test_the_dev_gpu_override_is_development_and_declares_no_stack():
+    """docker-compose.gpu.yml was a THIRD production stack — ENVIRONMENT=production
+    and file secrets — while every document called it the development GPU stack.
+    It was also unrunnable (it required POSTGRES_SUPERUSER_PASSWORD and
+    secrets/jwt_secret), so there was no working GPU development path at all.
+
+    It is now a small override layered on cpu.yml. If it ever regains a
+    production posture or its own datastores, it has become a fourth stack
+    again and this fails."""
+    source = read(DEV_GPU_OVERRIDE)
+    assert "ENVIRONMENT: production" not in source, (
+        "the dev GPU override sets ENVIRONMENT=production — it is a "
+        "development override layered on docker-compose.cpu.yml")
+    assert "/run/secrets/" not in source, (
+        "the dev GPU override mounts production secrets")
+    for service in ("postgres:", "redis:", "nginx:", "migrate:"):
+        assert f"\n  {service}" not in source, (
+            f"the dev GPU override declares its own {service} — it must only "
+            f"override face_recognition and ollama, everything else is inherited")
+
+
+def test_neither_gpu_override_declares_a_project_name():
+    """Compose merges the top-level `name` last-wins. An override that declared
+    its own name would fork the project — and therefore the volumes — the
+    moment someone ran the GPU pair."""
+    for override in (DEV_GPU_OVERRIDE, PROD_GPU_OVERRIDE):
+        assert not re.search(r"^name:", read(override), re.M), (
+            f"{override} declares a project name; it must inherit the base's")
+
+
+def test_the_two_stacks_use_disjoint_project_names():
+    """Without an explicit `name:` both stacks defaulted to the parent
+    directory, "docker". Both declare volumes called postgres_data,
+    redis_data, face_database_data and chromadb_cache, so both resolved to
+    docker_postgres_data &c. — STARTING PRODUCTION MOUNTED THE DEVELOPMENT
+    DATABASE. The names are the fix; this test is why they cannot be removed."""
+    dev = re.search(r"^name:\s*(\S+)", read(DEV_COMPOSE), re.M)
+    prod = re.search(r"^name:\s*(\S+)", read(PROD_COMPOSE), re.M)
+    assert dev, "docker-compose.cpu.yml declares no project name"
+    assert prod, "docker-compose.prod.yml declares no project name"
+    assert dev.group(1) != prod.group(1), (
+        f"dev and production share the project name {dev.group(1)!r}, so they "
+        f"share every named volume")
+    # Plain "face_detector" is not safe: volumes under that prefix already exist
+    # on some hosts from an older layout, and adopting them resurrects stale data.
+    for match in (dev, prod):
+        assert match.group(1) != "face_detector", (
+            "the bare 'face_detector' project would adopt pre-existing orphaned "
+            "volumes from an earlier layout")
+
+
+def test_no_compose_file_hardcodes_a_developer_home_directory():
+    """cpu.yml mounted "C:/Users/Raven/.ollama" — one developer's home
+    directory — which made the repository unusable anywhere else and silently
+    produced an Ollama with no models on Linux."""
+    for compose in (PROD_COMPOSE, DEV_COMPOSE, DEV_GPU_OVERRIDE, PROD_GPU_OVERRIDE):
+        source = read(compose)
+        offenders = re.findall(r"^\s*-\s*[\"']?[A-Za-z]:[/\\][^\n]*", source, re.M)
+        assert not offenders, (
+            f"{compose} mounts an absolute host path from a developer machine: "
+            f"{offenders}")
+
+
+def test_ingest_enforcement_is_on_in_every_stack():
+    for compose in (PROD_COMPOSE, DEV_COMPOSE):
+        assert "WEBHOOK_AUTH_MODE: enforce" in read(compose), (
+            f"{compose} does not enforce ingest authentication")
+    for compose in (PROD_COMPOSE,):
+        assert "WEBHOOK_AUTH_INSECURE_ACK" not in read(compose), (
+            f"{compose} ships the acknowledgement that disables the startup refusal")
+
+
+def test_the_secret_generator_writes_every_secret_file_compose_requires():
+    """A clean deploy must not fail at `docker compose up` on a missing file.
+
+    generate-secrets.sh wrote jwt_secret and bootstrap_admin_password but not
+    webhook_api_keys, while both production compose files declare it as a
+    required secret FILE — so following the runbook in order on a clean machine
+    failed at startup. Generalised over the compose `secrets:` blocks rather
+    than hardcoding that one name, so the next secret added to compose without a
+    generator line fails here instead of in someone's deployment.
+    """
+    generator = read(f"{REPO}/scripts/setup/generate-secrets.sh")
+    generated = set(re.findall(r"^\s*write_secret\s+([A-Za-z0-9_]+)", generator, re.M))
+
+    missing = {}
+    for label, compose_path in (("prod", PROD_COMPOSE),):
+        text = read(compose_path)
+        # `file: ../secrets/<name>` is what docker resolves at `up` time; a
+        # missing file is a hard startup failure, not a warning.
+        required = set(re.findall(r"file:\s*\.\./secrets/([A-Za-z0-9_.\-]+)", text))
+        required = {n for n in required if not n.endswith(".example")}
+        absent = sorted(required - generated)
+        if absent:
+            missing[label] = absent
+
+    assert not missing, (
+        f"compose requires secret files the generator never writes: {missing}. "
+        "Add a `write_secret <name>` line to scripts/setup/generate-secrets.sh.")

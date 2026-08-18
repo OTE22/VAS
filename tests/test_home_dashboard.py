@@ -223,6 +223,62 @@ def test_single_h1_and_required_sections():
         assert f'id="{section}"' in html, f"missing section: {section}"
 
 
+def test_html_pages_demand_revalidation():
+    """The recurring 'the fix didn't take' reports: FileResponse sends ETag but
+    NO Cache-Control, so browsers heuristically cached pages (~10% of file
+    age) and reused them on plain navigation WITHOUT revalidating — users kept
+    clicking week-old copies whose links had moved (Add Person still pointing
+    at the pre-split /dashboard). `no-cache` = cache-but-revalidate; the ETag
+    makes that a cheap 304."""
+    import urllib.request as _rq
+    req = _rq.Request(BASE + "/api/auth/login",
+                      data=json.dumps({"username": "admin",
+                                       "password": "admin123"}).encode(),
+                      method="POST")
+    req.add_header("Content-Type", "application/json")
+    with _rq.urlopen(req, timeout=30) as resp:
+        tok = json.loads(resp.read())["access_token"]
+
+    for path in ("/home", "/dashboard", "/admin/search"):
+        page_req = _rq.Request(BASE + path)
+        page_req.add_header("Authorization", "Bearer " + tok)
+        with _rq.urlopen(page_req, timeout=30) as resp:
+            cache = resp.headers.get("Cache-Control", "")
+            assert "no-cache" in cache, (
+                f"{path} serves HTML without Cache-Control ({cache!r}) — "
+                f"browsers will heuristically cache it and users get stale pages"
+            )
+            assert resp.headers.get("ETag"), f"{path} lost its ETag (304s need it)"
+
+
+def test_success_rate_moved_from_the_old_dashboard_grid():
+    """The live-feeds split: /dashboard keeps only the feed; the one stats
+    figure home lacked was the derived success rate. It must render an em-dash
+    (not '0%') when nothing has been received — no traffic is not failure."""
+    html = _read(HOME_HTML)
+    assert 'id="q-success-rate"' in html, "the success-rate row is missing"
+
+    js = _read(HOME_JS)
+    assert "q-success-rate" in js
+    block = js.split("q-success-rate", 1)[1][:300]
+    assert "EM_DASH" in block, "zero-traffic renders a fake percentage"
+    assert "received" in block and "processed" in block
+
+
+def test_add_person_opens_the_shared_modal_in_place():
+    """The quick action used to link to /dashboard, which no longer hosts the
+    form — it is the live-feeds page. The shared component (upload-modal-loader
+    → upload-modal.js) registers openUploadModal and owns the whole flow."""
+    html = _read(HOME_HTML)
+    assert 'data-action="openUploadModal"' in html, "Add person no longer opens the modal"
+    assert "upload-modal-loader.js" in html, (
+        "the loader that provides the modal + its JS is not loaded"
+    )
+    # The old bounce must be gone: no quick action links to /dashboard for
+    # adding a person (the Live Feeds action legitimately still does).
+    assert "Enrol a new face" in html
+
+
 def test_navbar_and_script_order_preserved():
     html = _read(HOME_HTML)
     assert 'id="navbar-placeholder"' in html

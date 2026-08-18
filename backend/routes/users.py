@@ -28,58 +28,82 @@ from backend.auth.capabilities import (
     is_known_role,
 )
 from backend.services.user_service import UserService
+from backend.services.system_principal import (
+    SYSTEM_USERNAME,
+    ensure_system_principal,
+    is_system_principal,
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def _guard_last_administrator(*, db: AsyncSession, target_user_id: int,
-                                    new_role=None, new_is_active=None) -> None:
-    """Refuse a change that would remove the final active administrator.
+async def _guard_system_principal(*, db: AsyncSession, target_user_id: int,
+                                  action: str) -> None:
+    """Refuse any human-account operation against the `system` audit principal.
 
-    Applies to demotion (role change away from admin) and to deactivation,
-    since an inactive admin resolves to zero capabilities and is therefore just
-    as unable to administer.
+    `system` exists only so machine-initiated actions have a valid actor for
+    `identity_audit_log.user_id` (NOT NULL, FK to users.id). It is not an
+    account: it cannot log in, and nothing should edit, re-activate, re-password
+    or delete it through the user-administration surface.
 
-    Counts only ACTIVE admins: an already-disabled admin account is not a
-    usable escape hatch.
+    The gap this closes is a combination, not a single call. Role changes away
+    from admin were allowed, `is_active` could be set true, and reset-password
+    had no guard at all — so `is_active=true` plus a password reset produced a
+    working login named `system`, and with it the end of any distinction between
+    automated and human entries in the audit log.
+
+    Enforced here rather than only by disabling the buttons: the frontend is not
+    a security boundary.
+
+    detail is a plain string, deliberately. _guard_last_administrator raises a
+    dict, which the admin page renders as "[object Object]" because it does
+    `error.detail || ...`.
     """
-    from sqlalchemy import func, select as _select
-
-    demoting = (new_role is not None
-                and canonical_role(new_role) is not Role.ADMIN)
-    deactivating = new_is_active is False
-    if not (demoting or deactivating):
-        return
+    from sqlalchemy import select as _select
 
     target = (await db.execute(
         _select(User).where(User.id == target_user_id)
     )).scalar_one_or_none()
-    if target is None or canonical_role(target.role) is not Role.ADMIN:
-        return  # not an admin; nothing to protect
+    if not is_system_principal(target):
+        return
 
-    remaining = (await db.execute(
-        _select(func.count()).select_from(User).where(
-            User.role == Role.ADMIN.value,
-            User.is_active.is_(True),
-            User.id != target_user_id,
-        )
-    )).scalar_one()
+    logger.warning(
+        "[USERS_ROUTE] ❌ Blocked attempt to %s the protected '%s' principal "
+        "(user_id=%s)", action, SYSTEM_USERNAME, target_user_id,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            f"The '{SYSTEM_USERNAME}' account is a protected audit principal "
+            f"and cannot be {action}. It exists so automated actions have a "
+            f"valid actor in the audit log, and it cannot be used to sign in."
+        ),
+    )
 
-    if remaining == 0:
-        action = "demote" if demoting else "deactivate"
-        logger.warning(
-            "[UPDATE_USER_ROUTE] ❌ Blocked attempt to %s the last administrator (user_id=%s)",
-            action, target_user_id,
-        )
+
+async def _guard_last_administrator(*, db: AsyncSession, target_user_id: int,
+                                    new_role=None, new_is_active=None) -> None:
+    """Route-side adapter for the last-administrator rule.
+
+    The rule itself lives in backend/services/user_policy.py so that
+    UserService.delete_user can enforce it without importing from a route (a
+    service importing route code inverts the dependency and drags HTTPException
+    into the domain layer). This wrapper only translates the domain error to
+    this route's established 409 shape.
+    """
+    from backend.services.user_policy import (
+        LastAdministratorError,
+        ensure_not_last_platform_administrator,
+    )
+
+    try:
+        await ensure_not_last_platform_administrator(
+            db, target_user_id=target_user_id,
+            new_role=new_role, new_is_active=new_is_active)
+    except LastAdministratorError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "LAST_ADMINISTRATOR",
-                "message": (
-                    f"Cannot {action} the only remaining administrator. "
-                    "Promote another account to administrator first."
-                ),
-            },
+            detail={"code": "LAST_ADMINISTRATOR", "message": str(e)},
         )
 
 
@@ -105,7 +129,7 @@ def require_user_admin_csrf(request: Request):
         )
 
 
-router = APIRouter()
+router = APIRouter(tags=["Users"])
 
 
 class CreateUserRequest(BaseModel):
@@ -167,6 +191,23 @@ async def create_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin users cannot be created through this interface. Admin users must be created through system initialization or direct database access."
+        )
+
+    # The audit principal's name is reserved. `role='system'` is already
+    # rejected below (it is not in the Role enum, so is_known_role is False),
+    # but the NAME was free — and while the principal is missing, an admin could
+    # create an ordinary login called `system`, which would then be picked up as
+    # the actor for machine-generated audit rows.
+    if user_data.username and user_data.username.strip().lower() == SYSTEM_USERNAME:
+        logger.warning(
+            "[CREATE_USER_ROUTE] ❌ SECURITY: attempt to create a user named "
+            "'%s' blocked by %s", SYSTEM_USERNAME, current_user.username)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"'{SYSTEM_USERNAME}' is a reserved account name. It belongs to "
+                f"the protected audit principal used for automated actions."
+            ),
         )
 
     # is_known_role first: canonical_role falls back to the least privileged
@@ -333,6 +374,11 @@ async def update_user(
                 detail=f"Invalid role '{user_data.role}'. Allowed roles are: {', '.join(assignable_role_values())}"
             )
 
+    # The audit principal is not editable through this form at all — role,
+    # activation, chatbot access and password are each enough on their own to
+    # break what it is for.
+    await _guard_system_principal(db=db, target_user_id=user_id, action="modified")
+
     # Never leave the system without an administrator.
     #
     # This is not hypothetical: it happened during development. The role
@@ -405,7 +451,12 @@ async def reset_password(
     logger.info(f"[RESET_PASSWORD_ROUTE] 🔐 Password reset request for user ID: {user_id}")
     logger.debug(f"[RESET_PASSWORD_ROUTE]   Requested by admin: {current_user.username} (ID: {current_user.id})")
     logger.debug(f"[RESET_PASSWORD_ROUTE]   New password length: {len(password_data.new_password) if password_data.new_password else 0}")
-    
+
+    # Giving the principal a real bcrypt hash is half of the two-step that turns
+    # it into a usable login; the other half is is_active=true.
+    await _guard_system_principal(
+        db=db, target_user_id=user_id, action="given a password")
+
     try:
         user = await UserService.reset_password(user_id, password_data.new_password, db)
         logger.info(f"[RESET_PASSWORD_ROUTE] ✅✅✅ Password reset successful for user: {user.username} (ID: {user.id})")
@@ -424,26 +475,106 @@ async def reset_password(
 @router.delete("/api/users/{user_id}")
 async def delete_user(
     user_id: int,
+    reassign_admin_to: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(["admin"])),
     _csrf: None = Depends(require_user_admin_csrf)
 ):
-    """Delete user (admin only)"""
+    """Permanently delete a user (admin only), preserving history.
+
+    Conversations, query/search history and audit rows survive with their user
+    reference detached (attribution kept via denormalized usernames,
+    historical_* ids and the deleted_users tombstone). Account-bound state —
+    memberships, sessions, memory, feedback, pipeline access — is removed.
+
+    `reassign_admin_to`: required (as a 409) when the target is the ONLY
+    workspace admin somewhere; names an existing member of every affected
+    workspace to promote in the same transaction.
+    """
+    from backend.services.user_policy import (
+        LastAdministratorError,
+        WorkspaceSuccessorRequired,
+    )
+
     if user_id == current_user.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete yourself")
-    
+
+    # Deleting the principal would orphan every machine-written audit row that
+    # references it, and silence the ones not yet written.
+    await _guard_system_principal(db=db, target_user_id=user_id, action="deleted")
+
     try:
-        success = await UserService.delete_user(user_id, db)
+        success = await UserService.delete_user(
+            user_id, db, actor=current_user, reassign_admin_to=reassign_admin_to)
         if not success:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        
+
         return {"message": "User deleted successfully"}
+    except LastAdministratorError as e:
+        # Policy refusals are 409 conflicts, not server errors. detail stays a
+        # plain string so the admin page renders it (it does `error.detail`).
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except WorkspaceSuccessorRequired as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except HTTPException:
+        raise
     except ValueError as e:
         logger.error(f"Error deleting user {user_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error deleting user {user_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete user: {str(e)}")
+
+
+@router.post("/api/users/system/restore")
+async def restore_system_principal(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_user_admin_csrf)
+):
+    """Recreate or repair the protected `system` audit principal (admin only).
+
+    The principal is seeded by migration a3b4c5d6e7f8, which is already applied
+    everywhere — so a database that has lost the row cannot get it back by
+    migrating. This is the supported repair, and it is idempotent: calling it
+    when the principal is healthy is a no-op that simply re-asserts its
+    canonical properties.
+
+    TAKES NO REQUEST BODY, deliberately. Every value is owned by the server, so
+    this cannot be repurposed as a generic "create a privileged account"
+    endpoint. Accepting even a username here would turn a repair action into
+    exactly that.
+
+    Safe against production: `ensure_system_principal` reads and writes only the
+    row named `system`.
+    """
+    user, created = await ensure_system_principal(db)
+
+    logger.info(
+        "[RESTORE_SYSTEM_PRINCIPAL] %s by admin %s (ID: %s)",
+        "created" if created else "verified",
+        current_user.username, current_user.id,
+    )
+
+    # password_hash is deliberately absent. It is a credential field, and even
+    # the unusable "!" sentinel should not be echoed to a client — returning it
+    # would normalise serialising password hashes out of this API.
+    return {
+        "created": created,
+        "message": (
+            "System audit principal created."
+            if created else
+            "System audit principal already present; properties verified."
+        ),
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+            "is_active": user.is_active,
+            "can_use_chatbot": user.can_use_chatbot,
+        },
+    }
 
 
 @router.get("/api/users/me/pipelines")
@@ -474,6 +605,12 @@ async def unblock_user(
     _csrf: None = Depends(require_user_admin_csrf)
 ):
     """Unblock a user (admin only) - restores system access"""
+    # unblock_user() sets is_active = True unconditionally, which is precisely
+    # the state the principal must never reach — so without this guard, unblock
+    # is a way around the update guard rather than a separate feature. The row
+    # cannot normally BE blocked, but the route does not require it to be.
+    await _guard_system_principal(db=db, target_user_id=user_id, action="unblocked")
+
     try:
         user = await UserService.unblock_user(user_id, db)
         

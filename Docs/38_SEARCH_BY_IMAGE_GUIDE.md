@@ -94,11 +94,11 @@ Step 5: FAISS SIMILARITY SEARCH
 │  Search FAISS indexes for similar embeddings:                    │
 │                                                                  │
 │  If scope = "known" or "both":                                   │
-│  ├── Search KNOWN index (threshold: 0.4)                         │
+│  ├── Search KNOWN index (SIMILARITY_THRESHOLD, default 0.4)      │
 │  └── Returns: [(identity_id, similarity), ...]                   │
 │                                                                  │
 │  If scope = "unknown" or "both":                                 │
-│  ├── Search UNKNOWN index (threshold: 0.35)                      │
+│  ├── Search UNKNOWN (UNKNOWN_SIMILARITY_THRESHOLD, default 0.35) │
 │  └── Returns: [(identity_id, similarity), ...]                   │
 │                                                                  │
 │  FAISS uses Inner Product (cosine similarity) for fast matching  │
@@ -137,10 +137,21 @@ Step 7: RESPONSE
 
 ### Similarity Thresholds
 
-| Index Type | Threshold | Meaning |
-|------------|-----------|---------|
-| **KNOWN** | 0.4 (40%) | Higher threshold for verified identities |
-| **UNKNOWN** | 0.35 (35%) | Lower threshold to catch potential matches |
+| Index Type | Setting | Default | Meaning |
+|------------|---------|---------|---------|
+| **KNOWN** | `SIMILARITY_THRESHOLD` | 0.4 (40%) | Higher bar for verified identities |
+| **UNKNOWN** | `UNKNOWN_SIMILARITY_THRESHOLD` | 0.35 (35%) | Lower bar to catch potential matches |
+
+These are **settings, not constants** — both are runtime-editable from the admin
+Settings page and apply immediately, with no restart. The search methods take
+`threshold=None` and resolve the setting per call; they previously declared the
+numbers as default arguments, which silently won for every caller that omitted
+the argument.
+
+A third value, `SEARCH_RETRIEVAL_FLOOR` (default 0.2), decides how deep the index
+is searched *before* the threshold above filters what you are shown. It must stay
+at or below `SIMILARITY_THRESHOLD` — the configuration guard refuses to start
+otherwise.
 
 ### Why Different Thresholds?
 
@@ -328,7 +339,7 @@ Authorization: Bearer <access_token>
 |-----------|------|----------|---------|-------------|
 | `image` | File | ✅ Yes | - | Face image file (JPG, PNG, WEBP) |
 | `scope` | String | No | `"both"` | Search scope: `"known"`, `"unknown"`, or `"both"` |
-| `top_k` | Integer | No | `10` | Number of results to return (1-100) |
+| `top_k` | Integer | No | `SEARCH_DEFAULT_TOP_K` (10) | Results per face. Above `SEARCH_MAX_TOP_K` (100) → **422**, not clamped. |
 | `date_from` | String | No | - | Filter: ISO date string (e.g., `"2025-01-01T00:00:00"`) |
 | `date_to` | String | No | - | Filter: ISO date string |
 | `pipeline_id` | String | No | - | Filter by specific camera/pipeline ID |
@@ -368,6 +379,8 @@ Authorization: Bearer <access_token>
 | **400** | `"Invalid image file"` | Corrupt or unsupported image format |
 | **401** | `"Not authenticated"` | Missing or invalid token |
 | **403** | `"Admin access required"` | User is not an admin |
+| **403** | `"Negative search (exclusions) is disabled (NEGATIVE_SEARCH_ENABLED)"` | Exclusion params sent while the feature flag is off (`/api/search/advanced`) |
+| **422** | `"top_k must not exceed the configured maximum of N"` | `top_k` above `SEARCH_MAX_TOP_K` |
 | **503** | `"Identity search service not available"` | System not fully initialized |
 
 ---
@@ -486,7 +499,7 @@ Authorization: Bearer <access_token>
 
 - **Unknown Faces Center Guide**: `07_UNKNOWN_FACES_CENTER_COMPLETE_GUIDE.md`
 - **Identity API Guide**: `08_IDENTITY_API_FRONTEND_GUIDE.md`
-- **FAISS Production Scaling**: `30_FAISS_PRODUCTION_SCALING.md`
+- **FAISS Production Scaling**: `70_VECTOR_INDEX_CONTRACT.md`
 - **SCRFD/ArcFace Integration**: `34_SCRFD_ARCFACE_INTEGRATION_PIPELINE.md`
 
 ---

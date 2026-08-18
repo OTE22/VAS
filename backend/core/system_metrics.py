@@ -133,6 +133,25 @@ class SystemMetricsCollector:
             except (OSError, Exception):
                 pass
 
+            # This loop already computed the value; the gauge was declared,
+            # documented in the README — and never set anywhere. It read 0
+            # forever while pipelines processed traffic.
+            try:
+                from backend.core import metrics as _m
+                if getattr(_m, "metrics_active_pipelines", None):
+                    _m.metrics_active_pipelines.set(active_pipelines_count)
+                # DB pool visibility: exhaustion previously had no Prometheus
+                # signal — it appeared only in /health/detailed JSON.
+                pool_stats = db_manager.get_stats() or {}
+                if getattr(_m, "metrics_db_pool_in_use", None) and "checked_out" in pool_stats:
+                    _m.metrics_db_pool_in_use.set(
+                        (pool_stats.get("checked_out") or 0)
+                        + max(0, pool_stats.get("overflow") or 0))
+                if getattr(_m, "metrics_db_pool_size", None) and "pool_size" in pool_stats:
+                    _m.metrics_db_pool_size.set(pool_stats.get("pool_size") or 0)
+            except Exception:                                  # noqa: BLE001
+                pass
+
             # Create metrics record in separate transaction
             async with db_manager.get_session() as db:
                 # Create metrics record

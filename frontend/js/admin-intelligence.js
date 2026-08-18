@@ -6,8 +6,9 @@
  * Security/correctness contract:
  *  - No backend value is ever rendered through innerHTML or inline handlers;
  *    all dynamic rendering uses createElement/textContent/setAttribute.
- *  - Backend map HTML only runs inside a sandboxed iframe (scripts only,
- *    opaque origin) so it can never touch cookies or the parent DOM.
+ *  - The map is MapLibre GL JS rendering GeoJSON from /map-data over the
+ *    offline Martin basemap (frontend/js/identity-map.js) — no iframe, no
+ *    backend-rendered HTML, no external host.
  *  - Every resource has its own AbortController + generation counter: a
  *    stale response can never overwrite a newer selection.
  *  - Identity search is server-side and paginated — the browser never
@@ -281,7 +282,12 @@
         temporalCharts: {},
         pipelineNames: new Map(), // pipeline_id -> approved display name
         mapRetryUsed: false,
-        mapDebounceTimer: null
+        mapDebounceTimer: null,
+        // MapLibre controller (frontend/js/identity-map.js). One per page;
+        // re-used across identities, destroyed on page teardown.
+        mapController: null,
+        mapLoadedFor: null,        // identityId + params the data was fetched for
+        mapDataKey: null
     };
 
     const elements = {};
@@ -645,8 +651,10 @@
     function viewIdentity(identityId) {
         const id = normalizeId(identityId);
         if (!id) return;
-        const url = new URL('/admin/unknown', window.location.origin);
-        url.searchParams.set('view', id);
+        // The dedicated identity page (used to be /admin/unknown?view=, which
+        // framed known people as unknown faces).
+        const url = new URL(`/admin/identity/${encodeURIComponent(id)}`, window.location.origin);
+        url.searchParams.set('from', window.location.pathname);
         window.location.href = url.pathname + url.search;
     }
 
@@ -682,13 +690,25 @@
         const req = beginRequest('related');
         renderLoading(elements.relatedContainer, 'Loading related identities...');
         try {
+            // Only send what the operator actually chose. These used to fall
+            // back to literals (3 and 5) and were ALWAYS transmitted, so
+            // RELATED_IDENTITY_MIN_CO_APPEARANCES and
+            // RELATED_IDENTITY_TIME_WINDOW_MINUTES could never take effect —
+            // the server-side defaults were structurally unreachable.
+            const params = { limit: 50 };
+            const minCoAppRaw = elements.minCoApp && elements.minCoApp.value;
+            const timeWindowRaw = elements.timeWindow && elements.timeWindow.value;
+            if (minCoAppRaw !== '' && minCoAppRaw != null) {
+                const parsed = toNonNegativeInteger(minCoAppRaw, 0);
+                if (parsed > 0) params.min_co_appearances = parsed;
+            }
+            if (timeWindowRaw !== '' && timeWindowRaw != null) {
+                const parsed = toNonNegativeInteger(timeWindowRaw, 0);
+                if (parsed > 0) params.time_window_minutes = parsed;
+            }
             const data = await api('/api/identities/' + encodeURIComponent(identityId) + '/related', {
                 signal: req.signal,
-                params: {
-                    min_co_appearances: toNonNegativeInteger(elements.minCoApp && elements.minCoApp.value, 3) || 3,
-                    time_window_minutes: toNonNegativeInteger(elements.timeWindow && elements.timeWindow.value, 5) || 5,
-                    limit: 50
-                }
+                params
             });
             if (!req.isCurrent() || state.selectedIdentityId !== identityId) return;
             // Envelope {items,thresholds} (current) or bare array (legacy)
@@ -1078,47 +1098,85 @@
         const refreshBtn = document.getElementById('refresh-map-btn');
         if (refreshBtn) refreshBtn.disabled = true;
 
-        renderLoading(mapContainer, 'Loading map...');
-
         try {
+            // Server-side flags (security overlays default OFF; a missing
+            // checkbox never enables them) and client-side display flags.
             const params = {};
             const date = elements.trackingDate && elements.trackingDate.value;
             if (date) params.date = date;
             else params.days_back = toNonNegativeInteger(elements.trackingDaysBack && elements.trackingDaysBack.value, 7) || 7;
-
-            const styleSelect = document.getElementById('map-style-select');
-            const style = styleSelect && MAP_STYLES.indexOf(styleSelect.value) >= 0 ? styleSelect.value : 'light';
-            params.map_style = style;
-            params.include_popups = displayChecked('map-include-popups');
             params.show_routes = displayChecked('map-show-routes');
-            params.cluster_markers = displayChecked('map-cluster-markers');
             params.enable_security_features = optInChecked('map-enable-security');
             params.detect_patterns = optInChecked('map-detect-patterns');
             params.show_risk_heatmap = optInChecked('map-show-heatmap');
-            params.show_timeline = optInChecked('map-show-timeline');
-            params.show_animated_avatar = optInChecked('map-show-animated-avatar');
 
-            const mapHtml = await api('/api/identities/' + encodeURIComponent(identityId) + '/map', {
-                signal: req.signal, timeout: MAP_TIMEOUT_MS, expect: 'html', params: params
-            });
-            if (!req.isCurrent() || state.selectedIdentityId !== identityId) return; // stale map never replaces newer view
+            const flags = {
+                popups: displayChecked('map-include-popups'),
+                cluster: displayChecked('map-cluster-markers'),
+                routes: params.show_routes,
+                security: params.enable_security_features,
+                patterns: params.detect_patterns,
+                risk: params.show_risk_heatmap,
+                timeline: optInChecked('map-show-timeline'),
+                avatar: optInChecked('map-show-animated-avatar')
+            };
 
-            // Sandboxed: scripts may run, but in a unique opaque origin with
-            // NO access to our cookies, storage, DOM or APIs.
-            const iframe = document.createElement('iframe');
-            iframe.setAttribute('sandbox', 'allow-scripts');
-            iframe.setAttribute('referrerpolicy', 'no-referrer');
-            iframe.setAttribute('title', 'Movement tracking map');
-            iframe.style.cssText = 'width:100%;height:100%;border:none;border-radius:8px;';
-            iframe.srcdoc = mapHtml;
-            mapContainer.replaceChildren(iframe);
+            const styleSelect = document.getElementById('map-style-select');
+            const style = styleSelect && MAP_STYLES.indexOf(styleSelect.value) >= 0 ? styleSelect.value : 'light';
+
+            // MapLibre renders INTO the page (no iframe, no backend HTML). The
+            // controller is an ES module bridged onto window.IdentityMap.
+            const IM = await window.IdentityMap.ready;
+
+            // A style change alone must not refetch analysis: only the data
+            // key (identity + server params) triggers a new request.
+            const dataKey = identityId + '|' + JSON.stringify(params);
+            let ctl = state.mapController;
+            if (!ctl || ctl.container !== mapContainer || !ctl.map) {
+                if (ctl) ctl.destroy();
+                renderLoading(mapContainer, 'Loading map...');
+                ctl = new IM.Controller(mapContainer, {
+                    style: 'light',
+                    onError: function (kind, detail) {
+                        if (kind === 'dataset') {
+                            showNotification('That map style is not installed on this system (' + detail.code + ')', 'error');
+                        }
+                    }
+                });
+                await ctl.init();
+                await ctl.loadAvailability(styleSelect);
+                state.mapController = ctl;
+                state.mapDataKey = null;
+            }
+            if (!req.isCurrent()) return;
+
+            if (ctl.isStyleAvailable(style)) {
+                if (style !== ctl.style) await ctl.setBasemap(style);
+            } else {
+                // Deterministic: refuse and tell the user; never substitute.
+                if (styleSelect) styleSelect.value = ctl.style;
+                showNotification('Map style "' + style + '" is unavailable: ' + IM.UNAVAILABLE, 'error');
+            }
+            if (!req.isCurrent()) return;
+
+            if (state.mapDataKey !== dataKey) {
+                await ctl.load(identityId, params, flags);
+                state.mapDataKey = dataKey;
+            } else {
+                Object.assign(ctl.flags, flags);
+                ctl._restoreOverlays();
+            }
+            if (req.isCurrent() && refreshBtn) refreshBtn.disabled = false;
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
+            if (err && err.message === (window.IdentityMap && window.IdentityMap.UNAVAILABLE)) {
+                if (refreshBtn) refreshBtn.disabled = false;
+                return;
+            }
             renderError(mapContainer,
                 err.status === 503 ? 'Map service is temporarily unavailable' : 'Failed to load map',
                 err.referenceId);
-        } finally {
-            if (req.isCurrent() && refreshBtn) refreshBtn.disabled = false;
+            if (refreshBtn) refreshBtn.disabled = false;
         }
     }
 
@@ -1326,6 +1384,7 @@
 
     function destroy() {
         abortAllRequests();
+        if (state.mapController) { state.mapController.destroy(); state.mapController = null; state.mapDataKey = null; }
         destroyTemporalCharts();
         destroyIdentityPicker();
         if (state.mapDebounceTimer) { window.clearTimeout(state.mapDebounceTimer); state.mapDebounceTimer = null; }

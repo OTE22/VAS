@@ -542,7 +542,8 @@ When you open the **Unknown Faces** page, you'll see:
                             "url": "/api/admin/unknown/{identity_id}/promote",
                             "body": {
                                 "display_name": "John Doe",
-                                "notes": "Employee ID: 12345"
+                                "notes": "Employee ID: 12345",
+                                "decision": "create_new"
                             },
                             "response": {
                                 "success": True,
@@ -578,7 +579,8 @@ When you open the **Unknown Faces** page, you'll see:
     },
     body: JSON.stringify({
       display_name: displayName,
-      notes: 'Promoted via admin interface'
+      notes: 'Promoted via admin interface',
+      decision: 'create_new'
     })
   });
   
@@ -602,7 +604,8 @@ When you open the **Unknown Faces** page, you'll see:
                         },
                         "body": {
                             "display_name": "string (required) - Name to assign",
-                            "notes": "string (optional) - Additional notes"
+                            "notes": "string (optional) - Additional notes",
+                            "decision": "string (required) - must be 'create_new'"
                         },
                         "response": {
                             "success": "boolean",
@@ -1045,6 +1048,7 @@ keeps serving and nothing changes.
                             "method": "POST",
                             "url": "/api/admin/identities/merge",
                             "body": {
+                                "decision": "merge_existing",
                                 "from_identity_id": "source-uuid",
                                 "to_identity_id": "target-uuid",
                                 "notes": "These are the same person"
@@ -1098,6 +1102,7 @@ keeps serving and nothing changes.
                         "path": "/api/admin/identities/merge",
                         "description": "Simple merge of two identities into one",
                         "body": {
+                            "decision": "string (required) - 'merge_existing'",
                             "from_identity_id": "UUID of source identity (will be merged)",
                             "to_identity_id": "UUID of target identity (will receive data)",
                             "notes": "Optional notes about the merge"
@@ -1599,6 +1604,30 @@ Access via: **SEARCH & INTELLIGENCE** → **Intelligence Analysis**
                         }
                     },
                     {
+                        "method": "POST",
+                        "path": "/api/search/batch",
+                        "description": ("Search several images in one request. Returns 403 when "
+                                        "BATCH_SEARCH_ENABLED is false, and aborts with a timeout "
+                                        "error if the batch exceeds BATCH_SEARCH_TIMEOUT_SECONDS."),
+                        "content_type": "multipart/form-data",
+                        "parameters": {
+                            "images": "file[] (required) - up to BATCH_SEARCH_MAX_IMAGES (20)",
+                            "scope": "string (default: both)",
+                            "top_k": ("integer (optional) - omit for SEARCH_DEFAULT_TOP_K (10); "
+                                      "above SEARCH_MAX_TOP_K (100) returns 422"),
+                            "min_quality": "float (optional, 0-1)",
+                            "check_watchlist": "boolean (default: true)"
+                        }
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/api/search/config",
+                        "description": ("Server-published search configuration the UI must mirror "
+                                        "instead of hard-coding: quality thresholds, confidence "
+                                        "bands, upload limits, plus results{default_top_k,max_top_k} "
+                                        "and display{min_similarity}.")
+                    },
+                    {
                         "method": "GET",
                         "path": "/api/search/history",
                         "description": "Get search history with filters",
@@ -1612,17 +1641,19 @@ Access via: **SEARCH & INTELLIGENCE** → **Intelligence Analysis**
                     {
                         "method": "GET",
                         "path": "/api/identities/{identity_id}/related",
-                        "description": "Get related identities (co-appearance analysis)",
+                        "description": ("Get related identities (co-appearance analysis). "
+                                        "403 when RELATED_IDENTITIES_ENABLED is false."),
                         "query_params": {
-                            "min_co_appearances": "integer (optional)",
-                            "time_window_minutes": "integer (optional, default: 5)",
+                            "min_co_appearances": "integer (optional) - omit for RELATED_IDENTITY_MIN_CO_APPEARANCES (3)",
+                            "time_window_minutes": "integer (optional) - omit for RELATED_IDENTITY_TIME_WINDOW_MINUTES (30)",
                             "limit": "integer (default: 20, max: 100)"
                         }
                     },
                     {
                         "method": "GET",
                         "path": "/api/identities/{identity_id}/temporal-patterns",
-                        "description": "Get temporal patterns (when/where identity appears)",
+                        "description": ("Get temporal patterns (when/where identity appears). "
+                                        "403 when TEMPORAL_PATTERNS_ENABLED is false."),
                         "query_params": {
                             "days_back": "integer (default: 90, max: 365)"
                         }
@@ -1630,7 +1661,8 @@ Access via: **SEARCH & INTELLIGENCE** → **Intelligence Analysis**
                     {
                         "method": "GET",
                         "path": "/api/identities/{identity_id}/cross-camera",
-                        "description": "Get cross-camera tracking (movement path)",
+                        "description": ("Get cross-camera tracking (movement path). "
+                                        "403 when CROSS_CAMERA_TRACKING_ENABLED is false."),
                         "query_params": {
                             "date": "string (optional, YYYY-MM-DD)",
                             "days_back": "integer (default: 7, max: 30)"
@@ -2028,17 +2060,57 @@ The audit log tracks:
 
 Use it for security, troubleshooting, compliance, and rollback planning.
 
+## When a saved setting takes effect — `apply_mode`
+
+Every setting declares HOW a save reaches the running system. The PUT response
+tells you which one applies, so you never have to guess:
+
+| `apply_mode` | What the save does |
+|---|---|
+| `immediate` | Live now. Consumers read the value on every call. |
+| `next_request` | Live now; the next request that reads it picks it up. |
+| `next_job_run` | Live now; the periodic job reads it when it next runs. |
+| `api_restart` | Stored. Applied when the API container next starts. |
+| `index_rebuild` | Stored and applied at restart, but existing vector index data also needs rebuilding to match. |
+| `container_recreate` | Stored, but describes how the container was LAUNCHED (ports, mounts, worker count, the separate backup service). Change the environment and recreate — the running process cannot adopt it. |
+
+The PUT response carries `applied`, `apply_mode`, `restart_required` and
+`effective_value`, so the UI can be specific rather than saying "may require a
+restart".
+
+**Restart-required settings really do apply after a restart.** Startup hydration
+loads every admin-modified value from the database, whatever its apply_mode, and
+does it before any component is constructed. This was previously broken: hydration
+skipped every non-dynamic key, so a value labelled "requires restart" was stored
+durably and then ignored forever. Two exclusions remain deliberately —
+security-critical keys (never mutable in-process) and `container_recreate`.
+
+## Validation
+
+Values are **refused, never silently corrected**. An out-of-range number returns
+`422` naming the field and the bound, for example:
+
+```
+422  SEARCH_RETRIEVAL_FLOOR: 5.0 is above the maximum (1)
+```
+
+Relationships between settings are checked at startup by the configuration guard,
+which refuses to boot on an inverted pair (for example a retrieval floor above the
+display threshold) rather than quietly clamping one of them.
+
 ## Troubleshooting
 
 **Setting won't save?**
 - Check type matches (string, number, etc.)
 - Check if readonly
-- Check validation rules
+- Check validation rules — the 422 message names the field and the bound
+- Cookie-authenticated PUT needs `X-Requested-With: XMLHttpRequest` or it returns 403
 
 **Setting not taking effect?**
-- Some settings require system restart
-- Check if value was actually saved
-- Verify in audit log
+- Check `apply_mode` in the PUT response (table above)
+- `api_restart` / `index_rebuild` → restart the API container
+- `container_recreate` → change the environment and recreate the container
+- Verify in the audit log that the value was actually stored
 
 **Can't see value?**
 - Sensitive settings are hidden
@@ -2108,359 +2180,6 @@ Use it for security, troubleshooting, compliance, and rollback planning.
                         "description": "Get audit log of setting changes",
                         "parameters": {
                             "limit": "Number of entries to return (default: 50)"
-                        }
-                    }
-                ]
-            },
-            {
-                "title": "FAISS Index Repair and Synchronization",
-                "description": "Learn about the automatic FAISS index repair system and how to configure it",
-                "content": """
-# FAISS Index Repair and Synchronization
-
-## What is FAISS?
-
-FAISS (Facebook AI Similarity Search) is the vector database that stores face embeddings. The system uses two FAISS indexes:
-- **KNOWN Index**: Stores embeddings for known persons (people you've named)
-- **UNKNOWN Index**: Stores embeddings for unknown faces
-
-## Why Repair is Needed
-
-FAISS indexes can become out of sync with the database due to:
-- Orphaned entries (vectors without database records)
-- Missing entries (database records without vectors)
-- Size mismatches (FAISS has more vectors than metadata)
-- Data corruption from crashes or improper shutdowns
-
-## Automatic Repair System
-
-The system **automatically repairs** FAISS indexes to keep them synchronized with the database.
-
-### When Repair Runs
-
-**1. On Startup (Optional)**
-- Runs after loading known faces from `storage/faces`
-- Detects and fixes orphaned entries
-- Rebuilds indexes if needed
-- **Configurable**: Can be disabled for faster startup
-
-**2. Background Repair (Periodic)**
-- Runs automatically every 24 hours (configurable)
-- Runs after configurable startup delay (default: 1 hour), then at specified interval
-- Non-blocking - doesn't affect system performance
-- **Configurable**: Set interval in hours (0 = disabled)
-
-### Repair Strategies by Scale
-
-The system uses smart strategies based on index size:
-
-**Small Mismatches (< 1% or < 100 entries):**
-- Uses **Lazy Marking** approach
-- Marks orphaned vectors, skips them during search
-- **Instant** - No performance impact
-- Perfect for large scale
-
-**Medium Indexes (< 50k vectors):**
-- **Immediate Rebuild** if mismatch is large
-- Rebuilds index from database
-- Acceptable startup delay (1-5 seconds)
-- Ensures clean state from start
-
-**Large Indexes (≥ 50k vectors):**
-- **Background Rebuild** for large mismatches
-- Schedules rebuild without blocking
-- System continues operating with old index
-- Switches to new index when ready
-
-## Configuration
-
-### Settings Available in Admin UI
-
-Navigate to **Admin → Settings** and filter by **"identity"** category:
-
-**1. REPAIR_FAISS_ON_STARTUP**
-- **Type**: Boolean (True/false)
-- **Default**: `True`
-- **Description**: Enable/disable FAISS index repair on application startup
-- **When to Disable**: Very large indexes (> 1M vectors) where startup time is critical
-- **Recommendation**: Keep enabled for most deployments
-
-**2. REPAIR_FAISS_INTERVAL_HOURS**
-- **Type**: Integer
-- **Default**: `24` (hours)
-- **Description**: Background repair interval in hours
-- **Recommendations**:
-  - Small deployments (< 10k vectors): 12 hours
-  - Medium deployments (10k-100k vectors): 24 hours (default)
-  - Large deployments (> 100k vectors): 48 hours
-  - Set to `0` to disable background repair
-
-### How to Configure
-
-**Via Admin UI:**
-1. Go to **Admin → Settings**
-2. Filter by **"identity"** category
-3. Find `REPAIR_FAISS_ON_STARTUP` or `REPAIR_FAISS_INTERVAL_HOURS`
-4. Click **Edit** button
-5. Enter new value
-6. Add change reason (optional)
-7. Click **Save Changes**
-
-**Via Environment Variables:**
-```bash
-# Enable/disable repair on startup
-REPAIR_FAISS_ON_STARTUP=True
-
-# Background repair interval (hours)
-REPAIR_FAISS_INTERVAL_HOURS=24
-```
-
-## Monitoring and Verification
-
-### Startup Logs
-
-When the system starts, you'll see repair logs:
-
-**Healthy System:**
-```
-✅ No orphaned entries found - indexes are clean
-📊 Index Verification:
-   KNOWN: FAISS=1000, DB=1000, Match=True
-```
-
-**Repair in Action:**
-```
-🔧 Repairing orphaned FAISS entries (efficient mode)...
-[FAISS_REPAIR] Removed 5 orphaned KNOWN embeddings
-💾 Saved repaired indexes to disk
-📊 Index Verification AFTER Repair:
-   KNOWN: FAISS=1000, DB=1000, Match=True
-```
-
-**Large Mismatch (Background Rebuild):**
-```
-⚠️ FAISS KNOWN index has 1200 vectors but metadata only has 1000 entries!
-[FAISS_REPAIR] Large index detected. Scheduling background rebuild...
-[FAISS_REPAIR] Background rebuild scheduled. Will rebuild without blocking.
-```
-
-### Verification via API
-
-Check index status:
-
-```bash
-GET /api/admin/identities/verify-indexes
-```
-
-**Response:**
-```json
-{
-  "known_index": {
-    "faiss_count": 1000,
-    "database_count": 1000,
-    "match": True,
-    "issues": []
-  },
-  "unknown_index": {
-    "faiss_count": 500,
-    "database_count": 500,
-    "match": True,
-    "issues": []
-  }
-}
-```
-
-## Troubleshooting
-
-### Issue: FAISS count != Database count
-
-**Symptoms:**
-```
-KNOWN: FAISS=18, DB=9, Match=False
-```
-
-**Solution:**
-- Repair should run automatically on startup
-- Check `REPAIR_FAISS_ON_STARTUP=True` in settings
-- Restart application to trigger repair
-- If persists, check repair logs for errors
-
-### Issue: Repair Taking Too Long
-
-**Symptoms:**
-- Startup takes minutes
-- System appears frozen
-
-**Solution:**
-1. **Disable startup repair:**
-   - Set `REPAIR_FAISS_ON_STARTUP=false`
-2. **Rely on background repair** - Runs automatically every 24 hours
-3. **For very large indexes** - Background rebuild is automatic
-
-### Issue: Known Faces Not Recognized
-
-**Symptoms:**
-- Known faces appear as unknown
-- FAISS search returns no matches
-
-**Solution:**
-1. **Verify known faces loaded:**
-   - Check logs: `✅ Loaded X known faces from storage/faces`
-2. **Check index size:**
-   - Verify: `KNOWN index: X vectors, Y identities`
-3. **Reload known faces:**
-   - Delete index files and restart
-   - Known faces will be reloaded automatically
-
-## Best Practices
-
-### For Production
-
-**Recommended Settings:**
-```bash
-REPAIR_FAISS_ON_STARTUP=True      # Enable for data integrity
-REPAIR_FAISS_INTERVAL_HOURS=24    # Daily background repair
-```
-
-### For Development
-
-**Faster Iteration:**
-```bash
-REPAIR_FAISS_ON_STARTUP=false     # Disable for faster startup
-REPAIR_FAISS_INTERVAL_HOURS=48    # Less frequent background repair
-```
-
-### For Large Scale (1M+ vectors)
-
-**Optimized Settings:**
-```bash
-REPAIR_FAISS_ON_STARTUP=false     # Disable for faster startup
-REPAIR_FAISS_INTERVAL_HOURS=48    # Less frequent background repair
-```
-
-**Why:**
-- Startup repair can take minutes for very large indexes
-- Background repair handles everything automatically
-- System uses lazy marking for small mismatches (instant)
-
-## What Happens During Repair
-
-### 1. Orphaned Identity Removal
-- Finds FAISS entries for identities that don't exist in database
-- Removes them from metadata
-- Keeps FAISS vectors (lazy marking approach)
-
-### 2. Orphaned Embedding Removal
-- Finds FAISS vectors that don't have database records
-- Marks them as orphaned
-- Skips them during search
-
-### 3. Index Rebuild (if needed)
-- Reconstructs valid embeddings from current index
-- Creates new clean index
-- Updates all metadata and database records
-
-## Summary
-
-✅ **Automatic**: Repair runs automatically on startup and in background  
-✅ **Efficient**: Smart strategies for all scales (lazy marking, background rebuild)  
-✅ **Configurable**: All settings available in Admin UI  
-✅ **Non-Blocking**: Background operations don't affect system performance  
-✅ **Scalable**: Works with millions of vectors  
-
-**Key Takeaways:**
-1. Repair is **automatic** - you don't need to do anything
-2. **Small mismatches** are handled instantly (lazy marking)
-3. **Large indexes** are rebuilt in background (non-blocking)
-4. **Configuration** is available in Admin → Settings
-5. **Monitor** via startup logs and verification API
-
-**See Documentation:** Check **33_FAISS_REPAIR_AND_SYNCHRONIZATION.md** for complete details.
-                """,
-                "examples": [
-                    {
-                        "title": "View Repair Settings",
-                        "description": "Check current repair configuration",
-                        "steps": [
-                            "1. Go to Admin → Settings",
-                            "2. Filter by 'identity' category",
-                            "3. Find REPAIR_FAISS_ON_STARTUP",
-                            "4. Find REPAIR_FAISS_INTERVAL_HOURS",
-                            "5. Review current values"
-                        ]
-                    },
-                    {
-                        "title": "Change Repair Interval",
-                        "description": "Update background repair frequency",
-                        "steps": [
-                            "1. Go to Admin → Settings",
-                            "2. Filter by 'identity' category",
-                            "3. Find REPAIR_FAISS_INTERVAL_HOURS",
-                            "4. Click 'Edit' button",
-                            "5. Enter new value (e.g., 48 for 48 hours)",
-                            "6. Add change reason (optional)",
-                            "7. Click 'Save Changes'",
-                            "8. Verify in audit log"
-                        ]
-                    },
-                    {
-                        "title": "Verify Index Status",
-                        "description": "Check if indexes are synchronized",
-                        "api_example": {
-                            "method": "GET",
-                            "url": "/api/admin/identities/verify-indexes",
-                            "response": {
-                                "known_index": {
-                                    "faiss_count": 1000,
-                                    "database_count": 1000,
-                                    "match": True,
-                                    "issues": []
-                                },
-                                "unknown_index": {
-                                    "faiss_count": 500,
-                                    "database_count": 500,
-                                    "match": True,
-                                    "issues": []
-                                }
-                            }
-                        }
-                    }
-                ],
-                "api_endpoints": [
-                    {
-                        "method": "GET",
-                        "path": "/api/admin/identities/verify-indexes",
-                        "description": "Verify FAISS index synchronization with database",
-                        "authentication": "Required - Admin role",
-                        "response": {
-                            "known_index": "Index statistics and issues",
-                            "unknown_index": "Index statistics and issues"
-                        }
-                    },
-                    {
-                        "method": "GET",
-                        "path": "/api/settings",
-                        "description": "Get all settings (filter by category='identity' for repair settings)",
-                        "query_parameters": {
-                            "category": "Optional - 'identity' for repair settings"
-                        }
-                    },
-                    {
-                        "method": "PUT",
-                        "path": "/api/settings/REPAIR_FAISS_ON_STARTUP",
-                        "description": "Enable/disable repair on startup",
-                        "body": {
-                            "value": "True or false",
-                            "change_reason": "Optional reason"
-                        }
-                    },
-                    {
-                        "method": "PUT",
-                        "path": "/api/settings/REPAIR_FAISS_INTERVAL_HOURS",
-                        "description": "Set background repair interval in hours",
-                        "body": {
-                            "value": "Integer (0 = disabled, 24 = daily, etc.)",
-                            "change_reason": "Optional reason"
                         }
                     }
                 ]
@@ -2536,22 +2255,12 @@ LOG_LEVEL=DEBUG
 
 **When to Enable:** When debugging recognition issues or investigating why faces aren't detected
 
-### FAISS Index Configuration
+### Vector Index Configuration
 
-**KNOWN_INDEX_TYPE**
-- **Default:** `flat`
-- **Options:** `flat`, `ivf`, `hnsw`, `ivfpq`
-- **Description:** Index type for known faces
-  - `flat`: Best accuracy, good for <100K faces
-  - `ivf`: Fast, good for 100K-1M faces
-  - `hnsw`: Fastest, good for 1M-10M faces
-  - `ivfpq`: Smallest memory, good for 10M+ faces
-- **Location:** Settings → Filter by "identity"
-
-**FAISS_LAZY_MARKING_THRESHOLD**
-- **Default:** `1` (for demo)
-- **Production:** `100` or higher
-- **Description:** Threshold for lazy marking orphaned vectors
+**VECTOR_BACKEND**
+- **Default:** `pgvector`
+- **Options:** `pgvector` (vectors searched in PostgreSQL), `faiss` (in-memory exact index)
+- **Description:** Where similarity search runs. Restart required.
 - **Location:** Settings → Filter by "identity"
 
 ### Face Recognition Accuracy
@@ -2682,13 +2391,18 @@ All settings are organized into categories:
                 "api_endpoints": [
                     {
                         "method": "GET",
-                        "url": "/api/settings",
+                        "path": "/api/settings",
                         "description": "Get all settings (filtered by category if specified)"
                     },
                     {
                         "method": "PUT",
-                        "url": "/api/settings/{setting_id}",
-                        "description": "Update a setting value"
+                        "path": "/api/settings/{setting_key}",
+                        "description": ("Update a setting value. Cookie-authenticated callers must "
+                                        "send X-Requested-With: XMLHttpRequest (CSRF). The response "
+                                        "reports apply_mode and restart_required."),
+                        "headers": {
+                            "X-Requested-With": "XMLHttpRequest (required for cookie auth, not for Bearer tokens)"
+                        }
                     }
                 ]
             },
@@ -3970,6 +3684,254 @@ governed separately by the retention/cleanup jobs.
                     }
                 ]
             },
+            {
+                "title": "Operating This System: Docs, Drift and the API Reference",
+                "description": "Where the documentation now lives, how to read the API without exposing Swagger, and the runtime-drift traps that have actually bitten this deployment",
+                "content": """
+# Operating This System
+
+The documentation was audited end to end against the running code. This section
+is the short version: where things live now, and the specific traps that have
+already caused outages here.
+
+---
+
+## 1. Which document to open
+
+| I want to... | Read |
+|---|---|
+| Deploy to production | `Docs/61_DEPLOYMENT_RUNBOOK.md` — **the authority**. Anything that contradicts it is wrong. |
+| Run it day to day | `Docs/72_ADMIN_CHEAT_SHEET.md` |
+| Fix something broken | `Docs/73_TROUBLESHOOTING.md` |
+| Harden before go-live | `Docs/74_SECURITY_CHECKLIST.md` |
+| Look up an endpoint | `Docs/75_API_REFERENCE.md` |
+| Back up / restore | `Docs/60_BACKUP_AND_RESTORE.md` |
+
+`Docs/00_DOCUMENTATION_INDEX.md` lists all 110 files. Two corrections it
+records, because they mislead otherwise:
+
+* **Vector search is pgvector, not FAISS.** Around 46 documents still describe
+  FAISS as the live index; they predate the migration. The binding contract is
+  `Docs/70_VECTOR_INDEX_CONTRACT.md` — PostgreSQL is authoritative, the index is
+  a disposable acceleration layer.
+* **`60_` and `61_` are used twice.** The production documents are
+  `60_BACKUP_AND_RESTORE.md` and `61_DEPLOYMENT_RUNBOOK.md`, *not* the
+  similarly numbered enhancements guides.
+
+---
+
+## 2. Reading the API in production, without exposing Swagger
+
+`/docs` and `/redoc` are **disabled in production by design** — they publish
+every admin route, and the gate cannot be flipped at runtime (it is
+`ENABLE_API_DOCS and not is_production`, plus a fatal startup rule, plus the key
+is security-critical so the settings API refuses it).
+
+That does not leave you without a reference. Two supported options:
+
+1. **`Docs/75_API_REFERENCE.md`** — generated from the application's own OpenAPI
+   document, committed to the repository, readable offline. All 254 operations
+   with parameters, bodies and status codes. A test fails if it drifts from the
+   code, so it cannot quietly go stale.
+2. **Extract the live spec from the production process** — nothing is exposed,
+   no route is registered:
+
+```bash
+docker compose -f docker/docker-compose.prod.yml exec face_recognition \\
+  python -c "from backend.main import app; import json; print(json.dumps(app.openapi()))" \\
+  > openapi-prod.json
+```
+
+Load that file into any Swagger or ReDoc viewer on your own workstation.
+
+**Temporarily enabling `/docs` in production is not a supported procedure.**
+
+In development, `/docs` and `/redoc` work fully offline: the Swagger and ReDoc
+assets are vendored into `frontend/vendor/swagger/` and the page is bootstrapped
+by a separate **local** script file, never an inline script and never a CDN.
+(The Content-Security-Policy is `script-src 'self'` with no `unsafe-inline`, so
+an inline bootstrap silently produces a blank page — which is exactly the bug
+that was fixed.)
+
+---
+
+## 3. What is actually running: the runtime fingerprint
+
+Every start now logs one greppable line, and `/health/detailed` returns the same
+data under a `runtime` key:
+
+```bash
+docker compose $COMPOSE_PROD logs face_recognition | grep "Runtime fingerprint"
+curl -fsS http://localhost/health/detailed | python3 -c "import sys,json; print(json.load(sys.stdin)['runtime'])"
+```
+
+```
+version=5.0.0 | git_commit=bea01a4e0d64 | environment=development |
+container=b15b91c8d796 | vector_backend=pgvector |
+database=postgres:5432/face_recognition | migrations_mode=run |
+expected_migration_head=unpinned | workers=1 | gpu=False
+```
+
+Database credentials are stripped by construction — only host, port and database
+name appear. This exists so that "is the runtime actually what the repository
+says?" is answerable in one command, because twice it was not.
+
+---
+
+## 4. Four drift traps that have really happened here
+
+**`restart` keeps the old environment.** `docker restart` preserves the
+container's original environment block. A compose change is only picked up by
+`up -d --force-recreate <service>`. A setting that "won't take effect" is
+almost always this.
+
+**A recreate gives nginx a stale upstream.** The new container gets a new IP;
+nginx resolved the old one at startup and returns **502 while the API is
+perfectly healthy**. Always follow a recreate with `restart nginx`. Confirm by
+curling the API directly inside its own container — 200 there and 502 through
+the proxy is the signature.
+
+**A stored setting silently overrules the environment.** Settings in the
+`settings` table are hydrated **over** the environment at boot. This is by
+design (that is how the settings UI works), but it means compose can say one
+thing and the running app use another. `WEBHOOK_DEDUP_TTL_SECONDS` was 600 in
+compose and **60** in the live app for days, short enough that camera frames
+retried by the VMS were re-processed as new sightings. Check the effective value
+rather than the environment:
+
+```bash
+curl -fsS "http://localhost/api/settings/WEBHOOK_DEDUP_TTL_SECONDS" \\
+  -H "Authorization: Bearer $TOKEN"
+# compare: stored_value / env_value / effective_value / source
+```
+
+Fix a wrong value **through the settings API**, not by editing the environment —
+hydration would overrule the environment again on the next boot.
+
+**A patch applied inside a live container disappears on the next update.**
+Offline map rendering depends on Leaflet assets vendored into `offline_folium`.
+That step *is* in both Dockerfiles, but the image in use predated it, so the
+assets had only ever been installed by hand into the running container.
+Recreating produced maps that silently fell back to CDN Leaflet — blank, on an
+offline deployment. **Always `build` as part of an update, never just recreate**,
+and never leave a fix that exists only inside a live container.
+
+---
+
+## 5. Documented values are defaults, not your values
+
+Numbers in the documentation are `config.py` defaults; the compose file and
+`.env` frequently override them. On the stack this was verified against, **five
+of six** spot-checked values differed from their documented default
+(`MAX_QUEUE_SIZE`, `MAX_CONCURRENT_REQUESTS`, `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`,
+`MAX_STORAGE_GB`). Read your own:
+
+```bash
+docker compose $COMPOSE_PROD exec -e PYTHONPATH=/app -w /app face_recognition \\
+  python -c "from config import settings; print(settings.MAX_QUEUE_SIZE, settings.DB_POOL_SIZE)"
+```
+
+---
+
+## 6. Destructive commands
+
+`docker compose down -v` deletes the named volumes — **the database, the stored
+faces and the logs**. There is no undo. It is never part of normal
+administration; `stop` and `down` both preserve data.
+
+`Docs/69_CLEAR_DATABASE_GUIDE.md` is **development only** and now says so at the
+top. Raw `DELETE FROM` / `TRUNCATE` recipes elsewhere carry backup warnings —
+prefer the retention system and the maintained wipe scripts, which also remove
+the stored image files that orphaned rows point at.
+
+---
+
+## 7. Alembic, for when you need it by hand
+
+Migrations apply themselves at startup according to `MIGRATIONS_MODE`. When you
+do need the CLI, note that `alembic.ini` lives in `/app/alembic`, **not**
+`/app` — without `-w` you get `No 'script_location' key found in configuration`:
+
+```bash
+docker compose $COMPOSE_PROD exec -w /app/alembic face_recognition alembic current
+```
+""",
+                "examples": [
+                    {
+                        "title": "Check what is actually running",
+                        "code": '''curl -fsS http://localhost/health/detailed \\
+  | python3 -c "import sys,json; r=json.load(sys.stdin)['runtime']; \\
+print('\\\\n'.join(f'{k}: {v}' for k,v in r.items()))"''',
+                        "description": "Version, git commit, environment, vector backend and database target — no credentials"
+                    },
+                    {
+                        "title": "Find a stored setting overruling the environment",
+                        "code": '''TOKEN=$(curl -fsS -X POST http://localhost/api/auth/login \\
+  -H 'Content-Type: application/json' \\
+  -d '{"username":"admin","password":"<your password>"}' \\
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+curl -fsS "http://localhost/api/settings/WEBHOOK_DEDUP_TTL_SECONDS" \\
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool''',
+                        "description": "Compare stored_value / env_value / effective_value / source. overridden=true means the database is winning."
+                    },
+                    {
+                        "title": "Correct a setting the supported way",
+                        "code": '''curl -sS -X PUT "http://localhost/api/settings/WEBHOOK_DEDUP_TTL_SECONDS" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -H "X-Requested-With: XMLHttpRequest" \\
+  -d '{"value": "600", "change_reason": "align with the deployed compose contract"}' ''',
+                        "description": "Values are sent as STRINGS. Editing the environment instead would be overruled by hydration on the next boot."
+                    },
+                    {
+                        "title": "Update safely (build, recreate, then the proxy)",
+                        "code": '''docker compose $COMPOSE_PROD build face_recognition
+docker compose $COMPOSE_PROD up -d
+docker compose $COMPOSE_PROD restart nginx        # else 502 on a stale upstream
+docker compose $COMPOSE_PROD exec -w /app/alembic face_recognition alembic current
+curl -fsS http://localhost/health/detailed''',
+                        "description": "build is not optional: a recreate alone reverts any fix that existed only inside the live container"
+                    },
+                    {
+                        "title": "Read the API reference on a production host",
+                        "code": '''docker compose $COMPOSE_PROD exec face_recognition \\
+  python -c "from backend.main import app; import json; print(json.dumps(app.openapi()))" \\
+  > openapi-prod.json''',
+                        "description": "Full spec, 254 operations. No route is exposed and /docs stays 404."
+                    }
+                ],
+                "api_endpoints": [
+                    {
+                        "method": "GET",
+                        "path": "/health/detailed",
+                        "description": "Per-component health plus the runtime fingerprint. Returns 200 even when unhealthy — read the 'healthy' field, do not rely on the status code.",
+                        "parameters": {},
+                        "response": {"healthy": True, "runtime": {"version": "5.0.0", "git_commit": "bea01a4e0d64", "vector_backend": "pgvector"}, "components": {"queue": "...", "database": "...", "storage": "..."}}
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/health/ready",
+                        "description": "503 ONLY when the database or the models are unavailable. A degraded cache or a stalled background service reports 'degraded' with 200, deliberately — so a dead cleanup loop cannot pull the API out of a load balancer.",
+                        "parameters": {},
+                        "response": {"status": "ready", "components": {"database": {"healthy": True, "required": True}, "cache": {"healthy": True, "required": False}}}
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/api/settings/{key}",
+                        "description": "One setting with its provenance: stored_value, env_value, default_value, effective_value and source. This is how you detect a database override of a deployed value.",
+                        "parameters": {"key": "Setting name, e.g. WEBHOOK_DEDUP_TTL_SECONDS"},
+                        "response": {"key": "WEBHOOK_DEDUP_TTL_SECONDS", "stored_value": 600, "env_value": 600, "effective_value": 600, "source": "environment", "overridden": False}
+                    },
+                    {
+                        "method": "PUT",
+                        "path": "/api/settings/{key}",
+                        "description": "Change a runtime setting (admin + CSRF). Values are sent as strings. Security-critical keys such as DEBUG and ENABLE_API_DOCS are refused at runtime by design.",
+                        "parameters": {"value": "String", "change_reason": "Audited reason"},
+                        "response": {"success": True, "applied": True, "apply_mode": "next_request", "restart_required": False}
+                    }
+                ]
+            },
         ],
         "quick_start": {
             "title": "Quick Start Guide",
@@ -4298,7 +4260,8 @@ async def get_api_examples(
     },
     body: JSON.stringify({
       display_name: displayName,
-      notes: 'Promoted via admin interface'
+      notes: 'Promoted via admin interface',
+      decision: 'create_new'
     })
   });
   return await response.json();
@@ -4336,6 +4299,7 @@ def promote_identity(identity_id, display_name, token):
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
+      decision: 'merge_existing',
       from_identity_id: fromId,
       to_identity_id: toId,
       notes: notes
@@ -4453,12 +4417,14 @@ def advanced_search(image_path, token, scope='both', top_k=10,
   -F "images=@/path/to/image2.jpg" \\
   -F "images=@/path/to/image3.jpg" \\
   -F "scope=both" \\
-  -F "top_k=5" """,
+  """,   # omit top_k: the server applies SEARCH_DEFAULT_TOP_K (10)
             "javascript": """async function batchSearch(imageFiles, options = {}) {
   const formData = new FormData();
   imageFiles.forEach(file => formData.append('images', file));
   formData.append('scope', options.scope || 'both');
-  formData.append('top_k', options.topK || '5');
+  // Only send top_k when the caller chose one; otherwise the server applies
+  // SEARCH_DEFAULT_TOP_K. Above SEARCH_MAX_TOP_K the request is rejected 422.
+  if (options.topK) formData.append('top_k', options.topK);
   
   const response = await fetch('/api/search/batch', {
     method: 'POST',
@@ -4471,11 +4437,16 @@ def advanced_search(image_path, token, scope='both', top_k=10,
 }""",
             "python": """import requests
 
-def batch_search(image_paths, token, scope='both', top_k=5):
+def batch_search(image_paths, token, scope='both', top_k=None):
+    # top_k=None -> the server applies SEARCH_DEFAULT_TOP_K (10), the same
+    # depth as a single-image search. This used to default to 5 here, so a
+    # batch ran at half the depth of the single search it sat beside.
     url = "https://your-domain.com/api/search/batch"
     headers = {"Authorization": f"Bearer {token}"}
     files = [('images', open(path, 'rb')) for path in image_paths]
-    data = {'scope': scope, 'top_k': top_k}
+    data = {'scope': scope}
+    if top_k is not None:
+        data['top_k'] = top_k
     response = requests.post(url, headers=headers, files=files, data=data)
     return response.json()"""
         },
@@ -4734,13 +4705,19 @@ def get_all_settings(token):
     method: 'PUT',
     headers: {
       'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      // Required when authenticating with the session cookie instead of a
+      // Bearer token; harmless to send either way. Without it: 403.
+      'X-Requested-With': 'XMLHttpRequest'
     },
     body: JSON.stringify({
       value: newValue,
       change_reason: reason
     })
   });
+  // The response carries applied / apply_mode / restart_required /
+  // effective_value, so you can tell the operator exactly what happened
+  // rather than guessing that a restart "may" be needed.
   return await response.json();
 }""",
             "python": """import requests
@@ -4749,7 +4726,8 @@ def update_setting(setting_key, new_value, token, reason=None):
     url = f"http://localhost/api/settings/{setting_key}"
     headers = {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",   # required for cookie auth
     }
     data = {
         "value": new_value,

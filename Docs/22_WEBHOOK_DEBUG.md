@@ -1,21 +1,44 @@
 # Webhook Endpoint Debugging Guide
 
-## ✅ Endpoint Status: WORKING
+> **⚠️ The ingest webhook requires a credential.** Requests without one get
+> **401**, not a queued frame. See
+> [Docs/21 → Authentication](21_WEBHOOK_TROUBLESHOOTING.md#-authentication-required)
+> for the full contract; the short version is below.
 
-The webhook endpoint has been tested and is working correctly. Both endpoints are available:
-- `/webhook/{pipeline_id}`
-- `/api/webhook/{pipeline_id}`
+## Authentication
+
+Send **one** of:
+
+```
+Authorization: Bearer YOUR_WEBHOOK_TOKEN     <-- use this for external systems
+X-Webhook-Key: YOUR_WEBHOOK_TOKEN            <-- for fixed-header camera firmware
+```
+
+Never as a query parameter — it is rejected, because the request line is written
+to three separate logs.
+
+## Endpoints
+
+- `POST /webhook/{pipeline_id}`
+- `POST /api/webhook/{pipeline_id}`
+- `GET  /webhook/test` — credential self-check, same auth
 
 ## Test Results
 
 ```bash
 # Test from inside container
-curl -X POST http://localhost:8000/api/webhook/test123 \
+curl -i -X POST http://localhost:8000/api/webhook/test123 \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_WEBHOOK_TOKEN" \
   -d '{"images":["data:image/jpeg;base64,..."]}'
 
-# Response: {"status":"queued","request_id":"3506e68e","pipeline_id":"test123","queued":1,"dropped":0}
+# HTTP/1.1 202 Accepted
+# {"status":"queued","job_id":"...","request_id":"3506e68e","pipeline_id":"test123","location_name":"...","queued":1,"dropped":0}
 ```
+
+Success is **202**, not 200. A `200` with `{"status":"ok","message":"No images"}`
+means the request authenticated fine but carried no image the extractor
+recognized — check the payload shapes below.
 
 ## How to Debug Your Pipeline
 
@@ -31,6 +54,14 @@ docker logs face_recognition_api -f | Select-String -Pattern "WEBHOOK"
 Make sure your pipeline is sending POST requests to:
 - `http://your-server-ip/api/webhook/{your_pipeline_id}`
 - OR `http://your-server-ip/webhook/{your_pipeline_id}`
+
+…and that it sets `Authorization: Bearer YOUR_WEBHOOK_TOKEN` (or the configured
+`X-Webhook-Key` header). Confirm the credential in isolation first:
+
+```bash
+curl -i -H "Authorization: Bearer YOUR_WEBHOOK_TOKEN" http://your-server-ip/webhook/test
+# 200 = credential good;  401 = fix the credential before debugging anything else
+```
 
 ### 3. Check Request Format
 
@@ -90,9 +121,10 @@ The endpoint accepts JSON with one of these formats:
 
 Test if your pipeline can reach the server:
 ```bash
-# Replace with your actual server IP and pipeline ID
-curl -X POST http://YOUR_SERVER_IP/api/webhook/YOUR_PIPELINE_ID \
+# Replace with your actual server IP, pipeline ID and token
+curl -i -X POST http://YOUR_SERVER_IP/api/webhook/YOUR_PIPELINE_ID \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_WEBHOOK_TOKEN" \
   -d '{"images":["data:image/jpeg;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="]}'
 ```
 
@@ -104,6 +136,27 @@ docker logs face_recognition_nginx --tail 100 | Select-String -Pattern "webhook|
 ```
 
 ### 6. Common Issues
+
+**Issue: 401 Unauthorized (`WEBHOOK_AUTH_REQUIRED`)** — the most common cause of
+"the webhook does nothing"
+- No credential sent, malformed (`Authorization: <token>` without `Bearer `,
+  or `Bearer` with no token), or a token that does not match
+- The response is **identical** for all three, on purpose — it must not confirm
+  a guessed token shape. Get the reason from the server:
+  `docker logs face_recognition_api --tail 200 2>&1 | grep "ingest credential"`
+  → `missing` = nothing usable arrived, `invalid` = arrived but did not match
+- Check `WWW-Authenticate: Bearer, WebhookKey` in the response for the accepted
+  schemes
+
+**Issue: 202 vs 200 confusion**
+- `202` is success (queued). `200` with `{"status":"ok","message":"No images"}`
+  means authentication succeeded but no image was recognized in the payload
+
+**Issue: 413 Payload Too Large**
+- Body exceeded `WEBHOOK_MAX_BODY_MB` (default 25)
+
+**Issue: 503 with `Retry-After`**
+- The ingest queue is full. Honour `Retry-After` and back off
 
 **Issue: 404 Not Found**
 - Check if you're using the correct URL path (`/api/webhook/` or `/webhook/`)
@@ -134,6 +187,15 @@ The webhook endpoint logs:
 - `[WEBHOOK] ✅ Validated pipeline ID: {pipeline_id}` - Validation passed
 - `[WEBHOOK] Extracted {count} images` - Images extracted
 - `[WEBHOOK] ❌ Error...` - Any errors
+- `[WEBHOOK] ingest credential missing|invalid - rejected path=... client=...` -
+  a 401. `client=` is a pseudonymized fingerprint, not a raw IP, and the
+  credential itself is **never** logged
+
+Metric to watch (Prometheus): `fr_webhook_auth_total{result=...}` with
+`result` in `ok | missing | invalid | would_reject | unenforced`.
+`would_reject` only appears in `log_only` mode — it counts requests that were
+accepted but would have been rejected under `enforce`. Drive it to zero before
+switching a fleet over.
 
 ### 8. Verify Container is Running
 

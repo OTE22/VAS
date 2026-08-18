@@ -50,7 +50,7 @@ def _decode_validate_sync(item: dict):
         )
         return None
 
-    if getattr(settings, 'SAVE_WEBHOOK_IMAGES', False):
+    if settings.SAVE_WEBHOOK_IMAGES:
         try:
             from backend.routes.webhook import _save_webhook_image
             _save_webhook_image(

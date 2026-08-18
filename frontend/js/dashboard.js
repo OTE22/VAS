@@ -54,7 +54,6 @@
     const ONE_MINUTE_MS = 60_000;
     const FACE_EXPIRY_SWEEP_MS = ONE_MINUTE_MS;       // expired faces leave within ~1min
     const ALERT_CACHE_CLEANUP_MS = ONE_MINUTE_MS;
-    const STATS_POLL_MS = 30_000;
     const NAME_RECONCILE_MS = ONE_MINUTE_MS;
     const CLOCK_SKEW_MS = 60_000;                      // tolerated future skew -> "Just now"
     const ALERT_COOLDOWN_MS = 2_000;
@@ -460,12 +459,6 @@
         if (changed) scheduleRender();
     }
 
-    function currentlyVisibleKnownFaces() {
-        let total = 0;
-        faceStore.forEach((faces, pid) => { if (hasPipelineAccess(pid)) total += faces.size; });
-        return total;
-    }
-
     // ==================================================================
     // Element registries (no untrusted string selectors)
     // ==================================================================
@@ -543,11 +536,6 @@
         const visiblePipelines = new Set();
         faceStore.forEach((faces, pid) => { if (faces.size && hasPipelineAccess(pid)) visiblePipelines.add(pid); });
         unknownCounts.forEach((count, pid) => { if (count > 0 && hasPipelineAccess(pid)) visiblePipelines.add(pid); });
-
-        // Frontend-owned metric: currently visible known faces
-        const totalFacesEl = document.getElementById('totalFaces');
-        if (totalFacesEl) totalFacesEl.textContent = String(currentlyVisibleKnownFaces());
-        // NOTE: #totalDetections is backend-owned (total_processed) — never written here.
 
         for (const pid of [...pipelineCardElements.keys()]) {
             if (!visiblePipelines.has(pid)) removePipelineCard(pid);
@@ -876,6 +864,7 @@
 
     const VALID_MESSAGE_TYPES = new Set([
         'config_changed', 'initial_data', 'new_detection', 'unknown_activity',
+        'detection_alerts',
         'ping', 'pong', 'background_task_notification', 'background_task_completed',
         'live_alert_test',
     ]);
@@ -900,6 +889,9 @@
                 break;
             case 'unknown_activity':
                 handleUnknownActivity(message);
+                break;
+            case 'detection_alerts':
+                handleDetectionAlerts(message);
                 break;
             case 'ping':
                 if (ws && ws.readyState === WebSocket.OPEN) {
@@ -956,7 +948,7 @@
         });
 
         renderDashboard();
-        if (message.stats) updateStats(message.stats);
+        // message.stats is ignored: stats rendering lives on /home now.
     }
 
     function ingestDetectionFaces(detection, detectionTime, { markSeen = false } = {}) {
@@ -986,7 +978,6 @@
         recordReportedName(detection.pipeline_id, detection.location_name);
         ingestDetectionFaces(detection, detectionTime);
         scheduleRender();
-        if (message.stats) updateStats(message.stats);
 
         const face = detection.faces[0];
         if (!face || typeof face.name !== 'string') return;
@@ -995,14 +986,58 @@
         const wantAlert = isNewDetection || detection.should_show_alert !== false;
         if (!wantAlert) return;
 
-        // ONE final sound decision per unique event
-        const shouldPlaySound =
-            (Array.isArray(detection.live_alerts) && detection.live_alerts.some(a => a && a.sound_alert === true))
-            || (Array.isArray(detection.watchlist_matches) && detection.watchlist_matches.length > 0)
-            || isNewDetection;
+        // Sound for a plain detection: only a genuinely new sighting. Live-alert
+        // and watchlist sounds arrive with the PERSISTED `detection_alerts` event
+        // (after the database commit) — never from this pre-commit payload.
+        const shouldPlaySound = isNewDetection;
 
         showAdvancedAlert(detection, detectionTime, { bypassPersonCooldown: isNewDetection, playSound: shouldPlaySound });
         showRealtimeNotification(face.name, detection.pipeline_id, Number(face.similarity) || 0);
+    }
+
+    // `detection_alerts`: the persisted live-alert triggers and watchlist alerts
+    // of one (detection, identity), broadcast only AFTER the rows committed.
+    // Rows carry their ids; the event id is exact per detection+identity, so a
+    // redelivery bumps nothing twice. Permission filtering applies exactly as
+    // for detections (server-side pipeline filter + this client-side check).
+    function handleDetectionAlerts(message) {
+        const data = message.data;
+        if (!data || typeof data !== 'object') return;
+        if (typeof data.pipeline_id !== 'string' || !data.pipeline_id) return;
+        if (!hasPipelineAccess(data.pipeline_id)) return;
+        const eventId = typeof data.event_id === 'string' ? data.event_id : null;
+        if (alreadyProcessed(eventId)) return;
+
+        const liveAlerts = Array.isArray(data.live_alerts) ? data.live_alerts.filter(a => a && typeof a === 'object') : [];
+        const watchlistAlerts = Array.isArray(data.watchlist_alerts) ? data.watchlist_alerts.filter(a => a && typeof a === 'object') : [];
+        if (!liveAlerts.length && !watchlistAlerts.length) return;
+
+        const wantSound = liveAlerts.some(a => a.sound_alert === true)
+            || watchlistAlerts.some(a => a.notify_dashboard !== false);
+        if (wantSound) playAlertSound();
+
+        const name = typeof data.identity_name === 'string' && data.identity_name ? data.identity_name : 'Unknown person';
+        const parts = [];
+        if (watchlistAlerts.length) {
+            const lists = watchlistAlerts.map(a => String(a.list_name || 'watchlist')).slice(0, 3).join(', ');
+            parts.push(`Watchlist: ${lists}`);
+        }
+        if (liveAlerts.length) {
+            const alerts = liveAlerts.map(a => String(a.alert_name || 'alert')).slice(0, 3).join(', ');
+            parts.push(`Live alert: ${alerts}`);
+        }
+        showAlertNotification(name, data.pipeline_id, parts.join(' · '));
+    }
+
+    function showAlertNotification(name, pipelineId, detail) {
+        const notification = document.getElementById('realtimeNotification');
+        const nameEl = document.getElementById('notificationName');
+        const pipeEl = document.getElementById('notificationPipeline');
+        if (!notification || !nameEl || !pipeEl) return;
+        nameEl.textContent = `${name} — ${detail}`;
+        pipeEl.textContent = getPipelineDisplayName(pipelineId);
+        notification.classList.add('show');
+        trackTimeout(() => notification.classList.remove('show'), 5000);
     }
 
     function handleUnknownActivity(message) {
@@ -1339,47 +1374,9 @@
     }
 
     // ==================================================================
-    // Stats (backend-owned metrics)
+    // Stats: NOT here. /home owns every stats-API figure (home.js);
+    // this page renders only what arrives over the live socket.
     // ==================================================================
-    function updateStats(stats) {
-        if (!stats || typeof stats !== 'object') return;
-        // Shape normalization: /api/stats nests the queue counters under
-        // "queue"; WebSocket messages send them flat. Accept both.
-        const q = (stats.queue && typeof stats.queue === 'object') ? stats.queue : stats;
-        const setText = (id, value) => {
-            const node = document.getElementById(id);
-            if (node && value !== undefined && value !== null) node.textContent = String(value);
-        };
-        setText('queueSize', q.queue_size ?? 0);
-        setText('processing', q.processing ?? 0);
-        setText('totalReceived', q.total_received ?? 0);
-        setText('processedCount', q.total_processed ?? 0);
-        setText('skippedCount', q.total_skipped ?? 0);
-        // #totalDetections is the BACKEND persistent total (documented contract)
-        setText('totalDetections', q.total_processed ?? 0);
-        const received = Number(q.total_received) || 0;
-        const processed = Number(q.total_processed) || 0;
-        setText('successRate', received > 0 ? ((processed / received) * 100).toFixed(1) + '%' : '0%');
-        if (stats.pipelines) setText('totalPipelines', stats.pipelines.active ?? 0);
-    }
-
-    let statsPollInFlight = false;
-    async function pollStats() {
-        if (document.hidden || statsPollInFlight) return;
-        statsPollInFlight = true;
-        try {
-            const result = await api('/api/stats');
-            if (result.ok && result.payload) updateStats(result.payload);
-        } finally {
-            statsPollInFlight = false;
-        }
-    }
-
-    function refreshData() {
-        const refreshIcon = document.getElementById('refreshIcon');
-        if (refreshIcon) refreshIcon.classList.add('loading');
-        pollStats().finally(() => { if (refreshIcon) refreshIcon.classList.remove('loading'); });
-    }
 
     // ==================================================================
     // Initial-face API fallback (only when WS initial_data truly failed)
@@ -1416,7 +1413,7 @@
             }
             const identity = data.results[0];
             if (window.viewIdentityDetails) window.viewIdentityDetails(identity.id);
-            else window.location.href = `/admin/unknown?view=${encodeURIComponent(identity.id)}`;
+            else window.location.href = `/admin/identity/${encodeURIComponent(identity.id)}?from=${encodeURIComponent(window.location.pathname)}`;
         } catch (e) {
             showError(`Error loading identity details: ${e && e.message}`);
         }
@@ -1440,104 +1437,13 @@
     }
 
     // ==================================================================
-    // Upload modal (kept; safe handling, no inline handlers)
+    // Add Person: handled entirely by the shared component
+    // (upload-modal-loader.js injects components/upload-modal.html and
+    // upload-modal.js, which registers openUploadModal and does the POST).
+    // The ~120-line copy that lived here fed an inline #uploadModal that
+    // DUPLICATED the injected one's id. The dead #imageModal handlers
+    // went with it — nothing ever opened that modal.
     // ==================================================================
-    function handleFileSelect(event) {
-        const file = event.target.files && event.target.files[0];
-        if (!file) return;
-        const filePreview = document.getElementById('filePreview');
-        const previewImage = document.getElementById('previewImage');
-        const fileInfo = document.getElementById('fileInfo');
-        const uploadSubmitBtn = document.getElementById('uploadSubmitBtn');
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            if (previewImage) previewImage.src = e.target.result;
-            if (filePreview) filePreview.classList.add('show');
-            if (fileInfo) fileInfo.textContent = `${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
-            if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
-        };
-        reader.readAsDataURL(file);
-    }
-
-    let uploadInFlight = false;
-    function handleUpload(event) {
-        event.preventDefault();
-        if (uploadInFlight) return;
-        const personName = (document.getElementById('personName') || {}).value;
-        const fileInput = document.getElementById('fileInput');
-        const file = fileInput && fileInput.files && fileInput.files[0];
-        const uploadSubmitBtn = document.getElementById('uploadSubmitBtn');
-        if (!personName || !personName.trim() || !file) { showError('Please enter a name and select a photo.'); return; }
-        if (file.size > 5 * 1024 * 1024) { showError('File too large. Maximum size is 5MB.'); return; }
-
-        const formData = new FormData();
-        formData.append('person_name', personName.trim());
-        formData.append('photo', file);
-
-        uploadInFlight = true;
-        if (uploadSubmitBtn) {
-            uploadSubmitBtn.disabled = true;
-            uploadSubmitBtn.replaceChildren(icon('fa-spinner fa-spin'), el('span', null, ' Uploading...'));
-        }
-
-        fetch('/api/upload-person', { method: 'POST', credentials: 'include', body: formData })
-            .then(async resp => {
-                let data = {};
-                try { data = await resp.json(); } catch (e) { /* non-JSON error */ }
-                if (!resp.ok || !data.success) {
-                    const message = data.details || data.message || `Upload failed (HTTP ${resp.status})`;
-                    if (data.error === 'no_face' && typeof window.showFaceDetectionAlert === 'function') {
-                        window.showFaceDetectionAlert(message);
-                    } else {
-                        showError(message);
-                    }
-                    return;
-                }
-                const successMessage = document.getElementById('uploadSuccessMessage');
-                const successText = document.getElementById('uploadSuccessText');
-                if (successText) successText.textContent = `✅ ${data.message} (Total: ${data.total_faces || 0} faces)`;
-                if (successMessage) successMessage.classList.add('show');
-                trackTimeout(() => {
-                    if (successMessage) successMessage.classList.remove('show');
-                    const nameInput = document.getElementById('personName');
-                    if (nameInput) nameInput.value = '';
-                    if (fileInput) fileInput.value = '';
-                    const filePreview = document.getElementById('filePreview');
-                    if (filePreview) filePreview.classList.remove('show');
-                    closeUploadModal();
-                }, 2000);
-            })
-            .catch(error => showError(`Upload failed: ${(error && error.message) || 'Unknown error'}`))
-            .finally(() => {
-                uploadInFlight = false;
-                if (uploadSubmitBtn) {
-                    uploadSubmitBtn.disabled = false;
-                    uploadSubmitBtn.replaceChildren(icon('fa-upload'), el('span', null, ' Upload Person'));
-                }
-            });
-    }
-
-    function closeUploadModal() {
-        const modal = document.getElementById('uploadModal');
-        if (modal) modal.classList.remove('active');
-    }
-
-    function closeImageModal() {
-        const modal = document.getElementById('imageModal');
-        if (modal) modal.classList.remove('active');
-    }
-
-    // Local upload-modal opener; upload-modal.js (shared component) overrides
-    // window.openUploadModal when it loads. Keep a fallback for this page.
-    if (typeof window.openUploadModal !== 'function') {
-        window.openUploadModal = function () {
-            (window.getAuthMe ? window.getAuthMe() : Promise.resolve(null)).then(user => {
-                if (!user || user.role !== 'admin') { showError('Only administrators can add persons.'); return; }
-                const modal = document.getElementById('uploadModal');
-                if (modal) modal.classList.add('active');
-            });
-        };
-    }
 
     window.logout = function () { window.location.href = '/signin'; };
 
@@ -1601,41 +1507,6 @@
         // Sound opt-in
         bindClick('sound-toggle-btn', toggleSound);
 
-        // Modals
-        const imageModal = document.getElementById('imageModal');
-        if (imageModal) imageModal.addEventListener('click', (e) => {
-            if (!e.target.closest('.modal-content') || e.target.closest('.modal-close')) closeImageModal();
-        });
-        const uploadModal = document.getElementById('uploadModal');
-        if (uploadModal) uploadModal.addEventListener('click', (e) => {
-            if (e.target === uploadModal) closeUploadModal();
-        });
-        bindClick('upload-close-btn', closeUploadModal);
-
-        const uploadForm = document.getElementById('upload-form');
-        if (uploadForm) uploadForm.addEventListener('submit', handleUpload);
-        const fileInput = document.getElementById('fileInput');
-        if (fileInput) fileInput.addEventListener('change', handleFileSelect);
-        const fileUploadArea = document.getElementById('fileUploadArea');
-        if (fileUploadArea) {
-            fileUploadArea.addEventListener('click', () => { if (fileInput) fileInput.click(); });
-            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evName => {
-                fileUploadArea.addEventListener(evName, (e) => { e.preventDefault(); e.stopPropagation(); });
-                document.body.addEventListener(evName, (e) => { e.preventDefault(); e.stopPropagation(); });
-            });
-            ['dragenter', 'dragover'].forEach(evName =>
-                fileUploadArea.addEventListener(evName, () => fileUploadArea.classList.add('active')));
-            ['dragleave', 'drop'].forEach(evName =>
-                fileUploadArea.addEventListener(evName, () => fileUploadArea.classList.remove('active')));
-            fileUploadArea.addEventListener('drop', (e) => {
-                const files = e.dataTransfer.files;
-                if (files.length > 0 && fileInput) {
-                    fileInput.files = files;
-                    handleFileSelect({ target: { files } });
-                }
-            });
-        }
-
         // Keyboard shortcuts
         document.addEventListener('keydown', onKeydown);
 
@@ -1653,14 +1524,15 @@
 
     function onKeydown(e) {
         if (e.key === 'Escape') {
-            closeImageModal();
-            closeUploadModal();
             closeAdvancedAlert();
             const panel = document.getElementById('alertHistoryPanel');
             if (panel) panel.classList.remove('show');
         } else if (e.key === 'r' && e.ctrlKey) {
             e.preventDefault();
-            refreshData();
+            // Stats are gone from this page; refresh means "reconcile the feed".
+            sweepExpiredFaces();
+            refreshPipelineDisplayNames();
+            scheduleRender();
         }
     }
 
@@ -1669,7 +1541,6 @@
             // Reconcile everything missed while hidden
             sweepExpiredFaces();
             scheduleRender();
-            pollStats();
             refreshPipelineDisplayNames();
             if (!ws) connectWebSocket();
         }
@@ -1699,7 +1570,6 @@
         trackInterval(sweepExpiredFaces, FACE_EXPIRY_SWEEP_MS);
         trackInterval(sweepAlertCaches, ALERT_CACHE_CLEANUP_MS);
         trackInterval(tickCountdowns, 1000);
-        trackInterval(pollStats, STATS_POLL_MS);
         trackInterval(() => { if (!document.hidden) refreshPipelineDisplayNames(); }, NAME_RECONCILE_MS);
     }
 
@@ -1722,7 +1592,6 @@
             showError('Dashboard configuration could not be loaded — running with safe defaults.');
         }
 
-        await pollStats();
         startCleanupSchedulers();
         connectWebSocket();
     }

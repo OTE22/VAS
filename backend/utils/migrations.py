@@ -18,6 +18,18 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Module level, not function level.
+#
+# Four call sites in this file read `settings.MIGRATION_DB_WAIT_SECONDS`,
+# `..._RETRY_INTERVAL_SECONDS`, `MIGRATIONS_EXPECTED_HEAD` and
+# `MIGRATIONS_MODE`, but the only import was scoped inside
+# `_get_sync_database_url()`. Every startup therefore raised
+# `NameError: name 'settings' is not defined` from run_alembic_migrations_detailed
+# — logged as "Migration error" and otherwise silent, so the schema check that
+# is supposed to refuse an unverified database never actually ran.
+# config.py imports nothing from backend.utils, so there is no cycle here.
+from config import settings
+
 # sysexits.h
 EX_CONFIG = 78
 EX_TEMPFAIL = 75
@@ -25,7 +37,6 @@ EX_TEMPFAIL = 75
 
 def _get_sync_database_url() -> str:
     """Return the configured database URL with a sync SQLAlchemy driver."""
-    from config import settings
     from sqlalchemy.engine.url import make_url
 
     database_url = settings.DATABASE_URL
@@ -36,7 +47,7 @@ def _get_sync_database_url() -> str:
 
     url = make_url(database_url)
     if url.host == "postgres" and not Path("/.dockerenv").exists():
-        url = url.set(host=os.getenv("LOCAL_DB_HOST", "localhost"))
+        url = url.set(host=settings.LOCAL_DB_HOST)
 
     return url.render_as_string(hide_password=False)
 
@@ -199,20 +210,62 @@ def _compare_revisions(
     return MigrationResult(MigrationOutcome.UP_TO_DATE, current_repr, head_repr)
 
 
-def should_fail_startup(
-    result: MigrationResult,
-    *,
-    environment: str,
-    fail_closed: bool = False,
-) -> bool:
-    """Whether an unsatisfied migration state must abort startup.
+def should_fail_startup(result: MigrationResult) -> bool:
+    """Whether the migration step's outcome must abort startup.
 
-    Pure, so the policy is testable without a database or a container.
+    Any unsatisfied outcome aborts, in EVERY environment. There is no
+    permissive mode for schema state: the former MIGRATIONS_FAIL_CLOSED flag
+    only ever permitted a boot after a failed migration step, and the schema
+    head is additionally verified unconditionally by DatabaseManager.init_db
+    (verify_database_head). Pure, so the policy is testable without a database.
     """
-    if result.ok:
-        return False
-    is_production = str(environment or "").strip().lower() in ("production", "prod")
-    return bool(is_production or fail_closed)
+    return not result.ok
+
+
+def _alembic_ini_path() -> str:
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "alembic", "alembic.ini")
+
+
+def expected_head_from_scripts() -> str:
+    """The single Alembic head of the migration scripts shipped with THIS code.
+    Raises RuntimeError on a branched chain — a branch is itself a defect."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    ini = _alembic_ini_path()
+    if not os.path.isfile(ini):
+        raise RuntimeError(f"alembic.ini not found at {ini}")
+    cfg = Config(ini)
+    cfg.set_main_option("script_location", os.path.dirname(ini))
+    heads = ScriptDirectory.from_config(cfg).get_heads()
+    if len(heads) != 1:
+        raise RuntimeError(f"migration chain has {len(heads)} heads: {heads}")
+    return heads[0]
+
+
+async def verify_database_head(engine) -> str:
+    """FAIL-CLOSED schema check used by DatabaseManager.init_db in every
+    environment: `alembic_version` must hold exactly the scripts' head.
+    Returns the head; raises RuntimeError otherwise (missing table = the
+    database was never migrated). Nothing here creates or alters schema — the
+    application never runs Base.metadata.create_all(); Alembic is the only
+    schema initializer."""
+    from sqlalchemy import text as _text
+    expected = expected_head_from_scripts()
+    async with engine.connect() as conn:
+        exists = (await conn.execute(_text(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'alembic_version')"))).scalar()
+        if not exists:
+            raise RuntimeError(
+                f"database schema is not migrated (no alembic_version); code expects head "
+                f"{expected}. Run: alembic upgrade head")
+        rows = [r[0] for r in (await conn.execute(_text("SELECT version_num FROM alembic_version"))).all()]
+    if len(rows) != 1 or rows[0] != expected:
+        raise RuntimeError(
+            f"database schema is at {rows} but code expects {expected}; "
+            f"run alembic upgrade head (this check has no permissive mode)")
+    return expected
 
 
 def run_alembic_migrations_detailed(mode: str = "run") -> MigrationResult:
@@ -278,8 +331,8 @@ def run_alembic_migrations_detailed(mode: str = "run") -> MigrationResult:
         
         logger.info(f"🔧 Alembic command: {' '.join(alembic_cmd)}")
 
-        wait_seconds = float(os.getenv("MIGRATION_DB_WAIT_SECONDS", "60"))
-        retry_interval = float(os.getenv("MIGRATION_DB_RETRY_INTERVAL_SECONDS", "2"))
+        wait_seconds = int(settings.MIGRATION_DB_WAIT_SECONDS)
+        retry_interval = int(settings.MIGRATION_DB_RETRY_INTERVAL_SECONDS)
         if not _wait_for_database(wait_seconds, retry_interval):
             return MigrationResult(
                 MigrationOutcome.DB_UNREACHABLE,
@@ -380,7 +433,7 @@ def run_alembic_migrations_detailed(mode: str = "run") -> MigrationResult:
                     logger.info("   ℹ️  No migration history (no migrations created yet)")
             
             # Step 5: Run migrations (upgrade to head), unless verifying only
-            expected_head = os.getenv("MIGRATIONS_EXPECTED_HEAD", "") or ""
+            expected_head = settings.MIGRATIONS_EXPECTED_HEAD or ""
 
             if verify_only:
                 logger.info("")
@@ -538,7 +591,7 @@ def _verify_revision(alembic_cmd, alembic_dir, expected_head: str = "") -> Migra
 def run_alembic_migrations() -> bool:
     """Backwards-compatible boolean wrapper for existing callers."""
     return run_alembic_migrations_detailed(
-        os.getenv("MIGRATIONS_MODE", "run")
+        settings.MIGRATIONS_MODE
     ).ok
 
 
@@ -555,7 +608,7 @@ async def run_migrations_async_detailed(mode: str = "run") -> MigrationResult:
 
 async def run_migrations_async() -> bool:
     """Backwards-compatible boolean wrapper."""
-    result = await run_migrations_async_detailed(os.getenv("MIGRATIONS_MODE", "run"))
+    result = await run_migrations_async_detailed(settings.MIGRATIONS_MODE)
     return result.ok
 
 
@@ -576,7 +629,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                        help="verify the current revision without writing")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    # The central logger, not a private basicConfig. This module IS a
+    # production entrypoint (docker-compose.prod.yml runs it as
+    # `python -m backend.utils.migrations --upgrade-head`), so its output must
+    # be formatted, redacted and written to the same rotating file as
+    # everything else rather than going out raw.
+    from utils.logging import setup_logging
+    setup_logging(log_to_file=True)
 
     mode = "verify" if args.verify else "run"
     result = run_alembic_migrations_detailed(mode)

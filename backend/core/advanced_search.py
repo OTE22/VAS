@@ -12,6 +12,7 @@ Provides production-grade face search capabilities including:
 
 import hashlib
 import logging
+import math
 import time
 import uuid
 from datetime import datetime
@@ -21,15 +22,17 @@ import numpy as np
 import cv2
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, exists
 from sqlalchemy.orm import selectinload
 
 from config import settings
 from db_models import (
-    Identity, IdentityType, Watchlist, WatchlistEntry, WatchlistAlert,
-    SearchHistory, SearchType
+    Identity, IdentityType, IdentityAppearance, Watchlist, WatchlistEntry,
+    WatchlistAlert, SearchHistory, SearchType
 )
 from backend.core.face_quality import assess_face_quality, QualityAssessment
+from backend.core.face_extraction import (DetectedFace, embed_face_normalized,
+                                          extract_faces)
 
 # Import path_to_url utility - handle import errors gracefully
 try:
@@ -39,7 +42,8 @@ except ImportError:
     def path_to_url(path: str) -> str:
         """Convert file path to URL format."""
         if not path:
-            return 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect fill="%23333" width="100" height="100"/%3E%3Ccircle cx="50" cy="35" r="15" fill="%23999"/%3E%3Cpath d="M 25 70 Q 25 60 35 60 L 65 60 Q 75 60 75 70 L 75 85 L 25 85 Z" fill="%23999"/%3E%3C/svg%3E'
+            # Resolved at call time, so the constant defined below is available.
+            return PLACEHOLDER_AVATAR_DATA_URI
         if path.startswith('storage/'):
             return f"/{path}"
         elif not path.startswith('/'):
@@ -47,7 +51,124 @@ except ImportError:
         else:
             return path
 
+from backend.core.vector_index.access import search_similar_embeddings
+from backend.core.vector_index.base import usable_score
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# [UPLOAD_MATCH] — one traceable line per stage of an image-match request
+#
+# Why a message-interpolated helper and not `extra={...}`: this project's
+# formatter is plain text with no structured-field support, and the redaction
+# filter in utils/logging.py inspects only the RENDERED message. Anything passed
+# via `extra=` would be invisible in the output *and* skip redaction — the worst
+# of both. So fields are rendered into the message, in the same `k=v` style as
+# [AUTH_AUDIT] and [TASK].
+#
+# SAFE FIELDS ONLY: ids, counts, dimensions, scores, durations. Never raw bytes,
+# never a full checksum, never an embedding, never an absolute path, never a
+# token. Note that utils/logging.py collapses any bracketed list of 12+ numbers
+# into [***EMBEDDING-REDACTED***], which is why per-candidate scores are emitted
+# as individual `raw_candidate` lines rather than one array.
+# ---------------------------------------------------------------------------
+
+UPLOAD_MATCH_STAGES = (
+    "request_started", "file_validated", "image_decoded", "face_detected",
+    "embedding_created", "vector_search_started", "raw_candidate",
+    "candidate_filtered", "final_candidates", "request_completed",
+    "request_failed",
+)
+
+# Per-stage severity. The two per-candidate stages are DEBUG because they are
+# the only ones whose volume scales with the result set — a top_k=50 search
+# would otherwise write 50 INFO lines. They still reach logs/app.log, which is
+# where a "why did this match?" investigation happens; utils/logging.py keeps
+# them off stdout. request_failed is ERROR so a failed match is visible in
+# Docker logs without reading the file.
+UPLOAD_MATCH_LEVELS = {
+    "request_started": logging.INFO,
+    "file_validated": logging.INFO,
+    "image_decoded": logging.INFO,
+    "face_detected": logging.INFO,
+    "embedding_created": logging.INFO,
+    "vector_search_started": logging.INFO,
+    "final_candidates": logging.INFO,
+    "request_completed": logging.INFO,
+    "raw_candidate": logging.DEBUG,
+    "candidate_filtered": logging.DEBUG,
+    "request_failed": logging.ERROR,
+}
+
+
+def _embedding_model_version() -> Optional[str]:
+    """Which recognition weights produced this vector, derived from the path.
+
+    Same rule as IdentityService._resolve_model_version, so a model swap shows
+    up in the trace without anyone remembering to bump a constant.
+    """
+    import os as _os
+    path = settings.RECOGNITION_MODEL or ""
+    if not path:
+        return None
+    return _os.path.splitext(_os.path.basename(str(path)))[0][:64] or None
+
+
+def _fmt_score(value) -> Optional[str]:
+    """Six-dp string, or the literal 'nan'/'none' — never a silent default.
+
+    A score that is not a real number is the thing this logging exists to make
+    visible, so it is printed as what it is rather than coerced.
+    """
+    if value is None:
+        return "none"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "invalid"
+    if not math.isfinite(number):
+        return "nan"
+    return f"{number:.6f}"
+
+
+def _match_log(stage: str, *, request_id: Optional[str] = None,
+               duration_ms: Optional[float] = None, level: Optional[int] = None,
+               **fields) -> None:
+    """Emit one [UPLOAD_MATCH] line. Never raises — logging must not break a search.
+
+    The severity comes from UPLOAD_MATCH_LEVELS, so a stage cannot be logged at
+    two different levels from two call sites. `upload_match_stage` is attached
+    to the record purely so the console filter in utils/logging.py can decide
+    what reaches stdout — it is a fixed enum value, never user data, and is
+    never rendered into the message.
+    """
+    try:
+        resolved = level if level is not None else UPLOAD_MATCH_LEVELS.get(
+            stage, logging.INFO)
+        if not logger.isEnabledFor(resolved):
+            return
+        rendered = " ".join(f"{key}={value}" for key, value in fields.items()
+                            if value is not None)
+        logger.log(resolved,
+                   "[UPLOAD_MATCH] stage=%s request_id=%s duration_ms=%s %s",
+                   stage, request_id or "-",
+                   f"{duration_ms:.1f}" if duration_ms is not None else "-",
+                   rendered,
+                   extra={"upload_match_stage": stage})
+    except Exception:                                            # noqa: BLE001
+        logger.debug("[UPLOAD_MATCH] failed to emit stage=%s", stage)
+
+
+# Shown when an identity has no usable snapshot. Kept as one constant so the
+# two places that emit it cannot drift apart.
+PLACEHOLDER_AVATAR_DATA_URI = (
+    'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E'
+    '%3Crect fill="%23333" width="100" height="100"/%3E'
+    '%3Ccircle cx="50" cy="35" r="15" fill="%23999"/%3E'
+    '%3Cpath d="M 25 70 Q 25 60 35 60 L 65 60 Q 75 60 75 70 L 75 85 L 25 85 Z" fill="%23999"/%3E'
+    '%3C/svg%3E'
+)
 
 
 @dataclass
@@ -77,6 +198,11 @@ class FaceInImage:
     skip_reason: Optional[str] = None
     matches: List[FaceSearchResult] = field(default_factory=list)
     embedding: Optional[np.ndarray] = None
+    # Watchlist-checked matches from BEFORE the pipeline/date filters were
+    # applied. Alerts are collected from this, never from `matches`, so a
+    # browse filter cannot suppress a persisted security record. Internal —
+    # `to_dict` does not serialize it.
+    alert_candidates: List[FaceSearchResult] = field(default_factory=list)
 
 
 @dataclass
@@ -110,31 +236,60 @@ class AdvancedSearchService:
     Advanced search service with multi-face detection, quality scoring,
     watchlist checking, and search history logging.
     """
-    
+
+    # Recall floor for candidate retrieval. Deliberately looser than the
+    # ingest-time thresholds: this is an investigative search where the
+    # operator judges the ranked list, not an auto-identification decision.
+    # It is applied to BOTH backends — the FAISS call sites used to omit it and
+    # silently fall back to the index defaults (0.4 / 0.35), so the two
+    # deployments searched to different depths.
+    #
+    # These are properties, not class constants: as constants they were a
+    # second, unreachable declaration of values the settings page offers.
+    # Read per call so an admin edit takes effect without a restart.
+    @property
+    def candidate_threshold(self) -> float:
+        return float(settings.SEARCH_RETRIEVAL_FLOOR)
+
+    # Candidate pool multiplier. The vector indexes return one row per
+    # EMBEDDING, and an identity may own many, so the pool has to be wider than
+    # the quota to have a chance of containing `top_k` distinct people. Widened
+    # further when a filter is active, because filtering happens after the
+    # index has already chosen the candidates.
+    @property
+    def candidate_multiplier(self) -> int:
+        return int(settings.SEARCH_CANDIDATE_MULTIPLIER)
+
+    @property
+    def filtered_candidate_multiplier(self) -> int:
+        return int(settings.SEARCH_FILTERED_CANDIDATE_MULTIPLIER)
+
     def __init__(self, model_manager=None, identity_index=None, pgvector_index=None):
         self.model_manager = model_manager
-        self.identity_index = identity_index  # FAISS backend
+        # Retained so existing constructor calls keep working; the in-process
+        # search path resolves the active index through the contract instead.
+        self.identity_index = identity_index
         self.pgvector_index = pgvector_index  # pgvector backend
         self._initialized = False
         
         # Check which backend to use
         try:
             from config import settings
-            self.use_pgvector = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector' and pgvector_index is not None
+            self.use_pgvector = settings.VECTOR_BACKEND.lower() == 'pgvector' and pgvector_index is not None
         except:
             self.use_pgvector = False
     
     def initialize(self, model_manager, identity_index, pgvector_index=None):
         """Initialize with model manager and identity index."""
         self.model_manager = model_manager
-        self.identity_index = identity_index  # FAISS backend
+        self.identity_index = identity_index
         self.pgvector_index = pgvector_index  # pgvector backend
         self._initialized = True
         
         # Check which backend to use
         try:
             from config import settings
-            self.use_pgvector = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector' and pgvector_index is not None
+            self.use_pgvector = settings.VECTOR_BACKEND.lower() == 'pgvector' and pgvector_index is not None
         except:
             self.use_pgvector = False
         
@@ -160,7 +315,10 @@ class AdvancedSearchService:
         exclude_watchlist_ids: List[str] = None,
         filters: Dict = None,
         ip_address: str = None,
-        user_agent: str = None
+        user_agent: str = None,
+        request_id: str = None,
+        *,
+        image_hash: str,
     ) -> MultiSearchResult:
         """
         Search for all faces detected in an image.
@@ -178,13 +336,24 @@ class AdvancedSearchService:
             filters: Additional filters (date_from, date_to, pipeline_id)
             ip_address: Client IP for audit
             user_agent: Client user agent for audit
+            request_id: Correlation id from the HTTP middleware, echoed on every
+                [UPLOAD_MATCH] line so one request's stages can be grepped out
             
         Returns:
             MultiSearchResult with all faces and matches
         """
         start_time = time.time()
+        stage_started = time.perf_counter()
         search_id = str(uuid.uuid4())
-        
+        height, width = (image.shape[:2] if image is not None and hasattr(image, "shape")
+                         else (0, 0))
+        _match_log("request_started", request_id=request_id, search_id=search_id,
+                   user_id=user_id, scope=scope, top_k=top_k,
+                   vector_backend=settings.VECTOR_BACKEND)
+        _match_log("image_decoded", request_id=request_id, search_id=search_id,
+                   width=int(width), height=int(height),
+                   duration_ms=(time.perf_counter() - stage_started) * 1000)
+
         if min_quality is None:
             min_quality = settings.SEARCH_MIN_QUALITY_THRESHOLD
         
@@ -194,42 +363,44 @@ class AdvancedSearchService:
         # Detect all faces in image
         faces_data = []
         watchlist_alerts = []
-        image_hash = hashlib.sha256(image.tobytes()).hexdigest()[:16]
+        # image_hash: sha256 of the UPLOADED bytes, computed by the caller that
+        # holds them (one convention for /search/by-image, /search/advanced and
+        # /search/batch: search_history.input_image_hash is comparable across
+        # the three). The decoded frame is never re-hashed here.
         
         try:
-            # Use model manager to detect faces (detect up to 100 faces for multi-face search)
-            bboxes, kpss = self.model_manager.detector.detect(image, max_num=100)
-            
-            # If no faces detected, check if this is a small pre-cropped face image
-            if (bboxes is None or len(bboxes) == 0) or (kpss is None or len(kpss) == 0):
-                h, w = image.shape[:2]
-                # Common face crop sizes: 112x112, 128x128, 160x160, etc.
-                # If image is small and roughly square, treat as face image
-                is_small_image = (h <= 200 and w <= 200) and (abs(h - w) <= 20)
-                
-                if is_small_image:
-                    logger.info(f"[ADVANCED_SEARCH] No face detected, but image is small ({h}x{w}) - treating as pre-cropped face image")
-                    logger.info(f"[ADVANCED_SEARCH] Using entire image as face region for search")
-                    
-                    # Create approximate keypoints at image center (for face alignment)
-                    center_x, center_y = w // 2, h // 2
-                    kpss = np.array([[
-                        [center_x - w * 0.15, center_y - h * 0.1],  # Left eye
-                        [center_x + w * 0.15, center_y - h * 0.1],  # Right eye
-                        [center_x, center_y],                         # Nose
-                        [center_x - w * 0.1, center_y + h * 0.15],  # Left mouth corner
-                        [center_x + w * 0.1, center_y + h * 0.15]   # Right mouth corner
-                    ]], dtype=np.float32)
-                    bboxes = np.array([[0, 0, w, h, 1.0]], dtype=np.float32)
-                    logger.info(f"[ADVANCED_SEARCH] Created approximate keypoints for pre-cropped face image")
-            
-            logger.info(f"[ADVANCED_SEARCH] Detected {len(bboxes)} faces in image")
-            
-            for idx, (bbox, kps) in enumerate(zip(bboxes, kpss if kpss is not None else [None] * len(bboxes))):
+            # One shared extractor, the same one enrollment uses. What this
+            # replaces synthesized five keypoints out of image geometry —
+            # fractions of width and height around the image midpoint, plus a
+            # frame-sized box with a hardcoded score of 1.0 — whenever detection
+            # failed on a small squarish image.
+            #
+            # That never fails and never looks wrong — ArcFace warps the face
+            # with the invented geometry and returns a well-formed vector
+            # pointing somewhere else. Measured on a real 112x112 crop, the
+            # fabricated-landmark embedding scores 0.665 against the real one for
+            # the SAME face, with a 0.4 match threshold. Every such search was
+            # querying with a probe that did not represent the uploaded person.
+            #
+            # The replacement retries detection on a padded canvas instead, which
+            # finds the real keypoints of exactly the crops the fabrication was
+            # trying to paper over. max_num=100 is passed through unchanged.
+            faces = extract_faces(image, max_num=100, manager=self.model_manager)
+
+            logger.info(f"[ADVANCED_SEARCH] Detected {len(faces)} faces in image")
+            for _f in faces:
+                _match_log("face_detected", request_id=request_id,
+                           search_id=search_id, face_index=_f.index,
+                           face_count=len(faces),
+                           det_score=_fmt_score(getattr(_f, "score", None)),
+                           has_bbox=getattr(_f, "bbox", None) is not None,
+                           has_landmarks=getattr(_f, "landmarks", None) is not None,
+                           padded_retry=getattr(_f, "padded_retry", False))
+
+            for idx, face in enumerate(faces):
                 face_data = await self._process_single_face(
                     image=image,
-                    bbox=bbox,
-                    landmarks=kps,
+                    face=face,
                     face_index=idx,
                     db=db,
                     scope=scope,
@@ -238,13 +409,16 @@ class AdvancedSearchService:
                     check_watchlist=check_watchlist,
                     exclude_identity_ids=exclude_identity_ids,
                     exclude_watchlist_ids=exclude_watchlist_ids,
-                    filters=filters
+                    filters=filters,
+                    request_id=request_id
                 )
                 faces_data.append(face_data)
                 
-                # Collect watchlist alerts
-                if face_data.matches:
-                    for match in face_data.matches:
+                # Collect watchlist alerts from the alert candidates, NOT from
+                # face_data.matches: these become persisted WatchlistAlert rows
+                # and must not be suppressed by a camera or date filter.
+                if face_data.alert_candidates:
+                    for match in face_data.alert_candidates:
                         if match.watchlist_match:
                             watchlist_alerts.append(WatchlistAlertInfo(
                                 face_index=idx,
@@ -261,8 +435,13 @@ class AdvancedSearchService:
             
         except Exception as e:
             logger.error(f"[ADVANCED_SEARCH] Error during face detection: {e}")
+            # Type only, never the message: an exception string can carry a path
+            # or a driver payload, and this line is operator-facing.
+            _match_log("request_failed", request_id=request_id, search_id=search_id,
+                       error_type=type(e).__name__,
+                       duration_ms=(time.perf_counter() - stage_started) * 1000)
             raise
-        
+
         processing_time_ms = int((time.time() - start_time) * 1000)
         
         # Build summary
@@ -272,6 +451,14 @@ class AdvancedSearchService:
         known_matches = [m for m in all_matches if m.type == "known"]
         unknown_matches = [m for m in all_matches if m.type == "unknown"]
         
+        for _face in faces_data:
+            _match_log("final_candidates", request_id=request_id,
+                       search_id=search_id, face_index=_face.face_index,
+                       returned=len(_face.matches),
+                       top_similarity=_fmt_score(
+                           _face.matches[0].similarity if _face.matches else None),
+                       skipped=_face.skipped, skip_reason=_face.skip_reason)
+
         summary = {
             "total_faces_detected": len(faces_data),
             "faces_searchable": len(searchable_faces),
@@ -286,12 +473,16 @@ class AdvancedSearchService:
         image_info = {
             "dimensions": f"{image.shape[1]}x{image.shape[0]}",
             "faces_detected": len(faces_data),
-            "faces_searchable": len(searchable_faces)
+            "faces_searchable": len(searchable_faces),
+            # Whether any face needed the padded retry — i.e. the upload was a
+            # tight crop the detector could not see without margin.
+            "padded_retry": any(f.padded_retry for f in faces)
         }
         
-        # Log search history
-        await self._log_search_history(
-            db=db,
+        # Log search history — the ONE writer (backend/core/search_audit.py)
+        from backend.core.search_audit import record_image_search
+        await record_image_search(
+            db,
             user_id=user_id,
             search_id=search_id,
             search_type=SearchType.MULTI if len(faces_data) > 1 else SearchType.SINGLE,
@@ -319,6 +510,14 @@ class AdvancedSearchService:
                 alerts=watchlist_alerts
             )
         
+        _match_log("request_completed", request_id=request_id, search_id=search_id,
+                   face_count=len(faces_data),
+                   faces_searchable=summary.get("faces_searchable"),
+                   total_matches=summary.get("total_matches"),
+                   unique_identities=summary.get("unique_identities_found"),
+                   watchlist_alerts=len(watchlist_alerts),
+                   duration_ms=(time.perf_counter() - stage_started) * 1000)
+
         return MultiSearchResult(
             search_id=search_id,
             image_info=image_info,
@@ -331,8 +530,7 @@ class AdvancedSearchService:
     async def _process_single_face(
         self,
         image: np.ndarray,
-        bbox: np.ndarray,
-        landmarks: Optional[np.ndarray],
+        face: DetectedFace,
         face_index: int,
         db: AsyncSession,
         scope: str,
@@ -341,14 +539,20 @@ class AdvancedSearchService:
         check_watchlist: bool,
         exclude_identity_ids: List[str],
         exclude_watchlist_ids: List[str],
-        filters: Dict
+        filters: Dict,
+        request_id: str = None
     ) -> FaceInImage:
         """Process a single detected face."""
-        
-        # Extract face crop
-        x1, y1, x2, y2 = map(int, bbox[:4])
-        face_crop = image[max(0, y1):y2, max(0, x1):x2]
-        
+
+        # bbox_int clamps to the image at BOTH ends. A face recovered by the
+        # padded retry can have a box extending past the original frame, and
+        # `image[max(0, y1):y2]` only guards the low end — an x1 beyond the
+        # width silently yields an EMPTY crop, which then gets a confident
+        # quality score about nothing.
+        x1, y1, x2, y2 = face.bbox_int(image.shape)
+        face_crop = image[y1:y2, x1:x2]
+        landmarks = face.landmarks
+
         # Assess quality
         quality = assess_face_quality(
             face_image=face_crop,
@@ -374,40 +578,62 @@ class AdvancedSearchService:
         if quality.overall_score < settings.SEARCH_QUALITY_WARNING_THRESHOLD:
             face_data.quality_warning = quality.warnings[0] if quality.warnings else "Low quality image"
         
-        # Generate embedding
+        # Generate embedding. The None-landmarks guard that used to stand here
+        # is gone because it cannot fire: every DetectedFace carries landmarks
+        # that came from the detector and passed validate_landmarks.
         try:
-            if landmarks is None:
-                raise ValueError("Landmarks are required for embedding generation")
-            embedding = self.model_manager.recognizer.get_embedding(image, landmarks)
-            if embedding is not None:
-                # Normalize embedding
-                embedding = embedding / np.linalg.norm(embedding)
+            _emb_started = time.perf_counter()
+            embedding = embed_face_normalized(image, face, manager=self.model_manager)
             face_data.embedding = embedding
+            _match_log("embedding_created", request_id=request_id,
+                       face_index=face_index,
+                       embedding_dim=int(np.asarray(embedding).size),
+                       embedding_norm=_fmt_score(float(np.linalg.norm(embedding))),
+                       embedding_model_version=_embedding_model_version(),
+                       duration_ms=(time.perf_counter() - _emb_started) * 1000)
         except Exception as e:
             logger.error(f"[ADVANCED_SEARCH] Failed to generate embedding for face {face_index}: {e}")
             face_data.skipped = True
             face_data.skip_reason = f"Failed to generate embedding: {str(e)}"
             return face_data
         
-        # Search in FAISS indexes
-        matches = await self._search_indexes(
+        # Search the vector indexes. Two lists come back: what to show, and
+        # what to raise alerts on (see _search_indexes for why they differ).
+        matches, alert_candidates = await self._search_indexes(
             embedding=embedding,
             db=db,
             scope=scope,
             top_k=top_k,
             exclude_identity_ids=exclude_identity_ids,
-            filters=filters
+            filters=filters,
+            request_id=request_id
         )
-        
-        # Check watchlists
-        if check_watchlist and matches:
-            matches = await self._check_watchlists(
+
+        # Check watchlists against the UNFILTERED candidates. A camera or date
+        # filter narrows a browse; it must not decide whether a threat alert is
+        # recorded.
+        if check_watchlist and alert_candidates:
+            alert_candidates = await self._check_watchlists(
                 db=db,
-                matches=matches,
+                matches=alert_candidates,
                 exclude_watchlist_ids=exclude_watchlist_ids
             )
-        
+
+            # Mirror the result onto the displayed matches so the badge still
+            # renders next to a match the user can see. `matches` and
+            # `alert_candidates` hold different FaceSearchResult objects when a
+            # filter is active, so this is a copy, not aliasing.
+            if matches is not alert_candidates:
+                by_identity = {
+                    m.identity_id: m.watchlist_match
+                    for m in alert_candidates if m.watchlist_match
+                }
+                for match in matches:
+                    if match.identity_id in by_identity:
+                        match.watchlist_match = by_identity[match.identity_id]
+
         face_data.matches = matches
+        face_data.alert_candidates = alert_candidates
         return face_data
     
     async def _search_indexes(
@@ -417,27 +643,51 @@ class AdvancedSearchService:
         scope: str,
         top_k: int,
         exclude_identity_ids: List[str],
-        filters: Dict
-    ) -> List[FaceSearchResult]:
-        """Search vector indexes (pgvector or FAISS) and return matches."""
-        
-        results = []
-        
+        filters: Dict,
+        request_id: str = None
+    ) -> Tuple[List[FaceSearchResult], List[FaceSearchResult]]:
+        """Search vector indexes (pgvector or FAISS) and return matches.
+
+        Returns TWO lists:
+          - `display`: what the user asked for — filters applied, capped at top_k.
+          - `alert_candidates`: the same ranking WITHOUT the pipeline/date
+            filters, capped at top_k.
+
+        They are separate on purpose. Watchlist alerts are persisted security
+        records (`WatchlistAlert` rows, `SearchHistory.watchlist_alerts_count`),
+        and they used to be derived from whatever survived the filters. That
+        meant narrowing the Camera dropdown to "Lobby" would silently suppress
+        the alert — and its audit trail — for a THREAT-list subject who matched
+        the uploaded face but had only ever been captured on "Garage".
+        Filtering is a view concern; an alert is a record. Different lists.
+        """
+        _search_started = time.perf_counter()
+        _match_log("vector_search_started", request_id=request_id,
+                   scope=scope, top_k=top_k,
+                   vector_backend=settings.VECTOR_BACKEND,
+                   retrieval_floor=self.candidate_threshold,
+                   display_floor=float(settings.SIMILARITY_THRESHOLD))
+
         # Determine which indexes to search
         search_known = scope in ("known", "both")
         search_unknown = scope in ("unknown", "both")
-        
+
+        has_db_filter = bool(filters and (
+            filters.get('pipeline_id') or filters.get('date_from') or filters.get('date_to')))
+        fetch_k = top_k * (self.filtered_candidate_multiplier if has_db_filter
+                           else self.candidate_multiplier)
+
         identity_ids_scores = []
-        
+
         # Use pgvector if enabled, otherwise use FAISS
         if self.use_pgvector and self.pgvector_index:
             logger.debug(f"[ADVANCED_SEARCH] Using pgvector backend for search (scope={scope}, top_k={top_k})")
-            
+
             if search_known:
                 known_results = await self.pgvector_index.search_known(
                     embedding=embedding,
-                    top_k=top_k * 2,
-                    threshold=0.2,  # Lower threshold for advanced search
+                    top_k=fetch_k,
+                    threshold=self.candidate_threshold,
                     db=db
                 )
                 # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
@@ -445,12 +695,12 @@ class AdvancedSearchService:
                     if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
                         continue
                     identity_ids_scores.append((identity_id, score, "known"))
-            
+
             if search_unknown:
                 unknown_results = await self.pgvector_index.search_unknown(
                     embedding=embedding,
-                    top_k=top_k * 2,
-                    threshold=0.2,  # Lower threshold for advanced search
+                    top_k=fetch_k,
+                    threshold=self.candidate_threshold,
                     db=db
                 )
                 # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
@@ -459,83 +709,178 @@ class AdvancedSearchService:
                         continue
                     identity_ids_scores.append((identity_id, score, "unknown"))
         else:
-            # FAISS backend (fallback)
-            logger.debug(f"[ADVANCED_SEARCH] Using FAISS backend for search (scope={scope}, top_k={top_k})")
-            
-            if search_known:
-                if not self.identity_index or not self.identity_index.known_index:
-                    logger.warning("[ADVANCED_SEARCH] FAISS KNOWN index is not available")
-                else:
-                    known_results = self.identity_index.search_known(embedding, top_k=top_k * 2)
-                    for identity_id, score in known_results:
-                        if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
-                            continue
-                        identity_ids_scores.append((identity_id, score, "known"))
-            
-            if search_unknown:
-                if not self.identity_index or not self.identity_index.unknown_index:
-                    logger.warning("[ADVANCED_SEARCH] FAISS UNKNOWN index is not available")
-                else:
-                    unknown_results = self.identity_index.search_unknown(embedding, top_k=top_k * 2)
-                    for identity_id, score in unknown_results:
-                        if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
-                            continue
-                        identity_ids_scores.append((identity_id, score, "unknown"))
-        
-        # Sort by score and take top_k
+            # In-process index, through the contract.
+            #
+            # The threshold is passed explicitly. Omitting it fell back to the
+            # legacy index defaults (0.4 known / 0.35 unknown), so this branch
+            # searched roughly half as deep as the pgvector branch while the
+            # comment above claimed a lower threshold.
+            logger.debug(f"[ADVANCED_SEARCH] Using the in-process vector index (scope={scope}, top_k={top_k})")
+
+            for wanted, enabled in (("known", search_known), ("unknown", search_unknown)):
+                if not enabled:
+                    continue
+                hits = await search_similar_embeddings(
+                    db, embedding, top_k=fetch_k,
+                    threshold=self.candidate_threshold, identity_type=wanted)
+                if not hits:
+                    logger.debug(f"[ADVANCED_SEARCH] no {wanted} candidates")
+                for hit in hits:
+                    identity_id = hit["identity_id"]
+                    if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
+                        continue
+                    identity_ids_scores.append((identity_id, hit["similarity"], wanted))
+
+        # Collapse to one entry per identity, keeping its best score.
+        #
+        # The indexes rank EMBEDDINGS, not people, and an identity may own many
+        # (6 do in the live database). Without this, one person can occupy
+        # several result slots — and once truncation moves after filtering,
+        # a filter that removes competing identities would backfill the freed
+        # slots with more copies of the survivor.
+        best_by_identity = {}
+        for identity_id, score, idx_type in identity_ids_scores:
+            key = str(identity_id)
+            current = best_by_identity.get(key)
+            if current is None or score > current[1]:
+                best_by_identity[key] = (identity_id, score, idx_type)
+        identity_ids_scores = list(best_by_identity.values())
+
+        # Rank. NOTE: no truncation here — the DB filters below must be applied
+        # across the whole candidate pool, or a narrow filter silently shrinks
+        # an already-cut list instead of promoting the next valid match.
+        for _iid, _score, _itype in identity_ids_scores:
+            _match_log("raw_candidate", request_id=request_id,
+                       identity_id=str(_iid), index_type=_itype,
+                       raw_similarity=_fmt_score(_score),
+                       raw_distance=_fmt_score(
+                           None if _score is None else 1.0 - float(_score)
+                           if isinstance(_score, (int, float)) and math.isfinite(float(_score))
+                           else None))
         identity_ids_scores.sort(key=lambda x: x[1], reverse=True)
-        identity_ids_scores = identity_ids_scores[:top_k]
-        
+
         if not identity_ids_scores:
-            return results
-        
+            return [], []
+
         # Fetch identity details from database
         identity_ids = [str(i[0]) for i in identity_ids_scores]
-        query = select(Identity).where(
-            Identity.id.in_([uuid.UUID(i) for i in identity_ids])
-        )
-        
-        # Apply date filters if provided
-        # Note: This would filter based on last_seen_at
+        base_ids = [uuid.UUID(i) for i in identity_ids]
+        query = select(Identity).where(Identity.id.in_(base_ids))
+        unfiltered_query = query
+
+        # Apply date filters if provided.
+        #
+        # Deliberately still on Identity.last_seen_at rather than on an
+        # appearance timestamp: 5 of 10 KNOWN identities have no appearance rows
+        # at all (enrolled but never captured), and moving this predicate would
+        # silently drop every one of them. Note that last_seen_at carries
+        # onupdate=utcnow, so it behaves more like updated_at than like a
+        # sighting time — changing that is a separate, deliberate decision.
         if filters:
             if filters.get('date_from'):
                 query = query.where(Identity.last_seen_at >= filters['date_from'])
             if filters.get('date_to'):
                 query = query.where(Identity.last_seen_at <= filters['date_to'])
-        
+
+            # Camera / location filter. Correlated EXISTS so the planner can
+            # drive from the (already small) candidate list and stop at the
+            # first matching appearance, rather than materialising every
+            # appearance row for the camera.
+            #
+            # Consequence worth knowing: an identity with no appearance rows
+            # fails this on every camera. That is correct for "seen on camera X"
+            # but it does mean enrolled-but-never-captured people disappear
+            # whenever a camera is selected — which is exactly why watchlist
+            # alerts are computed from the unfiltered set instead.
+            #
+            # Also note this predicate carries no time bound, so combining it
+            # with the date range above reads as "ever seen on camera X" AND
+            # "last_seen_at within range" — a looser conjunction than it looks.
+            if filters.get('pipeline_id'):
+                query = query.where(exists().where(
+                    (IdentityAppearance.identity_id == Identity.id) &
+                    (IdentityAppearance.pipeline_id == filters['pipeline_id'])
+                ))
+
         result = await db.execute(query)
         identities = {str(i.id): i for i in result.scalars().all()}
-        
-        # Build results
-        for identity_id, score, idx_type in identity_ids_scores:
-            identity = identities.get(str(identity_id))
-            if not identity:
-                continue
-            
-            confidence_band = self._get_confidence_band(score)
-            
-            # Backend constructs snapshot URL using path_to_url utility (all logic in backend)
-            snapshot_url = None
-            if identity.best_snapshot_path:
-                # Use path_to_url utility to properly convert path to URL
-                snapshot_url = path_to_url(identity.best_snapshot_path)
-            else:
-                # Backend provides fallback URL (SVG data URI with user icon)
-                snapshot_url = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E%3Crect fill="%23333" width="100" height="100"/%3E%3Ccircle cx="50" cy="35" r="15" fill="%23999"/%3E%3Cpath d="M 25 70 Q 25 60 35 60 L 65 60 Q 75 60 75 70 L 75 85 L 25 85 Z" fill="%23999"/%3E%3C/svg%3E'
-            
-            results.append(FaceSearchResult(
-                identity_id=str(identity_id),
-                display_name=identity.display_name,
-                type=identity.type.value if identity.type else idx_type,
-                similarity=float(round(score, 4)),  # Convert numpy type to Python float
-                confidence_band=confidence_band,
-                best_snapshot_path=identity.best_snapshot_path,  # Keep original path for reference
-                snapshot_url=snapshot_url,  # Backend provides ready-to-use URL
-                last_seen_at=identity.last_seen_at,
-                appearances_count=identity.appearances_count or 0
-            ))
-        
-        return results
+
+        # The alert path must not inherit the filters. Only re-query when a
+        # filter actually narrowed something.
+        if has_db_filter:
+            unfiltered_result = await db.execute(unfiltered_query)
+            unfiltered_identities = {str(i.id): i for i in unfiltered_result.scalars().all()}
+        else:
+            unfiltered_identities = identities
+
+        # RETRIEVAL floor vs DISPLAY floor. SEARCH_RETRIEVAL_FLOOR exists to
+        # search deeply enough that filtering has something to work with; it was
+        # also, accidentally, the only floor, so a 0.21 match was rendered as a
+        # result card labelled VERY_LOW. Anything the operator's configured
+        # recognition threshold would reject is not a match and is not shown.
+        display_floor = float(settings.SIMILARITY_THRESHOLD)
+
+        def build(pool, limit):
+            """Walk candidates in score order, keeping those the pool admits."""
+            built = []
+            for identity_id, score, idx_type in identity_ids_scores:
+                if len(built) >= limit:
+                    break
+                if not usable_score(score, display_floor):
+                    # Ordered by score, so everything after this is also below
+                    # the floor — but log the first rejection with its reason
+                    # rather than dropping the tail silently.
+                    _match_log("candidate_filtered", request_id=request_id,
+                               identity_id=str(identity_id),
+                               raw_similarity=_fmt_score(score),
+                               threshold=display_floor,
+                               rejection_reason="below_display_threshold")
+                    break
+                identity = pool.get(str(identity_id))
+                if not identity:
+                    _match_log("candidate_filtered", request_id=request_id,
+                               identity_id=str(identity_id),
+                               raw_similarity=_fmt_score(score),
+                               rejection_reason="not_in_filtered_pool")
+                    continue
+                built.append(self._build_match(identity, identity_id, score, idx_type))
+            return built
+
+        results = build(identities, top_k)
+        alert_candidates = build(unfiltered_identities, top_k) if has_db_filter else results
+
+        if has_db_filter and len(results) < top_k:
+            # Say so, rather than letting a short list read as "no more matches
+            # exist". The pool is finite and the filter ran after the index
+            # already chose the candidates.
+            logger.info(
+                "[ADVANCED_SEARCH] filtered result under-filled: %d/%d from %d candidates "
+                "(scope=%s, pipeline=%s) — widen the candidate pool if this is common",
+                len(results), top_k, len(identity_ids_scores), scope,
+                (filters or {}).get('pipeline_id'))
+
+        return results, alert_candidates
+
+    def _build_match(self, identity, identity_id, score, idx_type) -> FaceSearchResult:
+        """Build one API-facing match from a hydrated Identity row."""
+        # Backend constructs snapshot URL using path_to_url utility (all logic in backend)
+        if identity.best_snapshot_path:
+            snapshot_url = path_to_url(identity.best_snapshot_path)
+        else:
+            # Backend provides fallback URL (SVG data URI with user icon)
+            snapshot_url = PLACEHOLDER_AVATAR_DATA_URI
+
+        return FaceSearchResult(
+            identity_id=str(identity_id),
+            display_name=identity.display_name,
+            type=identity.type.value if identity.type else idx_type,
+            similarity=float(round(score, 4)),  # Convert numpy type to Python float
+            confidence_band=self._get_confidence_band(score),
+            best_snapshot_path=identity.best_snapshot_path,  # Keep original path for reference
+            snapshot_url=snapshot_url,  # Backend provides ready-to-use URL
+            last_seen_at=identity.last_seen_at,
+            appearances_count=identity.appearances_count or 0
+        )
     
     async def _check_watchlists(
         self,
@@ -606,55 +951,6 @@ class AdvancedSearchService:
             return "LOW"
         else:
             return "VERY_LOW"
-    
-    async def _log_search_history(
-        self,
-        db: AsyncSession,
-        user_id: int,
-        search_id: str,
-        search_type: SearchType,
-        scope: str,
-        top_k: int,
-        filters: Dict,
-        exclude_identity_ids: List[str],
-        exclude_watchlist_ids: List[str],
-        image_hash: str,
-        faces_count: int,
-        quality_scores: List[float],
-        results_count: int,
-        watchlist_alerts_count: int,
-        unique_identities: int,
-        processing_time_ms: int,
-        ip_address: str,
-        user_agent: str
-    ):
-        """Log search to history table."""
-        try:
-            history = SearchHistory(
-                id=uuid.UUID(search_id),
-                user_id=user_id,
-                search_type=search_type,
-                scope=scope,
-                top_k=top_k,
-                filters=filters,
-                exclude_identity_ids=exclude_identity_ids,
-                exclude_watchlist_ids=exclude_watchlist_ids,
-                input_image_hash=image_hash,
-                input_faces_count=faces_count,
-                input_quality_scores=quality_scores,
-                results_count=results_count,
-                watchlist_alerts_count=watchlist_alerts_count,
-                unique_identities_count=unique_identities,
-                processing_time_ms=processing_time_ms,
-                ip_address=ip_address,
-                user_agent=user_agent
-            )
-            db.add(history)
-            await db.commit()
-            logger.debug(f"[ADVANCED_SEARCH] Logged search history: {search_id}")
-        except Exception as e:
-            logger.error(f"[ADVANCED_SEARCH] Failed to log search history: {e}")
-            await db.rollback()
     
     async def _save_watchlist_alerts(
         self,

@@ -32,6 +32,8 @@ if parent_dir not in sys.path:
 from sqlalchemy import select, and_, text, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.vector_index.base import usable_score
+
 # Import central config
 try:
     from config import settings
@@ -39,6 +41,32 @@ except ImportError:
     settings = None
 
 logger = logging.getLogger(__name__)
+
+
+def _timed_vector_search(fn):
+    """Observe fr_vector_search_seconds around a search method.
+
+    This query runs on every recognized face and had no latency signal at
+    all — the index gauges say how big the index is, nothing said how slow
+    it is. A decorator rather than in-body timing because each search method
+    has many return paths.
+    """
+    import functools
+    import time as _time
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        started = _time.monotonic()
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            try:
+                from backend.core.metrics import metrics_vector_search
+                if metrics_vector_search:
+                    metrics_vector_search.observe(_time.monotonic() - started)
+            except Exception:                                  # noqa: BLE001
+                pass
+    return wrapper
 
 
 class IdentityIndexPgVector:
@@ -62,17 +90,17 @@ class IdentityIndexPgVector:
         Args:
             embedding_size: Dimension of embeddings (default: 512 for ArcFace)
         """
-        self.embedding_size = embedding_size or getattr(settings, 'IDENTITY_EMBEDDING_SIZE', 512)
-        self.index_type = getattr(settings, 'PGVECTOR_INDEX_TYPE', 'hnsw').lower()
+        self.embedding_size = embedding_size or settings.IDENTITY_EMBEDDING_SIZE
+        self.index_type = settings.PGVECTOR_INDEX_TYPE.lower()
         
         # HNSW parameters
-        self.hnsw_m = getattr(settings, 'PGVECTOR_HNSW_M', 16)
-        self.hnsw_ef_construction = getattr(settings, 'PGVECTOR_HNSW_EF_CONSTRUCTION', 64)
-        self.hnsw_ef_search = getattr(settings, 'PGVECTOR_HNSW_EF_SEARCH', 40)  # Search-time parameter for accuracy
+        self.hnsw_m = settings.PGVECTOR_HNSW_M
+        self.hnsw_ef_construction = settings.PGVECTOR_HNSW_EF_CONSTRUCTION
+        self.hnsw_ef_search = settings.PGVECTOR_HNSW_EF_SEARCH  # Search-time parameter for accuracy
         
         # IVFFlat parameters
-        self.ivfflat_lists = getattr(settings, 'PGVECTOR_IVFFLAT_LISTS', 100)
-        self.ivfflat_probes = getattr(settings, 'PGVECTOR_IVFFLAT_PROBES', 10)
+        self.ivfflat_lists = settings.PGVECTOR_IVFFLAT_LISTS
+        self.ivfflat_probes = settings.PGVECTOR_IVFFLAT_PROBES
         
         # Statistics tracking
         self._stats = {
@@ -209,28 +237,49 @@ class IdentityIndexPgVector:
     # SEARCH OPERATIONS
     # =========================================================================
     
+    def _effective_ef_search(self, top_k: int) -> int:
+        """ef_search must be at least k, or pgvector quietly loses recall.
+
+        The configured value is a floor, not a ceiling: callers that widen the
+        candidate pool (advanced search does, to leave room for post-query
+        filtering) would otherwise ask HNSW for more rows than it is exploring
+        and get a short, lower-quality list back with no error.
+        """
+        try:
+            configured = int(self.hnsw_ef_search or 0)
+        except (TypeError, ValueError):
+            configured = 0
+        return max(configured, int(top_k or 0), 1)
+
+    @_timed_vector_search
     async def search_known(
         self, 
         embedding: np.ndarray, 
         db: AsyncSession,
-        top_k: int = 1, 
-        threshold: float = 0.4
+        top_k: int = 1,
+        threshold: float = None
     ) -> List[Tuple[str, float]]:
         """
         Search for similar embeddings in KNOWN identities.
-        
+
         Args:
             embedding: Query embedding (will be L2-normalized)
             db: Database session
             top_k: Number of results to return
-            threshold: Minimum similarity threshold (cosine similarity)
-            
+            threshold: Minimum similarity (cosine). None resolves to
+                settings.SIMILARITY_THRESHOLD — a literal default here was a
+                second declaration of that setting, and it won for every caller
+                that omitted the argument.
+
         Returns:
             List of (identity_id, similarity_score) tuples sorted by similarity descending
         """
         import time
         start_time = time.time()
-        
+
+        if threshold is None:
+            threshold = float(settings.SIMILARITY_THRESHOLD)
+
         logger.info(f"[PGVECTOR] [SEARCH_KNOWN] ========================================")
         logger.info(f"[PGVECTOR] [SEARCH_KNOWN] 🔍 Starting KNOWN Identity Search (pgvector)")
         logger.info(f"[PGVECTOR] [SEARCH_KNOWN] Using: SCRFD (detection) → ArcFace (embedding) → pgvector (search)")
@@ -285,7 +334,8 @@ class IdentityIndexPgVector:
                 logger.info(f"[PGVECTOR] [SEARCH_KNOWN] ⚠️ HNSW is APPROXIMATE - may return slightly different results than exact search")
                 # Set ef_search for this transaction (affects HNSW search accuracy)
                 logger.debug(f"[PGVECTOR] [SEARCH_KNOWN] Setting HNSW ef_search parameter...")
-                await db.execute(text(f"SET LOCAL hnsw.ef_search = {self.hnsw_ef_search}"))
+                await db.execute(text(
+                    f"SET LOCAL hnsw.ef_search = {self._effective_ef_search(top_k)}"))
                 logger.debug(f"[PGVECTOR] [SEARCH_KNOWN] ✅ HNSW ef_search parameter set")
             
             logger.info(f"[PGVECTOR] [SEARCH_KNOWN] Preparing PostgreSQL query...")
@@ -309,7 +359,7 @@ class IdentityIndexPgVector:
                         ie.embedding IS NOT NULL
                         AND i.type::text = UPPER(:identity_type)
                         AND i.status::text IN ('ACTIVE', 'PROMOTED')
-                        AND 1 - (ie.embedding <=> qv.vec) >= :threshold
+                        AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
                     ORDER BY ie.embedding <=> qv.vec
                     LIMIT :top_k
                 """),
@@ -354,6 +404,14 @@ class IdentityIndexPgVector:
             
             for idx, row in enumerate(rows):
                 identity_id, similarity, quality, display_name = row
+                # Second gate: SQL already bounds the score from above to exclude
+                # NaN, but a value that is not a real number must never reach a
+                # caller regardless of what the database returned.
+                if not usable_score(similarity, threshold):
+                    logger.warning(
+                        "[PGVECTOR] [SEARCH_KNOWN] discarded non-finite score for "
+                        "identity=%s...", str(identity_id)[:8])
+                    continue
                 similarity_float = float(similarity)
                 results.append((identity_id, similarity_float))
                 
@@ -418,29 +476,34 @@ class IdentityIndexPgVector:
                 logger.error(f"[PGVECTOR] [SEARCH_KNOWN] Failed to rollback transaction: {rollback_error}", exc_info=True)
             return []
     
+    @_timed_vector_search
     async def search_unknown(
         self, 
         embedding: np.ndarray, 
         db: AsyncSession,
-        top_k: int = 1, 
-        threshold: float = 0.35
+        top_k: int = 1,
+        threshold: float = None
     ) -> List[Tuple[str, float]]:
         """
         Search for similar embeddings in UNKNOWN identities.
         Uses slightly looser threshold than known search.
-        
+
         Args:
             embedding: Query embedding (will be L2-normalized)
             db: Database session
             top_k: Number of results to return
-            threshold: Minimum similarity threshold (default 0.35, looser than known)
-            
+            threshold: Minimum similarity. None resolves to
+                settings.UNKNOWN_SIMILARITY_THRESHOLD.
+
         Returns:
             List of (identity_id, similarity_score) tuples sorted by similarity descending
         """
         import time
         start_time = time.time()
-        
+
+        if threshold is None:
+            threshold = float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
+
         logger.debug(f"[PGVECTOR] [SEARCH_UNKNOWN] Starting search: top_k={top_k}, threshold={threshold}")
         
         try:
@@ -470,7 +533,8 @@ class IdentityIndexPgVector:
             
             # Set HNSW ef_search parameter for better accuracy (if using HNSW index)
             if self.index_type == 'hnsw' and self.hnsw_ef_search:
-                await db.execute(text(f"SET LOCAL hnsw.ef_search = {self.hnsw_ef_search}"))
+                await db.execute(text(
+                    f"SET LOCAL hnsw.ef_search = {self._effective_ef_search(top_k)}"))
             
             result = await db.execute(
                 text(f"""
@@ -488,7 +552,7 @@ class IdentityIndexPgVector:
                         ie.embedding IS NOT NULL
                         AND i.type::text = UPPER(:identity_type)
                         AND i.status::text = UPPER(:identity_status)
-                        AND 1 - (ie.embedding <=> qv.vec) >= :threshold
+                        AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
                     ORDER BY ie.embedding <=> qv.vec
                     LIMIT :top_k
                 """),
@@ -505,6 +569,14 @@ class IdentityIndexPgVector:
             
             for row in rows:
                 identity_id, similarity, quality = row
+                # Second gate: SQL already bounds the score from above to exclude
+                # NaN, but a value that is not a real number must never reach a
+                # caller regardless of what the database returned.
+                if not usable_score(similarity, threshold):
+                    logger.warning(
+                        "[PGVECTOR] [SEARCH_UNKNOWN] discarded non-finite score for "
+                        "identity=%s...", str(identity_id)[:8])
+                    continue
                 results.append((identity_id, float(similarity)))
                 logger.debug(
                     f"[PGVECTOR] [SEARCH_UNKNOWN] Match: identity={identity_id[:8]}... "
@@ -538,25 +610,33 @@ class IdentityIndexPgVector:
                 logger.error(f"[PGVECTOR] [SEARCH_UNKNOWN] Failed to rollback transaction: {rollback_error}", exc_info=True)
             return []
     
+    @_timed_vector_search
     async def search_all(
         self, 
         embedding: np.ndarray, 
         db: AsyncSession,
-        top_k: int = 5, 
-        threshold: float = 0.35
+        top_k: int = None,
+        threshold: float = None
     ) -> List[Tuple[str, float, str]]:
         """
         Search across ALL identities (both known and unknown).
-        
+
         Args:
             embedding: Query embedding
             db: Database session
-            top_k: Number of results
-            threshold: Minimum similarity
-            
+            top_k: Number of results. None resolves to settings.SEARCH_DEFAULT_TOP_K.
+            threshold: Minimum similarity. None resolves to
+                settings.UNKNOWN_SIMILARITY_THRESHOLD (the looser of the two
+                bars, since this searches unknown identities as well).
+
         Returns:
             List of (identity_id, similarity, identity_type) tuples
         """
+        if top_k is None:
+            top_k = int(settings.SEARCH_DEFAULT_TOP_K)
+        if threshold is None:
+            threshold = float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
+
         logger.debug(f"[PGVECTOR] [SEARCH_ALL] Starting combined search: top_k={top_k}, threshold={threshold}")
         
         try:
@@ -584,7 +664,8 @@ class IdentityIndexPgVector:
             
             # Set HNSW ef_search parameter for better accuracy (if using HNSW index)
             if self.index_type == 'hnsw' and self.hnsw_ef_search:
-                await db.execute(text(f"SET LOCAL hnsw.ef_search = {self.hnsw_ef_search}"))
+                await db.execute(text(
+                    f"SET LOCAL hnsw.ef_search = {self._effective_ef_search(top_k)}"))
             
             result = await db.execute(
                 text(f"""
@@ -602,7 +683,7 @@ class IdentityIndexPgVector:
                     WHERE 
                         ie.embedding IS NOT NULL
                         AND i.status::text IN ('ACTIVE', 'PROMOTED')
-                        AND 1 - (ie.embedding <=> qv.vec) >= :threshold
+                        AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
                     ORDER BY ie.embedding <=> qv.vec
                     LIMIT :top_k
                 """),
@@ -615,6 +696,14 @@ class IdentityIndexPgVector:
             results = []
             for row in result.fetchall():
                 identity_id, similarity, identity_type, display_name = row
+                # Second gate: SQL already bounds the score from above to exclude
+                # NaN, but a value that is not a real number must never reach a
+                # caller regardless of what the database returned.
+                if not usable_score(similarity, threshold):
+                    logger.warning(
+                        "[PGVECTOR] [SEARCH_ALL] discarded non-finite score for "
+                        "identity=%s...", str(identity_id)[:8])
+                    continue
                 results.append((identity_id, float(similarity), identity_type))
                 logger.debug(
                     f"[PGVECTOR] [SEARCH_ALL] Match: {identity_id[:8]}... "
@@ -685,14 +774,15 @@ class IdentityIndexPgVector:
         identity_id: str,
         embedding: np.ndarray,
         detection_id: Optional[int],
-        pipeline_id: str,
+        pipeline_id: Optional[str],   # None = not a camera sighting (enrollment/preload)
         quality_score: Optional[float],
         index_type: str,  # 'known' or 'unknown'
-        db: AsyncSession
+        db: AsyncSession,
+        model_version: Optional[str] = None
     ) -> Optional[int]:
         """
         Add embedding to database with pgvector.
-        
+
         Args:
             identity_id: UUID of the identity
             embedding: Face embedding (will be L2-normalized)
@@ -701,7 +791,13 @@ class IdentityIndexPgVector:
             quality_score: Quality score of the face
             index_type: 'known' or 'unknown'
             db: Database session
-            
+            model_version: Which recognition model produced this vector.
+                Reconciliation compares it, so a row written without one is
+                permanently unable to prove it matches the index. Callers
+                inside IdentityService patch it up afterwards; callers that
+                do not (the startup identity_loader) must pass it here.
+                None is stored honestly as NULL, never fabricated.
+
         Returns:
             ID of created embedding record, or None if failed
         """
@@ -715,21 +811,45 @@ class IdentityIndexPgVector:
         
         try:
             # L2 normalize embedding (CRITICAL: must be norm=1.0 for cosine similarity)
-            norm = np.linalg.norm(embedding)
-            logger.info(f"[PGVECTOR] [ADD] Input embedding norm: {norm:.6f}")
-            
-            if norm > 0:
-                normalized = (embedding / norm).astype(np.float32)
-                final_norm = np.linalg.norm(normalized)
-                logger.info(f"[PGVECTOR] [ADD] ✅ Normalized embedding norm: {final_norm:.6f} (should be 1.0)")
-                
-                if abs(final_norm - 1.0) > 0.01:
-                    logger.error(f"[PGVECTOR] [ADD] ❌ CRITICAL: Normalized embedding norm is NOT 1.0! ({final_norm:.6f})")
-                    logger.error(f"[PGVECTOR] [ADD] This will cause INCORRECT similarity scores!")
-            else:
-                logger.warning(f"[PGVECTOR] [ADD] ⚠️ Zero-norm embedding for {identity_id[:8]}...")
-                normalized = embedding.astype(np.float32)
-            
+            #
+            # A degenerate vector is REFUSED here, never stored. This branch used
+            # to log a warning and persist the zero vector as-is, which is worse
+            # than it sounds: pgvector returns NaN for `zerovector <=> query`,
+            # and PostgreSQL orders NaN ABOVE every real number, so
+            # `1 - (e.embedding <=> q) >= :threshold` evaluated TRUE and the row
+            # was admitted to every search — verified on PostgreSQL 15.15 /
+            # pgvector 0.8.1. One unusable row therefore contaminated results
+            # for every query, forever.
+            #
+            # The FAISS write path already refused this (IdentityService.
+            # _normalize_for_storage raises ValueError), but under the
+            # configured pgvector backend that guard is never reached, so the
+            # rule is restated here rather than assumed.
+            vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+            norm = float(np.linalg.norm(vector))
+            logger.debug(f"[PGVECTOR] [ADD] Input embedding norm: {norm:.6f}")
+
+            if not np.all(np.isfinite(vector)):
+                logger.error(
+                    f"[PGVECTOR] [ADD] ❌ REFUSED: non-finite embedding for "
+                    f"{identity_id[:8]}... (contains NaN or inf)")
+                return None
+            if norm <= 0 or not np.isfinite(norm):
+                logger.error(
+                    f"[PGVECTOR] [ADD] ❌ REFUSED: zero-magnitude embedding for "
+                    f"{identity_id[:8]}... — storing it would return NaN from "
+                    f"every cosine comparison and pass every threshold")
+                return None
+
+            normalized = (vector / norm).astype(np.float32)
+            final_norm = float(np.linalg.norm(normalized))
+            if abs(final_norm - 1.0) > 0.01:
+                logger.error(
+                    f"[PGVECTOR] [ADD] ❌ REFUSED: normalization produced norm "
+                    f"{final_norm:.6f}, not 1.0 — this would yield incorrect "
+                    f"similarity scores")
+                return None
+
             embedding_list = normalized.tolist()
             
             logger.info(f"[PGVECTOR] [ADD] Embedding normalized, dim={len(embedding_list)}, final_norm={np.linalg.norm(normalized):.6f}")
@@ -742,7 +862,7 @@ class IdentityIndexPgVector:
                 embedding=embedding_list,  # pgvector accepts Python list
                 quality=quality_score,
                 faiss_index_type=index_type,  # Keep for compatibility
-                faiss_id=None,  # Not used with pgvector
+                embedding_model_version=model_version,
                 created_at=datetime.utcnow()
             )
             
@@ -885,6 +1005,10 @@ class IdentityIndexPgVector:
                 return False, 0.0
             
             similarity, quality1, quality2 = row
+            if not usable_score(similarity, -1.0):
+                logger.warning("[PGVECTOR] [SIMILARITY] non-finite score between "
+                               "%s... and %s...", identity_id_1[:8], identity_id_2[:8])
+                return False, 0.0
             similarity = float(similarity)
             
             # Default threshold for clustering
@@ -955,7 +1079,7 @@ class IdentityIndexPgVector:
                 CROSS JOIN best_embeddings e2
                 WHERE 
                     e1.identity_id < e2.identity_id
-                    AND 1 - (e1.embedding <=> e2.embedding) >= :threshold
+                    AND 1 - (e1.embedding <=> e2.embedding) BETWEEN :threshold AND 1.0
                 ORDER BY similarity DESC
             """)
             
@@ -1174,7 +1298,7 @@ def get_pgvector_index() -> Optional[IdentityIndexPgVector]:
     
     if identity_index_pgvector is None:
         # Check if pgvector backend is enabled
-        backend = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower()
+        backend = settings.VECTOR_BACKEND.lower()
         if backend == 'pgvector':
             identity_index_pgvector = IdentityIndexPgVector()
             logger.info("[PGVECTOR] Created global IdentityIndexPgVector instance")
@@ -1185,7 +1309,7 @@ def get_pgvector_index() -> Optional[IdentityIndexPgVector]:
 
 
 # Initialize on import if pgvector is the configured backend
-_backend = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() if settings else 'faiss'
+_backend = settings.VECTOR_BACKEND.lower() if settings else 'faiss'
 if _backend == 'pgvector':
     identity_index_pgvector = IdentityIndexPgVector()
     logger.info("[PGVECTOR] ✅ pgvector backend initialized on module load")

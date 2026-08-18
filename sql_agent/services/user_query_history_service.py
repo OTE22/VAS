@@ -708,7 +708,12 @@ class UserQueryHistoryService:
         """
         Find similar queries using HNSW index with pgvector for fast approximate nearest neighbor search.
         
-        Uses pgvector's HNSW index with cosine distance operator (<->) for efficient similarity search.
+        Uses pgvector's HNSW index with the cosine distance operator (<=>).
+
+        `<->` is L2, not cosine. It was used here and reported as cosine, so the
+        score was a distance presented as a similarity, and the HNSW index —
+        built with vector_cosine_ops — could not serve it, making every search a
+        sequential scan.
         Falls back to manual cosine similarity calculation if pgvector is not available.
         
         Args:
@@ -741,19 +746,20 @@ class UserQueryHistoryService:
                 self.logger.debug(f"[SEMANTIC_SEARCH] ✅ Step 2: Embedding converted (length: {len(embedding_str)} chars)")
                 
                 # Step 3: Prepare HNSW query with cosine distance
-                self.logger.info("[SEMANTIC_SEARCH] Step 3: Preparing HNSW query with cosine distance operator (<->)...")
+                self.logger.info("[SEMANTIC_SEARCH] Step 3: Preparing HNSW query with cosine distance operator (<=>)...")
                 self.logger.debug("[SEMANTIC_SEARCH] Step 3a: HNSW index will be used automatically if available")
-                self.logger.debug("[SEMANTIC_SEARCH] Step 3b: Using cosine distance: similarity = 1 - (embedding <-> query_embedding)")
+                self.logger.debug("[SEMANTIC_SEARCH] Step 3b: Using cosine distance: similarity = 1 - (embedding <=> query_embedding)")
                 
                 query_sql = text("""
                     SELECT 
                         qe.query_history_id,
-                        1 - (qe.embedding <-> :query_embedding::vector) as similarity
+                        1 - (qe.embedding <=> :query_embedding::vector) as similarity
                     FROM user_query_embeddings qe
                     WHERE qe.user_id = :user_id
                       AND qe.embedding IS NOT NULL
-                      AND (1 - (qe.embedding <-> :query_embedding::vector)) >= :similarity_threshold
-                    ORDER BY qe.embedding <-> :query_embedding::vector
+                      AND (1 - (qe.embedding <=> :query_embedding::vector))
+                          BETWEEN :similarity_threshold AND 1.0
+                    ORDER BY qe.embedding <=> :query_embedding::vector
                     LIMIT :limit
                 """)
                 

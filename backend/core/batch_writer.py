@@ -1,7 +1,19 @@
 """
 Batch Database Writer
 =====================
-Batch database writer with short-lived transactions and no long locks.
+Batches processed frames and persists each one through the ONE detection write
+path (`backend/core/detection_evidence.persist_detection`):
+
+    TX 1 (bulk)      ensure every pipeline of the batch exists
+    per detection    ONE transaction: detection + faces + appearance + exact
+                     embedding→detection link + counter (CORE, all-or-nothing)
+                     + live-alert / watchlist alerts (OPTIONAL, independent
+                     savepoints) → commit → broadcast `detection_alerts`
+
+A failing detection is compensated (the embeddings that frame created are
+removed), logged and counted; it never stops the rest of the batch and never
+leaves a committed detection without its required evidence. The direct-write
+path in image_processing uses the same function, so there is nothing to drift.
 """
 
 import os
@@ -22,9 +34,12 @@ from backend.config import BATCH_WRITE_SIZE
 from backend.core.circuit_breaker import db_circuit_breaker
 from backend.core.metrics import metrics_db_operations
 from db_connection import db_manager
-from db_models import Pipeline, Detection, Face
-from sqlalchemy import select, insert, update
+from db_models import Pipeline
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from backend.core.detection_evidence import (
+    persist_detection, broadcast_detection_alerts, compensate_failed_detection,
+    EmbeddingLinkError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +56,7 @@ class BatchDatabaseWriter:
         self.batch_size = batch_size
         # Use optimized flush interval from settings if available
         if flush_interval is None:
-            flush_interval = getattr(settings, 'BATCH_WRITE_INTERVAL', 2.0)
+            flush_interval = settings.BATCH_WRITE_INTERVAL
         self.flush_interval = flush_interval
 
         self.pending_detections: list[dict] = []
@@ -117,7 +132,6 @@ class BatchDatabaseWriter:
                 # pipeline name must never collide on the unique index (the old
                 # SELECT-then-INSERT dropped the whole batch on UniqueViolation).
                 pipeline_ids = list({d["pipeline_id"] for d in batch})
-
                 async with db_manager.get_session() as db:
                     now = datetime.utcnow()
                     stmt = pg_insert(Pipeline).values([
@@ -133,139 +147,43 @@ class BatchDatabaseWriter:
                     await db.execute(stmt)
 
                 # =====================================================
-                # TX 2 — bulk insert detections + faces (SHORT TX)
+                # per detection — ONE transaction each (core atomic), then
+                # broadcast only what was committed
                 # =====================================================
-                async with db_manager.get_session() as db:
-                    detection_rows = []
-                    face_rows = []
-
-                    for d in batch:
-                        detection_rows.append(d["detection"])
-
-                    result = await db.execute(
-                        insert(Detection).returning(Detection.id),
-                        detection_rows
-                    )
-                    detection_ids = [r[0] for r in result.fetchall()]
-
-                    for det_id, d in zip(detection_ids, batch):
-                        for face in d["faces"]:
-                            face_copy = face.copy()
-                            face_copy["detection_id"] = det_id
-                            # Remove internal fields that shouldn't be in DB
-                            face_copy.pop("_identity", None)
-                            face_copy.pop("_embedding", None)
-                            # Keep identity_id and label_state if present
-                            face_rows.append(face_copy)
-
-                    if face_rows:
-                        await db.execute(insert(Face), face_rows)
-                    
-                    # Store detection_id mapping for identity appearances
-                    detection_id_map = {i: det_id for i, det_id in enumerate(detection_ids)}
-
-                # =====================================================
-                # TX 3 — create identity appearances (if identity system active)
-                # =====================================================
-                try:
-                    from backend.core.identity_service import identity_service
-                    from db_models import Identity, IdentityEmbedding
-                    from sqlalchemy import update as sql_update, select as sql_select
-                    
-                    if identity_service:
+                persisted = 0
+                for d in batch:
+                    outcome = None
+                    try:
                         async with db_manager.get_session() as db:
-                            for batch_idx, d in enumerate(batch):
-                                detection_id = detection_id_map.get(batch_idx)
-                                if not detection_id:
-                                    continue
-                                
-                                detection_timestamp = d["detection"].get("timestamp", datetime.utcnow())
-                                
-                                for face in d["faces"]:
-                                    identity_id = face.get("identity_id")
-                                    embedding = face.get("_embedding")
-                                    
-                                    if identity_id and embedding is not None:
-                                        try:
-                                            # Reload identity from database (it may be from different session)
-                                            result = await db.execute(
-                                                select(Identity).where(Identity.id == identity_id)
-                                            )
-                                            identity_obj = result.scalar_one_or_none()
-                                            
-                                            if identity_obj:
-                                                # Get track_id if available (not stored in batch, so None for now)
-                                                track_id = None
-                                                
-                                                # Get quality_score and similarity for best snapshot selection
-                                                quality_score = None
-                                                similarity = face.get("similarity", 0.0)
-                                                
-                                                # Try to get quality_score from the embedding
-                                                if detection_id:
-                                                    from db_models import IdentityEmbedding
-                                                    emb_result = await db.execute(
-                                                        select(IdentityEmbedding.quality).where(
-                                                            IdentityEmbedding.identity_id == identity_obj.id,
-                                                            IdentityEmbedding.detection_id == detection_id
-                                                        ).order_by(IdentityEmbedding.created_at.desc()).limit(1)
-                                                    )
-                                                    quality_result = emb_result.scalar_one_or_none()
-                                                    if quality_result:
-                                                        quality_score = quality_result
-                                                
-                                                await identity_service.create_appearance(
-                                                    identity=identity_obj,
-                                                    pipeline_id=d["pipeline_id"],
-                                                    track_id=track_id,
-                                                    start_time=detection_timestamp,
-                                                    best_snapshot_path=face.get("face_image_path"),
-                                                    db=db,
-                                                    quality_score=quality_score,
-                                                    similarity=similarity
-                                                )
-                                                
-                                                # Update embedding record with detection_id
-                                                subquery = select(IdentityEmbedding.id).where(
-                                                    IdentityEmbedding.identity_id == identity_obj.id,
-                                                    IdentityEmbedding.detection_id.is_(None)
-                                                ).order_by(IdentityEmbedding.created_at.desc()).limit(1).scalar_subquery()
-                                                
-                                                await db.execute(
-                                                    sql_update(IdentityEmbedding).where(
-                                                        IdentityEmbedding.id == subquery
-                                                    ).values(
-                                                        detection_id=detection_id
-                                                    )
-                                                )
-                                        except Exception as identity_error:
-                                            logger.error(f"[BATCH] Identity appearance creation error: {identity_error}")
-                                            # Don't fail the whole batch
-                except ImportError:
-                    # Identity service not available, skip
-                    pass
-                except Exception as e:
-                    logger.warning(f"[BATCH] Identity appearance creation failed: {e}")
-
-                # =====================================================
-                # TX 4 — update pipeline counters (SHORT TX)
-                # =====================================================
-                async with db_manager.get_session() as db:
-                    for pid in pipeline_ids:
-                        await db.execute(
-                            update(Pipeline)
-                            .where(Pipeline.pipeline_id == pid)
-                            .values(
-                                total_detections=Pipeline.total_detections + 1,
-                                updated_at=datetime.utcnow()
-                            )
-                        )
+                            outcome = await persist_detection(db, detection_data=d)
+                        # session exit committed the transaction
+                    except EmbeddingLinkError as link_err:
+                        from backend.core.metrics import metrics_db_operation_failures
+                        if metrics_db_operation_failures:
+                            metrics_db_operation_failures.labels(reason="detection_core").inc()
+                        logger.error("[BATCH] detection NOT persisted (%s) pipeline=%s — embedding "
+                                     "provenance inconsistent: %s", link_err.outcome.value,
+                                     d.get("pipeline_id"), link_err)
+                        await compensate_failed_detection(d)
+                        continue
+                    except Exception:
+                        from backend.core.metrics import metrics_db_operation_failures
+                        if metrics_db_operation_failures:
+                            metrics_db_operation_failures.labels(reason="detection_core").inc()
+                        logger.exception("[BATCH] detection NOT persisted (core failure) pipeline=%s",
+                                         d.get("pipeline_id"))
+                        await compensate_failed_detection(d)
+                        continue
+                    persisted += 1
+                    if outcome.bundles:
+                        await broadcast_detection_alerts(outcome.bundles,
+                                                         location_name=d.get("location_name"))
 
             await db_circuit_breaker.call_succeeded()
             metrics_db_operations.observe(time.time() - start_time)
 
             logger.info(
-                f"✅ BULK flushed {len(batch)} detections "
+                f"✅ flushed {persisted}/{len(batch)} detections "
                 f"in {time.time() - start_time:.3f}s"
             )
 
@@ -276,10 +194,21 @@ class BatchDatabaseWriter:
             raise
         except asyncio.TimeoutError:
             await db_circuit_breaker.call_failed()
+            # The histogram used to observe ONLY successes, so a database
+            # slowdown made writes disappear from the latency data at exactly
+            # the moment they mattered. Record the duration and the failure.
+            metrics_db_operations.observe(time.time() - start_time)
+            from backend.core.metrics import metrics_db_operation_failures
+            if metrics_db_operation_failures:
+                metrics_db_operation_failures.labels(reason="timeout").inc()
             logger.error(f"❌ Batch write timeout after {DB_OPERATION_TIMEOUT}s - database may be overloaded")
             # Don't re-add to pending as this might cause infinite retries
         except Exception as e:
             await db_circuit_breaker.call_failed()
+            metrics_db_operations.observe(time.time() - start_time)
+            from backend.core.metrics import metrics_db_operation_failures
+            if metrics_db_operation_failures:
+                metrics_db_operation_failures.labels(reason="error").inc()
             logger.exception("❌ Batch write failed")
 
 batch_writer = BatchDatabaseWriter()

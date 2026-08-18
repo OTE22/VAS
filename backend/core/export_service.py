@@ -90,9 +90,15 @@ class ExportService:
         
         # Data rows
         records = 0
-        for face in results.get('faces', []):
-            for rank, match in enumerate(face.get('matches', []), 1):
-                watchlist = match.get('watchlist_match', {})
+        for face in results.get('faces') or []:
+            # `or {}`, not `.get(key, {})`: watchlist_match is Optional, so the
+            # key is PRESENT with the value None whenever a match is not on a
+            # watchlist — which is the common case. dict.get returns its default
+            # only for an ABSENT key, so this used to hand back None and the
+            # next line raised "'NoneType' object has no attribute 'get'",
+            # failing every CSV export containing an ordinary match.
+            for rank, match in enumerate(face.get('matches') or [], 1):
+                watchlist = match.get('watchlist_match') or {}
                 writer.writerow([
                     face.get('face_index', 0),
                     rank,
@@ -128,14 +134,14 @@ class ExportService:
                 'search_id': results.get('search_id'),
                 'format_version': '1.0'
             },
-            'summary': results.get('summary', {}),
-            'image_info': results.get('image_info', {}),
+            'summary': results.get('summary') or {},
+            'image_info': results.get('image_info') or {},
             'faces': [],
-            'watchlist_alerts': results.get('watchlist_alerts', [])
+            'watchlist_alerts': results.get('watchlist_alerts') or []
         }
         
         records = 0
-        for face in results.get('faces', []):
+        for face in results.get('faces') or []:
             face_data = {
                 'face_index': face.get('face_index'),
                 'bounding_box': face.get('bounding_box'),
@@ -144,10 +150,10 @@ class ExportService:
                 'quality_warning': face.get('quality_warning'),
                 'skipped': face.get('skipped'),
                 'skip_reason': face.get('skip_reason'),
-                'matches': face.get('matches', [])
+                'matches': face.get('matches') or []
             }
             export_data['faces'].append(face_data)
-            records += len(face.get('matches', []))
+            records += len(face.get('matches') or [])
         
         json_data = json.dumps(export_data, indent=2, default=str).encode('utf-8')
         
@@ -177,7 +183,7 @@ class ExportService:
         lines.append("")
         
         # Summary
-        summary = results.get('summary', {})
+        summary = results.get('summary') or {}
         lines.append("SUMMARY")
         lines.append("-" * 30)
         lines.append(f"Total Faces Detected: {summary.get('total_faces_detected', 0)}")
@@ -189,14 +195,14 @@ class ExportService:
         
         # Results
         records = 0
-        for face in results.get('faces', []):
+        for face in results.get('faces') or []:
             lines.append(f"FACE #{face.get('face_index', 0) + 1}")
             lines.append(f"Quality Score: {face.get('quality_score', 0):.2f}")
             if face.get('quality_warning'):
                 lines.append(f"Warning: {face.get('quality_warning')}")
             lines.append("")
             
-            for rank, match in enumerate(face.get('matches', []), 1):
+            for rank, match in enumerate(face.get('matches') or [], 1):
                 lines.append(f"  Match #{rank}")
                 lines.append(f"    Name: {match.get('display_name') or 'Unknown'}")
                 lines.append(f"    Type: {match.get('type', 'unknown')}")
@@ -211,8 +217,10 @@ class ExportService:
                 records += 1
         
         # Watchlist alerts section
-        alerts = results.get('watchlist_alerts', [])
-        if alerts:
+        # A batch payload carries watchlist_alerts as an INT; only a list
+        # is iterable here.
+        alerts = results.get('watchlist_alerts') or []
+        if isinstance(alerts, list) and alerts:
             lines.append("WATCHLIST ALERTS")
             lines.append("=" * 50)
             for alert in alerts:
@@ -332,7 +340,7 @@ class ExportService:
         ])
         
         records = 0
-        for img_result in results.get('results', []):
+        for img_result in results.get('results') or []:
             if img_result.get('status') == 'error':
                 writer.writerow([
                     img_result.get('image_index'),
@@ -354,10 +362,12 @@ class ExportService:
                 records += 1
                 continue
             
-            for match in img_result.get('matches', []):
-                watchlist = match.get('watchlist_match', {})
+            for match in img_result.get('matches') or []:
+                # Same Optional-is-present-but-None trap as the single-search
+                # CSV above.
+                watchlist = match.get('watchlist_match') or {}
                 quality_idx = match.get('face_index', 0)
-                quality_scores = img_result.get('quality_scores', [])
+                quality_scores = img_result.get('quality_scores') or []
                 quality = quality_scores[quality_idx] if quality_idx < len(quality_scores) else 0
                 
                 writer.writerow([
@@ -404,7 +414,7 @@ class ExportService:
                 'watchlist_alerts': results.get('watchlist_alerts'),
                 'processing_time_ms': results.get('processing_time_ms')
             },
-            'results': results.get('results', [])
+            'results': results.get('results') or []
         }
         
         json_data = json.dumps(export_data, indent=2, default=str).encode('utf-8')

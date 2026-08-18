@@ -183,6 +183,13 @@
         node.setAttribute('role', 'button');
         node.tabIndex = 0;
 
+        // orphaned = the owner's account was deleted; visible to workspace
+        // admins as a READ-ONLY historical record. The backend refuses every
+        // mutation on these regardless — omitting the buttons just keeps the
+        // UI honest about it.
+        const isOrphaned = conversation.orphaned === true;
+        if (isOrphaned) node.classList.add('conv-orphaned');
+
         const title = document.createElement('div');
         title.className = 'history-item-query';
         title.textContent = conversation.title || 'Untitled';
@@ -194,6 +201,15 @@
         time.className = 'history-item-time';
         time.textContent = formatTime(conversation.last_message_at);
         meta.appendChild(time);
+        if (isOrphaned) {
+            const author = document.createElement('span');
+            author.className = 'conv-badge conv-badge-orphaned';
+            // textContent, like every other server-supplied string here.
+            author.textContent = conversation.author_username
+                ? `Deleted User (${conversation.author_username})`
+                : 'Deleted User';
+            meta.appendChild(author);
+        }
         if (conversation.archived) {
             const badge = document.createElement('span');
             badge.className = 'conv-badge';
@@ -202,17 +218,19 @@
         }
         node.appendChild(meta);
 
-        const actions = document.createElement('div');
-        actions.className = 'conv-item-actions';
-        actions.appendChild(actionButton('fa-thumbtack', conversation.pinned ? 'Unpin' : 'Pin',
-            (e) => { e.stopPropagation(); togglePin(conversation); }));
-        actions.appendChild(actionButton('fa-pen', 'Rename',
-            (e) => { e.stopPropagation(); renameInline(node, conversation); }));
-        actions.appendChild(actionButton('fa-box-archive', conversation.archived ? 'Restore' : 'Archive',
-            (e) => { e.stopPropagation(); toggleArchive(conversation); }));
-        actions.appendChild(actionButton('fa-trash', 'Delete',
-            (e) => { e.stopPropagation(); confirmDelete(conversation); }));
-        node.appendChild(actions);
+        if (!isOrphaned) {
+            const actions = document.createElement('div');
+            actions.className = 'conv-item-actions';
+            actions.appendChild(actionButton('fa-thumbtack', conversation.pinned ? 'Unpin' : 'Pin',
+                (e) => { e.stopPropagation(); togglePin(conversation); }));
+            actions.appendChild(actionButton('fa-pen', 'Rename',
+                (e) => { e.stopPropagation(); renameInline(node, conversation); }));
+            actions.appendChild(actionButton('fa-box-archive', conversation.archived ? 'Restore' : 'Archive',
+                (e) => { e.stopPropagation(); toggleArchive(conversation); }));
+            actions.appendChild(actionButton('fa-trash', 'Delete',
+                (e) => { e.stopPropagation(); confirmDelete(conversation); }));
+            node.appendChild(actions);
+        }
 
         const open = () => openConversation(conversation.id);
         node.addEventListener('click', open);

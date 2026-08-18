@@ -76,16 +76,53 @@ def cookie(token):
     return f"access_token={token}"
 
 
+SEEDED_IDENTITY_NAME = "pytest-live-alerts-subject"
+
+
 def _first_identity_id():
-    async def _get():
+    """A KNOWN identity to attach an alert to, seeding one if none exists.
+
+    These tests used to borrow whatever identity happened to be in the
+    database. That made them depend on production leftovers, so they broke the
+    moment the enrollment gallery was purged — an empty system is now a
+    legitimate starting state. The fixture owns its data instead.
+    """
+    async def _get_or_create():
         from db_connection import db_manager
         from sqlalchemy import text as sa_text
         await _ensure_db()
         async with db_manager.get_session() as db:
-            return (await db.execute(sa_text(
-                "SELECT id FROM identities WHERE type='KNOWN' LIMIT 1"))).scalar()
-    ident = run_async(_get())
+            existing = (await db.execute(sa_text(
+                "SELECT id FROM identities WHERE type='KNOWN' "
+                "AND status='ACTIVE' LIMIT 1"))).scalar()
+            if existing:
+                return existing
+            created = (await db.execute(sa_text(
+                "INSERT INTO identities (id, type, status, display_name, "
+                "  first_seen_at, last_seen_at, created_at, updated_at, appearances_count) "
+                "VALUES (gen_random_uuid(), 'KNOWN', 'ACTIVE', :n, now(), now(), "
+                "  now(), now(), 0) RETURNING id"), {"n": SEEDED_IDENTITY_NAME})).scalar()
+            await db.commit()
+            return created
+    ident = run_async(_get_or_create())
     return str(ident) if ident else None
+
+
+def _drop_seeded_identity():
+    async def _run():
+        from db_connection import db_manager
+        from sqlalchemy import text as sa_text
+        await _ensure_db()
+        async with db_manager.get_session() as db:
+            await db.execute(sa_text(
+                "DELETE FROM live_search_alerts WHERE identity_id IN "
+                "(SELECT id FROM identities WHERE display_name = :n)"),
+                {"n": SEEDED_IDENTITY_NAME})
+            await db.execute(sa_text(
+                "DELETE FROM identities WHERE display_name = :n"),
+                {"n": SEEDED_IDENTITY_NAME})
+            await db.commit()
+    run_async(_run())
 
 
 @pytest.fixture(scope="module")
@@ -103,6 +140,7 @@ def alert(token):
     assert status == 200, f"alert create failed: {body}"
     yield body
     _http("DELETE", f"/api/live-alerts/{body['id']}", token=token)
+    _drop_seeded_identity()   # no-op unless this module seeded one
 
 
 def _seed_trigger(alert_id, acknowledged=False, detection_id=None, days_old=0):

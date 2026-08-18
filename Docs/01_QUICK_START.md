@@ -124,10 +124,14 @@ source venv/bin/activate
 
 # Install dependencies
 pip install --upgrade pip
-pip install -r requirements.txt
+# CPU host. There is no requirements.txt at the repository root — the shared
+# packages live in requirements-base.txt, which this file includes via -r.
+pip install -r requirements-cpu.txt
+# On a CUDA host use requirements-gpu.txt instead, or let the detector choose:
+#   python scripts/setup/install_dependencies.py
 
 # Create necessary directories
-mkdir -p logs storage weights assets/faces database/face_database
+mkdir -p logs storage/faces weights database/face_database
 ```
 
 ---
@@ -149,10 +153,10 @@ DATABASE_URL=postgresql+asyncpg://postgres:admin@localhost:5432/face_recognition
 # Redis (if available)
 REDIS_URL=redis://localhost:6379/0
 
-# Storage
+# Storage. STORAGE_DIR is the only settable root -- the face gallery,
+# upload staging area and debug image stores are derived from it.
 STORAGE_DIR=/opt/face-recognition/storage
-FACES_DIR=/opt/face-recognition/assets/faces
-DB_PATH=/opt/face-recognition/database/face_database
+# DB_PATH is not a setting. The database target comes from DATABASE_URL.
 
 # Models
 DETECTION_MODEL=/opt/face-recognition/weights/det_10g.onnx
@@ -186,11 +190,12 @@ CLEANUP_INTERVAL_HOURS=24
 ## Step 7: Add Known Faces
 
 ```bash
-# Add face images to assets/faces/
+# Enroll people through the admin UI (POST /api/upload-person or
+#   POST /api/identities/{identity_id}/images). Files land in
 # Filename should be the person's name
 # Example:
-#   assets/faces/john_doe.jpg
-#   assets/faces/jane_smith.jpg
+#   storage/faces/<identity_uuid>/image_001.jpg
+#   storage/faces/<identity_uuid>/image_002.jpg
 
 # The system will automatically build the face database on first run
 ```
@@ -616,9 +621,10 @@ sudo systemctl restart face-recognition
 
 ## 📖 Documentation
 
-- [Full Optimizations Guide](OPTIMIZATIONS.md)
-- [Migration Guide](MIGRATION_GUIDE.md)
-- [Production Servers Guide](PRODUCTION_SERVERS.md)
+- [Performance Optimization](15_PERFORMANCE_OPTIMIZATION.md)
+- [Migration Guide](05_MIGRATION_GUIDE.md)
+- [Deployment Runbook](61_DEPLOYMENT_RUNBOOK.md) — the production authority
+- [Administrator Cheat Sheet](72_ADMIN_CHEAT_SHEET.md)
 - [API Documentation](http://your-domain.com/docs)
 
 ---

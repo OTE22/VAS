@@ -17,7 +17,7 @@ echo "=========================================="
 # Check if container is running
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "❌ Container '${CONTAINER_NAME}' is not running!"
-    echo "   Please start it with: docker-compose -f docker/docker-compose.cpu.yml up -d"
+    echo "   Please start it with: docker compose -f docker/docker-compose.cpu.yml up -d"
     exit 1
 fi
 

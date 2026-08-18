@@ -39,6 +39,17 @@
 (function () {
     'use strict';
 
+    // Idempotent init. The IIFE previously attached seven document listeners
+    // and replaced window.Actions unconditionally, so a second load (a stray
+    // duplicate <script>, an HTML fragment injected by a component loader)
+    // double-fired every action AND handed back an empty registry, silently
+    // dropping every handler registered against the first copy.
+    if (window.Actions && window.Actions.__initialized) {
+        console.warn('[actions] actions.js loaded more than once — ' +
+            'keeping the existing registry and listeners');
+        return;
+    }
+
     var handlers = new Map();
     var warned = new Set();
 
@@ -57,11 +68,32 @@
         Object.keys(map).forEach(function (name) {
             var fn = map[name];
             if (typeof fn === 'function') {
+                // Last-wins is the existing behaviour and stays, but a silent
+                // overwrite means two pages (or two edits) can claim one name
+                // and only one of them ever runs, with nothing to show for it.
+                if (handlers.has(name) && handlers.get(name) !== fn) {
+                    console.warn('[actions] Duplicate handler for "' + name +
+                        '" — the later registration wins');
+                }
                 handlers.set(name, fn);
             } else {
                 console.warn('[actions] Ignoring non-function handler:', name);
             }
         });
+    }
+
+    /**
+     * A disabled control must not act.
+     *
+     * The browser suppresses events on a disabled <button>/<input>, but several
+     * pages put data-action on a <span> or <div> (the exclusion chips and batch
+     * file rows on /admin/search, for example), where it offers no protection
+     * at all — and `aria-disabled` is never enforced by the browser on anything.
+     */
+    function isDisabled(element) {
+        if (element.disabled === true) return true;
+        if (element.getAttribute('aria-disabled') === 'true') return true;
+        return Boolean(element.closest('[aria-disabled="true"], fieldset[disabled]'));
     }
 
     function dispatch(event, attribute) {
@@ -70,6 +102,7 @@
 
         var element = target.closest('[' + attribute + ']');
         if (!element || !document.contains(element)) return;
+        if (isDisabled(element)) return;
 
         var name = element.getAttribute(attribute);
         if (!name) return;
@@ -95,7 +128,16 @@
         }
 
         try {
-            handler(element, event);
+            var result = handler(element, event);
+            // try/catch only sees synchronous throws. Most handlers on this
+            // codebase are `async`, so a rejection escaped as a bare
+            // "Uncaught (in promise)" with no indication of which action it
+            // came from. Attaching here labels it and keeps it non-fatal.
+            if (result && typeof result.catch === 'function') {
+                result.catch(function (error) {
+                    console.error('[actions] Handler "' + name + '" rejected:', error);
+                });
+            }
         } catch (error) {
             console.error('[actions] Handler "' + name + '" failed:', error);
         }
@@ -169,5 +211,10 @@
         return value;
     }
 
-    window.Actions = { register: register, intFrom: intFrom };
+    window.Actions = {
+        register: register,
+        intFrom: intFrom,
+        // Read by the re-entry guard at the top of this IIFE.
+        __initialized: true
+    };
 })();

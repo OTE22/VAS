@@ -1,120 +1,43 @@
-# CPU-only requirements
-# This file is used when no GPU is detected
+# CPU deployment — everything shared lives in requirements-base.txt.
+#
+# Installed by docker/Dockerfile.cpu. Only add a package here if it genuinely
+# differs between CPU and GPU; anything else belongs in the base file, or it
+# will silently exist on one target and not the other.
 
-# Core ML/CV Dependencies (CPU)
-# Pinned: an unpinned runtime resolves to whatever is newest at build
-# time, so two builds of the same commit can ship different inference
-# engines. requirements-cpu.lock.txt pins the full transitive set.
+-r requirements-base.txt
+
+# ---------------------------------------------------------------------------
+# PyTorch — CPU wheels, deliberately.
+#
+# THE APPLICATION NEVER IMPORTS TORCH. `grep -ri torch --include=*.py` across
+# this repository returns nothing. It is here only because
+# `sentence-transformers` below requires it, and its entire runtime role is one
+# `SentenceTransformer.encode()` call that turns a chatbot question into a
+# 384-dim vector for semantic search over query history — a best-effort path
+# that already degrades to None when the import fails.
+#
+# Without this index URL, pip resolves the DEFAULT Linux torch wheel, which is
+# the CUDA build: it drags in nvidia-cublas, nvidia-cudnn, nvidia-cufft,
+# nvidia-nccl, triton and the rest — roughly 4.5 GB of GPU runtime into an
+# image that has no GPU and never calls torch. That was the real state of this
+# file; docker/Dockerfile.cpu even carried a BuildKit cache mount to make
+# re-downloading it bearable instead of eliminating it.
+#
+# Face detection and recognition do NOT use torch. They run on ONNX Runtime.
+# ---------------------------------------------------------------------------
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+
+# ---------------------------------------------------------------------------
+# Inference and vector search — the CPU builds.
+# The GPU file pins the CUDA-linked equivalents at a version tied to its base
+# image; the two must never be installed together, because both distributions
+# provide the same module name.
+# ---------------------------------------------------------------------------
 onnxruntime==1.23.2
-opencv-python-headless==4.9.0.80
-numpy==1.26.4
-scikit-image
 faiss-cpu
 
-# Web Framework - Production Ready
-fastapi
-uvicorn[standard]
-python-multipart
-websockets
-
-# Database & Caching
-sqlalchemy
-asyncpg
-redis
-aioredis
-pgvector>=0.2.4  # PostgreSQL vector similarity search
-
-# Background Tasks & Queues
-celery
-kombu
-
-# Monitoring & Logging
-prometheus-client
-python-json-logger
-
-# Performance
-orjson
-
-# Utils
-python-dotenv
-pydantic
-pydantic-settings
-
-# Core Web Framework
-gunicorn
-
-# ASGI Server
-uvloop
-httptools
-
-# Database (Async PostgreSQL)
-psycopg2-binary
-alembic
-
-# Redis Cache
-redis[asyncio]
-hiredis
-
-# SQL AST parsing. REQUIRED, not optional: sql_agent/security/sql_guard.py
-# fails closed without it, because a regex fallback reintroduces the
-# bypasses it exists to prevent (`BEGIN READ WRITE; DELETE ...` and
-# unrestricted table access).
-sqlglot==25.34.1
-
-# Image Processing
-# opencv-contrib-python removed: it installs a SECOND OpenCV distribution
-# alongside opencv-python-headless==4.9.0.80 above. Both provide cv2, so
-# the effective version depended on installation order — the running
-# container had headless 4.9.0.80 pinned but contrib 4.11.0.86 shadowing it.
-Pillow==12.1.0
-
-# Face Recognition Models (CPU)
-# (onnxruntime is pinned once at the top of this file)
-scikit-image
-
-# Utilities
-python-multipart
-websockets
-aiofiles
-httpx
-
-# Security
-python-jose[cryptography]
-passlib[bcrypt]
-PyJWT
-bcrypt
-
-# Logging
-python-json-logger
-colorlog
-
-# LangChain & SQL Agent
-langchain
-langchain-ollama
-langchain-community
-langgraph
-langchain-experimental
-
-# SQL Agent specific
-sqlalchemy-utils
-chromadb
-fuzzywuzzy[speedup]
-sentence-transformers  # For query embedding generation (semantic search)
-
-# Vana AI
-pandas
-vanna[chromadb,postgres,ollama]
-requests
-
-# Document Export (PDF & Word)
-reportlab
-python-docx
-
-# Identity Clustering (for merge suggestions)
-scikit-learn>=1.3.0
-
-# Map Generation (for intelligence tracking)
-folium>=0.15.0
-offline-folium>=0.1.0  # Completely offline maps - no internet required
-tqdm>=4.66.0  # Progress bars for tile download script
-
+# ---------------------------------------------------------------------------
+# Query-history semantic search. Pulls torch (above).
+# ---------------------------------------------------------------------------
+sentence-transformers

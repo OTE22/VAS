@@ -50,7 +50,9 @@ FEATURE_NAMES = [
 TRAINING_SEED = 42
 VALIDATION_FRACTION = 0.2
 DECISION_THRESHOLD = 0.5
-CANDIDATE_DIR = "models/candidates"
+# Derived from ML_ARTIFACT_DIR; was a bare relative literal that wrote
+# candidate models into the `models/` PYTHON PACKAGE directory.
+CANDIDATE_DIR = settings.MODEL_CANDIDATE_DIR
 
 # Quality gates — a candidate failing these cannot be activated.
 # False identity merges are far more harmful than missed suggestions,
@@ -134,7 +136,7 @@ def _cancelled(job_id: str) -> bool:
 
 async def dataset_readiness(db: AsyncSession, min_samples: Optional[int] = None) -> Dict:
     """Structured readiness checks — sample count alone is NOT enough."""
-    required_total = int(min_samples or getattr(settings, "SIMILARITY_MODEL_MIN_SAMPLES", 50))
+    required_total = int(min_samples or settings.SIMILARITY_MODEL_MIN_SAMPLES)
     required_per_class = max(5, required_total // 10)
     minimum_balance_ratio = 0.2
 
@@ -647,7 +649,7 @@ async def activate_model(db: AsyncSession, model_id: int, user_id: Optional[int]
 def _sync_legacy_model_path(artifact_path: str) -> None:
     """Keep the legacy startup path pointing at the ACTIVE artifact so a
     process restart loads the same model. Atomic copy (tmp + replace)."""
-    legacy_path = getattr(settings, "SIMILARITY_MODEL_PATH", "models/similarity_model.pkl")
+    legacy_path = settings.SIMILARITY_MODEL_PATH
     try:
         os.makedirs(os.path.dirname(legacy_path) or ".", exist_ok=True)
         tmp = legacy_path + ".tmp"

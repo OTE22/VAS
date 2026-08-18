@@ -85,6 +85,17 @@ When the person is detected:
 
 ## How It Works
 
+> **Persistence contract (2026-08-16):** a live-alert trigger fired by a
+> detection is written INSIDE the detection transaction
+> (`backend/core/detection_evidence.persist_detection`, savepoint A) with
+> `detection_id` populated and `ON CONFLICT (alert_id, detection_id) DO NOTHING`
+> — idempotent, never broadcast-only. The dashboard receives the persisted rows
+> in the `detection_alerts` WebSocket event, sent only after commit; the
+> `new_detection` event no longer carries `live_alerts` / `watchlist_matches`.
+> If persistence of the trigger fails, the detection itself is still committed
+> and the failure is counted (`alert_enrichment_live`) — the DB, not the
+> socket, is authoritative (`Docs/61` § 11.1).
+
 ### Detection Flow
 
 ```

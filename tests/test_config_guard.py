@@ -62,6 +62,15 @@ _GOOD = dict(
     POSTGRES_USER="fr_app",
     SQL_AGENT_DB_USER="fr_readonly",
     SQL_AGENT_DB_PASSWORD="Qm7Rt2Bx9Kd4Lp6Zn1Hs8Vw3Jc5Yf0",
+    # The face gallery has exactly ONE supported location: <STORAGE_DIR>/faces.
+    STORAGE_DIR="/app/storage",
+    # The pipeline ingest webhook accepts frames that become identities,
+    # embeddings and stored face images. A production config that leaves it
+    # unauthenticated is not clean.
+    WEBHOOK_API_KEYS="Zr6Xk1Nd8Bq3Ly7Vt5Wc0Mj2Hf9Ps4Ga",
+    WEBHOOK_AUTH_MODE="enforce",
+    WEBHOOK_AUTH_INSECURE_ACK=False,
+    SAVE_WEBHOOK_IMAGES=False,
 )
 
 
@@ -95,6 +104,88 @@ def test_development_ignores_every_production_rule():
         WORKERS=16,
     )
     assert fatal_only(collect_violations(reckless)) == []
+
+
+# ---------------------------------------------------------------------------
+# Face storage: one canonical location, enforced in EVERY environment
+# ---------------------------------------------------------------------------
+
+def test_a_derived_path_cannot_be_pointed_elsewhere():
+    """The exact misconfiguration that shipped in .env for months.
+
+    FACES_DIR used to be a settable field validated against <STORAGE_DIR>/faces.
+    It is now DERIVED, so it cannot diverge at all — and an environment that
+    still tries to set it is reported rather than silently ignored, because an
+    operator reading their compose file would otherwise believe the wrong thing.
+    """
+    for divergent in ("/app/assets/faces", "./assets/faces",
+                      "/app/storage/known_faces", "/tmp/faces",
+                      "/app/other/faces"):
+        found = [v for v in collect_violations(cfg(), env={"FACES_DIR": divergent})
+                 if v.code == "DERIVED_PATH_OVERRIDE"]
+        assert found, f"{divergent} was accepted silently"
+        assert found[0].severity == "fatal", divergent
+
+
+def test_the_derived_path_rule_is_not_production_only():
+    """A divergent gallery path is a data-integrity fault in any environment."""
+    violations = collect_violations(cfg(ENVIRONMENT="development"),
+                                    env={"FACES_DIR": "/app/assets/faces"})
+    assert "DERIVED_PATH_OVERRIDE" in {v.code for v in fatal_only(violations)}
+
+
+def test_a_leftover_override_that_matches_is_only_advisory():
+    """An upgrade must not fail on a now-inert but correct value."""
+    for equivalent in ("/app/storage/faces", "/app/storage/faces/",
+                       "/app/storage//faces"):
+        found = [v for v in collect_violations(cfg(), env={"FACES_DIR": equivalent})
+                 if v.code == "DERIVED_PATH_OVERRIDE"]
+        assert found and found[0].severity == "warn", equivalent
+
+
+def test_missing_storage_settings_are_reported():
+    # FACES_DIR can no longer be "missing": it is derived from STORAGE_DIR,
+    # which is therefore the only storage root that can be absent.
+    assert "STORAGE_DIR_MISSING" in codes(STORAGE_DIR="")
+
+
+def test_a_relative_storage_root_is_rejected():
+    """Every stored path would otherwise depend on the working directory,
+    which differs between gunicorn, alembic and a maintenance script."""
+    assert "STORAGE_DIR_RELATIVE" in codes(STORAGE_DIR="./storage")
+
+
+def test_the_guards_derivation_table_matches_config():
+    """The guard mirrors config.Settings' layout as data. If config.py changes
+    where a path resolves and this table does not, the guard would report the
+    wrong "should be" value — and, worse, call a correct environment divergent.
+    """
+    from config import settings
+    from backend.security.config_guard import DERIVED_PATHS
+
+    for name, (root_attr, parts) in DERIVED_PATHS.items():
+        mirrored = os.path.join(getattr(settings, root_attr), *parts)
+        assert getattr(settings, name) == mirrored, (
+            f"config.Settings.{name} no longer matches config_guard's table")
+
+
+def test_every_derived_path_is_guarded():
+    """A new derived property that nobody guards can be silently overridden."""
+    from config import Settings
+    from backend.security.config_guard import DERIVED_PATHS
+
+    declared = {n for n in dir(Settings)
+                if n.endswith("_DIR") and isinstance(getattr(Settings, n, None), property)}
+    assert declared <= set(DERIVED_PATHS), (
+        f"derived but unguarded: {sorted(declared - set(DERIVED_PATHS))}")
+
+
+def test_storage_paths_cannot_be_changed_at_runtime():
+    """An admin token must not be able to repoint face storage on a live
+    process — every persisted path is relative to it."""
+    from backend.security.config_guard import SECURITY_CRITICAL_KEYS
+    for key in ("FACES_DIR", "STORAGE_DIR", "IDENTITY_INDEX_DB_PATH"):
+        assert key in SECURITY_CRITICAL_KEYS, f"{key} is runtime-mutable"
 
 
 # ------------------------------------------------------------- JWT secret
@@ -563,3 +654,180 @@ def test_runtime_settings_does_not_log_secret_values():
     source = _read("/app/backend/core/runtime_settings.py")
     block = source[source.index("def apply_to_runtime"):]
     assert "SECRET_SETTINGS" in block, "secret values must be masked before logging"
+
+
+# ---------------------------------------------------------------------------
+# The admin settings surface must not advertise a derived path
+#
+# The settings table is seeded from routes/settings.py's `categories` map and
+# rendered as an editable form. A derived path listed there is a field the
+# operator can type into, whose value is stored, displayed back as the
+# configuration -- and never read by anything. Worse than useless: actively
+# misleading about where face images live.
+# ---------------------------------------------------------------------------
+
+def test_no_derived_path_is_offered_as_an_editable_setting():
+    from backend.routes.settings import sync_settings_from_config
+    from backend.security.config_guard import DERIVED_PATHS
+    import inspect
+
+    source = inspect.getsource(sync_settings_from_config)
+    categories = source.split("categories = {", 1)[1].split("\n    }", 1)[0]
+    offenders = [name for name in DERIVED_PATHS if f'"{name}"' in categories]
+    assert not offenders, (
+        f"{offenders} are seeded into the settings table but have no setter; "
+        "an admin edit would be stored, displayed, and silently ignored")
+
+
+def test_derived_paths_are_not_runtime_mutable():
+    """Defence in depth: even if one were seeded, it must not be applied."""
+    from backend.core import runtime_settings
+    from backend.security.config_guard import DERIVED_PATHS
+
+    for name in DERIVED_PATHS:
+        assert not runtime_settings.has_key(name), (
+            f"{name} is in SETTINGS_REGISTRY; hydrate_from_db would setattr it "
+            "onto a read-only property")
+
+
+def test_a_derived_path_has_no_setter():
+    """The property is the enforcement point -- if it grows a setter, every
+    other protection here becomes advisory."""
+    from config import settings
+    from backend.security.config_guard import DERIVED_PATHS
+
+    for name in DERIVED_PATHS:
+        with pytest.raises(AttributeError):
+            setattr(settings, name, "/tmp/somewhere-else")
+
+
+# ---------------------------------------------------------------------------
+# Storage writability
+#
+# A read-only gallery does not fail at startup -- it fails at the first
+# enrollment, as a 500 from inside the image pipeline, hours after deploy.
+# The probe is injected so these stay pure: no filesystem, no real mount.
+# ---------------------------------------------------------------------------
+
+def test_an_unwritable_storage_root_is_fatal_in_every_environment():
+    for environment in ("production", "development"):
+        violations = collect_violations(
+            cfg(ENVIRONMENT=environment),
+            storage_probe=lambda p: (False, f"{p} is mounted read-only"))
+        assert "STORAGE_DIR_NOT_WRITABLE" in codes_of(fatal_only(violations)), environment
+
+
+def test_a_writable_storage_root_is_silent():
+    violations = collect_violations(cfg(), storage_probe=lambda p: (True, "ok"))
+    assert "STORAGE_DIR_NOT_WRITABLE" not in codes_of(violations)
+
+
+def test_the_probe_is_skipped_when_not_supplied():
+    """Rules stay unit-testable without a filesystem; only real entry points
+    pay for the syscalls."""
+    assert "STORAGE_DIR_NOT_WRITABLE" not in codes()
+
+
+def test_the_probe_is_not_run_on_an_already_invalid_root():
+    """No point reporting 'not writable' about a path that is itself wrong --
+    two violations for one fault sends the operator down the wrong trail."""
+    def explode(path):
+        raise AssertionError(f"probed {path!r} despite an invalid root")
+
+    for bad in ({"STORAGE_DIR": ""}, {"STORAGE_DIR": "./storage"}):
+        found = codes_of(collect_violations(cfg(**bad), storage_probe=explode))
+        assert "STORAGE_DIR_NOT_WRITABLE" not in found
+
+
+def test_the_real_probe_reads_the_filesystem():
+    """The default probe is what production actually runs; a stub-only test
+    would not catch it inverting its own return value."""
+    import tempfile
+    from backend.security.config_guard import default_storage_probe
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ok, detail = default_storage_probe(tmp)
+        assert ok, detail
+
+        missing = os.path.join(tmp, "not-created-yet")
+        ok, detail = default_storage_probe(missing)
+        assert ok and "will be created" in detail, detail
+
+        nested = os.path.join(tmp, "no", "such", "parent")
+        ok, detail = default_storage_probe(nested)
+        assert not ok, detail
+
+    if os.geteuid() != 0:  # root ignores the permission bits
+        with tempfile.TemporaryDirectory() as tmp:
+            locked = os.path.join(tmp, "locked")
+            os.makedirs(locked)
+            os.chmod(locked, 0o555)
+            try:
+                ok, detail = default_storage_probe(locked)
+                assert not ok and "not writable" in detail, detail
+            finally:
+                os.chmod(locked, 0o755)
+
+
+# ------------------------------------------------- webhook ingest postures
+#
+# `off` used to be acknowledgeable. Combined with the keys-missing check being
+# skipped whenever mode was `off`, a production stack could start with no
+# credential AND no enforcement, reporting only a warning. These pin the
+# postures so that combination cannot come back.
+
+def test_webhook_off_is_fatal_in_production_even_when_acknowledged():
+    assert "WEBHOOK_AUTH_DISABLED" in codes(
+        WEBHOOK_AUTH_MODE="off", WEBHOOK_AUTH_INSECURE_ACK=True)
+    assert "WEBHOOK_AUTH_DISABLED" in codes_of(fatal_only(collect_violations(
+        cfg(WEBHOOK_AUTH_MODE="off", WEBHOOK_AUTH_INSECURE_ACK=True)))), (
+        "the acknowledgement downgraded a fully-open ingest webhook to a warning")
+
+
+def test_webhook_keys_missing_is_reported_even_when_mode_is_off():
+    """The check used to carry a `mode != off` exemption.
+
+    That is exactly backwards: `off` is the mode where a missing key matters
+    least for enforcement and most for what happens if someone later flips the
+    mode back to `enforce` without ever setting one.
+    """
+    assert "WEBHOOK_AUTH_KEYS_MISSING" in codes(
+        WEBHOOK_API_KEYS="", WEBHOOK_AUTH_MODE="off",
+        WEBHOOK_AUTH_INSECURE_ACK=True)
+
+
+def test_webhook_log_only_stays_acknowledgeable():
+    """The one surviving migration posture: keys are still required and verified.
+
+    If this ever becomes fatal, a fleet mid-rollout has no supported path and
+    operators will reach for `off` — which no longer exists in production.
+    """
+    violations = collect_violations(
+        cfg(WEBHOOK_AUTH_MODE="log_only", WEBHOOK_AUTH_INSECURE_ACK=True))
+    assert fatal_only(violations) == [], (
+        "log_only + acknowledgement must not be fatal")
+    assert "WEBHOOK_AUTH_UNENFORCED_ACKNOWLEDGED" in codes_of(violations)
+
+    # Unacknowledged it is still fatal.
+    assert "WEBHOOK_AUTH_LOG_ONLY" in codes(
+        WEBHOOK_AUTH_MODE="log_only", WEBHOOK_AUTH_INSECURE_ACK=False)
+
+
+def test_the_advisory_never_fires_for_a_mode_that_is_already_fatal():
+    """`off` must be reported once, as fatal — not also as an advisory warn."""
+    assert "WEBHOOK_AUTH_UNENFORCED_ACKNOWLEDGED" not in codes(
+        WEBHOOK_AUTH_MODE="off", WEBHOOK_AUTH_INSECURE_ACK=True)
+
+
+def test_a_token_supplied_only_as_the_alias_satisfies_the_keys_check():
+    """WEBHOOK_AUTH_TOKEN folds into WEBHOOK_API_KEYS during Settings construction.
+
+    The guard reads the folded field, so this asserts the fold happens through a
+    real Settings object rather than the SimpleNamespace the other cases use.
+    """
+    from config import Settings
+
+    resolved = Settings(ENVIRONMENT="production", WEBHOOK_API_KEYS="",
+                        WEBHOOK_AUTH_TOKEN="Zr6Xk1Nd8Bq3Ly7Vt5Wc0Mj2Hf9Ps4Gb",
+                        WEBHOOK_AUTH_MODE="enforce")
+    assert "WEBHOOK_AUTH_KEYS_MISSING" not in codes_of(collect_violations(resolved))

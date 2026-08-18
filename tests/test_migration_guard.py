@@ -11,6 +11,7 @@ application would happily serve requests against a schema it had never checked.
 All pure — no database, no subprocess, no container state.
 """
 
+import os
 import pytest
 
 from backend.utils.migrations import (
@@ -119,44 +120,42 @@ def test_empty_pin_disables_the_check():
 
 # ------------------------------------------------------------ startup policy
 
-def test_migration_failure_is_fatal_in_production():
-    assert should_fail_startup(
-        MigrationResult(MO.FAILED), environment="production", fail_closed=False
-    ) is True
+def test_migration_failure_is_fatal_everywhere():
+    """No permissive mode for schema state: an unsatisfied outcome aborts in
+    every environment (MIGRATIONS_FAIL_CLOSED was removed — it only ever
+    permitted a boot after a failed step)."""
+    assert should_fail_startup(MigrationResult(MO.FAILED)) is True
 
 
 @pytest.mark.parametrize("outcome", [
     MO.CONFIG_MISSING, MO.TOOLING_MISSING, MO.REVISION_MISMATCH, MO.MULTIPLE_HEADS,
 ])
-def test_every_unsatisfied_outcome_is_fatal_in_production(outcome):
-    assert should_fail_startup(
-        MigrationResult(outcome), environment="production", fail_closed=False
-    ) is True
-
-
-def test_migration_failure_is_not_fatal_in_development():
-    assert should_fail_startup(
-        MigrationResult(MO.FAILED), environment="development", fail_closed=False
-    ) is False
-
-
-def test_development_can_opt_into_fail_closed():
-    assert should_fail_startup(
-        MigrationResult(MO.FAILED), environment="development", fail_closed=True
-    ) is True
+def test_every_unsatisfied_outcome_is_fatal(outcome):
+    assert should_fail_startup(MigrationResult(outcome)) is True
 
 
 def test_success_never_fails_startup():
-    assert should_fail_startup(
-        MigrationResult(MO.UP_TO_DATE), environment="production", fail_closed=True
-    ) is False
+    assert should_fail_startup(MigrationResult(MO.UP_TO_DATE)) is False
 
 
-@pytest.mark.parametrize("environment", ["production", "PRODUCTION", " prod "])
-def test_production_detection_is_forgiving_about_formatting(environment):
-    assert should_fail_startup(
-        MigrationResult(MO.FAILED), environment=environment, fail_closed=False
-    ) is True
+def test_the_flag_is_gone_from_config_and_compose():
+    import re
+    from config import Settings
+    assert "MIGRATIONS_FAIL_CLOSED" not in Settings.model_fields
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel in ("docker/docker-compose.cpu.yml", "docker/docker-compose.prod.yml",
+                ".env.example", "backend/lifespan.py", "backend/security/config_guard.py"):
+        with open(os.path.join(root, rel), encoding="utf-8") as fh:
+            body = fh.read()
+        for line in body.splitlines():
+            if "MIGRATIONS_FAIL_CLOSED" in line:
+                assert line.strip().startswith("#"), f"{rel}: {line.strip()!r} still consumes the removed flag"
+
+
+def test_expected_head_from_scripts_is_a_single_head():
+    from backend.utils.migrations import expected_head_from_scripts
+    head = expected_head_from_scripts()
+    assert isinstance(head, str) and len(head) >= 12
 
 
 # ------------------------------------------------------------- exit codes
@@ -173,9 +172,11 @@ def test_lifespan_aborts_startup_on_unsatisfied_migrations():
     with open("/app/backend/lifespan.py", encoding="utf-8") as handle:
         source = handle.read()
     block = source[source.index("Running database migrations"):]
-    block = block[:block.index("Continuing startup (development)")]
+    block = block[:block.index("# 1.1 Database")]
     assert "should_fail_startup" in block
     assert "raise RuntimeError" in block
+    # no permissive branch survives: an unsatisfied migration step never continues
+    assert "Continuing startup" not in block
     assert "Continuing startup, but database schema may be incomplete" not in source
 
 

@@ -88,7 +88,7 @@ class IdentityEmbedding(Base):
 
 For new installations, pgvector works out of the box:
 
-1. Start containers: `docker compose -f docker/docker-compose.gpu.yml up -d`
+1. Start containers: `docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml up -d`
 2. Set environment: `VECTOR_BACKEND=pgvector`
 3. Restart the face recognition service
 
@@ -103,10 +103,12 @@ alembic upgrade head
 
 # 2. Migrate FAISS embeddings to pgvector
 # First, do a dry run:
-python scripts/migrate_faiss_to_pgvector.py --dry-run
+# RETIRED (2026-08): migrate_faiss_to_pgvector.py was deleted. It read the
+# v1 index files of the removed IdentityIndexService, which no deployment
+# has; the pgvector migration is complete and identity_embeddings.embedding
+# is authoritative.
 
 # Then, run the actual migration:
-python scripts/migrate_faiss_to_pgvector.py
 
 # 3. Enable pgvector backend
 export VECTOR_BACKEND=pgvector
@@ -159,7 +161,7 @@ identity, is_new, similarity = await identity_service.find_or_create_identity(
 pgvector operations are logged with the `[PGVECTOR]` prefix:
 
 ```log
-[PGVECTOR] [SEARCH_KNOWN] Starting search: top_k=5, threshold=0.4
+[PGVECTOR] [SEARCH_KNOWN] Parameters: top_k=10, threshold=0.4   # from SEARCH_DEFAULT_TOP_K / SIMILARITY_THRESHOLD
 [PGVECTOR] [SEARCH_KNOWN] Found 2 matches (best: 0.8542) in 3.21ms
 [PGVECTOR] [ADD] ✅ Added embedding: id=42 identity=abc123... type=known quality=0.85
 ```
@@ -203,7 +205,6 @@ python -c "import pgvector; print('pgvector installed')"
 psql -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
 
 # Re-run migration with verbose logging
-python scripts/migrate_faiss_to_pgvector.py --dry-run
 ```
 
 ## Health Check

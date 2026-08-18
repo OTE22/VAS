@@ -173,11 +173,28 @@ GET /api/identities/{identity_id}/map?enable_security_features=true&detect_patte
 
 **Configuration**: All defaults can be set in `config.py` and `.env`:
 ```bash
-MAP_ENABLE_SECURITY_FEATURES=true
-MAP_DETECT_PATTERNS=true
-MAP_SHOW_RISK_HEATMAP=true
-MAP_SHOW_TIMELINE=false
+# MAP_ENABLE_SECURITY_FEATURES=true   # NOT A SETTING - query parameter, see note below
+# MAP_DETECT_PATTERNS=true   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_RISK_HEATMAP=true   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_TIMELINE=false   # NOT A SETTING - query parameter, see note below
 ```
+
+
+> **These four are query parameters, not settings.** `enable_security_features`,
+> `detect_patterns`, `show_risk_heatmap` and `show_timeline` are passed per
+> request to `GET /api/identities/{identity_id}/map`, each defaulting to
+> `false`. There is no `MAP_ENABLE_SECURITY_FEATURES` / `MAP_DETECT_PATTERNS` /
+> `MAP_SHOW_RISK_HEATMAP` / `MAP_SHOW_TIMELINE` environment variable — setting
+> one in `.env` does nothing at all. The real `MAP_*` settings are listed in
+> [`36_CONFIGURATION_GUIDE.md`](36_CONFIGURATION_GUIDE.md).
+>
+> ```bash
+> curl -G "http://localhost/api/identities/$ID/map" \
+>   -H "Authorization: Bearer $TOKEN" \
+>   -d days_back=7 -d map_style=light \
+>   -d enable_security_features=true -d detect_patterns=true \
+>   -d show_risk_heatmap=true -d show_timeline=false
+> ```
 
 ### Example Request
 
@@ -268,7 +285,7 @@ Watchlist matches and alerts shown as:
 4. **Map Service** calls security features:
    - `SecurityMapAnalyzer` detects patterns
    - `SecurityMapRenderer` adds visualizations
-5. **Folium Map** generated with security overlays
+5. **MapLibre** draws the overlays in the browser from `/api/identities/{id}/map-data`
 
 ---
 
@@ -369,8 +386,6 @@ risk_factors = {
 ## Related Documentation
 
 - **Chapter 8.1**: Map Service Guide (`46_MAP_SERVICE_GUIDE.md`)
-- **Chapter 8.2**: Map Service Data Flow (`47_MAP_SERVICE_DATA_FLOW.md`)
-- **Chapter 8.4**: Map Service Production Guide (`49_MAP_SERVICE_PRODUCTION_GUIDE.md`)
 - **Chapter 7.4**: Security Intelligence Guide (`45_SECURITY_INTELLIGENCE_GUIDE.md`)
 
 ---

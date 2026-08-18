@@ -94,7 +94,7 @@
                             </div>
                         </button>
                         <div style="position: absolute; top: -8px; right: -8px; background: rgba(0, 255, 150, 0.9); border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; cursor: help; border: 2px solid rgba(0, 0, 0, 0.3); z-index: 10;" 
-                             title="💡 Graph-Based Merge Suggestions: The system uses advanced graph clustering to automatically find clusters of 3+ identities that are the same person. It analyzes patterns (cameras, times) and verifies with face recognition. Review suggestions and approve/reject based on confidence scores (70%+ = high confidence).">
+                             title="💡 Graph-Based Merge Suggestions: The system uses graph clustering to find clusters of identities that are the same person. Cluster size, similarity and confidence bands all come from the configured settings (Admin → Settings). It analyzes patterns (cameras, times) and verifies with face recognition, then asks you to approve or reject each suggestion.">
                             <i class="fas fa-info" style="font-size: 0.7rem; color: #000;"></i>
                         </div>
                     </div>
@@ -248,7 +248,7 @@
 
     <!-- Promote Modal -->
     <!-- Face Detection Error Alert Modal -->
-    <div id="face-detection-alert-modal" class="security-modal" style="display: none; z-index: 99999;">
+    <div id="face-detection-alert-modal" class="security-modal" style="display: none;">
         <div class="modal-content" style="max-width: 500px;">
             <div class="modal-header" style="background: linear-gradient(135deg, rgba(255, 68, 68, 0.2) 0%, rgba(255, 100, 100, 0.1) 100%); border-bottom-color: rgba(255, 68, 68, 0.4);">
                 <h2 style="color: #ff6b6b; text-shadow: 0 0 10px rgba(255, 107, 107, 0.5);">
@@ -293,7 +293,29 @@
                 </button>
             </div>
             <div class="modal-body">
+                <!-- Match suggestions. Populated by loadPromoteCandidates() from the
+                     read-only /match-candidates endpoint; nothing here is
+                     pre-selected and nothing merges without an explicit click. -->
+                <div id="promote-candidates-section">
+                    <h3 class="promote-candidates-heading">Is this someone you already know?</h3>
+                    <p id="promote-candidates-warning" role="alert"></p>
+                    <div id="promote-candidates"></div>
+                    <!-- Shown only when candidates exist: with none on screen
+                         there is nothing to say "none of these" to. Static
+                         markup, so it is bound by addEventListener at startup
+                         rather than needing a data-action dispatch. -->
+                    <button type="button" class="intelligence-admin-btn"
+                            id="promote-none-of-these" style="display: none;">
+                        <div class="btn-content">
+                            <div class="btn-icon-wrapper">
+                                <i class="fas fa-user-plus"></i>
+                            </div>
+                            <span class="btn-title">NONE OF THESE &mdash; PROMOTE AS A NEW PERSON</span>
+                        </div>
+                    </button>
+                </div>
                 <form id="promote-form">
+                    <p class="promote-newperson-heading">Or promote as a new person</p>
                     <div class="form-group">
                         <label for="promote-name">Display Name *</label>
                         <input type="text" id="promote-name" class="intelligence-input" required>
@@ -805,9 +827,10 @@
     </footer>
 
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
+    <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
-    <script src="/frontend/js/admin-unknown.js?v=unknown-7"></script>
+    <script src="/frontend/js/admin-unknown.js?v=unknown-8"></script>
 </body>
 </html>
 

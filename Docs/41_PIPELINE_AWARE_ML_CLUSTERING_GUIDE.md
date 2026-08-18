@@ -51,13 +51,13 @@ The similarity score combines:
 **For same-pipeline matches:**
 ```python
 similarity = (embedding_sim * 0.7) + (pipeline_overlap * 0.3)
-threshold = 0.35
+threshold = settings.UNKNOWN_SIMILARITY_THRESHOLD  # default 0.35
 ```
 
 **For cross-pipeline matches:**
 ```python
 similarity = (embedding_sim * 0.9) + (pipeline_overlap * 0.1)
-threshold = 0.50  # Stricter threshold
+threshold = settings.CROSS_PIPELINE_SIMILARITY_THRESHOLD  # stricter; default 0.50
 ```
 
 ### 4. Quality-Weighted Similarity
@@ -174,7 +174,7 @@ CROSS_PIPELINE_SIMILARITY_THRESHOLD: float = 0.50  # Minimum similarity for cros
    - Embedding similarity: 0.82 (from best embeddings)
    - Combined: (0.82 * 0.7) + (1.0 * 0.3) = 0.874
    ↓
-6. Creates suggestion (confidence: 0.874 > 0.35 threshold)
+6. Creates suggestion (confidence: 0.874 > UNKNOWN_SIMILARITY_THRESHOLD)
 ```
 
 ## Integration with Existing System
@@ -251,3 +251,6 @@ Potential improvements:
 - **Image quality features**: Use additional image metrics
 - **Active learning**: Learn from user feedback
 
+---
+
+> **Related (2026-08-16):** the behavioural ML-Ops lineage (threshold sets, prediction → model → threshold → snapshot → dataset → label, drift per shadow model, frozen feature definitions, demo seed) is documented in `Docs/40_ML_INTEGRATION.md` § "ML-Ops lineage" and `Docs/87` § I/O. `identity_embeddings.pipeline_id` is now a real FK (RESTRICT) and NULL for enrolled / preloaded embeddings — pipeline-aware clustering that filters on it treats NULL as "not a camera sighting".

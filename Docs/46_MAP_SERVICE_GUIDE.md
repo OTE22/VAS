@@ -1,442 +1,273 @@
-# Chapter 8.1: Map Service Guide
-## Backend Map Generation for Intelligence Tracking
+# 46 — Map Service Guide
 
-**Version:** 5.0.0  
-**Last Updated:** January 2025
-
----
-
-## Overview
-
-The Map Service provides server-side map generation using Python and Folium for the Intelligence Analysis tracking feature. This production-ready solution offers reliability, performance, and advanced security intelligence features.
+**Canonical map documentation.** Supersedes the former 47 (map data flow), 49
+(map service in production) and 55 (offline map setup), which described a
+server-side Folium renderer that no longer exists. Dataset acquisition and
+build procedure live in [`86_MAP_DATASET_ACQUISITION.md`](86_MAP_DATASET_ACQUISITION.md);
+the migration record and the defect post-mortem live in
+[`85_MAP_MIGRATION_INVENTORY.md`](85_MAP_MIGRATION_INVENTORY.md) and
+[`89_OFFLINE_MAP_REMEDIATION.md`](89_OFFLINE_MAP_REMEDIATION.md).
 
 ---
 
-## Architecture
+## 1. What draws the map
 
-### Components
+The browser draws it. MapLibre GL JS renders vector and raster tiles that a
+local Martin tile server reads out of MBTiles archives on disk. Nothing is
+fetched from the internet at runtime, and no map HTML is generated on the
+server.
 
-1. **Map Service** (`backend/core/map_service.py`)
-   - Generates interactive HTML maps using Folium
-   - Generates GeoJSON data for advanced frontend rendering
-   - Handles coordinate processing and route visualization
-   - Integrates with security intelligence features
-
-2. **Security Features** (`backend/core/security_map_features.py`)
-   - Pattern detection (loitering, backtracking, rapid movement)
-   - Risk scoring and heatmaps
-   - Threat indicators from watchlists
-   - Security zone visualization
-
-3. **API Endpoints** (`backend/routes/intelligence.py`)
-   - `/api/identities/{identity_id}/map` - Returns HTML map (Folium)
-   - `/api/identities/{identity_id}/map/geojson` - Returns GeoJSON data
-   - `/api/map/stats` - Returns map service statistics
-
-4. **Frontend Integration** (`frontend/js/admin-intelligence.js`)
-   - Automatically uses backend map when available
-   - Embeds map in iframe for isolation
-
----
-
-## Configuration
-
-### Environment Variables
-
-All map service configuration is managed through `config.py` and `.env`:
-
-```bash
-# Map Service Configuration
-MAP_CACHE_TTL=3600                    # Cache TTL in seconds (default: 1 hour)
-MAP_CACHE_ENABLED=true                 # Enable caching (default: true)
-MAP_MAX_COORDINATES=10000              # Max coordinates per map (default: 10000)
-MAP_GENERATION_TIMEOUT=30              # Timeout in seconds (default: 30)
-MAP_MAX_TRACKS=100                     # Max tracks per request (default: 100)
-MAP_DEFAULT_STYLE=dark                 # Default style: dark, light, satellite, terrain
-MAP_ENABLE_SECURITY_FEATURES=true      # Enable security features by default
-MAP_DETECT_PATTERNS=true               # Enable pattern detection by default
-MAP_SHOW_RISK_HEATMAP=true             # Show risk heatmap by default
-MAP_SHOW_TIMELINE=false                # Show timeline control by default
+```
+   browser                     nginx (same origin)            containers
+   ───────                     ───────────────────            ──────────
+   MapLibre GL JS  ──GET──►  /frontend/maps/styles/*.json  ──►  static file
+   (vendored, no CDN)        /maps/<source>/{z}/{x}/{y}    ──►  martin ──► *.mbtiles
+                             /maps/font/{stack}/{range}    ──►  martin ──► *.ttf
+                             /api/identities/{id}/map-data ──►  api ──► PostgreSQL
 ```
 
-### Redis Configuration
+Everything is same-origin: there is no CORS anywhere in the map path, and the
+CSP grants `worker-src 'self'` with no `blob:` and no `unsafe-eval`.
 
-The service uses the existing Redis cache manager:
+| Piece | Where |
+|---|---|
+| Renderer | `frontend/vendor/maplibre/` (vendored 6.3.0, worker as a same-origin `.mjs`) |
+| Controller | `frontend/js/identity-map.js` — one controller, no iframes |
+| Styles | `frontend/maps/styles/{light,dark,satellite,terrain}.json` |
+| Tile server | `ghcr.io/maplibre/martin:1.13.0`, config `config/martin.yaml` |
+| Archives | `map-data/production/*.mbtiles` (mounted read-only into Martin) |
+| Data endpoint | `GET /api/identities/{id}/map-data` → GeoJSON, `backend/core/map_data_service.py` |
+| Analysis | `backend/core/security_analysis.py` — zones, threats, patterns |
 
-```bash
-REDIS_URL=redis://redis:6379/0
-REDIS_MAX_CONNECTIONS=100
-REDIS_POOL_SIZE=50
-CACHE_TTL=3600
-```
+**There is no server-rendered map.** `GET /api/identities/{id}/map`,
+`/map/geojson` and `/api/map/stats` were removed with the Folium stack; they
+return 404 and have no replacement, because the browser now does that work.
 
----
+## 2. The four styles and the datasets behind them
 
-## Features
+| Style | Dataset | Kind | What it is |
+|---|---|---|---|
+| Light | `lebanon-streets-vector` | vector | OpenMapTiles-schema MVT, built by Planetiler from a Geofabrik OSM extract |
+| Dark | `lebanon-streets-vector` | vector | **the same archive**, different palette |
+| Satellite | `lebanon-satellite` | raster | Sentinel-2 L2A true colour, 10 m — 15,177 tiles z8-14, acquired 2026-08-12 |
+| Terrain | `lebanon-dem` | dem | Copernicus GLO-30, terrarium-encoded |
 
-### ✅ Interactive Maps (Folium)
-- **Interactive maps** with zoom, pan, and layer controls
-- **Route visualization** showing movement paths
-- **Marker clustering** for better performance with many locations
-- **Popup information** with timestamp, duration, and location details
-- **Multiple map styles**: dark, light, satellite, terrain
-- **Offline support** - works without external map tile dependencies
+Light and Dark are **one dataset with two palettes** — identical layer lists,
+identical `sources` blocks, one archive. Generating two street archives would
+double the disk cost and let the two drift apart;
+`tests/test_maplibre_stack.py::test_light_and_dark_are_the_same_layers_over_the_same_vector_source`
+fails if they ever diverge.
 
-### ✅ Security Intelligence Features
-- **Pattern Detection**: Loitering, backtracking, rapid movement
-- **Risk Scoring**: Multi-factor risk calculation
-- **Threat Indicators**: Watchlist integration
-- **Security Zones**: Monitored and restricted zones
-- **Risk Heatmap**: Visual risk distribution
-- **Timeline Playback**: Time-based movement visualization
+Styles are generated, not hand-edited: `scripts/map_data/build_vector_styles.py`
+writes both from one layer definition.
 
-### ✅ GeoJSON Endpoint
-- **Standard format** for GIS tools and mapping libraries
-- **Point features** for each location
-- **LineString features** for routes
-- **Rich metadata** in feature properties
+## 3. Availability: a style is offered only when it can actually be drawn
 
-### ✅ Production Features
-- **Redis Caching**: 1-hour TTL with cache hit/miss tracking
-- **Input Validation**: Coordinate, track, and style validation
-- **Security**: XSS prevention, input sanitization
-- **Error Handling**: Comprehensive error handling with graceful degradation
-- **Performance**: Async operations, memory limits, timeout protection
-- **Monitoring**: Statistics endpoint for metrics
+`GET /api/maps/availability` reports, per style, whether it is usable. The
+dropdown disables the ones that are not. **There is no fallback** — an
+unavailable style is never silently replaced by another, never a CSS-filtered
+street map pretending to be satellite, never a coloured grid.
 
----
+The gate ladder, first failure wins:
 
-## API Usage
+| Gate | Question | Failure code |
+|---|---|---|
+| installed | is it in Martin's catalog? | `CONTENT_MISSING` |
+| readable | does its TileJSON parse and declare zooms? | `METADATA_INVALID` |
+| serving | does a representative tile answer? | `PROBE_FAILED` |
+| not a placeholder | is it a known upstream error image? | `PLACEHOLDER_CONTENT` |
+| **content measured** | has its content been decoded and verified? | `CONTENT_NOT_VERIFIED` and others |
+| resources | are its fonts and sprites served? | `RESOURCES_MISSING` |
 
-### 1. Get Interactive Map (HTML)
-
-```http
-GET /api/identities/{identity_id}/map?date=2024-01-15&map_style=dark&enable_security_features=true
-```
-
-**Query Parameters:**
-- `date` (optional): Specific date (YYYY-MM-DD)
-- `days_back` (optional, default: 7): Days to analyze if no date
-- `map_style` (optional, default: "dark"): Style - dark, light, satellite, terrain
-- `include_popups` (optional, default: true): Include popup information
-- `show_routes` (optional, default: true): Draw routes between locations
-- `cluster_markers` (optional, default: true): Cluster nearby markers
-- `enable_security_features` (optional, default: true): Enable security intelligence features
-- `detect_patterns` (optional, default: true): Detect suspicious movement patterns
-- `show_risk_heatmap` (optional, default: true): Show risk heatmap overlay
-- `show_timeline` (optional, default: false): Show timeline playback control
-
-**Response:** HTML page with embedded interactive map
-
-**Caching:** Yes (configurable TTL, default: 1 hour)
-
-**Example:**
-```bash
-curl -X GET "http://localhost:8000/api/identities/123e4567-e89b-12d3-a456-426614174000/map?days_back=7&map_style=dark" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-### 2. Get GeoJSON Data
-
-```http
-GET /api/identities/{identity_id}/map/geojson?date=2024-01-15&days_back=7
-```
-
-**Query Parameters:**
-- `date` (optional): Specific date (YYYY-MM-DD)
-- `days_back` (optional, default: 7): Days to analyze
-
-**Response:** GeoJSON FeatureCollection
-
-**Example Response:**
-```json
+```jsonc
 {
-  "type": "FeatureCollection",
-  "features": [
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Point",
-        "coordinates": [-122.4194, 37.7749]
-      },
-      "properties": {
-        "date": "2024-01-15",
-        "pipeline_name": "Main Entrance",
-        "timestamp": "2024-01-15T10:30:00",
-        "duration_at_location": 120,
-        "sequence": 1,
-        "is_start": true,
-        "is_end": false
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [[-122.4194, 37.7749], [-122.4094, 37.7849]]
-      },
-      "properties": {
-        "type": "route",
-        "date": "2024-01-15",
-        "movement_count": 5
-      }
+  // illustrative: this is what an UNAVAILABLE style looks like. On this
+  // deployment all four are currently available.
+  "styles": { "light": true, "dark": true, "satellite": false, "terrain": true },
+  "detail": {
+    "satellite": {
+      "available": false, "source": null, "source_type": null,
+      "state": "OFFLINE_MAP_DATASET_UNAVAILABLE",
+      "reason": "CONTENT_MISSING",                 // never null when available is false
+      "reason_text": "lebanon-satellite is not installed",
+      "candidates": { "lebanon-satellite": {
+        "usable": false, "error": "not in Martin catalog", "code": "CONTENT_MISSING",
+        "checks": { "installed": false, "readable": null, "metadata_valid": null,
+                    "content_ok": null, "resources_ok": null } } }
     }
-  ]
+  },
+  "martin_reachable": true, "checked_at": 1786969974.5,
+  "unavailable_state": "OFFLINE_MAP_DATASET_UNAVAILABLE"
 }
 ```
 
-### 3. Get Map Service Statistics
+`styles` is a flat `{name: bool}` map and must stay one — `identity-map.js`
+does `opt.disabled = !ok` over it. Everything else is additive. A `checks`
+value of `null` means that gate was never reached because an earlier one
+failed.
 
-```http
-GET /api/map/stats
-```
+**An unavailable style always names a registered reason code.** That is
+enforced by construction, not by an assertion: `map_availability.style_entry()`
+is the only place a style entry is built, and it derives `reason` from
+`available`. If a reason cannot be composed it reports the internal code
+`AVAILABILITY_STATE_INVALID`, logs at ERROR and increments
+`fr_map_availability_state_invalid_total`. Deliberately not an `assert` —
+`python -O` strips those.
 
-**Response:**
-```json
-{
-  "maps_generated": 1250,
-  "cache_hits": 850,
-  "cache_misses": 400,
-  "errors": 5,
-  "timeouts": 2,
-  "cache_enabled": true
-}
-```
+The verdict is cached and refreshed every `MAP_AVAILABILITY_REFRESH_SECONDS`
+under the service supervisor; the endpoint never triggers a fresh probe.
 
----
+## 4. Content verification: why "the file is there" means nothing
 
-## Data Flow
+The Light basemap was once 145,718 tiles that were all the same image:
+OpenStreetMap's *"Access blocked — App is not following the tile usage policy"*
+PNG. Every check of the day passed — tile present, byte-identical to its
+source pyramid, count correct, coverage complete, checksum recorded — because
+every one of them measured **structure**. None looked at what a tile depicts.
 
-### Integration with Database
+So an archive is usable only once its **content** has been measured:
 
-The map service integrates with the database through the Intelligence Service:
+- `scripts/map_data/coverage_check.py` decodes a deterministic, geographically
+  stratified sample (never `ORDER BY random()`, so a refusal reproduces) and
+  applies per-kind rules: imagery must decode, have plausible dimensions, not
+  be blank, carry entropy and differ across the country; DEM must decode to
+  elevations in range with real relief; vector must decompress, parse as MVT,
+  and name layers its own metadata declares.
+- `map-data/metadata/content_verdicts.json` records the verdict for each
+  archive, bound to **that archive's bytes**: sha256 plus size, mtime, ctime
+  and inode.
+- `backend/core/map_content_ledger.verdict_for()` answers at runtime with one
+  `os.stat`. Any mismatch means the archive on disk is not the one that was
+  measured, so it is `CONTENT_NOT_VERIFIED` until something measures it again.
 
-1. **Route Handler** (`backend/routes/intelligence.py`)
-   - Receives database session
-   - Calls `intelligence_service.get_cross_camera_track()`
+**Never measured is not usable.** `content_ok` is a tri-state: `True` (measured
+and passed), `False` (measured and rejected), `None` (nobody has looked). Only
+`True` serves.
 
-2. **Intelligence Service** (`backend/core/intelligence_service.py`)
-   - Queries `IdentityAppearance` table
-   - Queries `Pipeline` table for coordinates (`latitude`, `longitude`)
-   - Queries `Identity` table for identity information
-   - Returns `CrossCameraTrack` objects with coordinates
+SHA-256 is recomputed at exactly four points — installation, boot verification,
+`POST /api/maps/verify`, and `production_gate.py` — never on an availability
+refresh, because hashing a multi-GB archive every few minutes is its own
+outage.
 
-3. **Map Service** (`backend/core/map_service.py`)
-   - Receives pre-processed tracking data
-   - Generates map with coordinates from database
-   - Adds security features if enabled
+At start-up the API measures any installed archive that has no valid verdict,
+in the background, and writes the ledger. Until that check *passes* the dataset
+stays unavailable. This is what makes a hand-copied `map-data/production/` safe
+rather than merely convenient.
 
-### Coordinate Source
-
-Coordinates are stored in the `pipelines` table:
-- `latitude` (Float): Latitude coordinate
-- `longitude` (Float): Longitude coordinate
-- `location_name` (String): Human-readable location name
-
-Coordinates are extracted by the Intelligence Service and passed to the Map Service.
-
----
-
-## Security Intelligence Features
-
-### Pattern Detection
-
-1. **Loitering Detection**
-   - Identifies when an identity stays in a small area for extended time
-   - Configurable radius (default: 100m) and duration (default: 5 minutes)
-
-2. **Backtracking Detection**
-   - Detects when an identity returns to a previous location
-   - Flags suspicious return patterns
-
-3. **Rapid Movement Detection**
-   - Identifies movements exceeding speed threshold (default: 100 km/h)
-   - Flags suspiciously fast movements
-
-### Risk Scoring
-
-Multi-factor risk calculation:
-- **Base Risk**: Default risk level
-- **Watchlist Risk**: Based on watchlist matches
-- **Pattern Risk**: Based on detected patterns
-- **Zone Risk**: Based on security zone violations
-- **Speed Risk**: Based on movement speed
-
-Risk levels: Critical, High, Medium, Low
-
-### Threat Indicators
-
-- **Watchlist Integration**: Shows locations where watchlisted identities were detected
-- **Alert Levels**: Critical, High, Medium, Low
-- **Visual Markers**: Color-coded threat indicators on map
-
-### Security Zones
-
-- **Monitored Zones**: Areas under surveillance
-- **Restricted Zones**: High-security areas
-- **Risk Levels**: 1-10 scale
-- **Polygon Overlays**: Visual zone boundaries
-
----
-
-## Frontend Integration
-
-The frontend automatically uses the backend map:
-
-1. **Automatic Detection**: When "Map" button is clicked, loads backend map
-2. **Iframe Embedding**: Map embedded in iframe to isolate Folium's CSS/JS
-3. **Error Handling**: Graceful fallback if backend fails
-
-### Manual Usage
-
-You can also use the GeoJSON endpoint for custom frontend rendering:
-
-```javascript
-async function loadCustomMap() {
-    const response = await fetch(`/api/identities/${identityId}/map/geojson?days_back=7`, {
-        credentials: 'include',
-        headers: {
-            'Authorization': `Bearer ${token}`
-        }
-    });
-    const geojson = await response.json();
-    
-    // Use with Leaflet, Mapbox, or any mapping library
-    L.geoJSON(geojson).addTo(map);
-}
-```
-
----
-
-## Installation
-
-### Requirements
-
-Add Folium to your requirements:
+### Verifying on demand
 
 ```bash
-pip install folium>=0.15.0
+curl -X POST http://localhost/api/maps/verify \
+     -H "Authorization: Bearer $TOKEN" -H "X-Requested-With: XMLHttpRequest"
 ```
 
-Or add to `requirements-cpu.txt`:
+Admin only, single-flight, runs on a worker thread. Re-measures every installed
+archive, rewrites the ledger and refreshes availability. This is the way to
+make a dataset usable again after replacing it by hand.
+
+## 5. Installing a dataset
+
+`scripts/map_data/install_dataset.sh <archive.mbtiles.new> <id> [--restart-martin]`
+
+One crash-safe transaction (`scripts/map_data/install_dataset.py`):
+
 ```
-folium>=0.15.0
-```
-
-### Configuration
-
-1. **Update `.env` file** with map service settings (see Configuration section)
-2. **Ensure Redis is running** for caching
-3. **Verify Pipeline coordinates** are set in database
-
----
-
-## Troubleshooting
-
-### Folium Not Installed
-
-If you see "Map Service Unavailable":
-```bash
-pip install folium>=0.15.0
+stage → validate + hash → PENDING verdict → retain previous → rename →
+activate verdict + checksums.txt + datasets.json → drop previous
 ```
 
-### Map Not Loading
+Every crash point leaves either the **old archive serving and available**, or
+the **new bytes in place and reported UNAVAILABLE** — never new bytes wearing
+the previous archive's authorization. `--rollback <id>` restores the retained
+copy.
 
-1. Check browser console for errors
-2. Check backend logs for map generation errors
-3. Verify coordinates are available in pipeline data:
-   ```sql
-   SELECT pipeline_id, latitude, longitude FROM pipelines WHERE latitude IS NOT NULL;
-   ```
-4. Check network tab for API response
+Martin 1.13.0 has **no hot reload** (proven): it keeps an open handle to a
+replaced file and its own tile cache, so after a swap it serves the OLD data
+while the catalog still lists the id. `--restart-martin` restarts the tile
+server *only* — never the backend, database, Redis or workers. The installer
+then verifies **freshness**, not presence: the tile served through nginx must
+be byte-identical to that tile inside the archive just installed.
 
-### Empty Map
+## 6. Building datasets
 
-- Verify pipelines have latitude/longitude coordinates
-- Check date range has tracking data
-- Ensure identity has appearances in the time period
-- Check backend logs for validation errors
-
-### Cache Issues
-
-- Verify Redis is running: `redis-cli ping`
-- Check cache configuration in `.env`
-- Review cache statistics: `GET /api/map/stats`
-
----
-
-## Performance Optimization
-
-### Caching
-
-- Maps are cached for 1 hour (configurable via `MAP_CACHE_TTL`)
-- Cache keys are based on request parameters
-- Cache hit/miss rates tracked in statistics
-
-### Memory Management
-
-- Maximum 10,000 coordinates per map (configurable via `MAP_MAX_COORDINATES`)
-- Maximum 100 tracks per request (configurable via `MAP_MAX_TRACKS`)
-- Automatic limiting prevents memory issues
-
-### Timeout Protection
-
-- 30-second timeout (configurable via `MAP_GENERATION_TIMEOUT`)
-- Prevents hanging requests
-- Returns error if timeout exceeded
-
----
-
-## Monitoring
-
-### Statistics Endpoint
-
-Monitor map service performance:
+Each dataset builds **independently**; nothing waits for anything else.
 
 ```bash
-curl -X GET "http://localhost:8000/api/map/stats" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+scripts/map_data/build_streets_vector.sh [--install] [--restart-martin]
+scripts/map_data/build_dem.sh            [--install] [--restart-martin]
+scripts/map_data/build_satellite.sh      [--install] [--restart-martin]
+scripts/map_data/build_all.sh            [--install] [streets-vector|satellite|dem ...]
 ```
 
-**Metrics:**
-- `maps_generated`: Total maps generated
-- `cache_hits`: Cache hit count
-- `cache_misses`: Cache miss count
-- `errors`: Error count
-- `timeouts`: Timeout count
-- `cache_enabled`: Cache status
+`build_all.sh` runs every requested builder even if one fails, prints a
+PASS/FAIL table, keeps the artifacts that succeeded, and exits non-zero only if
+a requested dataset failed. The datasets were once chained by hand and the
+streets build sat idle for 16 h 07 m behind a satellite build that then failed.
 
-### Logging
+Builders are hardened against the failure that produced that: downloads go to
+a `.part` file and are checked for HTTP status, content type, declared length,
+checksum and block pages before being promoted; retries are bounded with
+exponential backoff and full jitter; permanent refusals (403/404, wrong type,
+bad checksum) are not retried; disk space is checked before the first byte;
+and each builder validates its own output before promoting it.
 
-All map operations are logged:
-- `[MAP]` prefix for map service logs
-- `[SECURITY]` prefix for security feature logs
-- Error logs include stack traces
-- Warning logs for non-critical issues
+**There is no raster streets builder, deliberately.** The raster archive this
+replaced was produced by scraping `tile.openstreetmap.org` ~145,000 times
+against their tile usage policy. Rebuilding it would mean scraping again. See
+§8.
 
----
+## 7. Settings
 
-## Best Practices
+Documented **once**, here.
 
-1. **Set Pipeline Coordinates**: Ensure all pipelines have latitude/longitude
-2. **Enable Caching**: Use Redis caching for better performance
-3. **Monitor Statistics**: Regularly check `/api/map/stats`
-4. **Configure Limits**: Adjust `MAP_MAX_COORDINATES` based on your data size
-5. **Use Security Features**: Enable security intelligence for threat detection
-6. **Error Handling**: Implement frontend error handling for map failures
+| Setting | Default | Meaning |
+|---|---|---|
+| `MAP_DATA_DIR` | `/app/map-data` | Root of the dataset tree. The only settable map path. |
+| `MAP_MARTIN_INTERNAL_URL` | `http://martin:3000` | Backend-only address for availability probes. Browsers use `/maps/`. |
+| `MAP_AVAILABILITY_REFRESH_SECONDS` | `300` (min 30) | How often the cached verdict is re-derived. |
+| `MAP_BOUNDS_{SOUTH,WEST,NORTH,EAST}` | Lebanon | Panning bounds; also the fallback probe centre. |
+| `MAP_DEFAULT_{LAT,LON,ZOOM}` | 33.87 / 35.85 / 10 | Initial view. |
+| `MAP_MAX_COORDINATES` | `10000` | Cap on points returned by `/map-data`. |
 
----
+Derived and **not settable** — production archives and the ledger that
+authorizes them must never come from different trees:
+`MAP_PRODUCTION_DIR` = `<MAP_DATA_DIR>/production`,
+`MAP_METADATA_DIR` = `<MAP_DATA_DIR>/metadata`,
+`MAP_CONTENT_LEDGER_PATH` = `<MAP_METADATA_DIR>/content_verdicts.json`.
 
-## Related Documentation
+Retired with the Folium renderer: `MAP_CACHE_*`, `MAP_GENERATION_TIMEOUT`,
+`MAP_MAX_TRACKS`, `MAP_ANIMATION_*`, `MAP_REGION`, `MAP_TILE_URL`,
+`MAP_OFFLINE_TILES_*`, `MAP_MIN_ZOOM`, `MAP_MAX_ZOOM`.
 
-- **Chapter 8.2**: Map Service Data Flow (`47_MAP_SERVICE_DATA_FLOW.md`)
-- **Chapter 8.3**: Security Intelligence Map Features (`48_SECURITY_INTELLIGENCE_MAP_FEATURES.md`)
-- **Chapter 8.4**: Map Service Production Guide (`49_MAP_SERVICE_PRODUCTION_GUIDE.md`)
-- **Chapter 6**: Configuration Guide (`36_CONFIGURATION_GUIDE.md`)
+## 8. What must never happen
 
----
+- **Never scrape a public tile server.** That produced the original defect and
+  breaches the OSM tile usage policy. Vector tiles come from the Geofabrik PBF
+  extract, which is published for this purpose.
+- **Never store commercial imagery offline without a licence that permits it.**
+  Google, Bing, Esri and Mapbox terms do not. Copernicus Sentinel-2 and
+  Copernicus DEM are free, full and open with attribution — which is why they
+  are what ships.
+- **Never substitute a style for an unavailable one**, and never fake one with
+  a CSS filter or a coloured grid. Report `OFFLINE_MAP_DATASET_UNAVAILABLE`
+  with its reason code.
+- **Never treat file existence as validity.** An archive that has not been
+  content-verified is not usable, whatever its name, size or checksum file says.
 
-## Conclusion
+## 9. Checking the whole thing
 
-The Map Service provides a production-ready solution for intelligence tracking visualization with advanced security features, comprehensive error handling, and performance optimization. All configuration is managed through `config.py` and `.env` for easy deployment and maintenance.
+```bash
+# every rule, with the measured value behind each one
+docker exec face_recognition_api python3 /app/scripts/map_data/production_gate.py
 
+# content + coverage of the installed archives
+docker exec face_recognition_api python3 /app/scripts/map_data/coverage_check.py \
+    --production /app/map-data/production
+
+# what the browser sees
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost/api/maps/availability | python -m json.tool
+```
+
+Blank map, or a style missing from the picker? Ask
+`/api/maps/availability` first — it names the dataset and the reason code. See
+[`73_TROUBLESHOOTING.md`](73_TROUBLESHOOTING.md) §9.

@@ -1,0 +1,340 @@
+/* Identity Profile page (/admin/identity/{id})
+   Layout only — modals, timeline, buttons and forms come from admin.css. */
+
+.identity-page {
+    /* This app is an app-shell: admin.css sets
+       `body { height: 100vh; overflow: hidden; display: flex }`, so the
+       DOCUMENT never scrolls — each page must be its own scroll region
+       (every other admin page does this via .intelligence-content).
+       Without these three lines everything below the first viewport was
+       simply clipped, unreachable. */
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+
+    width: 100%;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1.5rem;
+    color: #fff;
+}
+
+.identity-back-link {
+    display: inline-block;
+    margin-bottom: 1rem;
+    color: #00ff96;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.identity-back-link:hover,
+.identity-back-link:focus-visible {
+    text-decoration: underline;
+}
+
+/* Loading / error states */
+.identity-state {
+    text-align: center;
+    padding: 4rem 1rem;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.identity-state i {
+    font-size: 2.5rem;
+    color: rgba(0, 255, 150, 0.6);
+    margin-bottom: 1rem;
+}
+
+#identity-error i {
+    color: #ffbe00;
+}
+
+.identity-state h2 {
+    color: #fff;
+    margin: 0 0 0.5rem;
+}
+
+/* Header */
+.profile-header {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, rgba(10, 25, 41, 0.95), rgba(20, 40, 30, 0.95));
+    border: 1px solid rgba(0, 255, 150, 0.2);
+    border-radius: 12px;
+}
+
+.profile-snapshot {
+    width: 120px;
+    height: 120px;
+    object-fit: cover;
+    border-radius: 10px;
+    border: 1px solid rgba(0, 255, 150, 0.3);
+    flex-shrink: 0;
+}
+
+.profile-heading {
+    min-width: 0;
+}
+
+.profile-name {
+    margin: 0 0 0.5rem;
+    font-size: 1.6rem;
+    overflow-wrap: anywhere;
+}
+
+.profile-badges {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.6rem;
+}
+
+.profile-badge {
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.profile-badge.type-known {
+    background: rgba(0, 255, 150, 0.18);
+    color: #00ff96;
+}
+
+.profile-badge.type-unknown {
+    background: rgba(255, 190, 0, 0.18);
+    color: #ffbe00;
+}
+
+.profile-id-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.profile-id-row code {
+    font-size: 0.8rem;
+    padding: 0.35rem 0.55rem;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(0, 255, 150, 0.3);
+    border-radius: 4px;
+    color: #00ff96;
+    word-break: break-all;
+}
+
+/* Actions */
+.profile-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 1.25rem 0;
+}
+
+/* Sections */
+.profile-section {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(0, 255, 150, 0.12);
+    border-radius: 10px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+}
+
+.profile-section-title {
+    margin: 0 0 1rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: rgba(0, 255, 150, 0.8);
+}
+
+.profile-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.5rem 2rem;
+}
+
+.profile-fact {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.35rem 0;
+    font-size: 0.9rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.profile-fact-label {
+    color: rgba(255, 255, 255, 0.55);
+    flex-shrink: 0;
+}
+
+.profile-fact-value {
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.profile-empty {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.45);
+    font-style: italic;
+}
+
+/* Watchlist membership */
+.profile-watchlists-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.profile-watchlist {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.7rem;
+    margin-bottom: 0.4rem;
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+    background: rgba(255, 255, 255, 0.04);
+    font-size: 0.9rem;
+}
+
+.profile-watchlist .watchlist-name {
+    flex: 1;
+    overflow-wrap: anywhere;
+}
+
+.profile-watchlist .watchlist-level {
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    color: rgba(255, 255, 255, 0.55);
+}
+
+.profile-watchlist.alert-level-critical { border-left-color: #ff6b6b; }
+.profile-watchlist.alert-level-critical i { color: #ff6b6b; }
+.profile-watchlist.alert-level-warning { border-left-color: #ffbe00; }
+.profile-watchlist.alert-level-warning i { color: #ffbe00; }
+.profile-watchlist.alert-level-info { border-left-color: rgba(0, 255, 150, 0.6); }
+.profile-watchlist.alert-level-info i { color: rgba(0, 255, 150, 0.8); }
+
+/* Modal helpers used by the ported modals */
+.modal-identity-banner {
+    background: rgba(0, 255, 150, 0.1);
+    border: 1px solid rgba(0, 255, 150, 0.3);
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.modal-identity-banner p {
+    margin: 0;
+    color: #00ff96;
+    font-size: 0.9rem;
+}
+
+.modal-identity-id-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+}
+
+.modal-identity-id-row code {
+    flex: 1;
+    font-size: 0.85rem;
+    padding: 0.5rem;
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(0, 255, 150, 0.3);
+    border-radius: 4px;
+    color: #00ff96;
+    word-break: break-all;
+    cursor: pointer;
+}
+
+.similarity-readout {
+    text-align: right;
+    color: #00ff96;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.checkbox-group label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 400;
+    margin-bottom: 0.5rem;
+}
+
+.live-alert-warning {
+    color: #ffcc00;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+}
+
+@media (max-width: 640px) {
+    .profile-header {
+        flex-direction: column;
+        text-align: center;
+    }
+
+    .profile-facts {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ============================================================
+   Fit guards — nothing on this page may widen the viewport.
+   The timeline track is a fixed 2880px; it scrolls INSIDE
+   .advanced-timeline-container (admin.css), never the page.
+   ============================================================ */
+.identity-page,
+.profile-section {
+    min-width: 0;
+}
+
+#identity-timeline {
+    max-width: 100%;
+}
+
+/* Legend + zoom controls: wrap on narrow screens instead of pushing wide. */
+#identity-timeline .timeline-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+#identity-timeline .timeline-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+/* The summary row under the track: wrap, don't overflow. */
+#identity-timeline .timeline-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+/* Long unbroken values (UUIDs, paths) must wrap, not widen. */
+.profile-fact-value,
+.profile-id-row code {
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+
+/* The ported modals: cap to the viewport on small screens. */
+#add-to-watchlist-modal .modal-content,
+#create-live-alert-modal .modal-content {
+    width: min(560px, 94vw);
+    max-height: 90vh;
+    overflow-y: auto;
+}

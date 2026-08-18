@@ -15,13 +15,6 @@ from backend.core.model_manager import ModelManager, model_manager
 from backend.core.batch_writer import BatchDatabaseWriter, batch_writer
 from backend.core.data_retention import DataRetentionManager, retention_manager
 from backend.core.production_cache import ProductionCacheManager, production_cache_manager
-from backend.core.face_recognition_cache import FaceRecognitionCache
-# face_recognition_cache will be set during startup in lifespan.py
-# Import it, but it may be None until startup
-try:
-    from backend.core.face_recognition_cache import face_recognition_cache
-except (ImportError, AttributeError):
-    face_recognition_cache = None
 from backend.core.system_metrics import SystemMetricsCollector, metrics_collector
 
 # Identity management (optional - may not be available)
@@ -41,10 +34,12 @@ try:
 except (ImportError, AttributeError):
     identity_service = None
 
-try:
-    from backend.core.identity_index import identity_index
-except (ImportError, AttributeError):
-    identity_index = None
+# The active VectorIndex implementation and its manager are published here by
+# lifespan at startup. They are declared as None rather than imported: importing
+# an index implementation at package-import time is what let a missing faiss
+# wheel take pgvector down with it.
+vector_index = None
+vector_index_manager = None
 
 __all__ = [
     'FaceTracker', 'face_tracker',
@@ -56,7 +51,6 @@ __all__ = [
     'BatchDatabaseWriter', 'batch_writer',
     'DataRetentionManager', 'retention_manager',
     'ProductionCacheManager', 'production_cache_manager',
-    'FaceRecognitionCache', 'face_recognition_cache',
     'SystemMetricsCollector', 'metrics_collector',
     'IdentityClusteringService', 'clustering_service',
     'IdentityRetentionManager', 'identity_retention_manager',

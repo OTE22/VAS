@@ -77,7 +77,7 @@ You should see your GPU information displayed.
 docker compose version
 
 # Test with our GPU compose file
-docker-compose -f docker/docker-compose.gpu.yml config
+docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml config
 ```
 
 ## 🎯 Quick Verification Script

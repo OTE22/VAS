@@ -191,11 +191,14 @@
     </footer>
 
     <!-- Scripts -->
-    <link rel="stylesheet" href="/frontend/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css" />
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/vendor/leaflet/leaflet.js"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
-    <script src="/frontend/js/admin-pipelines.js?v=rename-1" defer></script>
+    <!-- MapLibre GL JS is ESM-only; identity-map.js bridges it to window.IdentityMap
+         for the classic script below (the coordinate picker uses the same
+         renderer + Light style as the intelligence maps). -->
+    <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
+    <script src="/frontend/js/admin-pipelines.js?v=maplibre-1" defer></script>
         <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>

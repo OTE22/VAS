@@ -71,10 +71,10 @@ class SQLAgentTools:
         This is the FIRST security layer that catches malicious queries immediately.
         """
         logger.info(f"[STEP_0] Security scan - Input: {state['original_input'][:100]}")
-        print("\n" + "="*60)
-        print("🛡️ STEP 0: SECURITY SCAN - MALICIOUS INTENT DETECTION")
-        print("="*60)
-        print(f"📥 Scanning input: {state['original_input']}")
+        logger.info("\n" + "="*60)
+        logger.info("🛡️ STEP 0: SECURITY SCAN - MALICIOUS INTENT DETECTION")
+        logger.debug("="*60)
+        logger.info(f"📥 Scanning input: {state['original_input']}")
         
         user_input_lower = state['original_input'].lower()
         
@@ -165,23 +165,28 @@ class SQLAgentTools:
                 state["security_block_user_id"] = user_id
             
             # Set error state to stop processing
+            # The detector says WHAT was refused. It must not say what happens to
+            # the account — sql_agent/security_policy.py decides that, and only
+            # after the database write commits. Claiming a block here is what
+            # produced the "you are blocked" message for users who were not.
+            state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
             state["error"] = f"SECURITY VIOLATION: {operations_str} detected. This system is read-only and cannot execute data modification operations."
-            state["final_response"] = f"SECURITY ALERT: Your query was blocked because it attempts to modify the database ({operations_str}). This system is read-only. Your account has been blocked. Please contact an administrator immediately."
+            state["final_response"] = f"That operation is not permitted: the assistant is read-only and cannot modify the database ({operations_str})."
             state["query_result"] = {
                 "success": False,
-                "error": f"Security: {operations_str} operations are not allowed. Your account has been blocked.",
+                "error": f"Security: {operations_str} operations are not allowed.",
                 "rows": [],
                 "row_count": 0
             }
             
-            print(f"🚨 SECURITY ALERT: Malicious intent detected!")
-            print(f"   Operations: {operations_str}")
-            print(f"   User will be blocked immediately")
-            print(f"   Processing stopped")
+            logger.error(f"🚨 SECURITY ALERT: Malicious intent detected!")
+            logger.info(f"   Operations: {operations_str}")
+            logger.warning(f"   User will be blocked immediately")
+            logger.info(f"   Processing stopped")
             
             return state
         
-        print(f"✅ Security scan passed - No malicious intent detected")
+        logger.info(f"✅ Security scan passed - No malicious intent detected")
         logger.debug(f"[STEP_0] Security scan passed")
         return state
 
@@ -191,10 +196,10 @@ class SQLAgentTools:
         Correct grammar, spelling, and clarity.
         """
         logger.info(f"[STEP_1] Language normalization - Input: {state['original_input'][:100]}")
-        print("\n" + "="*60)
-        print("🔧 STEP 1: LANGUAGE NORMALIZATION")
-        print("="*60)
-        print(f"📥 Original Input: {state['original_input']}")
+        logger.info("\n" + "="*60)
+        logger.info("🔧 STEP 1: LANGUAGE NORMALIZATION")
+        logger.debug("="*60)
+        logger.info(f"📥 Original Input: {state['original_input']}")
 
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content="""You are a language correction assistant.
@@ -227,20 +232,20 @@ Example:
             normalized_words = len(normalized.split())
 
             if normalized_words > original_words + 1:  # Allow max 1 extra word (for minor fixes)
-                print(f"⚠️ LLM added words! Reverting to original.")
-                print(f"   Original: '{state['original_input']}' ({original_words} words)")
-                print(f"   Normalized: '{normalized}' ({normalized_words} words)")
+                logger.warning(f"⚠️ LLM added words! Reverting to original.")
+                logger.info(f"   Original: '{state['original_input']}' ({original_words} words)")
+                logger.info(f"   Normalized: '{normalized}' ({normalized_words} words)")
                 state["normalized_input"] = state["original_input"]
             else:
                 state["normalized_input"] = normalized
 
-            print(f"📤 Normalized Input: {state['normalized_input']}")
+            logger.info(f"📤 Normalized Input: {state['normalized_input']}")
             logger.debug(f"[STEP_1] Normalized: {state['normalized_input']}")
         except Exception as e:
             state["normalized_input"] = state["original_input"]
             state["error"] = f"Language normalization error: {str(e)}"
             logger.error(f"[STEP_1] Language normalization failed: {str(e)}", exc_info=True)
-            print(f"❌ Error: {state['error']}")
+            logger.error(f"❌ Error: {state['error']}")
 
         return state
 
@@ -250,9 +255,9 @@ Example:
         Check for typos in person names and suggest corrections from database.
         """
         logger.info("[STEP_1.5] Starting name correction and typo handling")
-        print("\n" + "="*60)
-        print("🔍 STEP 1.5: NAME CORRECTION & TYPO HANDLING")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("🔍 STEP 1.5: NAME CORRECTION & TYPO HANDLING")
+        logger.debug("="*60)
 
         normalized = state.get("normalized_input", "")
         
@@ -270,11 +275,11 @@ Example:
         
         if not potential_names:
             logger.debug("[STEP_1.5] No person names detected in query")
-            print("✅ No person names detected in query")
+            logger.info("✅ No person names detected in query")
             return state
         
         logger.info(f"[STEP_1.5] Detected potential names: {potential_names}")
-        print(f"🔍 Detected potential names: {potential_names}")
+        logger.info(f"🔍 Detected potential names: {potential_names}")
         
         # Get all known names from database
         try:
@@ -292,7 +297,7 @@ Example:
             conn.close()
             
             logger.info(f"[STEP_1.5] Found {len(known_names)} known names in database")
-            print(f"📋 Found {len(known_names)} known names in database")
+            logger.info(f"📋 Found {len(known_names)} known names in database")
             
             corrections = {}
             for potential_name in potential_names:
@@ -309,7 +314,7 @@ Example:
                 
                 if best_match and best_match.lower() != potential_name_lower:
                     corrections[potential_name] = best_match
-                    print(f"   ✏️ '{potential_name}' → '{best_match}' (similarity: {best_similarity:.2f})")
+                    logger.info(f"   ✏️ '{potential_name}' → '{best_match}' (similarity: {best_similarity:.2f})")
             
             # Apply corrections
             if corrections:
@@ -326,19 +331,19 @@ Example:
                 state["normalized_input"] = corrected_input
                 state["name_corrections"] = corrections
                 logger.info(f"[STEP_1.5] Applied name corrections: {corrections}")
-                print(f"✅ Applied corrections: {corrections}")
-                print(f"📤 Corrected input: {corrected_input}")
+                logger.info(f"✅ Applied corrections: {corrections}")
+                logger.info(f"📤 Corrected input: {corrected_input}")
                 
                 # Add correction notice to response context
                 correction_notice = f"Note: Corrected name(s): {', '.join([f'{old} → {new}' for old, new in corrections.items()])}"
                 state["name_correction_notice"] = correction_notice
             else:
                 logger.debug("[STEP_1.5] No corrections needed - names match database")
-                print("✅ No corrections needed - names match database")
+                logger.info("✅ No corrections needed - names match database")
                 
         except Exception as e:
             logger.warning(f"[STEP_1.5] Error checking names: {str(e)}", exc_info=True)
-            print(f"⚠️ Error checking names: {e}")
+            logger.warning(f"⚠️ Error checking names: {e}")
             # Continue with original input if name check fails
             # This is not critical, so we don't set an error state
         
@@ -350,10 +355,10 @@ Example:
         Classify as CHAT, SQL_QUERY, or HYBRID.
         """
         logger.info(f"[STEP_2] Classifying intent for: {state['normalized_input'][:100]}")
-        print("\n" + "="*60)
-        print("🎯 STEP 2: INTENT CLASSIFICATION")
-        print("="*60)
-        print(f"📥 Input to classify: {state['normalized_input']}")
+        logger.info("\n" + "="*60)
+        logger.info("🎯 STEP 2: INTENT CLASSIFICATION")
+        logger.debug("="*60)
+        logger.info(f"📥 Input to classify: {state['normalized_input']}")
 
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content="""You are an intent classifier for a SQL database assistant.
@@ -388,24 +393,24 @@ Examples:
             result = chain.invoke({})
             logger.info(f"[STEP_2] ✅ LLM intent response received ({len(result)} chars)")
             logger.info(f"[STEP_2] 📝 LLM INTENT RESPONSE:\n{result}\n{'='*80}")
-            print(f"🤖 LLM Raw Response: {result}")
+            logger.info(f"🤖 LLM Raw Response: {result}")
             # Parse JSON from response
             json_match = re.search(r'\{[^}]+\}', result)
             if json_match:
                 parsed = json.loads(json_match.group())
                 state["intent"] = parsed.get("intent", "CHAT")
                 state["intent_confidence"] = float(parsed.get("confidence", 0.5))
-                print(f"📤 Intent: {state['intent']} (confidence: {state['intent_confidence']})")
+                logger.info(f"📤 Intent: {state['intent']} (confidence: {state['intent_confidence']})")
             else:
                 state["intent"] = "CHAT"
                 state["intent_confidence"] = 0.5
-                print(f"⚠️ Could not parse JSON, defaulting to CHAT")
+                logger.warning(f"⚠️ Could not parse JSON, defaulting to CHAT")
         except Exception as e:
             state["intent"] = "CHAT"
             state["intent_confidence"] = 0.5
             state["error"] = f"Intent classification error: {str(e)}"
             logger.error(f"[STEP_2] Intent classification failed: {str(e)}", exc_info=True)
-            print(f"❌ Error: {state['error']}")
+            logger.error(f"❌ Error: {state['error']}")
 
         return state
 
@@ -415,20 +420,20 @@ Examples:
         Load and provide schema information.
         """
         logger.info("[STEP_3] Loading database schema")
-        print("\n" + "="*60)
-        print("📋 STEP 3: SCHEMA AWARENESS")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("📋 STEP 3: SCHEMA AWARENESS")
+        logger.debug("="*60)
 
         try:
             state["schema_description"] = self.db.get_schema_description()
             logger.info(f"[STEP_3] Schema loaded successfully ({len(state['schema_description'])} chars)")
-            print(f"✅ Schema loaded ({len(state['schema_description'])} chars)")
-            print(f"📄 Tables: faces, detections, pipelines, system_metrics")
+            logger.info(f"✅ Schema loaded ({len(state['schema_description'])} chars)")
+            logger.info(f"📄 Tables: faces, detections, pipelines, system_metrics")
         except Exception as e:
             state["schema_description"] = ""
             state["error"] = f"Schema loading error: {str(e)}"
             logger.error(f"[STEP_3] Schema loading failed: {str(e)}", exc_info=True)
-            print(f"❌ Error: {state['error']}")
+            logger.error(f"❌ Error: {state['error']}")
 
         return state
 
@@ -438,10 +443,10 @@ Examples:
         Search knowledge base for similar questions and their SQL queries.
         """
         logger.info(f"[STEP_3.5] RAG retrieval for: {state['normalized_input'][:100]}")
-        print("\n" + "="*60)
-        print("📚 STEP 3.5: RAG RETRIEVAL")
-        print("="*60)
-        print(f"🔍 Searching for: {state['normalized_input']}")
+        logger.info("\n" + "="*60)
+        logger.info("📚 STEP 3.5: RAG RETRIEVAL")
+        logger.debug("="*60)
+        logger.info(f"🔍 Searching for: {state['normalized_input']}")
 
         try:
             # Search for similar questions
@@ -460,20 +465,20 @@ Examples:
 
             if examples:
                 logger.info(f"[STEP_3.5] Found {len(examples)} similar examples")
-                print(f"✅ Found {len(examples)} similar examples:")
+                logger.info(f"✅ Found {len(examples)} similar examples:")
                 for i, ex in enumerate(examples, 1):
                     logger.debug(f"[STEP_3.5] Example {i}: {ex['question']} (similarity: {ex['similarity']})")
-                    print(f"   {i}. \"{ex['question']}\" (similarity: {ex['similarity']})")
+                    logger.info(f"   {i}. \"{ex['question']}\" (similarity: {ex['similarity']})")
             else:
                 logger.warning("[STEP_3.5] No similar examples found")
-                print("⚠️ No similar examples found")
+                logger.warning("⚠️ No similar examples found")
 
         except Exception as e:
             state["retrieved_examples"] = []
             state["rag_context"] = ""
             state["error"] = f"RAG retrieval error: {str(e)}"
             logger.error(f"[STEP_3.5] RAG retrieval failed: {str(e)}", exc_info=True)
-            print(f"❌ Error: {state['error']}")
+            logger.error(f"❌ Error: {state['error']}")
 
         return state
 
@@ -484,10 +489,10 @@ Examples:
         Uses the prepare_sql_from_llm_response tool to clean up the output.
         """
         logger.info(f"[STEP_4] Generating SQL for: {state['normalized_input'][:100]}")
-        print("\n" + "="*60)
-        print("⚙️ STEP 4: SQL GENERATION")
-        print("="*60)
-        print(f"📥 Query to generate SQL for: {state['normalized_input']}")
+        logger.info("\n" + "="*60)
+        logger.info("⚙️ STEP 4: SQL GENERATION")
+        logger.debug("="*60)
+        logger.info(f"📥 Query to generate SQL for: {state['normalized_input']}")
 
         # Build RAG context
         rag_section = ""
@@ -499,9 +504,9 @@ Adapt them to match the user's specific question.
 
 {state['rag_context']}
 """
-            print(f"📚 RAG context included: {len(state['rag_context'])} chars")
+            logger.info(f"📚 RAG context included: {len(state['rag_context'])} chars")
         else:
-            print("⚠️ No RAG context available")
+            logger.warning("⚠️ No RAG context available")
 
         # Get conversation context if available
         conversation_context = state.get("conversation_context", "")
@@ -576,15 +581,15 @@ If no query is possible:
         try:
             logger.info("[STEP_4] 🤖 Calling LLM for SQL generation...")
             logger.debug(f"[STEP_4] Prompt being sent to LLM: {prompt.messages[-1].content[:500]}...")
-            print("🤖 Calling LLM for SQL generation...")
+            logger.info("🤖 Calling LLM for SQL generation...")
             result = chain.invoke({})
             logger.info(f"[STEP_4] ✅ LLM raw response received ({len(result)} chars)")
             logger.info(f"[STEP_4] 📝 LLM RAW RESPONSE:\n{result}\n{'='*80}")
-            print(f"🤖 LLM Raw Response:\n{result}")
-            print("-"*40)
+            logger.info(f"🤖 LLM Raw Response:\n{result}")
+            logger.debug("-"*40)
 
             # Use the prepare_sql_from_llm_response tool to parse and clean the response
-            print("🔧 Using prepare_sql_from_llm_response tool...")
+            logger.info("🔧 Using prepare_sql_from_llm_response tool...")
             prepared = prepare_sql_from_llm_response.invoke(result)
 
             if prepared["success"]:
@@ -595,7 +600,7 @@ If no query is possible:
                 if not validation["is_safe"]:
                     logger.error(f"[SECURITY] ⚠️ LAYER 0: Forbidden SQL detected immediately after generation: {validation['reason']}")
                     logger.error(f"[SECURITY] Generated SQL: {generated_sql[:500]}")
-                    print(f"🚨 SECURITY ALERT: {validation['reason']}")
+                    logger.error(f"🚨 SECURITY ALERT: {validation['reason']}")
                     
                     # Mark user for blocking
                     user_id = getattr(self.conversation_memory, 'user_id', None)
@@ -614,7 +619,7 @@ If no query is possible:
                         "row_count": 0
                     }
                     logger.error(f"[STEP_4] SQL generation blocked by security validation")
-                    print(f"❌ SECURITY: Query blocked - {validation['reason']}")
+                    logger.error(f"❌ SECURITY: Query blocked - {validation['reason']}")
                     return state
                 
                 state["generated_sql"] = generated_sql
@@ -622,15 +627,15 @@ If no query is possible:
                 logger.info(f"[STEP_4] SQL generated successfully (length: {len(generated_sql)} chars)")
                 logger.debug(f"[STEP_4] Generated SQL: {generated_sql[:200]}...")
                 logger.debug(f"[STEP_4] Transformations: {prepared['transformations']}")
-                print(f"✅ SQL prepared successfully!")
-                print(f"📝 Transformations applied: {prepared['transformations']}")
-                print(f"📤 Generated SQL:\n{state['generated_sql']}")
-                print(f"📝 Purpose: {state['sql_purpose']}")
+                logger.info(f"✅ SQL prepared successfully!")
+                logger.info(f"📝 Transformations applied: {prepared['transformations']}")
+                logger.info(f"📤 Generated SQL:\n{state['generated_sql']}")
+                logger.info(f"📝 Purpose: {state['sql_purpose']}")
             else:
                 state["generated_sql"] = ""
                 state["sql_purpose"] = prepared["error"]
                 logger.error(f"[STEP_4] SQL preparation failed: {prepared['error']}")
-                print(f"❌ Could not prepare SQL: {prepared['error']}")
+                logger.error(f"❌ Could not prepare SQL: {prepared['error']}")
 
         except Exception as e:
             state["generated_sql"] = ""
@@ -651,7 +656,7 @@ If no query is possible:
             else:
                 state["sql_purpose"] = f"SQL generation error: {str(e)}"
                 logger.error(f"[STEP_4] SQL generation exception: {str(e)}", exc_info=True)
-            print(f"❌ Error: {state['sql_purpose']}")
+            logger.error(f"❌ Error: {state['sql_purpose']}")
 
         return state
 
@@ -662,41 +667,41 @@ If no query is possible:
         Uses LLM tool calling pattern to validate and correct SQL.
         """
         logger.info("[STEP_4.5] Starting SQL validation")
-        print("\n" + "="*60)
-        print("🔍 STEP 4.5: SQL VALIDATION & FIXING")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("🔍 STEP 4.5: SQL VALIDATION & FIXING")
+        logger.debug("="*60)
 
         generated_sql = state.get("generated_sql", "")
 
         if not generated_sql:
             logger.warning("[STEP_4.5] No SQL to validate")
-            print("❌ No SQL to validate")
+            logger.error("❌ No SQL to validate")
             state["sql_validation_status"] = "ERROR"
             state["sql_validation_error"] = "No SQL to validate"
             return state
 
         logger.debug(f"[STEP_4.5] Validating SQL ({len(generated_sql)} chars)")
-        print(f"📥 SQL to validate:\n{generated_sql}")
+        logger.info(f"📥 SQL to validate:\n{generated_sql}")
 
         # Use the validate_sql_query tool
         validation_result = validate_sql_query.invoke(generated_sql)
 
         if validation_result["is_valid"]:
             logger.info("[STEP_4.5] SQL validation passed")
-            print("✅ SQL passed validation")
+            logger.info("✅ SQL passed validation")
             state["sql_validation_status"] = "VALID"
             state["sql_fixes_applied"] = []
             state["sql_validation_warnings"] = validation_result.get("warnings", [])
             if state["sql_validation_warnings"]:
                 logger.warning(f"[STEP_4.5] Validation warnings: {state['sql_validation_warnings']}")
-                print(f"⚠️ Warnings: {state['sql_validation_warnings']}")
+                logger.warning(f"⚠️ Warnings: {state['sql_validation_warnings']}")
             return state
 
         logger.warning(f"[STEP_4.5] Validation errors found: {validation_result['errors']}")
-        print(f"⚠️ Validation errors found: {validation_result['errors']}")
+        logger.warning(f"⚠️ Validation errors found: {validation_result['errors']}")
 
         # Try to fix the SQL using LLM
-        print("\n🔧 Attempting to fix SQL with LLM...")
+        logger.info("\n🔧 Attempting to fix SQL with LLM...")
 
         fix_prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=f"""You are an expert PostgreSQL SQL debugger and fixer.
@@ -748,7 +753,7 @@ Provide the corrected SQL:""")
             result = chain.invoke({})
             logger.info(f"[STEP_5] ✅ LLM fix response received ({len(result)} chars)")
             logger.info(f"[STEP_5] 📝 LLM FIX RESPONSE:\n{result}\n{'='*80}")
-            print(f"🤖 LLM Fix Response:\n{result}")
+            logger.info(f"🤖 LLM Fix Response:\n{result}")
 
             # Use prepare_sql_from_llm_response to parse the fix response
             prepared = prepare_sql_from_llm_response.invoke(result)
@@ -763,20 +768,20 @@ Provide the corrected SQL:""")
                     state["generated_sql"] = fixed_sql
                     state["sql_validation_status"] = "FIXED"
                     state["sql_fixes_applied"] = prepared["transformations"]
-                    print(f"✅ SQL successfully fixed!")
-                    print(f"📝 Transformations: {prepared['transformations']}")
-                    print(f"📤 Fixed SQL:\n{fixed_sql}")
+                    logger.info(f"✅ SQL successfully fixed!")
+                    logger.info(f"📝 Transformations: {prepared['transformations']}")
+                    logger.info(f"📤 Fixed SQL:\n{fixed_sql}")
                 else:
-                    print(f"⚠️ Fixed SQL still has issues, keeping original")
+                    logger.warning(f"⚠️ Fixed SQL still has issues, keeping original")
                     state["sql_validation_status"] = "PARTIAL"
                     state["sql_validation_warnings"] = revalidation["errors"]
             else:
-                print(f"❌ Could not fix SQL: {prepared['error']}")
+                logger.error(f"❌ Could not fix SQL: {prepared['error']}")
                 state["sql_validation_status"] = "INVALID"
                 state["sql_validation_error"] = prepared["error"]
 
         except Exception as e:
-            print(f"❌ Error during SQL fixing: {str(e)}")
+            logger.error(f"❌ Error during SQL fixing: {str(e)}")
             state["sql_validation_status"] = "ERROR"
             state["sql_validation_error"] = str(e)
 
@@ -788,34 +793,36 @@ Provide the corrected SQL:""")
         Clean and prepare the SQL for safe execution.
         Also performs early read-only validation.
         """
-        print("\n" + "="*60)
-        print("📋 STEP 4.6: PREPARING SQL FOR EXECUTION")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("📋 STEP 4.6: PREPARING SQL FOR EXECUTION")
+        logger.debug("="*60)
 
         generated_sql = state.get("generated_sql", "")
 
         if not generated_sql:
-            print("❌ No SQL to prepare")
+            logger.error("❌ No SQL to prepare")
             return state
 
         # Early validation: Check if query is read-only before cleanup
         validation = self.db._validate_query(generated_sql)
         if not validation["is_safe"]:
             logger.warning(f"[STEP_4.6] Early validation failed: {validation['reason']}")
-            print(f"❌ Security validation failed: {validation['reason']}")
+            logger.error(f"❌ Security validation failed: {validation['reason']}")
             
             # SECURITY LAYER 2: Mark user for blocking (will be handled in API route)
             user_id = getattr(self.conversation_memory, 'user_id', None)
             if user_id:
                 logger.error(f"[SECURITY] ⚠️ LAYER 2: Marking user ID {user_id} for blocking - Early validation failed: {validation['reason']}")
                 state["security_block_user"] = True
+                state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
                 state["security_block_reason"] = f"Attempted forbidden SQL operation: {validation['reason']}. Query: {generated_sql[:200]}"
             else:
                 logger.warning(f"[SECURITY] Validation failed but no user_id available: {validation['reason']}")
-            
+
+            # Refusal only. The policy layer states any account consequence.
             state["query_result"] = {
                 "success": False,
-                "error": validation["reason"] + " Your account has been blocked. Please contact an administrator.",
+                "error": validation["reason"],
                 "rows": [],
                 "row_count": 0
             }
@@ -832,28 +839,30 @@ Provide the corrected SQL:""")
             final_validation = self.db._validate_query(prepared["sql"])
             if not final_validation["is_safe"]:
                 logger.warning(f"[STEP_4.6] Post-cleanup validation failed: {final_validation['reason']}")
-                print(f"❌ Security validation failed after cleanup: {final_validation['reason']}")
+                logger.error(f"❌ Security validation failed after cleanup: {final_validation['reason']}")
                 
                 # SECURITY LAYER 3: Mark user for blocking (will be handled in API route)
                 user_id = getattr(self.conversation_memory, 'user_id', None)
                 if user_id:
                     logger.error(f"[SECURITY] ⚠️ LAYER 3: Marking user ID {user_id} for blocking - Post-cleanup validation failed: {final_validation['reason']}")
                     state["security_block_user"] = True
+                    state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
                     state["security_block_reason"] = f"Attempted forbidden SQL operation after cleanup: {final_validation['reason']}. Query: {prepared['sql'][:200]}"
                 else:
                     logger.warning(f"[SECURITY] Post-cleanup validation failed but no user_id available: {final_validation['reason']}")
-                
+
+                # Refusal only. The policy layer states any account consequence.
                 state["query_result"] = {
                     "success": False,
-                    "error": final_validation["reason"] + " Your account has been blocked. Please contact an administrator.",
+                    "error": final_validation["reason"],
                     "rows": [],
                     "row_count": 0
                 }
                 return state
-            print(f"✅ SQL ready for execution (read-only validated)")
-            print(f"📤 Final SQL:\n{prepared['sql']}")
+            logger.info(f"✅ SQL ready for execution (read-only validated)")
+            logger.info(f"📤 Final SQL:\n{prepared['sql']}")
         else:
-            print(f"✅ SQL ready for execution (no additional cleanup needed)")
+            logger.info(f"✅ SQL ready for execution (no additional cleanup needed)")
 
         return state
 
@@ -863,9 +872,9 @@ Provide the corrected SQL:""")
         Execute the generated SQL safely.
         """
         logger.info("[STEP_5] Executing SQL query")
-        print("\n" + "="*60)
-        print("🚀 STEP 5: SQL EXECUTION")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("🚀 STEP 5: SQL EXECUTION")
+        logger.debug("="*60)
 
         if not state.get("generated_sql"):
             # Carry forward WHY there is no SQL. A generation timeout surfaced
@@ -880,7 +889,7 @@ Provide the corrected SQL:""")
             else:
                 reason = "No SQL query to execute"
                 logger.error("[STEP_5] No SQL query to execute")
-            print(f"❌ {reason}")
+            logger.error(f"❌ {reason}")
             state["query_result"] = {
                 "success": False,
                 "error": reason,
@@ -890,7 +899,7 @@ Provide the corrected SQL:""")
             return state
 
         logger.debug(f"[STEP_5] Executing SQL: {state['generated_sql'][:200]}...")
-        print(f"📤 Executing SQL:\n{state['generated_sql']}")
+        logger.info(f"📤 Executing SQL:\n{state['generated_sql']}")
 
         try:
             result = self.db.execute_query(state["generated_sql"])
@@ -898,14 +907,14 @@ Provide the corrected SQL:""")
             if result.get("success"):
                 row_count = result.get('row_count', 0)
                 logger.info(f"[STEP_5] Query executed successfully - {row_count} rows returned")
-                print(f"✅ Query successful! Rows returned: {row_count}")
+                logger.info(f"✅ Query successful! Rows returned: {row_count}")
                 if result.get("rows"):
                     logger.debug(f"[STEP_5] Sample data: {result['rows'][:3]}")
-                    print(f"📊 Sample data: {result['rows'][:3]}")
+                    logger.info(f"📊 Sample data: {result['rows'][:3]}")
             else:
                 error = result.get('error', 'Unknown error')
                 logger.error(f"[STEP_5] Query execution failed: {error}")
-                print(f"❌ Query failed: {error}")
+                logger.error(f"❌ Query failed: {error}")
                 
                 # SECURITY LAYER 4: Mark user for blocking (will be handled in API route)
                 if "Security:" in error or "forbidden" in error.lower() or "read-only" in error.lower():
@@ -924,7 +933,7 @@ Provide the corrected SQL:""")
                 "rows": [],
                 "row_count": 0
             }
-            print(f"❌ Exception: {str(e)}")
+            logger.error(f"❌ Exception: {str(e)}")
 
         return state
 
@@ -934,13 +943,13 @@ Provide the corrected SQL:""")
         Transform results into a clear narrative.
         """
         logger.info("[STEP_6] Generating story response")
-        print("\n" + "="*60)
-        print("📖 STEP 6: STORY RESPONSE GENERATION")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("📖 STEP 6: STORY RESPONSE GENERATION")
+        logger.debug("="*60)
 
         intent = state.get("intent", "CHAT")
         logger.debug(f"[STEP_6] Intent: {intent}")
-        print(f"📥 Intent: {intent}")
+        logger.info(f"📥 Intent: {intent}")
 
         if intent == "CHAT":
             # Pure chat response
@@ -1264,20 +1273,20 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             state["final_response"] = response_text
             logger.info(f"[STEP_6] Story response generated successfully ({len(state['final_response'])} chars)")
             logger.debug(f"[STEP_6] Response preview: {state['final_response'][:200]}...")
-            print(f"✅ Final response generated ({len(state['final_response'])} chars)")
+            logger.info(f"✅ Final response generated ({len(state['final_response'])} chars)")
         except Exception as e:
             logger.error(f"[STEP_6] Story generation failed: {str(e)}", exc_info=True)
             error_msg = f"I apologize, but I encountered an error while preparing your response: {str(e)}"
             state["final_response"] = error_msg
             if streaming_callback:
                 streaming_callback({"type": "error", "message": error_msg, "step": "error"})
-            print(f"❌ Error generating response: {str(e)}")
+            logger.error(f"❌ Error generating response: {str(e)}")
 
-        print("\n" + "="*60)
-        print("🏁 FINAL RESPONSE:")
-        print("="*60)
-        print(state["final_response"])
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("🏁 FINAL RESPONSE:")
+        logger.debug("="*60)
+        logger.info(state["final_response"])
+        logger.debug("="*60)
 
         return state
 
@@ -1402,10 +1411,10 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
 
     def handle_chat(self, state: AgentState) -> AgentState:
         """Handle pure chat responses without SQL."""
-        print("\n" + "="*60)
-        print("💬 CHAT RESPONSE (No SQL needed)")
-        print("="*60)
-        print(f"📥 Input: {state['normalized_input']}")
+        logger.info("\n" + "="*60)
+        logger.info("💬 CHAT RESPONSE (No SQL needed)")
+        logger.debug("="*60)
+        logger.info(f"📥 Input: {state['normalized_input']}")
 
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content="""You are a helpful database assistant.
@@ -1425,16 +1434,16 @@ If you don't know something, say so politely."""),
             state["final_response"] = response.strip()
             logger.info(f"[STEP_7] ✅ Final response set in state ({len(state['final_response'])} chars)")
             logger.info(f"[STEP_7] 📤 FINAL RESPONSE CONTENT:\n{state['final_response']}\n{'='*80}")
-            print(f"✅ Chat response generated")
+            logger.info(f"✅ Chat response generated")
         except Exception as e:
             state["final_response"] = f"I apologize, but I encountered an error: {str(e)}"
-            print(f"❌ Error: {str(e)}")
+            logger.error(f"❌ Error: {str(e)}")
 
-        print("\n" + "="*60)
-        print("🏁 FINAL RESPONSE:")
-        print("="*60)
-        print(state["final_response"])
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("🏁 FINAL RESPONSE:")
+        logger.debug("="*60)
+        logger.info(state["final_response"])
+        logger.debug("="*60)
 
         return state
 
@@ -1444,9 +1453,9 @@ If you don't know something, say so politely."""),
         If the query was successful, save it to the knowledge base for future reference.
         """
         logger.info("[STEP_7] Starting learning phase")
-        print("\n" + "="*60)
-        print("🧠 STEP 7: LEARNING")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("🧠 STEP 7: LEARNING")
+        logger.debug("="*60)
 
         # Only learn from successful SQL queries
         query_result = state.get("query_result", {})
@@ -1457,9 +1466,9 @@ If you don't know something, say so politely."""),
         should_learn = state.get('should_learn', True)
         
         logger.debug(f"[STEP_7] Query successful: {query_success}, Has SQL: {has_sql}, Should learn: {should_learn}")
-        print(f"📊 Query successful: {query_success}")
-        print(f"📊 Has SQL: {has_sql}")
-        print(f"📊 Should learn: {should_learn}")
+        logger.info(f"📊 Query successful: {query_success}")
+        logger.info(f"📊 Has SQL: {has_sql}")
+        logger.info(f"📊 Should learn: {should_learn}")
 
         if (
             query_result.get("success") and
@@ -1483,16 +1492,16 @@ If you don't know something, say so politely."""),
                         user_id=state.get("user_id"),
                     )
                     logger.info(f"[STEP_7] Learned new query pattern: {state['normalized_input'][:100]}")
-                    print("✅ Learned new query pattern!")
+                    logger.info("✅ Learned new query pattern!")
                 else:
                     similarity = existing[0].get('similarity', 0)
                     logger.debug(f"[STEP_7] Skipped learning - similar example exists (similarity: {similarity})")
-                    print(f"⏭️ Skipped learning - similar example exists (similarity: {similarity})")
+                    logger.info(f"⏭️ Skipped learning - similar example exists (similarity: {similarity})")
             except Exception as e:
                 # Don't fail the response if learning fails
                 logger.warning(f"[STEP_7] Learning failed: {str(e)}", exc_info=True)
-                print(f"⚠️ Learning failed: {str(e)}")
+                logger.warning(f"⚠️ Learning failed: {str(e)}")
         else:
-            print("⏭️ Skipped learning - conditions not met")
+            logger.info("⏭️ Skipped learning - conditions not met")
 
         return state

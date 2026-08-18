@@ -13,6 +13,13 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Repository root, derived from this file's location rather than the working
+# directory. The script used to pass bare names like 'requirements-cpu.txt' to
+# pip, so it only worked when invoked from the repository root and reported
+# "Requirements file not found" from anywhere else.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_REQUIREMENTS = os.path.join(REPO_ROOT, 'requirements-base.txt')
+
 
 def detect_gpu():
     """Detect if GPU is available"""
@@ -77,22 +84,31 @@ def main():
     
     # Determine which requirements file to use
     if has_gpu and gpu_type == 'cuda':
-        requirements_file = 'requirements-gpu.txt'
+        requirements_file = os.path.join(REPO_ROOT, 'requirements-gpu.txt')
         logger.info("🚀 GPU detected! Installing GPU-accelerated dependencies...")
     else:
-        requirements_file = 'requirements-cpu.txt'
+        requirements_file = os.path.join(REPO_ROOT, 'requirements-cpu.txt')
         logger.info("💻 No GPU detected. Installing CPU-only dependencies...")
-    
+
     # Check if requirements file exists
     if not os.path.exists(requirements_file):
         logger.error(f"❌ Requirements file not found: {requirements_file}")
         logger.info("Available files:")
-        if os.path.exists('requirements-cpu.txt'):
-            logger.info("  - requirements-cpu.txt")
-        if os.path.exists('requirements-gpu.txt'):
-            logger.info("  - requirements-gpu.txt")
+        for name in ('requirements-base.txt', 'requirements-cpu.txt', 'requirements-gpu.txt'):
+            if os.path.exists(os.path.join(REPO_ROOT, name)):
+                logger.info(f"  - {name}")
         sys.exit(1)
-    
+
+    # The hardware file is only half of the dependency set: it opens with
+    # `-r requirements-base.txt`, which pip resolves relative to the file. Fail
+    # here with a readable message instead of inside pip's resolver.
+    if not os.path.exists(BASE_REQUIREMENTS):
+        logger.error(f"❌ Shared dependencies missing: {BASE_REQUIREMENTS}")
+        logger.error(
+            f"   {os.path.basename(requirements_file)} includes it with "
+            f"`-r requirements-base.txt` and cannot install without it.")
+        sys.exit(1)
+
     # Install dependencies
     success = install_dependencies(requirements_file)
     
@@ -100,7 +116,8 @@ def main():
         print("\n" + "="*60)
         print("✅ Installation completed successfully!")
         print("="*60)
-        print(f"\nInstalled: {requirements_file}")
+        print(f"\nInstalled: {os.path.basename(requirements_file)} "
+              f"(+ requirements-base.txt)")
         if has_gpu:
             print("GPU acceleration: ENABLED")
         else:

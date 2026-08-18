@@ -165,54 +165,10 @@ class ProductionCacheManager:
 
         await self._async_set(key, value, int(actual_ttl))
 
-    # ==================== FACE RECOGNITION SPECIFIC ====================
-
-    async def get_face_match(self, embedding: np.ndarray, threshold: float, face_db_search_func):
-        """
-        Specialized cache for face matching with optimized key generation
-        """
-        # Generate deterministic cache key
-        embedding_hash = self._generate_embedding_hash(embedding)
-        cache_key = f"{self.cache_version}:face:{embedding_hash}:{threshold:.2f}"
-
-        # Try cache with fallback to face search
-        result = await self.get_with_fallback(
-            key=cache_key,
-            fallback_func=face_db_search_func,
-            fallback_args=(embedding, threshold),
-            ttl=600  # 10 minutes for face matches
-        )
-
-        # Parse result if from cache (string format: "face:name:similarity")
-        if isinstance(result, str):
-            if result.startswith("face:"):
-                # Format: "face:name:similarity"
-                parts = result[5:].split(":", 1)  # Remove "face:" prefix
-                if len(parts) == 2:
-                    name, similarity_str = parts
-                    try:
-                        return name, float(similarity_str)
-                    except ValueError:
-                        logger.warning(f"[CACHE] Failed to parse similarity from cached result: {result}")
-                        return None, 0.0
-            else:
-                # Try to parse as "name:similarity"
-                parts = result.split(":", 1)
-                if len(parts) == 2:
-                    name, similarity_str = parts
-                    try:
-                        return name, float(similarity_str)
-                    except ValueError:
-                        logger.warning(f"[CACHE] Failed to parse similarity from cached result: {result}")
-                        return None, 0.0
-
-        # Result is already a tuple from fallback
-        if isinstance(result, tuple) and len(result) == 2:
-            return result
-
-        # Fallback: return None if result is invalid
-        logger.warning(f"[CACHE] Unexpected result format: {type(result)} - {result}")
-        return None, 0.0
+    # `get_face_match` used to live here — a specialized cache in front of the
+    # legacy display-name FaceDatabase's search. It went with that chain: the
+    # store it cached was write-never under pgvector, so every cached entry was
+    # "no match".
 
     async def cache_pipeline_stats(self, pipeline_id: str, stats: dict, ttl: int = 60):
         """

@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import logging
 import os
+
+from config import settings
 import shutil
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +97,7 @@ def probe_gpu() -> None:
     """Record whether CUDA is genuinely usable, not merely requested."""
     from config import settings
 
-    requested = bool(getattr(settings, "USE_GPU", False))
+    requested = bool(settings.USE_GPU)
     usable = False
 
     try:
@@ -146,16 +148,38 @@ def probe_models() -> None:
         _set(model_loaded, 0)
 
 
+def disk_capacity(path: str) -> Optional[Tuple[int, int, int]]:
+    """(total, used, free) bytes of the filesystem holding `path`, or None.
+
+    The ONE place the real capacity of a volume is read, so the Prometheus
+    gauges and the /api/stats storage block cannot disagree about it. Returns
+    None rather than raising: an unreadable mount must degrade a report, never
+    fail a request or a scrape.
+
+    stdlib `shutil.disk_usage`, deliberately not psutil — psutil is in none of
+    the requirements files, which is why system_metrics.py's disk sampling has
+    silently written NULL since it was added.
+
+    Note this measures the whole volume, including files this application did
+    not write. That is the point: what matters operationally is whether the
+    disk is about to fill, not how much of it we personally account for.
+    """
+    try:
+        usage = shutil.disk_usage(path)
+        return usage.total, usage.used, usage.free
+    except Exception:
+        return None
+
+
 def probe_storage() -> None:
     from config import settings
 
-    path = getattr(settings, "STORAGE_DIR", "/app/storage")
-    try:
-        usage = shutil.disk_usage(path)
-        _set(storage_free, usage.free)
-        _set(storage_total, usage.total)
-    except Exception:
-        pass
+    capacity = disk_capacity(settings.STORAGE_DIR)
+    if capacity is None:
+        return
+    total, _used, free = capacity
+    _set(storage_free, free)
+    _set(storage_total, total)
 
 
 def probe_backups(backup_dir: Optional[str] = None) -> None:
@@ -164,7 +188,7 @@ def probe_backups(backup_dir: Optional[str] = None) -> None:
     Alerting on age rather than on a failure event means a backup job that
     silently stopped running still pages.
     """
-    directory = backup_dir or os.getenv("BACKUP_DIR", "/backups")
+    directory = backup_dir or settings.BACKUP_DIR
     try:
         if not os.path.isdir(directory):
             return
@@ -181,7 +205,7 @@ def probe_backups(backup_dir: Optional[str] = None) -> None:
 
 def probe_certificate(cert_path: Optional[str] = None) -> None:
     """Expiry of the serving certificate, so renewal can be alerted on."""
-    path = cert_path or os.getenv("TLS_CERT_PATH", "/etc/nginx/certs/server.crt")
+    path = cert_path or settings.TLS_CERT_PATH
     try:
         if not os.path.isfile(path):
             return

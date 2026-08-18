@@ -81,7 +81,7 @@ class CacheManager:
             return
 
         try:
-            ttl = ttl or getattr(settings, 'CACHE_TTL', 300)  # Default 5 minutes
+            ttl = ttl or settings.CACHE_TTL  # Default 5 minutes
             await self.redis_client.setex(key, ttl, value)
         except Exception as e:
             logger.error(f"Cache set error: {e}")

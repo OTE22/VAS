@@ -10,6 +10,7 @@ import asyncio
 import logging
 import base64
 import time
+import uuid
 import cv2
 import numpy as np
 from typing import Optional
@@ -26,11 +27,10 @@ from backend.core import (
     model_manager, face_tracker, batch_writer,
     processing_queue, ws_manager
 )
-# Import face_recognition_cache dynamically (set during startup)
 # We'll import it inside the function to get the current instance
 from backend.core.metrics import metrics_faces_detected, metrics_faces_batch_skipped
 from db_connection import db_manager
-from db_models import Pipeline, Detection, Face, IdentityType, LabelState
+from db_models import Pipeline, IdentityType, LabelState
 from sqlalchemy import select, update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from utils.helpers import face_alignment, reference_alignment
@@ -48,20 +48,20 @@ from concurrent.futures import ThreadPoolExecutor
 # the single uvicorn event loop - every frame froze ALL endpoints (health,
 # auth, websockets), causing the 499/502/timeout production symptoms.
 INFERENCE_POOL = ThreadPoolExecutor(
-    max_workers=int(getattr(settings, 'INFERENCE_WORKERS', 3)),
+    max_workers=int(settings.INFERENCE_WORKERS),
     thread_name_prefix="inference",
 )
 
 # Bounded concurrency: global cap + per-pipeline cap so one busy camera
 # cannot starve the others.
-_inference_semaphore = asyncio.Semaphore(int(getattr(settings, 'MAX_CONCURRENT_INFERENCE', 3)))
+_inference_semaphore = asyncio.Semaphore(int(settings.MAX_CONCURRENT_INFERENCE))
 _pipeline_semaphores: dict = {}
 
 
 def _get_pipeline_semaphore(pipeline_id: str) -> asyncio.Semaphore:
     sem = _pipeline_semaphores.get(pipeline_id)
     if sem is None:
-        sem = asyncio.Semaphore(int(getattr(settings, 'MAX_CONCURRENT_INFERENCE_PER_PIPELINE', 2)))
+        sem = asyncio.Semaphore(int(settings.MAX_CONCURRENT_INFERENCE_PER_PIPELINE))
         _pipeline_semaphores[pipeline_id] = sem
     return sem
 
@@ -78,7 +78,10 @@ def _process_crop_sync(crop: np.ndarray) -> dict:
     branching/logging on the loop. Never raises.
     """
     result = {"stage": None, "bboxes": None, "kpss": None,
-              "aligned_face": None, "embedding": None, "error": None}
+              "aligned_face": None, "embedding": None, "error": None,
+              "face_bbox": None, "det_score": None,
+              "quality": None, "quality_details": None,
+              "quality_scorer": None}
     try:
         result["stage"] = "detect"
         bboxes, kpss = model_manager.detector.detect(crop, max_num=1)
@@ -87,6 +90,15 @@ def _process_crop_sync(crop: np.ndarray) -> dict:
             return result  # no face - caller inspects kpss
 
         landmarks = kpss[0]
+        # SCRFD's own box and score, in crop coordinates. Both matter for
+        # quality: the FACE box is the right size signal (the upstream person
+        # box saturated it), and the detector's own confidence is a face signal
+        # where the upstream person-detector confidence was not.
+        face_bbox = [int(v) for v in bboxes[0][:4]]
+        result["face_bbox"] = face_bbox
+        if len(bboxes[0]) > 4:
+            result["det_score"] = float(bboxes[0][4])
+
         result["stage"] = "align"
         aligned_face, _m_inv = face_alignment(crop, landmarks, image_size=112)
         result["aligned_face"] = aligned_face
@@ -99,6 +111,16 @@ def _process_crop_sync(crop: np.ndarray) -> dict:
             result["error"] = "invalid_embedding"
             return result
         result["embedding"] = embedding / norm
+
+        # Quality, computed HERE because this function already holds the crop,
+        # the face box and the landmarks, and already runs in INFERENCE_POOL —
+        # so the blur/lighting/angle work costs nothing on the event loop.
+        result["stage"] = "quality"
+        from backend.core.face_quality import quality_score_for_detection
+        (result["quality"], result["quality_details"],
+         result["quality_scorer"]) = quality_score_for_detection(
+            crop, face_bbox, landmarks, result["det_score"])
+
         result["stage"] = "done"
         return result
     except Exception as e:  # noqa: BLE001 - report, don't crash the worker
@@ -119,12 +141,12 @@ def _save_cropped_image(crop: np.ndarray, pipeline_id: str, pred_idx: int):
     """
     try:
         # Get save directory from config
-        save_dir = Path(getattr(settings, 'CROPPED_IMAGES_DIR', './debug/cropped'))
+        save_dir = Path(settings.CROPPED_IMAGES_DIR)
         save_dir = save_dir / pipeline_id
         save_dir.mkdir(parents=True, exist_ok=True)
         
         # Create filename with timestamp and prediction index
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Include milliseconds
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # UTC; filename only
         filename = f"{timestamp}_pred{pred_idx}.jpg"
         filepath = save_dir / filename
         
@@ -358,7 +380,7 @@ async def process_image_async(
             continue
         
         # Save cropped image for debugging (if enabled) - off-loop
-        if getattr(settings, 'SAVE_CROPPED_IMAGES', False):
+        if settings.SAVE_CROPPED_IMAGES:
             try:
                 await loop.run_in_executor(INFERENCE_POOL, _save_cropped_image, crop, pipeline_id, pred_idx)
             except Exception as e:
@@ -371,8 +393,19 @@ async def process_image_async(
         # =====================================================
         async with _inference_semaphore:
             async with _get_pipeline_semaphore(pipeline_id):
+                # Utilization of the hard 3-wide inference bottleneck. When
+                # this gauge sits at MAX_CONCURRENT_INFERENCE while the queue
+                # grows, inference is the limiting resource — previously that
+                # diagnosis required guesswork.
+                from backend.core.metrics import metrics_inference_in_flight
+                if metrics_inference_in_flight:
+                    metrics_inference_in_flight.inc()
                 infer_start = time.time()
-                crop_result = await loop.run_in_executor(INFERENCE_POOL, _process_crop_sync, crop)
+                try:
+                    crop_result = await loop.run_in_executor(INFERENCE_POOL, _process_crop_sync, crop)
+                finally:
+                    if metrics_inference_in_flight:
+                        metrics_inference_in_flight.dec()
                 infer_ms = (time.time() - infer_start) * 1000
 
         if crop_result["error"]:
@@ -410,13 +443,32 @@ async def process_image_async(
             from backend.core.identity_service import identity_service
             
             if identity_service is not None:
-                # Calculate quality score
-                face_size = (x2 - x1) * (y2 - y1)
-                quality_score = identity_service.compute_quality_score(
-                    face_size=face_size,
-                    confidence=pred.get("confidence", 1.0)
-                )
+                # Quality score.
+                #
+                # This used to be computed from `(x2-x1)*(y2-y1)` — the UPSTREAM
+                # PERSON box — plus `pred["confidence"]`, the upstream object
+                # detector's score. Neither describes the face. The person box
+                # is always far larger than 100x100, so the size term saturated
+                # and the whole score collapsed to `0.3 + 0.2*confidence`, i.e.
+                # BELOW the 0.5 KNOWN threshold for any confidence under 1.0.
+                # Known people were not accumulating embeddings at all.
+                quality_score = crop_result.get("quality")
+                quality_scorer = crop_result.get("quality_scorer")
+                if quality_score is None:
+                    # Fallback must yield a NUMBER: every gate downstream reads
+                    # `is not None and < threshold`, so None admits everything.
+                    fb = crop_result.get("face_bbox")
+                    face_size = ((fb[2] - fb[0]) * (fb[3] - fb[1])) if fb else 0
+                    quality_score = identity_service.compute_quality_score(
+                        face_size=face_size,
+                        confidence=crop_result.get("det_score"),
+                    )
+                    from backend.core.face_quality import LEGACY_SCORER_VERSION
+                    quality_scorer = LEGACY_SCORER_VERSION
                 
+                frame_embedding_id = None
+                frame_identity_created = False
+                frame_secondary_embedding_ids = []
                 # Get database session for identity operations
                 async with db_manager.get_session() as db:
                     try:
@@ -439,13 +491,22 @@ async def process_image_async(
                         logger.debug(f"[PROCESS] [STEP-BY-STEP] identity_service.use_pgvector: {identity_service.use_pgvector}")
                         logger.debug(f"[PROCESS] [STEP-BY-STEP] identity_service.pgvector_index: {identity_service.pgvector_index is not None}")
                         
-                        identity, is_new_identity, similarity = await identity_service.find_or_create_identity(
+                        resolution = await identity_service.find_or_create_identity(
                             embedding=embedding,
                             pipeline_id=pipeline_id,
-                            detection_id=None,  # Will be set after detection is created
+                            detection_id=None,  # linked EXACTLY by persist_detection via embedding_id
                             db=db,
-                            quality_score=quality_score
+                            quality_score=quality_score,
+                            quality_scorer_version=quality_scorer
                         )
+                        identity, is_new_identity, similarity = (
+                            resolution.identity, resolution.is_new_identity, resolution.similarity)
+                        # Ownership metadata: the embedding row(s) THIS frame inserted.
+                        # Only ids produced by this processing attempt ever land
+                        # here, so "created by this frame" is structural, never
+                        # inferred from pipeline_id.
+                        frame_embedding_id = resolution.embedding_id
+                        frame_identity_created = resolution.identity_created
                         
                         logger.debug(f"[PROCESS] [STEP-BY-STEP] ✅ find_or_create_identity() returned successfully")
                         
@@ -475,14 +536,22 @@ async def process_image_async(
                         # This prevents duplicate embeddings and ensures pgvector works correctly
                         if not is_new_identity:
                             # For existing identities, save additional embedding (for tracking multiple appearances)
-                            await identity_service.save_embedding(
+                            saved = await identity_service.save_embedding(
                                 identity=identity,
                                 embedding=embedding,
-                                detection_id=None,  # Will be set after detection is created
+                                detection_id=None,  # linked EXACTLY by persist_detection via embedding_id
                                 pipeline_id=pipeline_id,
                                 quality_score=quality_score,
+                                quality_scorer_version=quality_scorer,
                                 db=db
                             )
+                            if saved is not None and getattr(saved, "id", None) is not None:
+                                # save_embedding's row is the frame's primary embedding;
+                                # an enrichment row (rare, gated) is also frame-created
+                                # and travels in the secondary list.
+                                if frame_embedding_id is not None and frame_embedding_id != saved.id:
+                                    frame_secondary_embedding_ids.append(frame_embedding_id)
+                                frame_embedding_id = saved.id
                         else:
                             # For new identities, embedding was already saved in _create_unknown_identity() or _create_known_identity()
                             # Verify embedding was saved (check if quality threshold was met)
@@ -514,34 +583,24 @@ async def process_image_async(
                         logger.error(f"[PROCESS] ❌❌❌ CRITICAL: Identity with name '{name}' is UNKNOWN type! This should be KNOWN!")
                         logger.error(f"[PROCESS] This means the person was not recognized from KNOWN index!")
             else:
-                # Fallback to old system if identity service not available
-                from backend.core.face_recognition_cache import face_recognition_cache
-                if face_recognition_cache is None:
-                    logger.error(f"[PROCESS] Neither identity_service nor face_recognition_cache is initialized!")
-                    continue
-                
-                name, similarity = await face_recognition_cache.search_face_with_cache(
-                    embedding=embedding,
-                    threshold=settings.SIMILARITY_THRESHOLD
-                )
-                logger.info(f"[PROCESS] Match (legacy): {name} (similarity={similarity:.4f})")
+                # No identity service — skip this face. The "legacy fallback"
+                # that used to run here searched the display-name-keyed
+                # FaceDatabase, which enrollment stopped writing when pgvector
+                # became authoritative. It was empty by construction: the
+                # fallback answered "Unknown" for every face, 100% of the time,
+                # while logging "Match (legacy)" as if it had checked something.
+                # A face processed without the identity system is a face NOT
+                # recognized — say so and move on.
+                logger.error("[PROCESS] identity_service unavailable — face skipped, "
+                             "not silently misclassified")
+                continue
         except Exception as e:
             logger.error(f"[PROCESS] Identity/face search error: {e}", exc_info=True)
-            # Fallback to legacy system
-            try:
-                from backend.core.face_recognition_cache import face_recognition_cache
-                if face_recognition_cache:
-                    name, similarity = await face_recognition_cache.search_face_with_cache(
-                        embedding=embedding,
-                        threshold=settings.SIMILARITY_THRESHOLD
-                    )
-            except Exception as fallback_error:
-                logger.error(f"[PROCESS] Fallback search also failed: {fallback_error}")
-                continue
+            continue
 
         # Optionally skip Unknown faces (make this configurable)
-        if getattr(settings, 'SKIP_UNKNOWN_FACES', False) and name == "Unknown":
-            logger.debug(f"[PROCESS] Skipping Unknown face (config: SKIP_UNKNOWN_FACES={getattr(settings, 'SKIP_UNKNOWN_FACES', False)})")
+        if settings.SKIP_UNKNOWN_FACES and name == "Unknown":
+            logger.debug(f"[PROCESS] Skipping Unknown face (config: SKIP_UNKNOWN_FACES={settings.SKIP_UNKNOWN_FACES})")
             continue
 
         # =====================================================
@@ -608,10 +667,10 @@ async def process_image_async(
         # SAVE THE FACE IMAGE (ORGANIZED BY PERSON FOLDER)
         # =====================================================
         face_filename = None
-        if getattr(settings, 'SAVE_IMAGES', True):
+        if settings.SAVE_IMAGES:
             # Check if we should save unknown faces
             is_unknown = name.lower() == "unknown"
-            if is_unknown and not getattr(settings, 'SAVE_UNKNOWN_FACES', False):
+            if is_unknown and not settings.SAVE_UNKNOWN_FACES:
                 # Still generate path for database, but don't save file to disk
                 safe_name = "unknown"
                 person_dir = os.path.join(settings.STORAGE_DIR, pipeline_id, safe_name)
@@ -703,15 +762,32 @@ async def process_image_async(
             "face_image_path": face_filename,  # Path to saved face image (None if not saved)
             "identity_id": identity.id if identity else None,
             "label_state": label_state,
-            "_identity": identity,  # Internal: Identity object for appearance creation
-            "_embedding": embedding.copy() if embedding is not None else None,  # Internal: embedding array
+            # The quality THIS crop scored at ingest, carried forward so
+            # create_appearance can compare like-for-like. Without these the
+            # batch writer re-read quality from identity_embeddings by
+            # detection_id — but the embedding is only back-linked to the
+            # detection AFTER create_appearance runs, so the read always
+            # missed and the snapshot decision fell through to the
+            # similarity-only branch.
+            "quality": quality_score,
+            "quality_scorer": quality_scorer,
+            # Provenance carried to persist_detection: the exact embedding row(s)
+            # this frame inserted (never pre-existing), whether the identity was
+            # created by this frame, and a stable per-face event id that the
+            # post-commit `detection_alerts` event echoes as detection_event_id.
+            "_embedding_id": frame_embedding_id,
+            "_embedding_created_by_this_frame": frame_embedding_id is not None,
+            "_secondary_embedding_ids": list(frame_secondary_embedding_ids),
+            "_identity_created_by_this_frame": bool(frame_identity_created),
+            "_event_id": uuid.uuid4().hex,
+            "_is_known": bool(identity and identity.type == IdentityType.KNOWN),
         }
         
         # Simple logging
         if face_filename:
             logger.info(f"[PROCESS] ✅ Saved image for {name}: {face_filename}")
         else:
-            logger.debug(f"[PROCESS] No image saved for {name} (SAVE_IMAGES={getattr(settings, 'SAVE_IMAGES', True)})")
+            logger.debug(f"[PROCESS] No image saved for {name} (SAVE_IMAGES={settings.SAVE_IMAGES})")
 
         detected_faces.append(face_data)
         new_faces_count += 1
@@ -745,74 +821,23 @@ async def process_image_async(
                     
                     logger.info(f"[PROCESS] Known person detected: {name} (sim={similarity:.3f}) in {pipeline_id} - should_show_alert={should_show_alert}, is_new_detection={is_new_detection}")
                     
-                    # =====================================================
-                    # CHECK LIVE ALERTS
-                    # =====================================================
-                    live_alert_triggers = []
-                    watchlist_matches = []
-                    
-                    if identity and getattr(settings, 'LIVE_ALERTS_ENABLED', True):
-                        try:
-                            from backend.core.live_alert_service import live_alert_service
-                            async with db_manager.get_session() as alert_db:
-                                triggers = await live_alert_service.check_detection_against_alerts(
-                                    db=alert_db,
-                                    identity_id=str(identity.id),
-                                    similarity=similarity,
-                                    pipeline_id=pipeline_id,
-                                    snapshot_path=face_data.get("face_image_path")
-                                )
-                                live_alert_triggers = triggers
-                                
-                                if triggers:
-                                    logger.info(f"[PROCESS] 🔔 Live alert triggered! {len(triggers)} alert(s) for {name} in {pipeline_id}")
-                                    for trigger in triggers:
-                                        logger.info(f"[PROCESS]   📢 Alert: {trigger.alert_name} (sound={trigger.sound_alert}, dashboard={trigger.should_notify_dashboard})")
-                        except Exception as alert_error:
-                            logger.error(f"[PROCESS] Error checking live alerts: {alert_error}", exc_info=True)
-                    
-                    # =====================================================
-                    # CHECK WATCHLISTS
-                    # =====================================================
-                    if identity and getattr(settings, 'WATCHLIST_ENABLED', True):
-                        try:
-                            from backend.core.watchlist_service import watchlist_service
-                            async with db_manager.get_session() as watchlist_db:
-                                matches = await watchlist_service.check_identities_against_watchlists(
-                                    db=watchlist_db,
-                                    identity_ids=[str(identity.id)]
-                                )
-                                if str(identity.id) in matches:
-                                    watchlist_matches = matches[str(identity.id)]
-                                    logger.info(f"[PROCESS] 🚨 Watchlist match! {name} found on {len(watchlist_matches)} watchlist(s)")
-                                    for match in watchlist_matches:
-                                        logger.info(f"[PROCESS]   📋 Watchlist: {match['list_name']} (level={match['alert_level']})")
-                        except Exception as watchlist_error:
-                            logger.error(f"[PROCESS] Error checking watchlists: {watchlist_error}", exc_info=True)
-                    
-                    import uuid as _uuid
+                    # Live-alert triggers and watchlist alerts are PERSISTED and
+                    # broadcast AFTER the detection row is committed
+                    # (backend/core/detection_evidence.py → `detection_alerts`).
+                    # This pre-commit event carries the detection only.
                     realtime_result = {
                         # Stable event id: frontends deduplicate popups/sounds on
-                        # this across reconnects and duplicate deliveries.
-                        "event_id": _uuid.uuid4().hex,
+                        # this across reconnects and duplicate deliveries; the
+                        # post-commit detection_alerts event echoes it.
+                        "event_id": face_data["_event_id"],
                         "created_at": datetime.utcnow().isoformat() + "Z",
                         "pipeline_id": pipeline_id,
                         "location_name": display_name,  # friendly display title (may be None)
                         "timestamp": datetime.utcnow().isoformat() + "Z",
                         "processing_time_ms": (time.time() - start_time) * 1000,
-                        "faces": [face_data],
+                        "faces": [{k: v for k, v in face_data.items() if not k.startswith("_")}],
                         "should_show_alert": should_show_alert,  # Flag for frontend to decide if alert should be shown
                         "is_new_detection": is_new_detection,  # Backend flag: True if first time or after 1-hour window
-                        "live_alerts": [{
-                            "alert_id": t.alert_id,
-                            "alert_name": t.alert_name,
-                            "trigger_id": t.trigger_id,
-                            "identity_name": t.identity_name,
-                            "similarity": t.similarity,
-                            "sound_alert": t.sound_alert,
-                            "should_notify_dashboard": t.should_notify_dashboard,
-                        } for t in live_alert_triggers] if live_alert_triggers else [],
-                        "watchlist_matches": watchlist_matches if watchlist_matches else [],
                     }
 
                     # Get stats for context
@@ -832,7 +857,7 @@ async def process_image_async(
                     
                     # Broadcast to all connected clients (filtered by pipeline access)
                     logger.debug(f"[PROCESS] 📡 Broadcasting new_detection for '{name}' (sim={similarity:.3f}) in pipeline '{pipeline_id}' to WebSocket clients")
-                    logger.debug(f"[PROCESS] 📦 Message data: pipeline_id={pipeline_id}, location_name={display_name!r}, timestamp={realtime_result['timestamp']}, is_new_detection={is_new_detection}, should_show_alert={should_show_alert}, live_alerts={len(live_alert_triggers)}, watchlists={len(watchlist_matches)}")
+                    logger.debug(f"[PROCESS] 📦 Message data: pipeline_id={pipeline_id}, location_name={display_name!r}, timestamp={realtime_result['timestamp']}, is_new_detection={is_new_detection}, should_show_alert={should_show_alert}")
                     try:
                         await ws_manager.broadcast({
                             "type": "new_detection",
@@ -853,26 +878,8 @@ async def process_image_async(
                     # Unknown faces should appear in real-time on the unknown page, organized by pipeline
                     logger.info(f"[PROCESS] Unknown person detected: {name} (sim={similarity:.3f}) in {pipeline_id} - sending to unknown page")
                     
-                    # =====================================================
-                    # CHECK WATCHLISTS FOR UNKNOWN FACES
-                    # =====================================================
-                    watchlist_matches = []
-                    if identity and getattr(settings, 'WATCHLIST_ENABLED', True):
-                        try:
-                            from backend.core.watchlist_service import watchlist_service
-                            async with db_manager.get_session() as watchlist_db:
-                                matches = await watchlist_service.check_identities_against_watchlists(
-                                    db=watchlist_db,
-                                    identity_ids=[str(identity.id)]
-                                )
-                                if str(identity.id) in matches:
-                                    watchlist_matches = matches[str(identity.id)]
-                                    logger.info(f"[PROCESS] 🚨 Watchlist match for UNKNOWN! {name} found on {len(watchlist_matches)} watchlist(s)")
-                                    for match in watchlist_matches:
-                                        logger.info(f"[PROCESS]   📋 Watchlist: {match['list_name']} (level={match['alert_level']})")
-                        except Exception as watchlist_error:
-                            logger.error(f"[PROCESS] Error checking watchlists for unknown: {watchlist_error}", exc_info=True)
-                    
+                    # Watchlist alerts for unknown identities are persisted and
+                    # broadcast after commit as `detection_alerts` — not here.
                     # Prepare unknown face data for unknown page
                     # Include identity_id if available so frontend can update existing identity or create new one
                     unknown_realtime_result = {
@@ -880,10 +887,9 @@ async def process_image_async(
                         "location_name": display_name,  # friendly display title (may be None)
                         "timestamp": datetime.utcnow().isoformat() + "Z",
                         "processing_time_ms": (time.time() - start_time) * 1000,
-                        "face": face_data,  # Single face object (not array)
+                        "face": {k: v for k, v in face_data.items() if not k.startswith("_")},  # Single face object (not array)
                         "identity_id": str(identity.id) if identity else None,  # Include identity ID if available
                         "label_state": label_state.value if label_state else None,
-                        "watchlist_matches": watchlist_matches if watchlist_matches else [],
                     }
                     
                     # Get stats for context
@@ -905,7 +911,7 @@ async def process_image_async(
                     # Broadcast to all connected clients (filtered by pipeline access)
                     # Unknown faces go to unknown page, so we use a different message type
                     logger.debug(f"[PROCESS] 📡 Broadcasting new_unknown_detection for '{name}' (sim={similarity:.3f}) in pipeline '{pipeline_id}' to WebSocket clients")
-                    logger.debug(f"[PROCESS] 📦 Unknown message data: pipeline_id={pipeline_id}, location_name={display_name!r}, timestamp={unknown_realtime_result['timestamp']}, identity_id={unknown_realtime_result.get('identity_id')}, watchlists={len(watchlist_matches)}")
+                    logger.debug(f"[PROCESS] 📦 Unknown message data: pipeline_id={pipeline_id}, location_name={display_name!r}, timestamp={unknown_realtime_result['timestamp']}, identity_id={unknown_realtime_result.get('identity_id')}")
                     try:
                         await ws_manager.broadcast({
                             "type": "new_unknown_detection",
@@ -919,11 +925,10 @@ async def process_image_async(
                         # Also notify dashboard clients with a LIGHTWEIGHT event (no image
                         # data) so they can show an "N unknown" badge on the camera card.
                         # new_unknown_detection itself is filtered to unknown-page clients.
-                        import uuid as _uuid_ua
                         await ws_manager.broadcast({
                             "type": "unknown_activity",
                             # Stable id so clients can deduplicate badge bumps
-                            "event_id": _uuid_ua.uuid4().hex,
+                            "event_id": face_data["_event_id"],
                             "created_at": datetime.utcnow().isoformat() + "Z",
                             "pipeline_id": pipeline_id,
                             "location_name": display_name,
@@ -972,15 +977,15 @@ async def process_image_async(
     # =====================================================
     detection_data = {
         "pipeline_id": pipeline_id,
+        "location_name": display_name,
         "detection": {
             "pipeline_id": pipeline_id,
             "timestamp": datetime.utcnow(),
-            "image_path": None,  # No full frame saved
             "image_size_bytes": 0,
             "processing_time_ms": processing_time,
             "worker_id": worker_id,
         },
-                "faces": [
+        "faces": [
             {
                 "name": f["name"],
                 "similarity": f["similarity"],
@@ -991,168 +996,50 @@ async def process_image_async(
                 "bbox_y2": f["bbox"][3],
                 "identity_id": f.get("identity_id"),
                 "label_state": f.get("label_state"),
-                # Store embedding and identity for appearance creation
-                "_identity": f.get("_identity"),  # Internal: Identity object
-                "_embedding": f.get("_embedding"),  # Internal: embedding array
+                "quality": f.get("quality"),
+                "quality_scorer": f.get("quality_scorer"),
+                # provenance for persist_detection (stripped before insert(Face))
+                "_embedding_id": f.get("_embedding_id"),
+                "_embedding_created_by_this_frame": f.get("_embedding_created_by_this_frame"),
+                "_secondary_embedding_ids": f.get("_secondary_embedding_ids") or [],
+                "_identity_created_by_this_frame": f.get("_identity_created_by_this_frame"),
+                "_event_id": f.get("_event_id"),
+                "_is_known": f.get("_is_known"),
             }
             for f in detected_faces
         ]
     }
 
     # =====================================================
-    # SAVE TO DATABASE
+    # SAVE TO DATABASE — one write path (detection_evidence.persist_detection)
     # =====================================================
     if use_batch_write:
-        # Add to batch writer
         try:
             await batch_writer.add_detection(detection_data)
             logger.debug(f"[PROCESS] Added {len(detected_faces)} faces to batch writer")
         except Exception as e:
             logger.error(f"[PROCESS] Batch writer error: {e}")
-            # Fall back to direct write on batch writer failure
             use_batch_write = False
 
     if not use_batch_write:
-        # Direct write to database
+        # Direct write: the SAME function the batch writer runs, in one
+        # transaction; broadcast only after commit; compensate on core failure.
+        from backend.core.detection_evidence import (
+            persist_detection, broadcast_detection_alerts, compensate_failed_detection)
+        outcome = None
         try:
             async with db_manager.get_session() as db:
-                # Ensure pipeline exists (race-safe upsert)
                 await ensure_pipeline_registered(db, pipeline_id)
-
-                # Create detection record
-                detection = Detection(**detection_data["detection"])
-                db.add(detection)
-                await db.flush()
-
-                # Create face records and identity appearances
-                from backend.core.identity_service import identity_service
-                
-                for face_data_item in detection_data["faces"]:
-                    # Extract internal fields before creating Face record
-                    identity = face_data_item.get("_identity")
-                    embedding = face_data_item.get("_embedding")
-                    
-                    # Create face record (without internal fields)
-                    face_record_data = {k: v for k, v in face_data_item.items() if not k.startswith("_")}
-                    face_record_data["detection_id"] = detection.id
-                    face = Face(**face_record_data)
-                    db.add(face)
-                    await db.flush()
-                    
-                    # Create identity appearance if identity system is active
-                    if identity_service and identity and embedding is not None:
-                        try:
-                            # Refresh identity from database to ensure it's attached to this session
-                            from db_models import Identity
-                            result = await db.execute(
-                                select(Identity).where(Identity.id == identity.id)
-                            )
-                            identity_obj = result.scalar_one_or_none()
-                            
-                            if identity_obj:
-                                # Get track_id from prediction if available
-                                track_id = None
-                                bbox = [face_data_item.get("bbox_x1"), face_data_item.get("bbox_y1"),
-                                       face_data_item.get("bbox_x2"), face_data_item.get("bbox_y2")]
-                                for pred in predictions:
-                                    pred_bbox = pred.get("bbox", [])
-                                    if len(pred_bbox) == 4 and len(bbox) == 4:
-                                        if abs(pred_bbox[0] - bbox[0]) < 5 and abs(pred_bbox[1] - bbox[1]) < 5:
-                                            track_id = pred.get("track_id")
-                                            break
-                                
-                                # Get quality_score and similarity for best snapshot selection
-                                quality_score = None
-                                similarity = 0.0
-                                
-                                # Try to get quality_score from the embedding we just saved
-                                if identity_obj:
-                                    from db_models import IdentityEmbedding
-                                    # First try with detection_id
-                                    emb_result = await db.execute(
-                                        select(IdentityEmbedding.quality).where(
-                                            IdentityEmbedding.identity_id == identity_obj.id,
-                                            IdentityEmbedding.detection_id == detection.id
-                                        ).order_by(IdentityEmbedding.created_at.desc()).limit(1)
-                                    )
-                                    quality_result = emb_result.scalar_one_or_none()
-                                    if quality_result:
-                                        quality_score = quality_result
-                                    else:
-                                        # Fallback: get most recent embedding for this identity
-                                        emb_result = await db.execute(
-                                            select(IdentityEmbedding.quality).where(
-                                                IdentityEmbedding.identity_id == identity_obj.id
-                                            ).order_by(IdentityEmbedding.created_at.desc()).limit(1)
-                                        )
-                                        quality_result = emb_result.scalar_one_or_none()
-                                        if quality_result:
-                                            quality_score = quality_result
-                                
-                                # Get similarity from face_data_item if available
-                                similarity = face_data_item.get("similarity", 0.0)
-                                
-                                best_snapshot_path = face_data_item.get("face_image_path")
-                                logger.debug(f"[PROCESS] 💾 Saving appearance for {identity_obj.display_name} (ID: {identity_obj.id})")
-                                logger.debug(f"[PROCESS]   📸 best_snapshot_path: {best_snapshot_path}")
-                                
-                                await identity_service.create_appearance(
-                                    identity=identity_obj,
-                                    pipeline_id=pipeline_id,
-                                    track_id=track_id,
-                                    start_time=detection.timestamp,
-                                    best_snapshot_path=best_snapshot_path,
-                                    db=db,
-                                    quality_score=quality_score,
-                                    similarity=similarity
-                                )
-                                
-                                if best_snapshot_path:
-                                    logger.debug(f"[PROCESS]   ✅ Appearance saved with image path: {best_snapshot_path}")
-                                    logger.debug(f"[PROCESS]   🌐 This path will be used for display: {best_snapshot_path}")
-                                else:
-                                    logger.warning(f"[PROCESS]   ⚠️ Appearance saved but best_snapshot_path is None - image may not display")
-                                
-                                # Update embedding record with detection_id
-                                if face_data_item.get("identity_id"):
-                                    from db_models import IdentityEmbedding
-                                    from sqlalchemy import update as sql_update
-                                    
-                                    # Update the most recent embedding without detection_id
-                                    from sqlalchemy import select as sql_select
-                                    subquery = select(IdentityEmbedding.id).where(
-                                        IdentityEmbedding.identity_id == identity_obj.id,
-                                        IdentityEmbedding.detection_id.is_(None)
-                                    ).order_by(IdentityEmbedding.created_at.desc()).limit(1).scalar_subquery()
-                                    
-                                    await db.execute(
-                                        sql_update(IdentityEmbedding).where(
-                                            IdentityEmbedding.id == subquery
-                                        ).values(
-                                            detection_id=detection.id
-                                        )
-                                    )
-                        except Exception as identity_error:
-                            logger.error(f"[PROCESS] Identity appearance creation error: {identity_error}", exc_info=True)
-                            # Don't fail the whole process
-
-                # Update pipeline stats (atomic SQL update - safe under concurrency)
-                await db.execute(
-                    sa_update(Pipeline)
-                    .where(Pipeline.pipeline_id == pipeline_id)
-                    .values(
-                        total_detections=Pipeline.total_detections + new_faces_count,
-                        updated_at=datetime.utcnow(),
-                    )
-                )
-
-                await db.commit()
-                logger.info(f"✅ Saved {new_faces_count} faces to DB for pipeline {pipeline_id}")
-
+                outcome = await persist_detection(db, detection_data=detection_data)
+            logger.info(f"✅ Saved {new_faces_count} faces to DB for pipeline {pipeline_id}")
         except Exception as e:
-            logger.error(f"[PROCESS] Database error: {e}", exc_info=True)
-            # Don't re-raise - we still want to return the detection result
-            # The frontend should know faces were detected even if DB save failed
+            from backend.core.metrics import metrics_db_operation_failures
+            if metrics_db_operation_failures:
+                metrics_db_operation_failures.labels(reason="detection_core").inc()
+            logger.error(f"[PROCESS] detection NOT persisted (core failure): {e}", exc_info=True)
+            await compensate_failed_detection(detection_data)
+        if outcome is not None and outcome.bundles:
+            await broadcast_detection_alerts(outcome.bundles, location_name=display_name)
 
     # =====================================================
     # RETURN RESULT
@@ -1184,12 +1071,11 @@ if __name__ == "__main__":
     import argparse
     from pathlib import Path
     
-    # Setup logging for debug mode
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s | %(levelname)-8s | %(thread)d | %(name)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    # Central logger even in standalone CLI mode. A private basicConfig here
+    # would bypass the redaction filter and write nothing to the rotating file,
+    # so a debugging run would leak what a served request never would.
+    from utils.logging import setup_logging
+    setup_logging(log_to_file=True)
     
     parser = argparse.ArgumentParser(description='Test image processing pipeline standalone')
     parser.add_argument('image_path', type=str, help='Path to image file to test')
@@ -1280,27 +1166,21 @@ if __name__ == "__main__":
             
             # Initialize identity services if not in no-db mode
             test_identity_service = None
-            test_identity_index = None
             
             if not args.no_db:
                 print("\n🔄 Initializing identity services...")
                 try:
-                    from backend.core.identity_index import IdentityIndexService
                     from backend.core.identity_service import IdentityService
-                    
-                    test_identity_index = IdentityIndexService(
-                        embedding_size=settings.IDENTITY_EMBEDDING_SIZE,
-                        db_path=settings.IDENTITY_INDEX_DB_PATH
-                    )
-                    test_identity_index.load()
-                    
-                    test_identity_service = IdentityService(test_identity_index)
-                    
-                    known_size = test_identity_index.known_index.ntotal if test_identity_index.known_index else 0
-                    unknown_size = test_identity_index.unknown_index.ntotal if test_identity_index.unknown_index else 0
-                    print(f"✅ Identity services initialized")
-                    print(f"   KNOWN index: {known_size} vectors")
-                    print(f"   UNKNOWN index: {unknown_size} vectors")
+                    from backend.core.identity_index_pgvector import get_pgvector_index
+
+                    # This harness reads and writes through the database, so it
+                    # needs no index of its own. Building a private FAISS index
+                    # here created a second copy of the vectors that diverged
+                    # from PostgreSQL the moment the harness exited.
+                    test_identity_service = IdentityService(
+                        None, pgvector_index=get_pgvector_index())
+                    print(f"✅ Identity services initialized "
+                          f"(vectors read from identity_embeddings)")
                 except Exception as e:
                     print(f"⚠️  Warning: Could not initialize identity services: {e}")
                     print("   Continuing without identity recognition...")

@@ -22,7 +22,7 @@ from config import settings
 from db_connection import db_manager
 from backend.config import (
     FACE_TRACKING_ENABLED, FACE_TRACKING_WINDOW_SECONDS,
-    CACHE_ENABLED, BATCH_WRITE_SIZE, DATA_RETENTION_DAYS
+    CACHE_ENABLED, BATCH_WRITE_SIZE
 )
 from backend.core import (
     cache_manager, production_cache_manager, model_manager,
@@ -33,12 +33,12 @@ from backend.core.metrics import metrics_queue_size
 from backend.services.queue_worker import queue_worker
 from backend.services.cache_metrics import update_cache_metrics
 
-# Apply performance optimizations
-try:
-    from utils.performance_config import apply_optimized_config
-    apply_optimized_config()
-except Exception as e:
-    logger.warning(f"Could not apply performance optimizations: {e}")
+# utils/performance_config.apply_optimized_config() used to run here. It read
+# 15 values off `settings` and wrote them back into os.environ — after
+# Settings() had already been constructed, so they could never reach `settings`
+# and only misled later readers. Its GPU/CPU "optimized defaults" were
+# unreachable for the same reason: every key it looked up is a declared field,
+# so the default branch never ran. Sizing now comes from configuration alone.
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,9 @@ async def _emergency_shutdown(initialized_components: list, worker_tasks: list =
                     await ws_manager.redis_client.close()
             elif component == "batch_writer" and hasattr(batch_writer, 'stop'):
                 await batch_writer.stop()
+            elif component == "map_availability":
+                from backend.core import map_availability
+                await map_availability.stop_refresh_loop()
             elif component.startswith("workers_") and worker_tasks:
                 for task in worker_tasks:
                     task.cancel()
@@ -151,7 +154,11 @@ async def lifespan(app: FastAPI):
         asyncio.get_running_loop().set_exception_handler(_asyncio_exception_handler)
 
         logger.info("=" * 70)
-        logger.info("🚀 Starting Face Recognition Service v5.1 (Production)")
+        # Version comes from config.VERSION — this line used to hardcode
+        # "v5.1" while config said 5.0.0, which is its own kind of drift.
+        logger.info(f"🚀 Starting Face Recognition Service v{settings.VERSION}")
+        from backend.core.runtime_fingerprint import log_fingerprint
+        log_fingerprint(logger)
         logger.info(f"📊 Face Tracking: {'ENABLED' if FACE_TRACKING_ENABLED else 'DISABLED'}")
         logger.info(f"💾 Redis Cache: {'ENABLED' if CACHE_ENABLED else 'DISABLED'}")
         logger.info("=" * 70)
@@ -176,13 +183,10 @@ async def lifespan(app: FastAPI):
                     migration_result.outcome.value, migration_result.current_revision,
                 )
                 initialized_components.append("migrations")
-            elif should_fail_startup(
-                migration_result,
-                environment=settings.ENVIRONMENT,
-                fail_closed=settings.MIGRATIONS_FAIL_CLOSED,
-            ):
+            elif should_fail_startup(migration_result):
                 # Serving against an unverified schema silently corrupts data
-                # and returns wrong answers. Refuse instead.
+                # and returns wrong answers. Refuse — in every environment;
+                # there is no permissive mode for schema state.
                 logger.error(
                     "  ❌ Database migrations not satisfied: %s — %s",
                     migration_result.outcome.value, migration_result.detail,
@@ -190,25 +194,17 @@ async def lifespan(app: FastAPI):
                 raise RuntimeError(
                     f"database migrations not satisfied: {migration_result.outcome.value}"
                 )
-            else:
-                logger.warning(
-                    "  ⚠️  Migrations not satisfied (%s: %s) — continuing because "
-                    "ENVIRONMENT=%s and MIGRATIONS_FAIL_CLOSED is off",
-                    migration_result.outcome.value, migration_result.detail,
-                    settings.ENVIRONMENT,
-                )
         except RuntimeError:
             raise
         except Exception as e:
             logger.error(f"  ❌ Exception during migration check: {type(e).__name__}: {e}")
             logger.exception("  Migration exception details:")
-            if settings.is_production or settings.MIGRATIONS_FAIL_CLOSED:
-                raise
-            logger.warning("  ⚠️  Continuing startup (development)")
+            raise
         logger.info("  " + "=" * 60)
         logger.info("")
 
-        # 1.1 Database
+        # 1.1 Database (init_db verifies the exact Alembic head — fail-closed;
+        #     the application never runs Base.metadata.create_all())
         logger.info("  🔄 Initializing database...")
         try:
             await db_manager.init_db()
@@ -218,11 +214,61 @@ async def lifespan(app: FastAPI):
             logger.error(f"  ❌ Database initialization failed: {e}")
             raise
 
+        # 1.1.1 Runtime settings hydration.
+        #
+        # Runs here — immediately after the database is reachable and before
+        # ANY component is constructed — because hydration is what makes an
+        # admin's saved setting real. Every later phase (Redis sizing, the
+        # vector index geometry, the model manager, every background job)
+        # captures values off `settings` as it initializes; a value applied
+        # after its consumer has read it is applied too late to matter.
+        # This used to sit after the pgvector index was already built.
+        logger.info("  🔄 Hydrating runtime settings from database...")
+        try:
+            from backend.core import runtime_settings as _rt_settings
+            async with db_manager.get_session() as _settings_db:
+                hydrated = await _rt_settings.hydrate_from_db(_settings_db)
+            logger.info(f"  ✅ Runtime settings hydrated from database ({hydrated} applied)")
+        except Exception as hydrate_err:
+            logger.warning(f"  ⚠️  Settings hydration failed (using env/defaults): {hydrate_err}")
+
+        # 1.1.1b ML feature-definition contract — FAIL CLOSED in every
+        # environment. Definitions are seeded only by Alembic (frozen literal);
+        # the runtime inventory must match the table exactly. A mismatch means
+        # code changed without its migration: refuse to serve feature-less ML.
+        from backend.ml.feature_store import feature_store as _feature_store
+        async with db_manager.get_session() as _fs_db:
+            _fs_check = await _feature_store.verify_definitions(_fs_db)
+        logger.info(f"  ✅ ML feature definitions verified ({_fs_check['verified']} definitions)")
+
+        # 1.1.2 Webhook body-size alignment check (AFTER hydration, so a
+        # DB-stored admin override is included). The settings API refuses new
+        # oversized values; a pre-existing one must not brick boot, so this is
+        # a loud warning, not a gate. "Expected" because it reads the nginx
+        # config baked into this image - the running nginx mounts the host
+        # file, so the live limit is confirmed by boundary tests, not here.
+        try:
+            from backend.core.runtime_settings import expected_nginx_webhook_body_limit_mb
+            _nginx_mb = expected_nginx_webhook_body_limit_mb()
+            _recv_mb = int(settings.WEBHOOK_MAX_BODY_MB)
+            if _nginx_mb is not None and _recv_mb > _nginx_mb:
+                logger.error(
+                    f"  ❌ CONFIG DRIFT: WEBHOOK_MAX_BODY_MB={_recv_mb} exceeds the expected "
+                    f"nginx client_max_body_size={_nginx_mb}m on the webhook route - nginx "
+                    f"rejects bodies over {_nginx_mb}MB before this service ever sees them. "
+                    f"Raise nginx or lower WEBHOOK_MAX_BODY_MB.")
+            elif _nginx_mb is not None:
+                logger.info(
+                    f"  ✅ Webhook body limits aligned: receiver {_recv_mb}MB <= "
+                    f"expected nginx {_nginx_mb}MB")
+        except Exception as _align_err:
+            logger.warning(f"  ⚠️  Webhook body-size alignment check skipped: {_align_err}")
+
         # 1.2 Redis Cache (for container)
         logger.info("  🔄 Initializing Redis cache (container)...")
         try:
             # Get Redis URL from settings or environment
-            redis_url = getattr(settings, 'REDIS_URL', "redis://redis:6379/0")
+            redis_url = settings.REDIS_URL
             from backend.security.redaction import redact_url
             logger.info(f"  📍 Connecting to Redis at: {redact_url(redis_url)}")
 
@@ -245,6 +291,25 @@ async def lifespan(app: FastAPI):
             if cache_enabled:
                 logger.info("  ✅ Redis cache service initialized (page caching enabled)")
                 initialized_components.append("redis_cache_service")
+
+                # Drop dashboard/unknown payloads cached by a PREVIOUS build.
+                #
+                # Those blobs are whole serialized WebSocket messages, held for
+                # up to CACHE_TTL (dashboard) / 30 h (unknown), and replayed
+                # verbatim. An entry written before the timezone-aware wire
+                # format landed still carries naive timestamps, so the browser
+                # would keep printing "[TIME] Legacy naive timestamp received"
+                # for a day and a half after a correct deploy — with nothing in
+                # the running code to blame. Cheap to rebuild, so evict on
+                # every startup rather than reason about which build wrote what.
+                try:
+                    dropped = (await redis_cache_service.invalidate_dashboard_cache()
+                               + await redis_cache_service.invalidate_unknown_cache())
+                    if dropped:
+                        logger.info("  🧹 Evicted %d cached dashboard/unknown "
+                                    "payload(s) from a previous build", dropped)
+                except Exception as exc:      # noqa: BLE001 — never block startup
+                    logger.warning("  ⚠️  Could not evict stale cached payloads: %s", exc)
             else:
                 logger.warning("  ⚠️  Redis cache service disabled - page caching will be slower")
         except Exception as e:
@@ -290,9 +355,7 @@ async def lifespan(app: FastAPI):
 
             # Verify models
             if model_manager.detector and model_manager.recognizer:
-                face_count = model_manager.face_db.index.ntotal if model_manager.face_db and model_manager.face_db.index else 0
                 logger.info(f"  ✅ Models loaded (detector: {settings.DETECTION_MODEL})")
-                logger.info(f"    • Face database: {face_count} faces")
                 initialized_components.append("models")
             else:
                 raise RuntimeError("Models not properly initialized")
@@ -316,104 +379,98 @@ async def lifespan(app: FastAPI):
             logger.error(f"  ❌ Model loading failed: {e}")
             raise  # Critical failure
 
-        # Initialize face recognition cache
-        from backend.core.face_recognition_cache import FaceRecognitionCache
-        import sys
-        
-        global face_recognition_cache
-        face_recognition_cache = FaceRecognitionCache(model_manager, production_cache_manager)
-        
-        # Make it available globally in the module using sys.modules
-        try:
-            frc_module = sys.modules.get('backend.core.face_recognition_cache')
-            if frc_module is not None:
-                setattr(frc_module, 'face_recognition_cache', face_recognition_cache)
-        except Exception as e:
-            logger.warning(f"Could not set face_recognition_cache in module: {e}")
-        
-        # Also make it available in backend.core for imports
-        try:
-            core_module = sys.modules.get('backend.core')
-            if core_module is not None:
-                setattr(core_module, 'face_recognition_cache', face_recognition_cache)
-        except Exception as e:
-            logger.warning(f"Could not set face_recognition_cache in core module: {e}")
+        # The FaceRecognitionCache wiring that used to sit here is gone with the
+        # legacy FaceDatabase chain: it cached lookups against a store that was
+        # write-never under pgvector, i.e. it accelerated an always-empty answer.
 
-        # 2.2 Identity Index Service (for unknown/known face management)
-        logger.info("  🔄 Initializing identity index service...")
+        # 2.2 Vector search index — a DISPOSABLE acceleration layer over the
+        # authoritative vectors in identity_embeddings.embedding.
+        #
+        # The backend decides what actually runs. Under pgvector there is no
+        # separate index and therefore NO snapshot or reconciliation loops —
+        # the previous code constructed the FAISS service and started three
+        # loops unconditionally, which is why an empty index was re-serialized
+        # to disk every 5 minutes (527 times) on a pgvector deployment.
+        #
+        # Selection FAILS CLOSED: a configured-but-unusable FAISS backend stops
+        # startup unless VECTOR_INDEX_FALLBACK=pgvector is explicitly set.
+        logger.info("  🔄 Initializing vector search index...")
+        vector_index_manager = None
         try:
-            from backend.core.identity_index import IdentityIndexService
-            
-            identity_index = IdentityIndexService(
-                embedding_size=settings.IDENTITY_EMBEDDING_SIZE,
-                db_path=settings.IDENTITY_INDEX_DB_PATH
-            )
-            
-            # Load existing indexes
-            loaded = identity_index.load()
-            if loaded:
-                stats = identity_index.get_stats()
-                known_index_size = identity_index.known_index.ntotal if identity_index.known_index else 0
-                unknown_index_size = identity_index.unknown_index.ntotal if identity_index.unknown_index else 0
-                known_identities_count = len(identity_index.known_identity_to_faiss)
-                unknown_identities_count = len(identity_index.unknown_identity_to_faiss)
-                
-                logger.info(f"  ✅ Identity indexes loaded from disk")
-                logger.info(f"  📊 KNOWN index: {known_index_size} vectors, {known_identities_count} identities")
-                logger.info(f"  📊 UNKNOWN index: {unknown_index_size} vectors, {unknown_identities_count} identities")
-                
-                if known_index_size == 0:
-                    logger.warning(f"  ⚠️  KNOWN index is EMPTY! No known faces loaded yet.")
-                    logger.warning(f"  ⚠️  System will not recognize any known persons until faces are loaded from storage/faces")
-            else:
-                logger.info("  ✅ Identity indexes initialized (empty - no existing indexes found)")
-                logger.warning("  ⚠️  KNOWN index size: 0, UNKNOWN index size: 0")
-                logger.warning("  ⚠️  This means no known faces are loaded yet!")
-            
-            # Make it available globally
+            from backend.core.vector_index import select_backend
+            from backend.core.vector_index.manager import VectorIndexManager
+
+            model_version = None
+            try:
+                model_version = os.path.splitext(
+                    os.path.basename(str(settings.RECOGNITION_MODEL)))[0][:64]
+            except Exception:
+                model_version = None
+
+            selection = select_backend(
+                settings,
+                storage_dir=settings.IDENTITY_INDEX_DB_PATH,
+                model_version=model_version)
+            vector_index_manager = VectorIndexManager(selection, db_manager, settings)
+
+            startup_report = await vector_index_manager.startup()
+            logger.info("  ✅ Vector index ready: backend=%s %s",
+                        selection.backend, startup_report)
+            if selection.degraded:
+                logger.critical(
+                    "  🚨 DEGRADED: running %s while %s was configured — %s",
+                    selection.backend, selection.requested, selection.reason)
+
+            # Publish for routes/services that need status or direct access.
             try:
                 core_module = sys.modules.get('backend.core')
                 if core_module is not None:
-                    setattr(core_module, 'identity_index', identity_index)
-                
-                # Also set in identity_index module
-                idx_module = sys.modules.get('backend.core.identity_index')
-                if idx_module is not None:
-                    setattr(idx_module, 'identity_index', identity_index)
+                    setattr(core_module, 'vector_index_manager', vector_index_manager)
+                    setattr(core_module, 'vector_index', selection.index)
             except Exception as e:
-                logger.warning(f"Could not set identity_index in module: {e}")
-            
-            initialized_components.append("identity_index")
-            
-            # Start periodic auto-save for identity indexes
-            try:
-                await identity_index.start_auto_save()
-                logger.info("  ✅ Identity index auto-save started")
-            except Exception as e:
-                logger.warning(f"  ⚠️  Failed to start identity index auto-save: {e}")
-            
-            # Start background repair task (runs periodically, doesn't block startup)
-            try:
-                repair_interval = getattr(settings, 'REPAIR_FAISS_INTERVAL_HOURS', 24)
-                await identity_index.start_background_repair(db_manager, repair_interval)
-                logger.info(f"  ✅ Background FAISS repair started (interval: {repair_interval}h)")
-            except Exception as e:
-                logger.warning(f"  ⚠️  Failed to start background repair: {e}")
-            
-            # Start background rebuild worker (for large indexes that need rebuilding)
-            try:
-                await identity_index.start_background_rebuild(db_manager)
-                logger.info("  ✅ Background FAISS rebuild worker started")
-            except Exception as e:
-                logger.warning(f"  ⚠️  Failed to start background rebuild worker: {e}")
-            
+                logger.warning(f"Could not publish vector_index in module: {e}")
+
+            initialized_components.append("vector_index")
+
+            # Snapshot + reconciliation loops exist ONLY for a real FAISS index.
+            if selection.backend == "faiss":
+                autosave_interval = vector_index_manager.autosave_interval()
+
+                async def _vector_index_autosave():
+                    await vector_index_manager.save_once(trigger="autosave")
+
+                async def _vector_index_reconcile():
+                    await vector_index_manager.reconcile_once(trigger="scheduled")
+
+                background_tasks["vector_index_autosave"] = asyncio.create_task(
+                    supervised_loop(
+                        "vector_index_autosave",
+                        lambda: vector_index_manager.autosave_interval(),
+                        _vector_index_autosave,
+                        initial_delay=autosave_interval,
+                        error_backoff_base=120.0))
+                background_tasks["vector_index_reconcile"] = asyncio.create_task(
+                    supervised_loop(
+                        "vector_index_reconcile",
+                        lambda: vector_index_manager.reconcile_interval(),
+                        _vector_index_reconcile,
+                        initial_delay=600.0,
+                        error_backoff_base=600.0))
+                logger.info("  ✅ Vector index loops started (autosave every %.0fs, "
+                            "reconcile every %.0fs)", autosave_interval,
+                            vector_index_manager.reconcile_interval())
+            else:
+                logger.info("  ⏭️  No index loops: %s stores vectors in place, so "
+                            "there is nothing to snapshot or reconcile",
+                            selection.backend)
+
             # Initialize Identity Service
             from backend.core.identity_service import IdentityService
             from backend.core.identity_index_pgvector import get_pgvector_index
             
             # Get pgvector index if using pgvector backend
             pgvector_index = None
-            if getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector':
+            if settings.VECTOR_BACKEND.lower() == 'pgvector':
                 pgvector_index = get_pgvector_index()
                 if pgvector_index:
                     logger.info("  ✅ pgvector index initialized for IdentityService")
@@ -434,18 +491,13 @@ async def lifespan(app: FastAPI):
                 else:
                     logger.warning("  ⚠️  pgvector backend enabled but pgvector_index is None")
 
-            # Hydrate admin-modified settings from the database into the running
-            # config (dynamic keys only). This is what makes settings saved on
-            # the admin page SURVIVE container restarts.
-            try:
-                from backend.core import runtime_settings as _rt_settings
-                async with db_manager.get_session() as _settings_db:
-                    hydrated = await _rt_settings.hydrate_from_db(_settings_db)
-                logger.info(f"  ✅ Runtime settings hydrated from database ({hydrated} applied)")
-            except Exception as hydrate_err:
-                logger.warning(f"  ⚠️  Settings hydration failed (using env/defaults): {hydrate_err}")
-            
-            identity_service = IdentityService(identity_index, pgvector_index=pgvector_index)
+            # (Settings hydration moved to phase 1.1.1 — it has to precede
+            # every consumer, including the pgvector index geometry above.)
+
+            identity_service = IdentityService(
+                pgvector_index=pgvector_index,
+                vector_index=(vector_index_manager.index
+                              if vector_index_manager is not None else None))
             
             # Make it available globally
             try:
@@ -466,7 +518,7 @@ async def lifespan(app: FastAPI):
             try:
                 from backend.core.advanced_search import advanced_search_service
                 # Pass pgvector_index if available (same one used by IdentityService)
-                advanced_search_service.initialize(model_manager, identity_index, pgvector_index=pgvector_index)
+                advanced_search_service.initialize(model_manager, None, pgvector_index=pgvector_index)
                 if pgvector_index:
                     logger.info("  ✅ Advanced search service initialized with pgvector backend")
                 else:
@@ -520,7 +572,7 @@ async def lifespan(app: FastAPI):
                     identity_loader = IdentityLoader(identity_service, model_manager)
                     
                     # Get faces directory from settings
-                    faces_dir = getattr(settings, 'FACES_DIR', './storage/faces')
+                    faces_dir = settings.FACES_DIR
                     
                     # Load known faces into Identity system
                     async with db_manager.get_session() as db:
@@ -543,7 +595,7 @@ async def lifespan(app: FastAPI):
                         
                         # Check which backend is being used
                         use_pgvector = (
-                            getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector' and
+                            settings.VECTOR_BACKEND.lower() == 'pgvector' and
                             identity_service.use_pgvector and
                             identity_service.pgvector_index
                         )
@@ -564,9 +616,6 @@ async def lifespan(app: FastAPI):
                             logger.info(f"     UNKNOWN: FAISS={verification['unknown_index']['faiss_count']}, "
                                       f"DB={verification['unknown_index']['database_count']}, "
                                       f"Match={verification['unknown_index']['match']}")
-                        if verification.get('assets_faces', {}).get('directory_exists'):
-                            logger.info(f"     Assets/Faces: {verification['assets_faces']['loaded_count']}/"
-                                      f"{verification['assets_faces']['file_count']} loaded")
                         
                         if verification['known_index'].get('issues'):
                             logger.warning(f"  ⚠️  KNOWN index issues: {verification['known_index']['issues']}")
@@ -576,63 +625,28 @@ async def lifespan(app: FastAPI):
                         # Repair orphaned entries AFTER loading known faces (critical - must run after loading)
                         # Only repair FAISS if using FAISS backend
                         use_pgvector = (
-                            getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector' and
+                            settings.VECTOR_BACKEND.lower() == 'pgvector' and
                             identity_service.use_pgvector and
                             identity_service.pgvector_index
                         )
                         
                         if not use_pgvector:
-                            # FAISS backend - repair orphaned entries
-                            repair_on_startup = getattr(settings, 'REPAIR_FAISS_ON_STARTUP', True)
-                            if repair_on_startup:
-                                try:
-                                    logger.info("  🔧 Repairing orphaned FAISS entries (efficient mode)...")
-                                    
-                                    # Use async methods that use database queries instead of loading all IDs
-                                    # Step 1: Remove entries for identities that don't exist
-                                    repair_stats = await identity_index.repair_orphaned_entries_async(db)
-                                    
-                                    # Step 2: Remove embeddings that don't have database records (this is the critical one)
-                                    known_emb_repair = await identity_index.repair_orphaned_embeddings_async(db, 'known')
-                                    unknown_emb_repair = await identity_index.repair_orphaned_embeddings_async(db, 'unknown')
-                                    
-                                    total_removed = (
-                                        repair_stats['known_removed'] + repair_stats['unknown_removed'] +
-                                        known_emb_repair['removed'] + unknown_emb_repair['removed']
-                                    )
-                                    
-                                    if total_removed > 0:
-                                        logger.warning(f"  ⚠️  Removed {total_removed} orphaned entries:")
-                                        logger.warning(f"     - {repair_stats['known_removed']} KNOWN identities")
-                                        logger.warning(f"     - {repair_stats['unknown_removed']} UNKNOWN identities")
-                                        logger.warning(f"     - {known_emb_repair['removed']} KNOWN embeddings")
-                                        logger.warning(f"     - {unknown_emb_repair['removed']} UNKNOWN embeddings")
-                                        # Save repaired indexes
-                                        identity_index.save()
-                                        logger.info("  💾 Saved repaired indexes to disk")
-                                        
-                                        # Re-verify after repair
-                                        verification_after = await identity_loader.verify_indexes(db)
-                                        logger.info(f"  📊 Index Verification AFTER Repair:")
-                                        if use_pgvector:
-                                            logger.info(f"     KNOWN: pgvector={verification_after['known_index']['pgvector_count']}, "
-                                                      f"DB={verification_after['known_index']['database_count']}, "
-                                                      f"Match={verification_after['known_index']['match']}")
-                                        else:
-                                            logger.info(f"     KNOWN: FAISS={verification_after['known_index']['faiss_count']}, "
-                                                      f"DB={verification_after['known_index']['database_count']}, "
-                                                      f"Match={verification_after['known_index']['match']}")
-                                        if verification_after['known_index'].get('issues'):
-                                            logger.warning(f"  ⚠️  KNOWN index still has issues: {verification_after['known_index']['issues']}")
-                                    else:
-                                        logger.info("  ✅ No orphaned entries found - indexes are clean")
-                                except Exception as e:
-                                    logger.warning(f"  ⚠️  Failed to repair orphaned entries: {e}")
-                                    logger.exception("  Repair error details:")
-                                    # Non-critical, continue
-                            else:
-                                logger.info("  ⏭️  FAISS repair on startup disabled (REPAIR_FAISS_ON_STARTUP=False)")
-                                logger.info("  ℹ️  Repair will run in background or on-demand if needed")
+                            # FAISS backend: converge the index onto PostgreSQL.
+                            # Replaces repair_orphaned_* on the legacy service,
+                            # which compared COUNT(*) against ntotal — blind to
+                            # the common case of one vector missing and one
+                            # stale vector present, which counts identically to
+                            # a healthy index.
+                            try:
+                                if vector_index_manager is not None:
+                                    _recon = await vector_index_manager.reconcile_once(
+                                        trigger="startup")
+                                    logger.info("  🔧 Vector index reconciliation: %s", _recon)
+                                else:
+                                    logger.warning("  ⚠️  No vector index manager; "
+                                                   "skipping reconciliation")
+                            except Exception as repair_error:
+                                logger.warning(f"  ⚠️  Reconciliation failed: {repair_error}")
                         else:
                             logger.info("  ⏭️  Skipping FAISS repair (using pgvector backend)")
                             logger.info("  ℹ️  pgvector doesn't require FAISS repair - all data is in PostgreSQL")
@@ -644,8 +658,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"  ❌ Identity index initialization failed: {e}")
             logger.warning("    Continuing without identity management (unknown faces will use legacy system)")
-            identity_index = None
             identity_service = None
+
+        # 2.2f Crash-safe embedding provenance: a worker that died between the
+        # embedding commit and its detection's persistence leaves a camera-origin
+        # embedding with no detection. Reconcile it now (canonical path, vector
+        # index up) and again on every retention cycle. Idempotent.
+        try:
+            from backend.core.identity_retention import identity_retention_manager as _irm
+            if _irm:
+                _stale = await _irm.reconcile_orphan_camera_embeddings()
+                if _stale.get("embeddings"):
+                    logger.warning("  🧹 Reconciled %s stale camera embedding(s) from a previous crash",
+                                   _stale["embeddings"])
+        except Exception as e:
+            logger.error(f"  ❌ Stale camera embedding reconciliation failed at startup: {e}")
 
         # ==================== PHASE 3: Core Services ====================
         logger.info("⚙️ Phase 3: Starting Core Services...")
@@ -677,7 +704,7 @@ async def lifespan(app: FastAPI):
         logger.info("  🔄 Starting data retention manager...")
         try:
             await retention_manager.start()
-            logger.info(f"  ✅ Data retention started (keep: {DATA_RETENTION_DAYS} days)")
+            logger.info(f"  ✅ Data retention started (keep: {settings.DATA_RETENTION_DAYS} days)")
             initialized_components.append("retention_manager")
         except Exception as e:
             logger.error(f"  ❌ Data retention failed: {e}")
@@ -702,12 +729,51 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"  ❌ WebSocket Redis pub/sub initialization failed: {e}")
                 # Non-critical - continue without Redis pub/sub
+
+            # Multi-worker single-flight requires shared locking infrastructure.
+            # Documented warning path: with WORKERS>1 and no Redis, distributed
+            # locks degrade to per-process guards — duplicate intelligence jobs
+            # and assessment computations become possible (assessment ROWS
+            # still dedup via the DB unique constraint).
+            try:
+                from backend.core.distributed_lock import redis_available
+                workers_configured = int(settings.WORKERS or 1)
+                if workers_configured > 1 and not redis_available():
+                    logger.warning(
+                        "  ⚠️  WORKERS=%s without Redis: cross-worker single-flight "
+                        "locks are DEGRADED to per-process guards. Configure Redis "
+                        "(shared locking infrastructure) for safe multi-worker "
+                        "operation.", workers_configured)
+            except Exception:
+                logger.debug("multi-worker lock check skipped", exc_info=True)
+
             logger.info("  ✅ Background task notifier initialized")
             initialized_components.append("task_notifier")
         except Exception as e:
             logger.warning(f"  ⚠️  Task notifier initialization failed: {e}")
             # Non-critical
         
+        # 3.2.9 Offline map availability (MapLibre + Martin)
+        # One deep check now so the first /api/maps/availability answer is
+        # real, then a supervised refresh loop. Failure here must never block
+        # boot: maps degrade to "unavailable", the service does not.
+        logger.info("  🔄 Checking offline map datasets (Martin)...")
+        try:
+            from backend.core import map_availability
+            snap = await map_availability.refresh()
+            await map_availability.start_refresh_loop()
+            # Any installed archive whose CONTENT has never been measured is
+            # reported unavailable, so measure it — in the background, because
+            # decoding tiles must not stand between the process and serving
+            # traffic. The dataset stays unavailable until the check passes.
+            await map_availability.start_boot_verification()
+            initialized_components.append("map_availability")
+            logger.info("  ✅ Map availability: martin=%s %s", snap.martin_reachable,
+                        {k: (v["state"] if v["available"] else v["reason"])
+                         for k, v in snap.styles.items()})
+        except Exception as e:
+            logger.warning(f"  ⚠️  Map availability check failed (maps report unavailable): {e}")
+
         # 3.3.0 Log Cleanup Manager
         logger.info("  🔄 Starting log cleanup manager...")
         try:
@@ -793,6 +859,33 @@ async def lifespan(app: FastAPI):
             logger.error(f"  ❌ Batch flusher failed: {e}")
             # Non-critical
 
+        # 3.6.1 ML drift monitor (REPORT-ONLY — never triggers deployment or
+        # retraining; interval live-tunable; startup delay avoids competing
+        # with boot). Non-critical: RULES mode needs none of this.
+        logger.info("  🔄 Starting ML drift monitor...")
+        try:
+            from backend.core.service_supervisor import supervised_loop as _supervised_loop
+            from backend.ml.drift_service import drift_service as _drift_service
+
+            def _drift_interval():
+                hours = float(settings.ML_DRIFT_CHECK_INTERVAL_HOURS or 24)
+                return max(3600.0, hours * 3600.0)
+
+            ml_drift_task = asyncio.create_task(
+                _supervised_loop(
+                    "ml_drift_monitor",
+                    _drift_interval,
+                    _drift_service.scheduled_check,
+                    initial_delay=600.0,
+                ),
+                name="ml_drift_monitor",
+            )
+            logger.info("  ✅ ML drift monitor started (report-only)")
+            initialized_components.append("ml_drift_monitor")
+        except Exception as e:
+            logger.error(f"  ❌ ML drift monitor failed: {e}")
+            # Non-critical
+
         # 3.7 Event-loop lag monitor: measures how late a 1s sleep wakes up.
         # Lag > 0.5s means something is blocking the loop — exactly the failure
         # mode behind the 499/502 outages — so it's exported as a gauge and
@@ -829,7 +922,7 @@ async def lifespan(app: FastAPI):
         # ==================== PHASE 4: Worker Pool ====================
         logger.info("👷 Phase 4: Starting Worker Pool...")
 
-        worker_count = getattr(settings, 'QUEUE_WORKERS', 4)
+        worker_count = settings.QUEUE_WORKERS
 
         for i in range(worker_count):
             try:
@@ -1035,10 +1128,7 @@ async def lifespan(app: FastAPI):
             ("retention_manager", "Stopping data retention", lambda: retention_manager if 'retention_manager' in initialized_components else None),
             ("identity_retention", "Stopping identity retention", lambda: identity_retention_manager if 'identity_retention' in initialized_components else None),
             ("identity_clustering", "Stopping identity clustering", lambda: clustering_service if 'identity_clustering' in initialized_components else None),
-            ("identity_index_auto_save", "Stopping identity index auto-save", lambda: identity_index if 'identity_index' in initialized_components else None),
-            ("identity_index_background_repair", "Stopping background FAISS repair", lambda: identity_index if 'identity_index' in initialized_components else None),
-            ("identity_index_background_rebuild", "Stopping background FAISS rebuild", lambda: identity_index if 'identity_index' in initialized_components else None),
-            ("identity_index", "Saving identity indexes", lambda: identity_index if 'identity_index' in initialized_components else None),
+            ("vector_index", "Saving vector index snapshot", lambda: vector_index_manager if 'vector_index' in initialized_components else None),
             ("batch_writer", "Stopping batch writer", lambda: batch_writer if 'batch_writer' in initialized_components else None),
             ("face_tracker", "Stopping face tracker", lambda: face_tracker if 'face_tracker' in initialized_components else None),
             ("production_cache", "Stopping production cache", lambda: production_cache_manager if 'production_cache' in initialized_components else None),
@@ -1065,57 +1155,24 @@ async def lifespan(app: FastAPI):
                 logger.info(f"  🔄 {description}...")
                 start = time.time()
                 
-                # Special handling for identity_index_auto_save (stop auto-save task)
-                if component_name == "identity_index_auto_save" and component:
+                # Vector index: snapshot on the way out. Off-loop (serializing
+                # 100k vectors writes 201 MB) and BOUNDED — abandoning a timed-out
+                # save is safe because the snapshot commits through a single
+                # atomic pointer swap, so on-disk state is always the last
+                # COMPLETE snapshot, and PostgreSQL can rebuild it regardless.
+                if component_name == "vector_index" and component:
                     try:
-                        await asyncio.wait_for(component.stop_auto_save(), timeout=10.0)
-                        logger.info(f"    ✅ Auto-save stopped")
-                        shutdown_results[component_name] = "stopped"
-                    except Exception as e:
-                        logger.error(f"    ❌ Failed to stop auto-save: {e}")
-                        shutdown_results[component_name] = f"error: {e}"
-                    continue
-                
-                # Special handling for identity_index_background_repair (stop repair task)
-                if component_name == "identity_index_background_repair" and component:
-                    try:
-                        await asyncio.wait_for(component.stop_background_repair(), timeout=10.0)
-                        logger.info(f"    ✅ Background repair stopped")
-                        shutdown_results[component_name] = "stopped"
-                    except Exception as e:
-                        logger.error(f"    ❌ Failed to stop background repair: {e}")
-                        shutdown_results[component_name] = f"error: {e}"
-                    continue
-                
-                # Special handling for identity_index_background_rebuild (stop rebuild task)
-                if component_name == "identity_index_background_rebuild" and component:
-                    try:
-                        await asyncio.wait_for(component.stop_background_rebuild(), timeout=10.0)
-                        logger.info(f"    ✅ Background rebuild stopped")
-                        shutdown_results[component_name] = "stopped"
-                    except Exception as e:
-                        logger.error(f"    ❌ Failed to stop background rebuild: {e}")
-                        shutdown_results[component_name] = f"error: {e}"
-                    continue
-                
-                # Special handling for identity_index (save instead of stop).
-                # Off-loop (serialization blocks for seconds at scale) and
-                # BOUNDED: abandoning a timed-out save is safe now that saves
-                # are atomic — the on-disk pair is always the last complete
-                # snapshot, never a half-written one.
-                if component_name == "identity_index" and component:
-                    try:
-                        await asyncio.wait_for(asyncio.to_thread(component.save), timeout=30.0)
-                        logger.info(f"    ✅ Indexes saved")
+                        result = await asyncio.wait_for(
+                            component.save_once(trigger="shutdown"), timeout=45.0)
+                        logger.info(f"    ✅ Vector index snapshot: {result}")
                         shutdown_results[component_name] = "saved"
                     except asyncio.TimeoutError:
                         logger.error(
-                            "    ❌ Index save timed out after 30s — on-disk index "
-                            "remains the last atomic save"
-                        )
+                            "    ❌ Snapshot timed out after 45s — the previous "
+                            "snapshot remains valid and PostgreSQL is authoritative")
                         shutdown_results[component_name] = "timeout"
                     except Exception as e:
-                        logger.error(f"    ❌ Failed to save indexes: {e}")
+                        logger.error(f"    ❌ Failed to snapshot vector index: {e}")
                         shutdown_results[component_name] = f"error: {e}"
                     continue
 

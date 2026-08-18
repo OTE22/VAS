@@ -33,7 +33,6 @@ chromadb_data/
 sql_agent/chromadb_data/
 conversation_cache/
 database/face_database/
-tiles/
 debug/
 backup/
 *.dump
@@ -82,3 +81,8 @@ Thumbs.db
 Docs/
 *.md
 !README.md
+
+# Map datasets are mounted, never baked. The regression fixtures are generated
+# on demand and mounted the same way.
+map-data/
+map-data-test/

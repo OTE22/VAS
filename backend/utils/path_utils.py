@@ -42,7 +42,7 @@ def normalize_storage_path(file_path: Optional[str], storage_dir: Optional[str] 
     # Get storage directory
     if storage_dir is None:
         from config import settings
-        storage_dir = getattr(settings, 'STORAGE_DIR', './storage')
+        storage_dir = settings.STORAGE_DIR
     
     storage_dir_abs = os.path.abspath(storage_dir)
     

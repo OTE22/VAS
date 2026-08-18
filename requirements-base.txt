@@ -1,0 +1,151 @@
+# Shared runtime dependencies — everything that is identical on CPU and GPU.
+#
+# Included by BOTH requirements-cpu.txt and requirements-gpu.txt via `-r`.
+# Add and remove packages HERE unless the package genuinely differs between
+# the two hardware targets (that is only: the ONNX Runtime build and the FAISS
+# build — see the two files that include this one).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The CPU and GPU lists were standalone and 51 of their ~55 lines were
+# byte-identical. They had already drifted: `sentence-transformers` and `tqdm`
+# existed only on CPU, and `Pillow` was pinned on CPU but unpinned on GPU, so
+# the same commit could ship two different Pillow majors. Inheritance removes
+# the class of bug rather than the instances.
+#
+# NOTE ON REPRODUCIBILITY: most direct dependencies below carry no version, so
+# resolving this file twice can produce two different environments from the
+# same commit. A requirements-cpu.lock.txt intended to close that gap was
+# DELETED because it had become actively harmful (nothing installed it; it was
+# frozen from a container with pytest installed by hand; it carried a package
+# removed from the list long before; and it was missing sqlglot, which broke 18
+# sql_guard tests in a rebuilt container for no code reason).
+#
+# To reintroduce one, generate it from a CLEAN build (no INSTALL_DEV, no ad-hoc
+# installs) and wire it into the Dockerfile in the same change:
+#
+#   docker compose -f docker/docker-compose.cpu.yml build --no-cache face_recognition
+#   docker run --rm --entrypoint python face-detector/api:dev -m pip freeze > requirements-cpu.lock.txt
+#   # then in Dockerfile.cpu:
+#   #   pip install --no-cache-dir --no-deps -r requirements-cpu.lock.txt && pip check
+#
+# tests/test_compose_and_deployment.py::test_no_stale_lock_artifact enforces
+# that: if a lock file exists, the build must install it, it must contain
+# everything pinned here, and it must not carry development-only packages.
+
+# ---------------------------------------------------------------------------
+# Core CV / numerics
+# Pinned: an unpinned runtime resolves to whatever is newest at build time, so
+# two builds of the same commit can ship different inference behaviour.
+#
+# opencv-contrib-python is deliberately ABSENT: it installs a SECOND OpenCV
+# distribution alongside the headless one below. Both provide `cv2`, so the
+# effective version depended on installation order — a running container once
+# had headless 4.9.0.80 pinned with contrib 4.11.0.86 shadowing it.
+# ---------------------------------------------------------------------------
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+scikit-image
+scipy                      # backend/ml/drift_service.py; was only ever
+                           # transitive via scikit-learn, which is fragile
+
+# ---------------------------------------------------------------------------
+# Web framework and ASGI server
+# uvicorn/gunicorn/uvloop/httptools/python-multipart/websockets are never
+# imported by application code — they are the server and its speed extras.
+# ---------------------------------------------------------------------------
+fastapi
+uvicorn[standard]
+gunicorn
+uvloop
+httptools
+python-multipart
+websockets
+httpx
+
+# ---------------------------------------------------------------------------
+# Database and caching
+# ---------------------------------------------------------------------------
+sqlalchemy
+asyncpg
+psycopg2-binary
+alembic
+pgvector>=0.2.4            # PostgreSQL vector similarity search
+redis[asyncio]
+hiredis                    # C parser used automatically by redis
+
+# ---------------------------------------------------------------------------
+# Configuration, monitoring, metrics
+# ---------------------------------------------------------------------------
+python-dotenv
+pydantic
+pydantic-settings
+prometheus-client
+psutil                     # backend/core/system_metrics.py — was imported
+                           # under a try/except while declared nowhere
+
+# ---------------------------------------------------------------------------
+# Security. Auth uses bcrypt and PyJWT directly.
+# ---------------------------------------------------------------------------
+PyJWT
+bcrypt
+cryptography               # backend/core/operational_metrics.py reads the TLS
+                           # certificate to export its expiry as a metric. It
+                           # used to arrive only as an extra of
+                           # python-jose[cryptography]; removing that unused
+                           # package took this with it, and the certificate
+                           # expiry gauge went silent. Declared where used.
+
+# ---------------------------------------------------------------------------
+# SQL agent
+#
+# sqlglot is REQUIRED, not optional: sql_agent/security/sql_guard.py fails
+# closed without it, because a regex fallback reintroduces the bypasses it
+# exists to prevent (`BEGIN READ WRITE; DELETE ...` and unrestricted table
+# access).
+#
+# langchain-core arrives transitively through langchain-ollama; the umbrella
+# `langchain`, `langchain-community` and `langchain-experimental` packages were
+# removed because nothing imports them.
+# ---------------------------------------------------------------------------
+sqlglot==25.34.1
+langchain-ollama
+langgraph
+chromadb
+
+# ---------------------------------------------------------------------------
+# Clustering
+# hdbscan is optional at runtime (identity_clustering falls back to sklearn)
+# but was imported while declared nowhere, so the fallback fired for a missing
+# dependency rather than for a deliberate choice.
+# ---------------------------------------------------------------------------
+scikit-learn>=1.3.0
+hdbscan
+
+# ---------------------------------------------------------------------------
+# ML dataset artefacts. backend/ml/dataset_builder.py writes training datasets
+# as Parquet and trainer.py reads them back, both importing pyarrow directly.
+# It used to arrive only as a transitive dependency of pandas — which nothing
+# imports — so removing pandas silently broke ML training with
+# "No module named 'pyarrow'". Declared where it is actually used.
+# ---------------------------------------------------------------------------
+pyarrow
+
+# ---------------------------------------------------------------------------
+# Maps. Offline by design — see Docs/56_OFFLINE_MAP_TILES_SETUP.md.
+# ---------------------------------------------------------------------------
+tqdm>=4.66.0               # progress bars for the tile download script
+
+# ---------------------------------------------------------------------------
+# Document export
+# ---------------------------------------------------------------------------
+reportlab
+python-docx
+requests
+
+# Pillow — a DIRECT dependency, declared here on purpose.
+# scripts/map_data/coverage_check.py DECODES tiles to prove a dataset carries
+# map data; an archive of 145,718 identical 'Access blocked' PNGs passed every
+# structural check before that gate existed. It used to arrive only
+# transitively, which is the exact breakage this file's header warns about.
+Pillow>=10.0.0

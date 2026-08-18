@@ -540,3 +540,75 @@ html {
     scroll-behavior: smooth;
 }
 
+
+/* ---------------------------------------------------------------------------
+   Build indicator
+   The tutorial content is served by the API, so it is by construction the
+   running build's copy. This states WHICH build, from the runtime fingerprint
+   on /health/detailed, so the claim is checkable rather than asserted.
+   Hidden until populated: an empty line is worse than no line.
+   --------------------------------------------------------------------------- */
+.tutorial-build {
+    margin-top: 8px;
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+    color: rgba(0, 255, 150, 0.75);
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.tutorial-build i {
+    margin-right: 6px;
+    opacity: 0.8;
+}
+
+/* [hidden] needs an explicit rule: the display on .tutorial-build would
+   otherwise win and the empty element would still take space. */
+.tutorial-build[hidden] {
+    display: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Further reading — where to go when the tutorial is not enough.
+   --------------------------------------------------------------------------- */
+.tutorial-further-reading {
+    margin: 32px auto 48px;
+    max-width: 1200px;
+    padding: 20px 24px;
+    border: 1px solid rgba(0, 255, 150, 0.25);
+    border-left: 3px solid #00ff96;
+    border-radius: 6px;
+    background: rgba(0, 255, 150, 0.04);
+}
+
+.tutorial-further-reading h2 {
+    margin: 0 0 12px;
+    font-size: 1.1rem;
+    color: #00ff96;
+    letter-spacing: 0.03em;
+}
+
+.tutorial-further-reading ul {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.tutorial-further-reading li {
+    margin-bottom: 8px;
+    line-height: 1.6;
+}
+
+.tutorial-further-reading code {
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.35);
+    color: #00ff96;
+    font-size: 0.88em;
+}
+
+/* Keyboard focus must be visible on the panels, which are now tabbable
+   (tabindex="0") so a keyboard user can scroll the section they selected. */
+.tutorial-section:focus-visible,
+.tutorial-nav button:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
+}

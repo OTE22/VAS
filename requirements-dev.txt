@@ -1,13 +1,27 @@
 # Development and test dependencies.
 #
-# The integration suite runs INSIDE the API container against the live service:
+# The suite runs INSIDE the API container against the live service. Build the
+# image with the dev extras rather than installing them by hand — recreating
+# the container drops anything added ad-hoc:
 #
-#   docker exec face_recognition_api pip install -r /app/requirements-dev.txt
+#   docker compose -f docker/docker-compose.cpu.yml build \
+#       --build-arg INSTALL_DEV=true face_recognition
 #   docker exec face_recognition_api python -m pytest tests/ -q
 #
-# Kept out of requirements-cpu.txt / requirements-gpu.txt so production images
-# do not ship a test runner. Recreating the container drops anything installed
-# ad-hoc, so install from this file rather than by hand.
+# Kept out of requirements-base.txt / -cpu.txt / -gpu.txt so production images
+# ship no test runner: the Dockerfiles default INSTALL_DEV=false.
+#
+# NOTHING HERE MAY RE-DECLARE A RUNTIME PACKAGE. This file is installed AFTER
+# the runtime set, so a pin here silently overrides production's resolution and
+# the suite then exercises versions production never runs. That had already
+# happened: this file pinned `requests==2.32.5` while requirements-base.txt
+# leaves `requests` unpinned, so every test image was downgraded from the
+# 2.34.x that a clean production build installs.
 
 pytest==9.1.1
-requests==2.32.5
+
+# tests/test_logging_pipeline.py parses the logging config with `import yaml`.
+# It only ever worked because chromadb and kubernetes happen to pull PyYAML in
+# transitively — the same accident that made pyarrow and cryptography look
+# installed until the packages that dragged them in were removed.
+PyYAML

@@ -22,10 +22,11 @@ if parent_dir not in sys.path:
 from db_connection import get_db
 from db_models import ChatbotAuditLog, User
 from backend.auth.auth_service import get_current_user, require_role
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Audit"])
 
 
 def to_naive_utc(dt: datetime) -> datetime:
@@ -49,7 +50,11 @@ def to_naive_utc(dt: datetime) -> datetime:
 
 class AuditLogResponse(BaseModel):
     id: int
-    user_id: int
+    # NULL after the account was deleted (FK SET NULL, migration b0c1d2e3f4a5);
+    # the durable numeric attribution is historical_user_id, stamped at deletion
+    # time — read straight from the column, never reconstructed here.
+    user_id: Optional[int] = None
+    historical_user_id: Optional[int] = None
     username: str
     query: str
     response: Optional[str]
@@ -137,6 +142,7 @@ async def get_chatbot_audit_logs(
             AuditLogResponse(
                 id=log.id,
                 user_id=log.user_id,
+                historical_user_id=log.historical_user_id,
                 username=log.username,
                 query=log.query,
                 response=log.response,
@@ -144,7 +150,7 @@ async def get_chatbot_audit_logs(
                 error_message=log.error_message,
                 processing_time_ms=log.processing_time_ms,
                 session_id=log.session_id,
-                created_at=log.created_at.isoformat()
+                created_at=iso_utc(log.created_at)
             )
             for log in logs
         ]
@@ -239,6 +245,7 @@ async def get_chatbot_audit_log(
     return AuditLogResponse(
         id=log.id,
         user_id=log.user_id,
+        historical_user_id=log.historical_user_id,
         username=log.username,
         query=log.query,
         response=log.response,
@@ -246,6 +253,6 @@ async def get_chatbot_audit_log(
         error_message=log.error_message,
         processing_time_ms=log.processing_time_ms,
         session_id=log.session_id,
-        created_at=log.created_at.isoformat()
+        created_at=iso_utc(log.created_at)
     )
 

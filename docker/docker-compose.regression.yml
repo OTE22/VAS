@@ -1,0 +1,182 @@
+# =============================================================================
+# Isolated regression stack — the ONLY supported way to run the full test suite.
+#
+#   scripts/run_regression_isolated.sh          (creates, asserts, runs, tears down)
+#
+# SELF-CONTAINED. This stack starts its own PostgreSQL, Redis, API, Martin and
+# nginx on its own private network, and requires NO development container to be
+# running. Verify that claim rather than trusting it:
+#
+#   docker compose -f docker/docker-compose.cpu.yml stop
+#   scripts/run_regression_isolated.sh
+#
+# It used to join the dev network as an external and start only redis + api, so
+# every map assertion — the availability probe, the served-tile freshness
+# check, the style/zoom coverage check — was really measuring the DEVELOPMENT
+# Martin serving the DEVELOPMENT map-data. A regression run that validates
+# another stack's data proves nothing about the code under test, and it cannot
+# run at all when that stack is down.
+#
+# Because the network is private, services can safely take the SAME aliases the
+# production config expects (`face_recognition`, `martin`, `redis`, `postgres`).
+# nginx.conf resolves its upstreams by service name — `face_recognition:8000`,
+# `martin:3000` — so the real production nginx config is exercised unmodified,
+# and nothing here is reachable from, or reachable by, the dev project.
+#
+# Map data is a dedicated immutable fixture tree built by
+# scripts/map_data/make_test_fixtures.py, mounted read-only, with its OWN
+# content ledger. The suite therefore validates fixtures it controls instead of
+# whatever happens to be installed on the developer's machine.
+#
+# Parameterised by REGRESSION_ID (exported by the runner);
+# `docker compose -p fr_regression_<id> ... down -v` removes all of it.
+# =============================================================================
+
+services:
+  postgres_regression:
+    image: pgvector/pgvector:pg15
+    container_name: fr_regression_${REGRESSION_ID:?set by scripts/run_regression_isolated.sh}_db
+    command: ["postgres", "-c", "max_connections=200",
+              "-c", "shared_preload_libraries=pg_stat_statements"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin
+      # Deliberately the SAME database name as production. init-db.sql does
+      # `\c face_recognition` and creates uuid-ossp, pg_stat_statements and
+      # pgvector inside it; a differently-named database would silently skip
+      # every one of those and the suite would fail on a missing `vector` type.
+      # Isolation comes from this being a separate SERVER, which is stronger
+      # than a differently-named database on the developer's own postgres.
+      POSTGRES_DB: face_recognition
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - ../init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+      # Roles are CLUSTER-wide, so a fresh server has none. The old design
+      # created a scratch database on the developer's postgres and silently
+      # inherited fr_readonly from it; here it has to be created, or the SQL
+      # agent cannot authenticate and its read-only guard cannot be tested.
+      - ./regression-roles.sql:/docker-entrypoint-initdb.d/02-roles.sql:ro
+      # tmpfs, not a named volume: the database is scratch by definition and
+      # this removes the create/drop dance the runner used to perform against
+      # the developer's own postgres server.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d face_recognition"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      regression:
+        aliases: [postgres]
+
+  redis_regression:
+    image: redis:7-alpine
+    container_name: fr_regression_${REGRESSION_ID}_redis
+    # Logical DB numbers do not isolate pub/sub or FLUSHALL; a separate
+    # instance does.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      regression:
+        aliases: [redis]
+
+  martin_regression:
+    image: ghcr.io/maplibre/martin:1.13.0
+    container_name: fr_regression_${REGRESSION_ID}_martin
+    command: ["--config", "/config/martin.yaml"]
+    volumes:
+      # The FIXTURE tree, not map-data/. Read-only, and built before the stack
+      # starts by scripts/map_data/make_test_fixtures.py.
+      - ../map-data-test:/map-data:ro
+      - ../config/martin.yaml:/config/martin.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      regression:
+        aliases: [martin]
+
+  face_recognition_regression:
+    # Extends the dev API service so the image and env contract cannot drift.
+    extends:
+      file: docker-compose.cpu.yml
+      service: face_recognition
+    container_name: fr_regression_${REGRESSION_ID}_api
+    depends_on: !override
+      postgres_regression:
+        condition: service_healthy
+      redis_regression:
+        condition: service_healthy
+      martin_regression:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition
+      REDIS_URL: redis://redis:6379/0
+      MIGRATIONS_MODE: run
+      # The fixture tree; production/ and metadata/ (including the content
+      # ledger) are derived from it, so the archives and the verdicts that
+      # authorize them can never come from different trees.
+      MAP_DATA_DIR: /app/map-data-test
+      # regression-only marker read by the isolation assertions
+      REGRESSION_ISOLATION_ID: ${REGRESSION_ID}
+    volumes: !override
+      - ../weights:/app/weights:ro
+      - ../assets:/app/assets:ro
+      - ../:/app
+      - fr_regression_storage:/app/storage
+      - fr_regression_ml:/app/models/ml
+      - fr_regression_database:/app/database
+      - fr_regression_logs:/var/log/face-recognition
+      - fr_regression_chroma:/home/appuser/.cache/chroma
+    # !override, not a merge: `extends` would otherwise UNION this list with the
+    # dev service's `face_recognition_network`, quietly putting the regression
+    # API back on the developer's network — the exact coupling this stack exists
+    # to remove.
+    networks: !override
+      regression:
+        aliases: [face_recognition]
+
+  nginx_regression:
+    image: nginx:alpine
+    container_name: fr_regression_${REGRESSION_ID}_nginx
+    # The PRODUCTION config, unmodified: it resolves face_recognition:8000 and
+    # martin:3000, which the aliases above provide inside this network.
+    volumes:
+      - ../nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../frontend:/usr/share/nginx/html/frontend:ro
+      - ../icons:/usr/share/nginx/html/icons:ro
+    depends_on:
+      face_recognition_regression:
+        condition: service_healthy
+      martin_regression:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      regression:
+        aliases: [nginx]
+
+volumes:
+  fr_regression_storage:
+  fr_regression_ml:
+  fr_regression_database:
+  fr_regression_logs:
+  fr_regression_chroma:
+
+networks:
+  # Private to this project. NOT external: the whole point is that no dev
+  # container is reachable, and none can reach in.
+  regression:
+    driver: bridge

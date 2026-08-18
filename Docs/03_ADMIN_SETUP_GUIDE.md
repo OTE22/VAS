@@ -180,7 +180,7 @@ If you need to create an admin user directly in the database (e.g., if you lost 
 
 ```bash
 # Using Docker
-docker-compose exec postgres psql -U postgres -d face_recognition
+docker compose -f docker/docker-compose.cpu.yml exec postgres psql -U postgres -d face_recognition
 
 # Or directly
 psql -U postgres -d face_recognition

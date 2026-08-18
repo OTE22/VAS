@@ -14,7 +14,8 @@ import uuid
 import logging
 from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Body
+from fastapi import (APIRouter, BackgroundTasks, Depends, HTTPException,
+                     Request, Body)
 from fastapi.responses import JSONResponse
 import json
 import cv2
@@ -27,13 +28,152 @@ if parent_dir not in sys.path:
 
 from backend.core import processing_queue
 from backend.core.metrics import metrics_requests_total
+
+# ---------------------------------------------------------------------------
+# Cardinality guard for the pipeline_id metric label.
+#
+# pipeline_id is a caller-chosen URL segment (any ^[A-Za-z0-9_-]{3,100}$ —
+# validate_pipeline_id checks shape, not existence), and Prometheus never
+# reclaims a label value once seen. Without a cap, an authenticated sender
+# cycling names would grow the registry without bound and every scrape would
+# ship the whole graveyard. Real deployments have a handful of cameras; the
+# first N distinct ids keep their own series, everything after collapses into
+# one "other" series. The DATA path is unaffected — only the metric label.
+# ---------------------------------------------------------------------------
+_METRIC_PIPELINE_LABEL_CAP = 50
+_metric_pipeline_labels_seen: set = set()
+
+
+def _metric_pipeline_label(pipeline_id: str) -> str:
+    if pipeline_id in _metric_pipeline_labels_seen:
+        return pipeline_id
+    if len(_metric_pipeline_labels_seen) < _METRIC_PIPELINE_LABEL_CAP:
+        _metric_pipeline_labels_seen.add(pipeline_id)
+        return pipeline_id
+    return "other"
+from backend.auth.auth_service import require_role
 from backend.routes.utils import validate_pipeline_id, validate_image_content
 from utils.helpers import extract_images_from_payload
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Ingest (Webhook)"])
+
+_UNENFORCED_WARNED = False
+
+
+async def require_webhook_key(request: Request) -> None:
+    """Reject an ingest request that does not carry a valid key.
+
+    Attached with Depends rather than implemented inside the handler or as
+    middleware, for two concrete reasons:
+
+      * a dependency runs BEFORE the route body, so an unauthenticated caller
+        never gets 25 MB of body buffered by parse_webhook_request on its behalf;
+      * route-level attachment is visible in `app.routes`, which is what lets a
+        test assert that no webhook route is unguarded without grepping source.
+    """
+    global _UNENFORCED_WARNED
+    from backend.core import metrics
+    from backend.security import webhook_auth, webhook_credentials
+
+    def _count(result: str) -> None:
+        counter = getattr(metrics, "metrics_webhook_auth", None)
+        if counter is not None:
+            try:
+                counter.labels(result=result).inc()
+            except Exception:                                  # noqa: BLE001
+                pass
+
+    def _count_source(source: str) -> None:
+        counter = getattr(metrics, "metrics_webhook_auth_source", None)
+        if counter is not None:
+            try:
+                counter.labels(source=source).inc()
+            except Exception:                                  # noqa: BLE001
+                pass
+
+    mode = webhook_auth.auth_mode(settings)
+    if mode == webhook_auth.MODE_OFF:
+        _count("unenforced")
+        return
+
+    # Load the issued-credential snapshot. After the first request of a worker's
+    # life this awaits nothing that touches I/O: past the TTL it spawns a
+    # refresh and serves the current snapshot. It never reads the request body,
+    # so an unauthenticated oversized payload is still rejected unbuffered.
+    await webhook_credentials.ensure_fresh()
+
+    # BOTH sets must be empty. Checking only the environment keys would mean an
+    # operator who mints a credential in the admin UI without also setting
+    # WEBHOOK_API_KEYS gets wide-open ingest while believing it is authenticated
+    # — the feature would make this posture worse than having no feature at all.
+    if not webhook_auth.keys_configured(settings) and not webhook_credentials.any_cached():
+        # Development convenience only: production cannot reach this state,
+        # because config_guard refuses to start without a key. Warn once per
+        # process rather than per request so it is visible but not a flood.
+        if not _UNENFORCED_WARNED:
+            _UNENFORCED_WARNED = True
+            logger.warning(
+                "[WEBHOOK] No WEBHOOK_API_KEYS and no issued credentials - ingest "
+                "is accepting unauthenticated frames. Anyone who can reach this "
+                "port can create identities and fill face storage.")
+        _count("unenforced")
+        return
+
+    presented = webhook_auth.present_key(request, settings)
+    label = webhook_credentials.match(presented, settings)
+    if label is not None:
+        _count("ok")
+        _count_source("env" if label.startswith("env#") else "db")
+        webhook_credentials.note_use(label)
+        # One INFO line the first time a credential is seen, then DEBUG. At 50
+        # cameras a per-frame INFO would be pure noise, but "which senders are
+        # actually live" is exactly what tells an operator whether a rotation
+        # can finish. The label is a name or a position, never the token.
+        if webhook_credentials.first_use(label):
+            logger.info("[WEBHOOK] ingest credential in use: %s client=%s",
+                        label, _client_fingerprint(request))
+        else:
+            logger.debug("[WEBHOOK] ingest ok credential=%s", label)
+        return
+
+    result = "missing" if not presented else "invalid"
+    if mode == webhook_auth.MODE_LOG_ONLY:
+        # Migration posture: report what WOULD be rejected so an operator can
+        # watch the count fall to zero before switching to enforce.
+        _count("would_reject")
+        logger.warning(
+            "[WEBHOOK] ingest credential %s (log_only: accepted) path=%s client=%s",
+            result, request.url.path, _client_fingerprint(request))
+        return
+
+    _count(result)
+    logger.warning("[WEBHOOK] ingest credential %s - rejected path=%s client=%s",
+                   result, request.url.path, _client_fingerprint(request))
+    raise HTTPException(
+        status_code=401,
+        detail={"error": {"code": "WEBHOOK_AUTH_REQUIRED",
+                          "message": "A valid ingest key is required."}},
+        # Both accepted transports, standard scheme first: an external sender
+        # reading the challenge should find one it can actually produce.
+        # "WebhookKey" alone named nothing any HTTP client implements.
+        headers={"WWW-Authenticate": "Bearer, WebhookKey"})
+
+
+def _client_fingerprint(request: Request) -> str:
+    """A correlatable, non-identifying stand-in for the caller's address.
+
+    Matches the [AUTH_AUDIT] discipline: a rejected camera has to be findable in
+    the logs without writing raw client IPs into them.
+    """
+    try:
+        from backend.auth.auth_security import pseudonymize
+        host = getattr(getattr(request, "client", None), "host", "") or "unknown"
+        return pseudonymize(host)
+    except Exception:                                          # noqa: BLE001
+        return "unknown"
 
 
 def _save_webhook_image(image_bytes: bytes, pipeline_id: str, request_id: str, image_index: int):
@@ -48,12 +188,12 @@ def _save_webhook_image(image_bytes: bytes, pipeline_id: str, request_id: str, i
     """
     try:
         # Get save directory from config
-        save_dir = Path(getattr(settings, 'WEBHOOK_IMAGES_DIR', './debug/webhook_images'))
+        save_dir = Path(settings.WEBHOOK_IMAGES_DIR)
         save_dir = save_dir / pipeline_id
         save_dir.mkdir(parents=True, exist_ok=True)
         
         # Create filename with timestamp and request ID
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Include milliseconds
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # UTC; filename only
         filename = f"{timestamp}_{request_id}_{image_index}.jpg"
         filepath = save_dir / filename
         
@@ -135,7 +275,7 @@ _DEDUP_MAX_KEYS = 5000
 def _dedup_is_duplicate(key: str) -> bool:
     """Return True if this job key was seen within the dedup TTL; record it otherwise."""
     now = time.time()
-    ttl = int(getattr(settings, 'WEBHOOK_DEDUP_TTL_SECONDS', 60))
+    ttl = int(settings.WEBHOOK_DEDUP_TTL_SECONDS)
     if len(_dedup_seen) > _DEDUP_MAX_KEYS:
         for k, exp in list(_dedup_seen.items()):
             if exp < now:
@@ -167,7 +307,7 @@ def _job_key(payload: dict, pipeline_id: str, images_b64: list):
 
 async def parse_webhook_request(request: Request) -> dict:
     """Shared body parsing for all webhook routes: size guard (413) + JSON parse (400)."""
-    max_bytes = int(getattr(settings, 'WEBHOOK_MAX_BODY_MB', 25)) * 1024 * 1024
+    max_bytes = int(settings.WEBHOOK_MAX_BODY_MB) * 1024 * 1024
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit() and int(content_length) > max_bytes:
         raise HTTPException(status_code=413, detail=f"Request body exceeds {max_bytes // (1024*1024)} MB limit")
@@ -327,15 +467,17 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
         
         logger.info(f"[WEBHOOK] Found {len(global_predictions)} global predictions, {len(per_image_predictions)} per-image predictions")
 
-        if not images_b64:
-            metrics_requests_total.labels(pipeline_id=pipeline_id, status="no_images").inc()
-            return {"status": "ok", "message": "No images", "request_id": request_id}
-
-        # Idempotency: same sender id / same content within the TTL -> acknowledge
-        # without re-enqueueing (protects against sender retries under load).
+        # Idempotency FIRST - before the no-images early return, so image-free
+        # events carrying a sender id (event_id/request_id/frame_id) are
+        # deduplicated too. VMS retries an image-free detection event with the
+        # same event_id; without this ordering those retries were re-processed.
+        # This is idempotent deduplication within WEBHOOK_DEDUP_TTL_SECONDS,
+        # not exactly-once processing (and _dedup_seen is per-process; prod
+        # runs WORKERS=1 so per-process == global there). A keyless image-free
+        # payload still gets job_key=None -> no dedup, exactly as before.
         job_key = _job_key(payload, pipeline_id, images_b64)
         if job_key and _dedup_is_duplicate(job_key):
-            metrics_requests_total.labels(pipeline_id=pipeline_id, status="duplicate").inc()
+            metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(pipeline_id), status="duplicate").inc()
             logger.info(f"[WEBHOOK] 🔁 Duplicate request {request_id} (key={job_key[:64]}) - acknowledged, not re-queued")
             return JSONResponse(status_code=200, content={
                 "status": "duplicate",
@@ -345,6 +487,10 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
                 "queued": 0,
                 "dropped": 0,
             })
+
+        if not images_b64:
+            metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(pipeline_id), status="no_images").inc()
+            return {"status": "ok", "message": "No images", "request_id": request_id}
 
         queued = 0
         dropped = 0
@@ -416,7 +562,7 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
                 queue_full = True
 
         if queued == 0 and queue_full:
-            metrics_requests_total.labels(pipeline_id=pipeline_id, status="queue_full").inc()
+            metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(pipeline_id), status="queue_full").inc()
             logger.warning(f"[WEBHOOK] 🚦 Queue full - rejecting request {request_id} (pipeline {pipeline_id})")
             return JSONResponse(
                 status_code=503,
@@ -431,7 +577,7 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
             )
 
         status = "queued" if queued > 0 else "dropped"
-        metrics_requests_total.labels(pipeline_id=pipeline_id, status=status).inc()
+        metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(pipeline_id), status=status).inc()
 
         # 202 Accepted: work happens asynchronously; senders checking 2xx keep working.
         return JSONResponse(status_code=202, content={
@@ -450,34 +596,39 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
     except Exception as e:
         logger.error(f"[WEBHOOK] ❌ Error processing request {request_id}: {str(e)}", exc_info=True)
         error_pipeline_id = pipeline_id if 'pipeline_id' in locals() else "unknown"
-        metrics_requests_total.labels(pipeline_id=error_pipeline_id, status="error").inc()
+        metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(error_pipeline_id), status="error").inc()
         raise HTTPException(status_code=500, detail=f"Webhook processing error: {str(e)}")
 
 
 # Register webhook endpoint at both /webhook/{pipeline_id} and /api/webhook/{pipeline_id}
-@router.post("/webhook/{pipeline_id}")
+@router.post("/webhook/{pipeline_id}",
+             dependencies=[Depends(require_webhook_key)])
 async def webhook(pipeline_id: str, request: Request, background_tasks: BackgroundTasks):
     """Webhook endpoint - /webhook/{pipeline_id}"""
     payload = await parse_webhook_request(request)
     return await webhook_handler(pipeline_id, payload, background_tasks)
 
 
-@router.post("/api/webhook/{pipeline_id}")
+@router.post("/api/webhook/{pipeline_id}",
+             dependencies=[Depends(require_webhook_key)])
 async def webhook_api(pipeline_id: str, request: Request, background_tasks: BackgroundTasks):
     """Webhook endpoint - /api/webhook/{pipeline_id} (alias for compatibility)"""
     payload = await parse_webhook_request(request)
     return await webhook_handler(pipeline_id, payload, background_tasks)
 
 
-# Add a simple test endpoint to verify connectivity
-@router.get("/webhook/test")
-@router.get("/api/webhook/test")
+# Connectivity probe. Key-gated on purpose: as a credential self-check for a
+# camera installer ("200 means your key works, 401 means fix it") this is
+# strictly more useful than an anonymous liveness ping, and it removes an
+# unauthenticated endpoint from the surface.
+@router.get("/webhook/test", dependencies=[Depends(require_webhook_key)])
+@router.get("/api/webhook/test", dependencies=[Depends(require_webhook_key)])
 async def webhook_test():
-    """Test endpoint to verify webhook routes are accessible"""
+    """Verify that ingest routes are reachable AND that your key is accepted."""
     logger.info("[WEBHOOK] Test endpoint accessed")
     return {
         "status": "ok",
-        "message": "Webhook endpoint is accessible",
+        "message": "Webhook endpoint is accessible and the ingest key was accepted",
         "endpoints": [
             "/webhook/{pipeline_id}",
             "/api/webhook/{pipeline_id}"
@@ -485,75 +636,110 @@ async def webhook_test():
     }
 
 
+
+
+def _debug_images_base() -> Path:
+    """The one directory debug snapshots may ever be read from."""
+    return Path(settings.WEBHOOK_IMAGES_DIR).resolve()
+
+
+def _debug_images_dir(pipeline_id: str) -> Path:
+    """Resolve a pipeline's snapshot directory, anchored to a FIXED base.
+
+    The previous version built `save_dir = WEBHOOK_IMAGES_DIR / pipeline_id`
+    from the raw path parameter and then checked containment with
+    `filepath.resolve().relative_to(save_dir.resolve())` — against the
+    ALREADY-TRAVERSED directory. So `pipeline_id="../../storage/faces"` resolved
+    save_dir to the face gallery and every file inside it passed the check:
+    unauthenticated arbitrary .jpg read over the whole tree.
+
+    Two changes make that impossible: pipeline_id is validated against the same
+    strict pattern the ingest path uses BEFORE it becomes a path component, and
+    containment is asserted against the fixed base rather than against a
+    directory the caller influenced.
+    """
+    validate_pipeline_id(pipeline_id)
+    base = _debug_images_base()
+    candidate = (base / pipeline_id).resolve()
+    if candidate != base and base not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Invalid pipeline id")
+    return candidate
+
+
 @router.get("/api/webhook/images/{pipeline_id}")
-async def list_webhook_images(pipeline_id: str):
+async def list_webhook_images(pipeline_id: str,
+                              current_user=Depends(require_role(["admin"]))):
     """
     List all saved webhook images for a pipeline.
     Returns list of image files with metadata.
     """
+    if not settings.SAVE_WEBHOOK_IMAGES:
+        # 404, not an explanatory 200: a disabled debug facility should not
+        # advertise its own existence or its configuration flag.
+        raise HTTPException(status_code=404, detail="Not found")
+
+    save_dir = _debug_images_dir(pipeline_id)
     try:
-        save_dir = Path(getattr(settings, 'WEBHOOK_IMAGES_DIR', './debug/webhook_images')) / pipeline_id
-        
-        if not save_dir.exists():
-            return {
-                "pipeline_id": pipeline_id,
-                "images": [],
-                "count": 0,
-                "message": "No images saved yet for this pipeline. Enable SAVE_WEBHOOK_IMAGES in config."
-            }
-        
-        # Get all image files
+        if not save_dir.is_dir():
+            return {"pipeline_id": pipeline_id, "images": [], "count": 0}
+
+        base = _debug_images_base()
         image_files = []
-        for img_file in sorted(save_dir.glob("*.jpg"), key=lambda x: x.stat().st_mtime, reverse=True):
+        for img_file in sorted(save_dir.glob("*.jpg"),
+                               key=lambda x: x.stat().st_mtime, reverse=True):
             stat = img_file.stat()
             image_files.append({
                 "filename": img_file.name,
-                "path": str(img_file.relative_to(Path.cwd())),
+                # Relative to the debug base, not to CWD: relative_to(Path.cwd())
+                # raised ValueError -> 500 whenever WEBHOOK_IMAGES_DIR sat
+                # outside the working directory, which is the default layout.
+                "path": str(img_file.resolve().relative_to(base)),
                 "size_bytes": stat.st_size,
                 "size_kb": round(stat.st_size / 1024, 2),
                 "created": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 "url": f"/api/webhook/images/{pipeline_id}/{img_file.name}"
             })
-        
+
         return {
             "pipeline_id": pipeline_id,
             "images": image_files,
             "count": len(image_files),
-            "directory": str(save_dir)
         }
-    except Exception as e:
-        logger.error(f"[WEBHOOK] Error listing webhook images: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error listing images: {str(e)}")
-
-
-@router.get("/api/webhook/images/{pipeline_id}/{filename}")
-async def get_webhook_image(pipeline_id: str, filename: str):
-    """
-    Get a specific webhook image file.
-    """
-    from fastapi.responses import FileResponse
-    
-    try:
-        save_dir = Path(getattr(settings, 'WEBHOOK_IMAGES_DIR', './debug/webhook_images')) / pipeline_id
-        filepath = save_dir / filename
-        
-        # Security: Ensure file is within the save directory (prevent path traversal)
-        try:
-            filepath.resolve().relative_to(save_dir.resolve())
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Invalid file path")
-        
-        if not filepath.exists():
-            raise HTTPException(status_code=404, detail="Image not found")
-        
-        return FileResponse(
-            path=str(filepath),
-            media_type="image/jpeg",
-            filename=filename
-        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[WEBHOOK] Error getting webhook image: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error getting image: {str(e)}")
+        logger.error(f"[WEBHOOK] Error listing webhook images: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error listing images")
+
+
+@router.get("/api/webhook/images/{pipeline_id}/{filename}")
+async def get_webhook_image(pipeline_id: str, filename: str,
+                            current_user=Depends(require_role(["admin"]))):
+    """Serve one debug snapshot, anchored inside the configured base."""
+    from fastapi.responses import FileResponse
+
+    if not settings.SAVE_WEBHOOK_IMAGES:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    save_dir = _debug_images_dir(pipeline_id)
+
+    # The filename is a NAME, never a path. Rejecting separators outright is
+    # clearer than normalizing them away, and `Path(filename).name` alone would
+    # silently accept "../x.jpg" by quietly reinterpreting it.
+    if filename != os.path.basename(filename) or filename in ("", ".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid file name")
+    if not filename.lower().endswith(".jpg"):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    base = _debug_images_base()
+    filepath = (save_dir / filename).resolve()
+    if base not in filepath.parents:
+        # Anchored to the FIXED base, not to save_dir.
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    if not filepath.is_file():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(path=str(filepath), media_type="image/jpeg",
+                        filename=filename)
 

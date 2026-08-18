@@ -79,7 +79,23 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
         description="Cosine similarity required to match an existing UNKNOWN identity"),
     "IDENTITY_ENRICH_MIN_SIMILARITY": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
     "IDENTITY_ENRICH_MIN_QUALITY": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
-    "IDENTITY_MAX_EMBEDDINGS": SettingMeta("integer", "count", 1, 100, None, _DYN),
+    "IDENTITY_NEAR_DUPLICATE_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Similarity at which an enrichment candidate is a duplicate of a stored view"),
+    "IDENTITY_INGEST_TOP_K": SettingMeta("integer", "count", 1, 100, None, _DYN,
+        description="Candidate depth when matching an ingested face against known identities"),
+
+    # --- Enrollment review bands (read per upload in enrollment_service) ---
+    # The min/max here bound a single edit; the RELATIONSHIP between the four
+    # (floor <= strong, pool > shown) is enforced at startup by
+    # backend/security/config_guard.py, which this API cannot express.
+    "ENROLL_STRONG_MATCH_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Similarity at/above which an upload is treated as an existing person"),
+    "ENROLL_CANDIDATE_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Similarity floor for offering a candidate; below this an upload enrolls directly"),
+    "ENROLL_CANDIDATE_POOL": SettingMeta("integer", "count", 2, 500, None, _DYN,
+        description="Nearest embeddings retrieved before collapsing to one row per identity"),
+    "ENROLL_MAX_CANDIDATES": SettingMeta("integer", "count", 1, 50, None, _DYN,
+        description="Candidate identities shown to the administrator for review"),
 
     # --- Image saving flags (per-call in image_processing/queue_worker) ---
     "SAVE_IMAGES": SettingMeta("boolean", "on/off", apply_mode=_DYN),
@@ -106,6 +122,142 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     # --- Search (per-call in batch_search/advanced_search) ---
     "BATCH_SEARCH_MAX_IMAGES": SettingMeta("integer", "count", 1, 500, None, _DYN),
     "BATCH_SEARCH_TIMEOUT_SECONDS": SettingMeta("integer", "sec", 10, 3600, None, _DYN),
+    "BATCH_SEARCH_MAX_CONCURRENCY": SettingMeta("integer", "count", 1, 64, None, _DYN),
+    "SEARCH_DEFAULT_TOP_K": SettingMeta("integer", "count", 1, 1000, None, _DYN,
+        description="Matches per query face when the caller does not specify"),
+    "SEARCH_MAX_TOP_K": SettingMeta("integer", "count", 1, 1000, None, _DYN,
+        description="Hard ceiling on matches per query face"),
+    "SEARCH_RETRIEVAL_FLOOR": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="How deep the vector index is searched, before the display threshold filters"),
+    "SEARCH_CANDIDATE_MULTIPLIER": SettingMeta("integer", "factor", 1, 100, None, _DYN),
+    "SEARCH_FILTERED_CANDIDATE_MULTIPLIER": SettingMeta("integer", "factor", 1, 100, None, _DYN),
+    "SEARCH_MIN_QUALITY_THRESHOLD": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Face quality below which a search is not attempted"),
+    "SEARCH_QUALITY_WARNING_THRESHOLD": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Face quality below which the result carries a quality warning"),
+
+    # --- Confidence bands (read per call in advanced_search, published to the UI) ---
+    "CONFIDENCE_VERY_HIGH_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "CONFIDENCE_HIGH_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "CONFIDENCE_MEDIUM_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "CONFIDENCE_LOW_MIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+
+    # --- Live alerts (per-call in live_alert_service) ---
+    "LIVE_ALERT_MAX_PER_USER": SettingMeta("integer", "count", 1, 10000, None, _DYN),
+    "LIVE_ALERT_MAX_PER_IDENTITY": SettingMeta("integer", "count", 1, 1000, None, _DYN),
+    "LIVE_ALERT_MIN_SIMILARITY": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "LIVE_ALERT_CLIP_DURATION_SECONDS": SettingMeta("integer", "sec", 1, 3600, None, _DYN),
+    "LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES": SettingMeta("integer", "min", 0, 10080, None, _DYN),
+    # Notification transports. Read per call by the readiness probe on the
+    # live-alerts page, which reported both channels as unconfigured forever
+    # because these three names were declared nowhere. Empty = disabled.
+    "SMTP_HOST": SettingMeta("string", "hostname", apply_mode=_DYN, allow_empty=True),
+    "SMS_PROVIDER_URL": SettingMeta("string", "url", apply_mode=_DYN, allow_empty=True),
+    "TWILIO_ACCOUNT_SID": SettingMeta("string", "sid", apply_mode=_DYN, allow_empty=True),
+
+    # --- Feature flags read per call ---
+    "WATCHLIST_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "SHOW_UNKNOWN_FACES_ON_DASHBOARD": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    # These six were declared with descriptions asserting they enable/disable a
+    # feature, rendered as editable switches, and read by nothing. Each now
+    # gates its endpoint, so registering them as immediate is truthful.
+    "RELATED_IDENTITIES_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "TEMPORAL_PATTERNS_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "CROSS_CAMERA_TRACKING_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "BATCH_SEARCH_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "EXPORT_RESULTS_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "NEGATIVE_SEARCH_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "AUTO_THRESHOLD_LEARNING_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "TRAJECTORY_PREDICTION_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "PIPELINE_AWARE_CLUSTERING_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+
+    # --- Pagination (shared dependency in backend/utils/pagination.py) ---
+    "API_DEFAULT_PAGE_SIZE": SettingMeta("integer", "rows", 1, 1000, None, _DYN,
+        description="Rows per page when a listing endpoint's caller does not specify"),
+    "API_MAX_PAGE_SIZE": SettingMeta("integer", "rows", 1, 10000, None, _DYN,
+        description="Hard ceiling on rows per page"),
+
+    # --- Face quality gates (properties on the module-level scorer) ---
+    "FACE_QUALITY_THRESHOLD_BLUR": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "FACE_QUALITY_THRESHOLD_LIGHTING": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "FACE_QUALITY_THRESHOLD_SIZE": SettingMeta("integer", "px", 1, 4096, None, _DYN),
+    "FACE_QUALITY_THRESHOLD_ANGLE": SettingMeta("float", "degrees", 1.0, 90.0, None, _DYN),
+
+    # --- Clustering weights and bands (properties; were frozen at import) ---
+    "PIPELINE_SIMILARITY_WEIGHT": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "EMBEDDING_SIMILARITY_WEIGHT": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "CROSS_PIPELINE_SIMILARITY_THRESHOLD": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "SIMILARITY_QUALITY_FLOOR": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "CLUSTER_ACTIVE_WINDOW_DAYS": SettingMeta("integer", "days", 1, 3650, None, _JOB),
+    "CLUSTER_TRAINED_MODEL_MARGIN": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+
+    # --- Intelligence ---
+    "INTEL_QUERY_TIMEOUT_SECONDS": SettingMeta("float", "sec", 1.0, 600.0, None, _DYN,
+        description="Seconds a heavy analysis may run before returning 503"),
+
+    # --- Security intelligence (per-call in security_intelligence_service) ---
+    "ANOMALY_DEVIATION_SIGMA": SettingMeta("float", "sigma", 0.5, 10.0, None, _DYN,
+        description="Circular-hour deviation (in effective std devs) that flags off-schedule"),
+    "ANOMALY_MIN_BASELINE_SAMPLES": SettingMeta("integer", "count", 1, 1000, None, _DYN),
+    "ANOMALY_MIN_STD_HOURS": SettingMeta("float", "hours", 0.0, 12.0, None, _DYN),
+    "ANOMALY_MAX_ITEMS": SettingMeta("integer", "count", 1, 5000, None, _DYN),
+    "PATTERN_SCAN_LIMIT": SettingMeta("integer", "rows", 100, 1000000, None, _DYN),
+    "PATTERN_MAX_PER_TYPE": SettingMeta("integer", "count", 1, 5000, None, _DYN),
+    "PATTERN_OFF_HOURS_START": SettingMeta("integer", "hour", 0, 23, None, _DYN,
+        description="Unusual-timing window start (site-local hour; window may wrap midnight)"),
+    "PATTERN_OFF_HOURS_END": SettingMeta("integer", "hour", 0, 23, None, _DYN),
+    "PATTERN_RAPID_WINDOW_SECONDS": SettingMeta("integer", "sec", 10, 86400, None, _DYN),
+    "PATTERN_RAPID_MIN_SPEED_KMH": SettingMeta("float", "km/h", 1.0, 500.0, None, _DYN),
+    "NETWORK_FALLBACK_MAX_IDENTITIES": SettingMeta("integer", "count", 10, 10000, None, _DYN),
+    # Risk platform (per-call consumers in time_context / assessment_service /
+    # rate_limiter / threshold_store)
+    "DEFAULT_SITE_TIMEZONE": SettingMeta("string", "IANA tz", apply_mode=_DYN,
+        description="Business-hour timezone fallback when a pipeline has none (storage stays UTC)"),
+    "WEEKEND_DAYS": SettingMeta("string", "Mon=0 list", apply_mode=_DYN),
+    "ANOMALY_HOLIDAYS": SettingMeta("string", "ISO dates", apply_mode=_DYN),
+    "ANOMALY_BASELINE_MAX_DAYS": SettingMeta("integer", "days", 7, 3650, None, _DYN),
+    "ASSESSMENT_DEDUP_WINDOW_MINUTES": SettingMeta("integer", "min", 1, 1440, None, _DYN),
+    "THRESHOLD_MIN_SAMPLES_FOR_ACTIVATION": SettingMeta("integer", "count", 1, 100000, None, _DYN),
+    "API_RATE_LIMIT_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "RATE_LIMIT_DEFAULT_PER_MINUTE": SettingMeta("integer", "req/min", 0, 100000, None, _DYN),
+    "RATE_LIMIT_HEAVY_PER_MINUTE": SettingMeta("integer", "req/min", 0, 100000, None, _DYN),
+    # --- ML pipeline (per-call consumers in backend/ml/) ---
+    "ML_DECISION_MODE": SettingMeta("string", "mode", None, None,
+        ["rules", "shadow", "hybrid", "ml"], _DYN,
+        description="rules is the production-safe default; shadow needs an approved anomaly model; hybrid/ml are gated this release"),
+    "ML_INFERENCE_TIMEOUT_MS": SettingMeta("integer", "ms", 100, 60000, None, _DYN),
+    "ML_SHADOW_TIMEOUT_MS": SettingMeta("integer", "ms", 100, 60000, None, _DYN),
+    "ML_MODEL_CACHE_TTL_SECONDS": SettingMeta("integer", "sec", 5, 3600, None, _DYN),
+    "ML_SUPERVISED_MIN_LABELS": SettingMeta("integer", "count", 10, 1000000, None, _DYN),
+    "ML_SUPERVISED_MIN_PER_CLASS": SettingMeta("integer", "count", 5, 100000, None, _DYN),
+    "ML_COLLECTOR_LATE_GRACE_MINUTES": SettingMeta("integer", "min", 0, 10080, None, _JOB),
+    "ML_FEATURE_SAMPLED_FULL_VECTOR_RATE": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Default 0.0 (disabled). Enabling stores full feature vectors on sampled predictions — requires documented privacy/retention justification"),
+    "ML_GRAPH_MIN_NODES": SettingMeta("integer", "count", 1, 100000, None, _DYN),
+    "ML_GRAPH_MIN_EDGES": SettingMeta("integer", "count", 1, 1000000, None, _DYN),
+    "ML_GRAPH_MIN_OBSERVATION_DAYS": SettingMeta("integer", "days", 1, 3650, None, _DYN),
+    "ML_GRAPH_MIN_PAIR_APPEARANCES": SettingMeta("integer", "count", 1, 10000, None, _DYN),
+    "ML_DRIFT_CHECK_INTERVAL_HOURS": SettingMeta("integer", "hours", 1, 720, None, _JOB),
+    "ML_DRIFT_MIN_SAMPLES": SettingMeta("integer", "count", 10, 1000000, None, _JOB),
+    "ML_DRIFT_PSI_WARNING": SettingMeta("float", "psi", 0.01, 10.0, None, _JOB),
+    "ML_DRIFT_PSI_CRITICAL": SettingMeta("float", "psi", 0.01, 10.0, None, _JOB),
+    "ML_PREDICTION_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
+    "ML_SNAPSHOT_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
+    "ML_DRIFT_REPORT_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
+    "ML_MAX_ARTIFACT_MB": SettingMeta("integer", "MB", 1, 4096, None, _DYN),
+    "MLFLOW_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN,
+        description="Flag only — reported operational only when the dependency imports and the backend responds"),
+    "OPTUNA_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "XGBOOST_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "SHAP_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+
+    # Existing per-call consumers that predate this registry section
+    "RELATED_IDENTITY_MIN_CO_APPEARANCES": SettingMeta("integer", "count", 1, 100, None, _DYN),
+    "RELATED_IDENTITY_TIME_WINDOW_MINUTES": SettingMeta("integer", "min", 1, 1440, None, _DYN),
+    "MULTI_CAMERA_CO_APPEARANCE_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "MULTI_CAMERA_DISTANCE_METERS": SettingMeta("float", "m", 10.0, 100000.0, None, _DYN),
+    "MULTI_CAMERA_TIME_WINDOW_MINUTES": SettingMeta("integer", "min", 1, 1440, None, _DYN),
+    "MULTI_CAMERA_MIN_CO_APPEARANCES": SettingMeta("integer", "count", 1, 100, None, _DYN),
 
     # --- Retention (jobs re-read at each run start after the rework) ---
     "DATA_RETENTION_DAYS": SettingMeta("integer", "days", 1, 3650, None, _JOB),
@@ -118,6 +270,10 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "SEARCH_HISTORY_RETENTION_DAYS": SettingMeta("integer", "days", 1, 3650, None, _JOB),
     "SEARCH_HISTORY_MAX_PER_USER": SettingMeta("integer", "count", 10, 100000, None, _JOB),
     "AUDIT_LOG_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
+    "TASK_HISTORY_RETENTION_DAYS": SettingMeta("integer", "days", 1, 3650, None, _JOB),
+    # Real float: the clustering job sleeps a fraction of an hour on startup.
+    # Auto-derivation typed it from an int-looking default and rejected 0.5.
+    "CLUSTER_STARTUP_DELAY_HOURS": SettingMeta("float", "hours", 0.0, 168.0, None, _JOB),
 
     # --- Curated restart-required (correct, honest labels) ---
     "CONFIDENCE_THRESHOLD": SettingMeta("float", "0-1", 0.05, 1.0, None, "api_restart",
@@ -143,7 +299,20 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "PGVECTOR_HNSW_EF_CONSTRUCTION": SettingMeta("integer", "index param", 8, 1024, None, "index_rebuild"),
     "PGVECTOR_HNSW_EF_SEARCH": SettingMeta("integer", "index param", 8, 1024, None, "api_restart"),
     "PGVECTOR_IVFFLAT_LISTS": SettingMeta("integer", "index param", 1, 32768, None, "index_rebuild"),
+    # Search-time probe count — the recall/latency knob for an existing ivfflat
+    # index. Only ..._LISTS was registered, so the one an operator actually
+    # tunes fell through to auto-derived metadata.
+    "PGVECTOR_IVFFLAT_PROBES": SettingMeta("integer", "index param", 1, 32768, None, "api_restart"),
     "WORKERS": SettingMeta("integer", "count", 1, 64, None, "container_recreate"),
+    # Read by scripts/backup/backup.sh and backup-loop.sh in the SEPARATE
+    # `backup` service, via environment variables set in
+    # docker-compose.prod.yml. Applying them to this process would do nothing
+    # at all, so container_recreate is the only honest mode — the operator has
+    # to change the environment and recreate that service.
+    "BACKUP_RETENTION_DAYS": SettingMeta("integer", "days", 1, 3650, None, "container_recreate",
+        description="Days of backups kept by the backup service (scripts/backup/backup.sh)"),
+    "BACKUP_INTERVAL_SECONDS": SettingMeta("integer", "sec", 3600, 2592000, None, "container_recreate",
+        description="Seconds between automatic backup runs (scripts/backup/backup-loop.sh)"),
 }
 
 # Categories whose non-curated keys can never be live (bind/env/connection level)
@@ -151,6 +320,12 @@ _CONTAINER_LEVEL_CATEGORIES = {"server", "database", "cache"}
 
 # Keys whose apply hooks the service guarantees (subset of registry, _DYN/_JOB/next_request)
 DYNAMIC_APPLY_MODES = {"immediate", "next_request", "next_job_run"}
+
+# Modes that can never be satisfied by writing to this process's settings
+# object, not even at boot: they describe how the container itself was
+# launched (bind address, port, mounts, worker count). Applying one would make
+# `effective_value` disagree with reality, which is worse than not applying it.
+_NEVER_IN_PROCESS_APPLY_MODES = {"container_recreate"}
 
 # last time apply_to_runtime succeeded, per key (in-process)
 _last_applied_at: Dict[str, datetime] = {}
@@ -199,6 +374,41 @@ def get_default(key: str) -> Any:
 
 def has_key(key: str) -> bool:
     return _pydantic_field(key) is not None
+
+
+# ---------------------------------------------------------------------------
+# Expected nginx webhook body limit
+# ---------------------------------------------------------------------------
+
+# The nginx configs are baked into the API image by `COPY . .` - the same files
+# tests/test_deployment_surface.py parses. IMPORTANT: this is the EXPECTED /
+# deployment limit: the running nginx container mounts the HOST file, which can
+# in principle differ from the copy baked into this image. Every message built
+# from this value must therefore say "expected nginx webhook body limit" and
+# never claim to be the live value. The live limit is verified operationally
+# (boundary POSTs through the running nginx), not from here.
+_NGINX_CONF_CANDIDATES = ("/app/nginx.conf", "/app/nginx.prod.conf")
+
+
+def expected_nginx_webhook_body_limit_mb() -> Optional[int]:
+    """Parse client_max_body_size (integer MB) from the webhook location of the
+    nginx config baked into this image. Returns None - never raises - when no
+    candidate file exists or the location/directive cannot be parsed. Extraction
+    mirrors tests/test_deployment_surface.py so the two cannot disagree."""
+    import re
+    for path in _NGINX_CONF_CANDIDATES:
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if "location ~ ^/(api/)?webhook/" not in text:
+            continue
+        location = text.split("location ~ ^/(api/)?webhook/", 1)[1].split("}", 1)[0]
+        match = re.search(r"client_max_body_size\s+(\d+)m", location, re.I)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -340,11 +550,21 @@ def describe_source(key: str, stored_raw: Optional[str], category: Optional[str]
 # Runtime application
 # ---------------------------------------------------------------------------
 
-def apply_to_runtime(key: str, value: Any, category: Optional[str] = None) -> bool:
+def apply_to_runtime(key: str, value: Any, category: Optional[str] = None,
+                     *, at_boot: bool = False) -> bool:
     """Push a validated value into the running process, if its apply_mode allows.
 
     Returns True when the running behavior now reflects the value (immediate /
     next_request / next_job_run), False when a restart-level action is needed.
+
+    `at_boot=True` lifts the apply_mode gate, because boot IS the restart that
+    an `api_restart` / `worker_restart` / `index_rebuild` save was waiting for.
+    Without it those saves are durable but permanently inert: the row sits in
+    the settings table, the UI promises "takes effect after a restart", and the
+    restart re-reads env/defaults and ignores it forever. `container_recreate`
+    is still refused — those are bind/env-level (ports, mounts) and setting them
+    on this object would make `effective_value` report a value the container is
+    not actually running under.
     """
     from backend.security.config_guard import SECURITY_CRITICAL_KEYS
     from backend.security.redaction import SECRET_SETTINGS
@@ -353,6 +573,7 @@ def apply_to_runtime(key: str, value: Any, category: Optional[str] = None) -> bo
     # the only path that writes to the live settings object, so refusing here
     # closes the hole where an admin token could set ENVIRONMENT=development
     # and neutralize the production guard without restarting anything.
+    # This holds at boot too: those keys come from env, never from the DB.
     if key in SECURITY_CRITICAL_KEYS:
         logger.warning(
             "[SETTINGS] ⛔ Refused runtime change to security-critical setting %s "
@@ -361,7 +582,10 @@ def apply_to_runtime(key: str, value: Any, category: Optional[str] = None) -> bo
         return False
 
     meta = get_meta(key, category)
-    if meta.apply_mode not in DYNAMIC_APPLY_MODES:
+    if at_boot:
+        if meta.apply_mode in _NEVER_IN_PROCESS_APPLY_MODES:
+            return False
+    elif meta.apply_mode not in DYNAMIC_APPLY_MODES:
         return False
 
     try:
@@ -382,16 +606,27 @@ def last_applied_at(key: str) -> Optional[str]:
 
 
 async def hydrate_from_db(db) -> int:
-    """At startup: load admin-modified DB values for dynamic keys into runtime.
+    """At startup: load every admin-modified DB value into the running config.
 
     Only rows whose value differs from the environment/default (i.e. genuine
     admin edits) are applied — this is what makes saved settings survive
     container restarts.
+
+    This deliberately does NOT filter on apply_mode. Startup is precisely the
+    moment an `api_restart` / `worker_restart` / `index_rebuild` save becomes
+    due; skipping those here meant the settings page promised "takes effect
+    after a restart" for 111 of 170 keys and never kept it. `apply_to_runtime`
+    still refuses security-critical keys and container-level modes.
+
+    Call this as early as the database allows — before the components that read
+    these values are constructed (see backend/lifespan.py phase 1.1). A value
+    applied after its consumer has already captured it is applied too late.
     """
     from sqlalchemy import select
     from db_models import Setting
 
     applied = 0
+    deferred: List[str] = []
     try:
         result = await db.execute(select(Setting))
         rows = result.scalars().all()
@@ -402,21 +637,27 @@ async def hydrate_from_db(db) -> int:
     for row in rows:
         if not has_key(row.key):
             continue
-        meta = get_meta(row.key, row.category)
-        if meta.apply_mode not in DYNAMIC_APPLY_MODES:
-            continue
         info = describe_source(row.key, row.value, row.category)
         if info["source"] != "database":
             continue  # seeded mirror of env/default — nothing to apply
         try:
             value = typed_parse(row.key, row.value, row.category)
-            apply_to_runtime(row.key, value, row.category)
-            applied += 1
+            if apply_to_runtime(row.key, value, row.category, at_boot=True):
+                applied += 1
+            else:
+                deferred.append(row.key)
         except SettingValidationError as e:
             logger.warning("[SETTINGS] Hydration skipped invalid stored value: %s", e)
+        except Exception as e:
+            # One unsettable key must not abort hydration for every other key.
+            logger.warning("[SETTINGS] Hydration could not apply %s: %s", row.key, e)
 
     if applied:
         logger.info("[SETTINGS] ✅ Hydrated %d admin-modified setting(s) from database", applied)
     else:
-        logger.info("[SETTINGS] Hydration complete: no admin-modified dynamic settings in database")
+        logger.info("[SETTINGS] Hydration complete: no admin-modified settings in database")
+    if deferred:
+        logger.warning(
+            "[SETTINGS] %d admin-modified setting(s) need the container recreated "
+            "to take effect: %s", len(deferred), ", ".join(sorted(deferred)))
     return applied

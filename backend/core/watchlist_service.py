@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func, delete
+from sqlalchemy import text, select, and_, or_, func, delete
 from sqlalchemy.orm import selectinload
 
 from db_models import (
@@ -766,6 +766,7 @@ class WatchlistService:
                     matches[identity_str] = []
                 
                 matches[identity_str].append({
+                    'entry_id': str(entry.id),
                     'watchlist_id': str(entry.watchlist_id),
                     'list_name': entry.watchlist.name,
                     'alert_level': entry.watchlist.alert_level.value,
@@ -773,10 +774,58 @@ class WatchlistService:
                     'icon': entry.watchlist.icon,
                     'priority': entry.priority.value,
                     'notes': entry.notes,
-                    'action_instructions': entry.action_instructions
+                    'action_instructions': entry.action_instructions,
+                    'notify_dashboard': bool(entry.watchlist.notify_dashboard),
                 })
         
         return matches
+
+    async def record_detection_alerts(
+        self,
+        db: AsyncSession,
+        *,
+        identity_id: str,
+        detection_id: int,
+        pipeline_id: str,
+        similarity: float,
+        snapshot_path: Optional[str],
+    ) -> List[Dict]:
+        """Persist detection-triggered watchlist alerts for ONE recognised identity
+        of ONE detection. Flush only — joins the caller's transaction (the
+        detection-evidence transaction; see backend/core/detection_evidence.py).
+
+        Idempotent per (entry, detection) through the partial unique index
+        `uq_watchlist_alert_entry_detection`: a retry inserts nothing and returns
+        [] so nothing is broadcast twice. Returns the match dicts (+ alert_id) of
+        the rows inserted in THIS call only.
+        """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        matches = (await self.check_identities_against_watchlists(db, [identity_id])).get(identity_id) or []
+        if not matches:
+            return []
+        now = datetime.utcnow()
+        rows = [{
+            "id": uuid.uuid4(),
+            "watchlist_entry_id": uuid.UUID(m["entry_id"]),
+            "triggered_by": "detection",
+            "detection_id": detection_id,
+            "similarity_score": float(similarity),
+            "pipeline_id": pipeline_id,
+            "snapshot_path": snapshot_path,
+            "acknowledged": False,
+            "created_at": now,
+        } for m in matches]
+        stmt = (pg_insert(WatchlistAlert).values(rows)
+                .on_conflict_do_nothing(index_elements=["watchlist_entry_id", "detection_id"],
+                                        index_where=text("detection_id IS NOT NULL"))
+                .returning(WatchlistAlert.id, WatchlistAlert.watchlist_entry_id))
+        inserted = {str(r[1]): str(r[0]) for r in (await db.execute(stmt)).all()}
+        persisted = []
+        for m in matches:
+            alert_id = inserted.get(m["entry_id"])
+            if alert_id:
+                persisted.append({**m, "alert_id": alert_id, "detection_id": detection_id})
+        return persisted
     
     async def cleanup_expired_entries(
         self,

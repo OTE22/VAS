@@ -52,7 +52,7 @@ class SimilarityModel:
     """
     
     def __init__(self, model_path: Optional[str] = None):
-        self.model_path = model_path or getattr(settings, 'SIMILARITY_MODEL_PATH', 'models/similarity_model.pkl')
+        self.model_path = model_path or settings.SIMILARITY_MODEL_PATH
         self.scaler = StandardScaler()
         self.model: Optional[MLPRegressor] = None
         self.is_trained = False
@@ -365,18 +365,28 @@ class SimilarityModel:
         appearances_diff: float,
         is_cross_pipeline: bool
     ) -> float:
-        """Fallback heuristic prediction when model is not trained"""
+        """Fallback heuristic prediction when model is not trained.
+
+        Weights come from EMBEDDING_SIMILARITY_WEIGHT / PIPELINE_SIMILARITY_WEIGHT.
+        Both branches used to carry their own literal pair (0.9/0.1 and 0.7/0.3),
+        which made this the fourth independent copy of the same two numbers and
+        meant the declared settings governed none of them.
+        """
+        embedding_weight = float(settings.EMBEDDING_SIMILARITY_WEIGHT)
+        pipeline_weight = float(settings.PIPELINE_SIMILARITY_WEIGHT)
         if is_cross_pipeline:
-            # Cross-pipeline: 90% embedding, 10% pipeline
-            score = (embedding_similarity * 0.9) + (pipeline_overlap * 0.1)
-        else:
-            # Same-pipeline: 70% embedding, 30% pipeline
-            score = (embedding_similarity * 0.7) + (pipeline_overlap * 0.3)
-        
-        # Quality adjustment
+            # No shared pipeline means the overlap signal carries no
+            # information, so lean further onto the embedding.
+            embedding_weight = min(1.0, embedding_weight + pipeline_weight / 2.0)
+            pipeline_weight = max(0.0, 1.0 - embedding_weight)
+        score = (embedding_similarity * embedding_weight) + (pipeline_overlap * pipeline_weight)
+
+        # Quality adjustment: scale the score down when the two faces are of
+        # poor quality, never below the configured floor of its own value.
+        quality_floor = float(settings.SIMILARITY_QUALITY_FLOOR)
         avg_quality = (quality_score_1 + quality_score_2) / 2.0
-        score = score * (0.7 + 0.3 * avg_quality)  # Reduce score if quality is low
-        
+        score = score * (quality_floor + (1.0 - quality_floor) * avg_quality)
+
         return max(0.0, min(1.0, score))
     
     def reload_from_path(self, path: str) -> bool:

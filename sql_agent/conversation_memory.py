@@ -5,6 +5,7 @@ Stores and retrieves conversation history for context-aware responses.
 """
 
 import json
+import logging
 import os
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -12,6 +13,8 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain_core.messages import message_to_dict, messages_from_dict
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationMemory:
@@ -58,7 +61,7 @@ class ConversationMemory:
                 session_id = f"user_{self.user_id}_main"
             else:
                 # Default session-based
-                session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                session_id = f"session_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
 
         self.current_session_id = session_id
         
@@ -92,7 +95,7 @@ class ConversationMemory:
                 self.current_session_id = session_id
                 return True
         except Exception as e:
-            print(f"⚠️ Error loading session {session_id}: {e}")
+            logger.warning(f"⚠️ Error loading session {session_id}: {e}")
             return False
 
     def save_session(self) -> bool:
@@ -110,7 +113,7 @@ class ConversationMemory:
         try:
             data = {
                 "session_id": self.current_session_id,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.utcnow().isoformat(),  # naive UTC (storage convention)
                 "message_count": len(self.messages),
                 "messages": [message_to_dict(msg) for msg in self.messages]
             }
@@ -120,7 +123,7 @@ class ConversationMemory:
 
             return True
         except Exception as e:
-            print(f"⚠️ Error saving session: {e}")
+            logger.warning(f"⚠️ Error saving session: {e}")
             return False
 
     def add_message(self, message: BaseMessage):
@@ -219,7 +222,7 @@ class ConversationMemory:
                     self.messages = []
                 return True
             except Exception as e:
-                print(f"⚠️ Error deleting session: {e}")
+                logger.warning(f"⚠️ Error deleting session: {e}")
                 return False
 
         return False

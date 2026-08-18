@@ -10,11 +10,12 @@ import logging
 import uuid
 from typing import List, Optional
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request, Query, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,12 +23,14 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from db_connection import get_db
+from backend.utils.pagination import resolve_page, resolve_page_size
 from db_models import (
     User, Identity, IdentityAppearance, IdentityEmbedding, Face, Detection,
     IdentityType, IdentityStatus, LabelState
 )
 from backend.auth.auth_service import get_current_user, require_role
 from backend.core import model_manager
+from backend.core.merge_compatibility import MergeCompatibilityBlocked
 from backend.utils.identity_audit import IdentityAuditLogger, get_client_info
 from fastapi import Request
 from config import settings
@@ -177,8 +180,46 @@ async def _find_best_image_from_storage_for_identity(identity: Identity, storage
         logger.error(f"[IDENTITIES] ❌ Error finding best image from storage for identity {identity.id}: {e}", exc_info=True)
         return None
 
-# Import identity_service and identity_index (may be None if not initialized)
+# Import identity_service (may be None before startup completes)
 # Use getattr to access dynamically since they're set during startup
+def _merge_confirmation_response(blocked) -> JSONResponse:
+    """The structured 409 every gated merge route returns.
+
+    Emitted BEFORE any mutation (the service gate runs first and the
+    transaction is rolled back defensively), so the first low-similarity
+    request never merges anything. The frontend keys on `code` to raise its
+    high-risk confirmation instead of a generic error toast.
+    """
+    assessment = blocked.assessment
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "code": "MERGE_CONFIRMATION_REQUIRED",
+            "message": ("The selected identities may represent unrelated persons."
+                        if assessment.comparable else
+                        "There are not enough comparable embeddings to verify "
+                        "these identities."),
+            "risk": assessment.to_dict(),
+        })
+
+
+def _cleanup_copied_files(paths) -> None:
+    """Best-effort unlink of gallery files a failed merge copied.
+
+    File copies cannot join the database transaction; when the transaction
+    rolls back they are the one side effect rollback cannot undo. The loser's
+    originals are never touched (merge copies, never moves), so the worst
+    outcome of this failing too is an orphan file occupying an image_NNN slot
+    — disk space, never data loss.
+    """
+    for path in (paths or []):
+        try:
+            if path and os.path.isfile(path):
+                os.unlink(path)
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning("[MERGE] could not remove copied file %s: %s", path, exc)
+
+
 def get_identity_service():
     """Get identity_service instance (may be None if not initialized)"""
     try:
@@ -197,21 +238,12 @@ def get_identity_service():
         return None
 
 def get_identity_index():
-    """Get identity_index instance (may be None if not initialized)"""
-    try:
-        # Try from backend.core first (set during startup)
-        import backend.core
-        if hasattr(backend.core, 'identity_index'):
-            return backend.core.identity_index
-    except (ImportError, AttributeError):
-        pass
-    
-    try:
-        # Fallback to direct import
-        from backend.core.identity_index import identity_index
-        return identity_index
-    except (ImportError, AttributeError):
-        return None
+    """The active VectorIndex implementation, or None if none is configured.
+
+    None is a normal answer under VECTOR_BACKEND=pgvector — there is no
+    in-process index to hand back, and callers fall through to the database.
+    """
+    return get_vector_index()
 
 # For backward compatibility, try to import directly
 try:
@@ -219,10 +251,8 @@ try:
 except (ImportError, AttributeError):
     identity_service = None
 
-try:
-    from backend.core.identity_index import identity_index
-except (ImportError, AttributeError):
-    identity_index = None
+from backend.core.vector_index.access import (get_vector_index, index_stats,
+                                              load_vectors, request_snapshot)
 import numpy as np
 import cv2
 
@@ -270,20 +300,54 @@ class IdentityDetail(IdentityListItem):
         from_attributes = True
 
 
+def _validated_decision(value):
+    """Pydantic validator body: normalize, or fail the request with a 422.
+
+    Raising here rather than inside the route is the whole point — a
+    ValidationError is answered before the handler runs, so a request carrying a
+    bad decision cannot have promoted, merged or written anything.
+    """
+    from backend.utils.identity_audit import coerce_decision
+    return coerce_decision(value)
+
+
 class PromoteRequest(BaseModel):
     display_name: str
-    person_code: Optional[str] = None  # Optional identifier code
+    person_code: Optional[str] = None
+    # MANDATORY. Promoting is one of two mutually exclusive answers to "who is
+    # this?", and the audit trail is only useful if it records which was given.
+    decision: str
+
+    _check_decision = field_validator("decision")(_validated_decision)
 
 
 class MergeRequest(BaseModel):
     from_identity_id: str
     to_identity_id: str
     notes: Optional[str] = None
+    # MANDATORY. Previously optional for backward compatibility; that allowance
+    # is gone, so a merge always states whether it came from the promote
+    # match-suggestion flow or is an ordinary admin merge.
+    decision: str
+    # Explicit acknowledgement of a MERGE_CONFIRMATION_REQUIRED refusal. The
+    # backend RE-assesses compatibility on the override request — this flag
+    # authorizes proceeding despite the (recomputed) risk, it never vouches
+    # for a score the frontend displayed earlier.
+    confirm_merge_risk: bool = False
+
+    _check_decision = field_validator("decision")(_validated_decision)
 
 class MergeMultipleRequest(BaseModel):
     identity_ids: List[str]  # List of identity IDs to merge
     target_identity_id: Optional[str] = None  # Optional: if provided, merge all others into this one
     notes: Optional[str] = None
+    # Same contract as MergeRequest.confirm_merge_risk.
+    confirm_merge_risk: bool = False
+
+
+class MergeSuggestionApproveRequest(BaseModel):
+    """Optional body for suggestion approval; same override contract."""
+    confirm_merge_risk: bool = False
 
 
 class MergePreviewRequest(BaseModel):
@@ -331,6 +395,8 @@ class MergeSuggestionResponse(BaseModel):
     confidence: float
     confidence_percent: Optional[float] = None
     status: str
+    invalidated_reason: Optional[str] = None   # set when status == invalidated
+    invalidated_at: Optional[str] = None
     representative_snapshots: Optional[List[str]] = None
     snapshot_count: Optional[int] = None
     created_at: str
@@ -360,21 +426,19 @@ async def get_identity_service_status(
     
     try:
         # Get configured backend
-        vector_backend = getattr(config_settings, 'VECTOR_BACKEND', 'faiss').lower()
+        vector_backend = config_settings.VECTOR_BACKEND.lower()
         
         status_info = {
             "service_available": identity_service is not None,
-            "index_available": identity_index is not None,
+            "index_available": get_vector_index() is not None,
             "model_manager_available": model_manager is not None and hasattr(model_manager, 'recognizer'),
             "vector_backend": vector_backend,
         }
         
-        # FAISS Index Stats
-        if identity_index:
-            stats = identity_index.get_stats()
-            status_info["faiss_index_stats"] = stats
-        else:
-            status_info["faiss_index_stats"] = None
+        # In-process index stats, via the contract. Reported under the
+        # historical key so existing dashboards keep working; None means the
+        # active backend has no in-process index (pgvector), not an error.
+        status_info["faiss_index_stats"] = index_stats()
         
         # pgvector Stats (if available)
         if vector_backend == 'pgvector':
@@ -456,7 +520,7 @@ async def load_known_faces(
         from config import settings
         
         identity_loader = IdentityLoader(identity_service, model_manager)
-        faces_dir = getattr(settings, 'FACES_DIR', './storage/faces')
+        faces_dir = settings.FACES_DIR
         
         loaded, skipped, errors = await identity_loader.load_known_faces_from_directory(
             faces_dir=faces_dir,
@@ -467,9 +531,8 @@ async def load_known_faces(
         if loaded > 0:
             await db.commit()
         
-        # Save indexes
-        if identity_index:
-            identity_index.save()
+        # Ask for a snapshot; the manager may skip it if one is running.
+        await request_snapshot(trigger="load_known_faces")
         
         return {
             "success": True,
@@ -498,9 +561,9 @@ async def debug_identity_recognition(
     Returns detailed information about FAISS index state, database state, and potential issues.
     """
     try:
-        from backend.core.identity_index import identity_index
         from backend.core.identity_service import identity_service
-        
+
+        vector_index = get_vector_index()
         identity_uuid = uuid.UUID(identity_id)
         identity_id_str = str(identity_uuid)
         
@@ -522,8 +585,8 @@ async def debug_identity_recognition(
                 "status": identity.status.value,
                 "display_name": identity.display_name,
                 "appearances_count": identity.appearances_count,
-                "first_seen_at": identity.first_seen_at.isoformat() if identity.first_seen_at else None,
-                "last_seen_at": identity.last_seen_at.isoformat() if identity.last_seen_at else None,
+                "first_seen_at": _identity_iso_z(identity.first_seen_at) if identity.first_seen_at else None,
+                "last_seen_at": _identity_iso_z(identity.last_seen_at) if identity.last_seen_at else None,
             },
             "faiss": {
                 "in_known_index": False,
@@ -534,43 +597,54 @@ async def debug_identity_recognition(
             },
             "embeddings": {
                 "database_count": 0,
-                "with_faiss_id": 0,
-                "without_faiss_id": 0,
                 "details": []
             },
             "recognition_status": "unknown",
             "issues": []
         }
         
-        # Check FAISS KNOWN index
-        if identity_index and identity_index.known_identity_to_faiss:
-            known_faiss_ids = identity_index.known_identity_to_faiss.get(identity_id_str, [])
-            if known_faiss_ids:
-                debug_info["faiss"]["in_known_index"] = True
-                debug_info["faiss"]["faiss_ids"] = known_faiss_ids
-                
-                # Check metadata
-                for faiss_id in known_faiss_ids:
-                    if faiss_id in identity_index.known_metadata:
-                        metadata_identity_id = identity_index.known_metadata[faiss_id]
-                        debug_info["faiss"]["metadata_entries"].append({
-                            "faiss_id": faiss_id,
-                            "identity_id": metadata_identity_id,
-                            "matches": metadata_identity_id == identity_id_str
-                        })
-                        if metadata_identity_id != identity_id_str:
-                            debug_info["faiss"]["issues"].append(f"FAISS ID {faiss_id} maps to different identity_id: {metadata_identity_id}")
-                    else:
-                        debug_info["faiss"]["issues"].append(f"FAISS ID {faiss_id} not in metadata")
-        
-        # Check FAISS UNKNOWN index
-        if identity_index and identity_index.unknown_identity_to_faiss:
-            unknown_faiss_ids = identity_index.unknown_identity_to_faiss.get(identity_id_str, [])
-            if unknown_faiss_ids:
-                debug_info["faiss"]["in_unknown_index"] = True
-                debug_info["faiss"]["faiss_ids"].extend(unknown_faiss_ids)
-                debug_info["faiss"]["issues"].append(f"Identity is in UNKNOWN index but type={identity.type.value}")
-        
+        # Index membership, asked of the index by embedding key.
+        #
+        # The old version read the legacy service's internal faiss_id maps and
+        # its metadata dict. Those are gone: the index is keyed by
+        # identity_embeddings.id, so membership is answered by asking whether
+        # each of this identity's embedding rows is present.
+        emb_keys_result = await db.execute(
+            select(IdentityEmbedding.id, IdentityEmbedding.embedding.isnot(None))
+            .where(IdentityEmbedding.identity_id == identity_uuid)
+        )
+        emb_keys = [(int(r[0]), bool(r[1])) for r in emb_keys_result.all()]
+        debug_info["faiss"]["embedding_keys"] = [k for k, _ in emb_keys]
+        debug_info["faiss"]["rows_with_vector"] = sum(1 for _, has in emb_keys if has)
+
+        indexed_keys = []
+        if vector_index is not None:
+            for key, _has_vector in emb_keys:
+                try:
+                    if vector_index.contains(key):
+                        indexed_keys.append(key)
+                except Exception:
+                    # pgvector answers membership from the database, not in
+                    # process; the row-level counts above already cover it.
+                    indexed_keys = [k for k, has in emb_keys if has]
+                    break
+        else:
+            indexed_keys = [k for k, has in emb_keys if has]
+
+        debug_info["faiss"]["faiss_ids"] = indexed_keys
+        debug_info["faiss"]["indexed_count"] = len(indexed_keys)
+        in_index = len(indexed_keys) > 0
+        if identity.type == IdentityType.KNOWN:
+            debug_info["faiss"]["in_known_index"] = in_index
+        else:
+            debug_info["faiss"]["in_unknown_index"] = in_index
+
+        missing = [k for k, has in emb_keys if has and k not in indexed_keys]
+        if missing:
+            debug_info["faiss"]["issues"].append(
+                f"{len(missing)} stored vector(s) are not in the index "
+                f"(reconciliation will re-add them): {missing[:10]}")
+
         # Check database embeddings
         emb_result = await db.execute(
             select(IdentityEmbedding).where(IdentityEmbedding.identity_id == identity_uuid)
@@ -581,43 +655,40 @@ async def debug_identity_recognition(
         for emb in embeddings:
             emb_info = {
                 "id": emb.id,
-                "faiss_id": emb.faiss_id,
                 "faiss_index_type": emb.faiss_index_type,
                 "quality": emb.quality,
                 "pipeline_id": emb.pipeline_id,
-                "created_at": emb.created_at.isoformat() if emb.created_at else None
+                "created_at": _identity_iso_z(emb.created_at) if emb.created_at else None
             }
             debug_info["embeddings"]["details"].append(emb_info)
-            
-            if emb.faiss_id is not None:
-                debug_info["embeddings"]["with_faiss_id"] += 1
-            else:
-                debug_info["embeddings"]["without_faiss_id"] += 1
         
         # Determine recognition status
         if identity.type == IdentityType.KNOWN:
             if debug_info["faiss"]["in_known_index"]:
-                if len(debug_info["faiss"]["faiss_ids"]) > 0:
-                    debug_info["recognition_status"] = "should_be_recognized"
-                else:
-                    debug_info["recognition_status"] = "in_index_but_no_embeddings"
-                    debug_info["issues"].append("Identity is in FAISS but has no faiss_ids")
+                debug_info["recognition_status"] = "should_be_recognized"
+            elif debug_info["faiss"]["rows_with_vector"] > 0:
+                debug_info["recognition_status"] = "stored_but_not_indexed"
+                debug_info["issues"].append(
+                    "Identity has stored vectors that are not indexed; "
+                    "reconciliation will re-add them")
             else:
-                debug_info["recognition_status"] = "not_in_faiss"
-                debug_info["issues"].append("Identity is KNOWN but not in FAISS KNOWN index")
+                debug_info["recognition_status"] = "no_stored_vectors"
+                debug_info["issues"].append("Identity is KNOWN but has no stored vectors")
         else:
             if debug_info["faiss"]["in_unknown_index"]:
                 debug_info["recognition_status"] = "in_unknown_index"
             else:
                 debug_info["recognition_status"] = "not_indexed"
-                debug_info["issues"].append("Identity is UNKNOWN and not in FAISS")
+                debug_info["issues"].append("Identity is UNKNOWN and has no indexed vector")
         
         # Check for common issues
         if identity.type == IdentityType.KNOWN and not debug_info["faiss"]["in_known_index"]:
-            debug_info["issues"].append("CRITICAL: KNOWN identity not in FAISS KNOWN index - will not be recognized!")
-        
-        if debug_info["embeddings"]["without_faiss_id"] > 0:
-            debug_info["issues"].append(f"{debug_info['embeddings']['without_faiss_id']} embeddings have no faiss_id - not indexed in FAISS")
+            debug_info["issues"].append(
+                "CRITICAL: KNOWN identity has no indexed vector - will not be recognized!")
+
+        if debug_info["faiss"]["rows_with_vector"] == 0:
+            debug_info["issues"].append(
+                "No embedding row carries a stored vector - nothing to index or rebuild from")
         
         if identity.status != IdentityStatus.ACTIVE:
             debug_info["issues"].append(f"Identity status is {identity.status.value} (not ACTIVE) - may be filtered")
@@ -680,8 +751,8 @@ async def verify_indexes(
 
 @router.get("/admin/unknown", response_model=dict, summary="List Unknown Identities", description="Get paginated list of unknown identities with filters (Admin or users with pipeline access)")
 async def list_unknown_identities(
-    page: int = 1,
-    page_size: int = 20,
+    page: int = None,
+    page_size: int = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     pipeline_id: Optional[str] = None,
@@ -702,12 +773,19 @@ async def list_unknown_identities(
     `show_all=true` (the page's Show-all toggle) or an explicit `date_from`
     bypasses the window. Data stays stored until retention deletes it.
     """
+    # Pagination bounds from configuration. This route had a bare
+    # `page_size: int = 20` with no ceiling, so a caller could request any
+    # page size — and the frontend asked for 20 against a 25 default nobody
+    # could see.
+    page = resolve_page(page)
+    page_size = resolve_page_size(page_size)
+
     try:
         # REDIS CACHING: Check cache first for faster page loads
         from backend.core.redis_cache import redis_cache_service
 
         # Display window (read per request → setting applies without restart)
-        display_window_hours = float(getattr(settings, 'UNKNOWN_FACE_DISPLAY_HOURS', 24) or 0)
+        display_window_hours = float(settings.UNKNOWN_FACE_DISPLAY_HOURS or 0)
         window_active = (not show_all) and (not date_from) and display_window_hours > 0
         window_cutoff = (datetime.utcnow() - timedelta(hours=display_window_hours)) if window_active else None
 
@@ -765,7 +843,7 @@ async def list_unknown_identities(
                     }
                 }
                 # Cache empty result too (use unknown faces TTL)
-                cache_ttl = getattr(settings, 'CACHE_TTL_UNKNOWN', 108000)  # Default 30 hours
+                cache_ttl = settings.CACHE_TTL_UNKNOWN  # Default 30 hours
                 await redis_cache_service.set(cache_key, empty_result, ttl=cache_ttl)
                 return empty_result
         
@@ -907,7 +985,7 @@ async def list_unknown_identities(
             
             if best_snapshot_path:
                 # Convert absolute path to relative path for static file serving
-                storage_dir = getattr(settings, 'STORAGE_DIR', './storage')
+                storage_dir = settings.STORAGE_DIR
                 # Normalize storage_dir to handle both absolute and relative paths
                 storage_dir_abs = os.path.abspath(storage_dir)
                 
@@ -1005,9 +1083,10 @@ async def list_unknown_identities(
                 "id": str(identity.id),
                 "type": identity.type.value,
                 "display_name": identity.display_name,
+                "person_code": identity.person_code,
                 "status": identity.status.value,
-                "first_seen_at": identity.first_seen_at.isoformat(),
-                "last_seen_at": identity.last_seen_at.isoformat(),
+                "first_seen_at": _identity_iso_z(identity.first_seen_at),
+                "last_seen_at": _identity_iso_z(identity.last_seen_at),
                 "appearances_count": identity.appearances_count,
                 "best_snapshot_path": best_snapshot_path,  # Keep original path for reference
                 "snapshot_url": snapshot_url,  # Backend provides ready-to-use URL
@@ -1104,7 +1183,7 @@ async def list_unknown_identities(
         
         # REDIS CACHING: Cache the result for future requests
         # Use longer TTL for unknown faces (30 hours) since they change less frequently
-        cache_ttl = getattr(settings, 'CACHE_TTL_UNKNOWN', 108000)  # Default 30 hours (108000 seconds)
+        cache_ttl = settings.CACHE_TTL_UNKNOWN  # Default 30 hours (108000 seconds)
         await redis_cache_service.set(cache_key, result, ttl=cache_ttl)
         logger.info(f"[UNKNOWN_API] [CACHE] 💾 Cached result (TTL: {cache_ttl}s = {cache_ttl/3600:.1f} hours, key: {cache_key})")
         
@@ -1222,7 +1301,7 @@ async def get_identity_details(
         cameras_count = len(pipeline_ids)
         
         # Get image - prioritize database paths, then search storage
-        storage_dir = getattr(settings, 'STORAGE_DIR', './storage')
+        storage_dir = settings.STORAGE_DIR
         from backend.utils.path_utils import path_to_url
         
         best_snapshot_path = None
@@ -1273,8 +1352,8 @@ async def get_identity_details(
                 "id": app.id,
                 "pipeline_id": app.pipeline_id,
                 "track_id": app.track_id,
-                "start_time": app.start_time.isoformat(),
-                "end_time": app.end_time.isoformat() if app.end_time else None,
+                "start_time": _identity_iso_z(app.start_time),
+                "end_time": _identity_iso_z(app.end_time) if app.end_time else None,
                 "best_snapshot_path": app.best_snapshot_path if app.best_snapshot_path and os.path.exists(app.best_snapshot_path) else None,  # Keep for reference
                 "snapshot_url": app_snapshot_url  # Backend provides ready-to-use URL
             })
@@ -1283,9 +1362,10 @@ async def get_identity_details(
             "id": str(identity.id),
             "type": identity.type.value,
             "display_name": identity.display_name,
+            "person_code": identity.person_code,
             "status": identity.status.value,
-            "first_seen_at": identity.first_seen_at.isoformat(),
-            "last_seen_at": identity.last_seen_at.isoformat(),
+            "first_seen_at": _identity_iso_z(identity.first_seen_at),
+            "last_seen_at": _identity_iso_z(identity.last_seen_at),
             "appearances_count": identity.appearances_count,
             "best_snapshot_path": best_snapshot_path,  # Keep original path for reference
             "snapshot_url": snapshot_url,  # Backend provides ready-to-use URL
@@ -1295,6 +1375,13 @@ async def get_identity_details(
             "faces_count": faces_count
         }
     
+    # Deliberate: the 403 (access denied) and 404 (no such identity) raised
+    # above are HTTPExceptions too — without this re-raise the bare
+    # `except Exception` swallowed them and answered 500 for BOTH, so a
+    # pipeline-less user saw a server error instead of a denial and the
+    # frontend could never distinguish "not found" from "broken".
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1306,6 +1393,182 @@ async def get_identity_details(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get identity details: {str(e)}"
         )
+
+
+# =====================================================
+# Promote — who might this unknown face already be?
+# =====================================================
+
+def _resolve_snapshot_absolute(stored_path: str) -> str:
+    """Absolute, containment-checked path for a stored snapshot.
+
+    Two shapes live in `identities.best_snapshot_path`: an ABSOLUTE
+    `/app/storage/<pipeline>/unknown/unknown_*.jpg` written by the detection
+    pipeline, and a RELATIVE `storage/faces/<uuid>/image_001.jpg` written by
+    enrollment. `pending_absolute_path` alone mishandles the first — the string
+    does not start with "storage/", so os.path.join drops the base and it only
+    lands correctly by accident under Docker.
+
+    normalize_storage_path folds both shapes into the relative form;
+    pending_absolute_path then applies the commonpath guard that actually
+    refuses an escape. Chained, so the guard is always the last word — unlike
+    the ad-hoc `if not os.path.isabs(...)` joins elsewhere in this module,
+    which have no containment check at all.
+    """
+    from backend.core.enrollment_service import pending_absolute_path
+    from backend.utils.path_utils import normalize_storage_path
+
+    relative = normalize_storage_path(stored_path) or str(stored_path or "")
+    return pending_absolute_path(relative)
+
+
+async def _last_seen_by_identity(db: AsyncSession, identity_ids: List[str]) -> dict:
+    """Most recent appearance per identity: {identity_id: (pipeline_id, start_time)}.
+
+    build_candidate_rows returns `last_seen_at` but no PLACE, and the unknown
+    list response carries only an unordered `pipeline_ids` set with no
+    timestamps. One grouped query over at most ENROLL_MAX_CANDIDATES ids is
+    cheaper than hydrating each candidate's full appearance list.
+    """
+    from sqlalchemy import text as sa_text
+
+    if not identity_ids:
+        return {}
+    rows = (await db.execute(sa_text("""
+        SELECT DISTINCT ON (identity_id) identity_id, pipeline_id, start_time
+        FROM identity_appearances
+        WHERE identity_id = ANY(CAST(:ids AS uuid[]))
+        ORDER BY identity_id, start_time DESC NULLS LAST
+    """), {"ids": [str(i) for i in identity_ids]})).all()
+    return {str(r[0]): (r[1], r[2]) for r in rows}
+
+
+@router.get("/admin/unknown/{identity_id}/match-candidates",
+            summary="Known identities this unknown face may already be",
+            description="Read-only. Ranks KNOWN identities against the unknown identity's "
+                        "stored snapshot so an administrator can merge instead of "
+                        "creating a duplicate person. Never writes.")
+async def unknown_match_candidates(
+    identity_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Suggestions for the promote modal. Looking must never change anything.
+
+    Deliberately NOT built on AdvancedSearchService.search_multi_face: that
+    writes a SearchHistory row and calls db.commit() twice on the session handed
+    to it, plus WatchlistAlert rows. A suggestion lookup that commits would turn
+    opening a modal into a mutation. find_similar_identities reuses the same
+    decode -> detect -> embed -> vector-search -> collapse chain with none of
+    the side effects.
+
+    Every failure is a 200 with a warning rather than an error status: the
+    administrator must still be able to promote the face as a new person when
+    its snapshot is missing, corrupt or faceless. A 4xx here would strand them.
+    """
+    def _thresholds() -> dict:
+        return {
+            "candidate_min": float(settings.ENROLL_CANDIDATE_MIN),
+            "strong_min": float(settings.ENROLL_STRONG_MATCH_MIN),
+            "max_candidates": int(settings.ENROLL_MAX_CANDIDATES),
+            "candidate_pool": int(settings.ENROLL_CANDIDATE_POOL),
+        }
+
+    def _answer(candidates, band, warning=None):
+        return {
+            "success": True,
+            "identity_id": identity_id,
+            "candidates": candidates,
+            "match_band": band,
+            "warning": warning,
+            "thresholds": _thresholds(),
+        }
+
+    try:
+        identity_uuid = uuid.UUID(identity_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Invalid identity ID: {identity_id}")
+
+    # Same gate as promote itself: a user who may not promote this identity may
+    # not enumerate who it resembles either — the candidate list is a list of
+    # real people's names and photos.
+    if current_user.role != "admin":
+        from backend.auth.auth_service import check_identity_access
+        if not await check_identity_access(identity_id, current_user, db):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Access denied to this identity")
+
+    identity = (await db.execute(
+        select(Identity).where(Identity.id == identity_uuid))).scalar_one_or_none()
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Identity {identity_id} not found")
+
+    if not identity.best_snapshot_path:
+        return _answer([], "none",
+                       "This face has no stored snapshot, so it cannot be compared "
+                       "against known people. You can still promote it as a new person.")
+
+    try:
+        absolute = _resolve_snapshot_absolute(identity.best_snapshot_path)
+        with open(absolute, "rb") as handle:
+            image_bytes = handle.read()
+    except FileNotFoundError:
+        return _answer([], "none",
+                       "The snapshot image file is missing from storage, so this face "
+                       "cannot be compared. You can still promote it as a new person.")
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning("[MATCH] could not read snapshot for %s: %s", identity_id, exc)
+        return _answer([], "none",
+                       "The snapshot image could not be read, so this face cannot be "
+                       "compared. You can still promote it as a new person.")
+
+    try:
+        from backend.core.enrollment_service import (
+            build_candidate_rows, classify_match, find_similar_identities,
+            prepare_upload)
+
+        # is_face_image=True selects the detector's padded-retry branch. Pipeline
+        # snapshots are already tight crops, and a 112x112 crop is invisible to
+        # the plain detector — the same reason the enrollment path exposes this flag.
+        prepared = prepare_upload(image_bytes, is_face_image=True)
+    except Exception as exc:                                   # noqa: BLE001
+        # EnrollmentError and FaceExtractionError both land here. "No face in
+        # this crop" is an ordinary outcome for a camera snapshot, not a fault.
+        logger.info("[MATCH] no usable face in snapshot for %s: %s", identity_id, exc)
+        return _answer([], "none",
+                       "No face could be detected in this snapshot, so it cannot be "
+                       "compared against known people. You can still promote it as a "
+                       "new person.")
+
+    try:
+        # exclude_identity_ids keeps the face out of its own result list, and
+        # find_similar_identities applies it BEFORE collapsing, so the exclusion
+        # cannot consume a candidate slot.
+        ranked = await find_similar_identities(
+            db, prepared.embedding_normalized,
+            exclude_identity_ids=[str(identity_uuid)])
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning("[MATCH] vector search failed for %s: %s", identity_id, exc)
+        return _answer([], "none",
+                       "The similarity search could not be completed. You can still "
+                       "promote this face as a new person.")
+
+    band = classify_match(ranked[0][1] if ranked else None)
+    candidates = await build_candidate_rows(db, ranked)
+
+    places = await _last_seen_by_identity(db, [c["identity_id"] for c in candidates])
+    for candidate in candidates:
+        pipeline_id, seen_at = places.get(str(candidate["identity_id"]), (None, None))
+        candidate["last_seen_pipeline_id"] = pipeline_id
+        # iso_utc keeps the Z suffix the timestamp contract pins.
+        from backend.utils.time_utils import iso_utc
+        candidate["last_seen_location_at"] = iso_utc(seen_at) if seen_at else None
+
+    logger.info("[MATCH] %s -> %d candidate(s), band=%s",
+                identity_id, len(candidates), band)
+    return _answer(candidates, band)
 
 
 # =====================================================
@@ -1354,10 +1617,51 @@ async def promote_unknown_to_known(
                 detail="Display name is required and cannot be empty"
             )
         display_name_clean = request.display_name.strip()
+
+        # The schema already guaranteed a valid enum member; this rejects the
+        # one member that contradicts the endpoint. "Promote this as a merge"
+        # is not a coherent instruction, and refusing it here — before any row
+        # is touched — keeps the audit's decision honest rather than recording
+        # a merge that never happened.
+        from backend.utils.identity_audit import DECISION_CREATE_NEW
+        if request.decision != DECISION_CREATE_NEW:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(f"decision must be '{DECISION_CREATE_NEW}' on the promote "
+                        f"endpoint; use the merge endpoint to merge into an "
+                        f"existing person"))
         logger.info(f"[PROMOTE] ✅ Display name validated: '{display_name_clean}'")
         
         identity_uuid = uuid.UUID(identity_id)
         logger.info(f"[PROMOTE] Step 3: Parsed identity UUID: {identity_uuid}")
+
+        # person_code is normalized and format-checked BEFORE anything is
+        # written, so a malformed code cannot half-promote an identity. It used
+        # to be accepted, logged and discarded — there was no column for it.
+        from backend.core.enrollment_service import (PersonCodeError,
+                                                     normalize_person_code)
+        try:
+            person_code_display, person_code_key = normalize_person_code(
+                getattr(request, "person_code", None))
+        except PersonCodeError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                detail=str(exc))
+
+        if person_code_key:
+            taken = (await db.execute(
+                select(Identity.id, Identity.display_name)
+                .where(Identity.person_code_key == person_code_key,
+                       Identity.id != identity_uuid))).first()
+            if taken is not None:
+                # 409, not 422: the code is well-formed, it just already
+                # identifies somebody else. Naming them is what lets the
+                # operator resolve it — they are looking at a typo or a genuine
+                # duplicate person.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(f"Person code '{person_code_display}' is already used by "
+                            f"{taken[1] or taken[0]}."))
+
         
         # Check access for non-admin users
         logger.info(f"[PROMOTE] Step 4: Checking user access...")
@@ -1399,9 +1703,31 @@ async def promote_unknown_to_known(
         
         if identity_before.type != IdentityType.UNKNOWN:
             logger.error(f"[PROMOTE] ❌ Identity is not UNKNOWN (current type: {identity_before.type.value})")
+            # Audit the refusal: re-promoting an already-known identity is the
+            # one business failure an operator will actually hit, and it used
+            # to leave no trace — only unexpected exceptions were audited.
+            try:
+                from backend.utils.identity_audit import IdentityAuditLogger, get_client_info
+                ip_address, user_agent = get_client_info(http_request)
+                await IdentityAuditLogger.log_error(
+                    db=db,
+                    user_id=current_user.id,
+                    username=current_user.username,
+                    action_type="promote",
+                    error_message=f"refused: identity is not unknown "
+                                  f"(type={identity_before.type.value}, "
+                                  f"status={identity_before.status.value})",
+                    identity_id=identity_uuid,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                )
+                await db.commit()
+            except Exception as audit_error:                   # noqa: BLE001
+                logger.warning(f"[PROMOTE] Failed to audit refusal: {audit_error}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Identity is not unknown (current type: {identity_before.type.value})"
+                detail=f"Identity is not unknown (current type: {identity_before.type.value}, "
+                       f"status: {identity_before.status.value})"
             )
         
         # Skip face detection validation - we already have a face detected when promoting
@@ -1589,6 +1915,23 @@ async def promote_unknown_to_known(
         face_count_before = face_before_result.scalar() or 0
         logger.info(f"[PROMOTE]   Total Face records: {face_count_before}")
         
+        # Capture the before-state as plain strings NOW: identity_before and
+        # the object the service returns are the SAME row in the session's
+        # identity map, so reading identity_before after promotion would show
+        # the new values.
+        before_state = {
+            "type": identity_before.type.value,
+            "status": identity_before.status.value,
+            "display_name": identity_before.display_name,
+            "person_code": identity_before.person_code,
+        }
+
+        # Persisted on the SAME row and in the SAME transaction as the
+        # promotion, so a failure cannot leave a code attached to a face that
+        # was never promoted.
+        identity_before.person_code = person_code_display
+        identity_before.person_code_key = person_code_key
+
         # Promote identity
         logger.info(f"[PROMOTE] Step 8: Calling identity_service.promote_unknown_to_known()...")
         identity = await identity_service.promote_unknown_to_known(
@@ -1644,17 +1987,63 @@ async def promote_unknown_to_known(
         else:
             logger.warning(f"[PROMOTE]   ⚠️ Only {faces_with_name}/{face_count_after} Face records have the new name")
         
-        # Save identity index (FAISS only)
-        if identity_index:
-            logger.info(f"[PROMOTE] Step 12: Saving FAISS indexes to disk...")
-            identity_index.save()
-            logger.info(f"[PROMOTE]   ✅ Indexes saved to disk")
-        else:
-            logger.info(f"[PROMOTE] Step 12: No FAISS index to save (using pgvector)")
+        # Snapshot request. Promotion changed no vector — only the identity's
+        # type column — so a skipped snapshot loses nothing.
+        _snap = await request_snapshot(trigger="promote")
+        logger.info(f"[PROMOTE] Step 12: snapshot {_snap}")
         
         await db.commit()
         logger.info(f"[PROMOTE] Step 13: Database transaction committed")
-        
+
+        # Audit the SUCCESS — after the commit, same pattern as the merge route
+        # below: log_action swallows its own failures, so a lost audit row can
+        # never roll back a durable promotion. Before this call, log_promote()
+        # existed and was called from nowhere; only failed promotions were ever
+        # audited.
+        try:
+            from backend.utils.identity_audit import IdentityAuditLogger, get_client_info
+            ip_address, user_agent = get_client_info(http_request)
+            person_code = getattr(request, "person_code", None)
+            action_notes = None
+            if person_code and str(person_code).strip():
+                # person_code has no column and no business logic; recording it
+                # here is its one honest use — previously it was accepted,
+                # logged, and silently discarded.
+                action_notes = f"person_code={str(person_code).strip()}"
+            await IdentityAuditLogger.log_promote(
+                db=db,
+                user_id=current_user.id,
+                username=current_user.username,
+                identity_id=identity_uuid,
+                display_name=display_name_clean,
+                before_state=before_state,
+                after_state={
+                    "type": identity.type.value,
+                    "status": identity.status.value,
+                    "display_name": identity.display_name,
+                    "person_code": identity.person_code,
+                },
+                ip_address=ip_address,
+                user_agent=user_agent,
+                notes=action_notes,
+                # The value the request carried and the guard above accepted —
+                # the mutation and the audit record cannot diverge.
+                decision=request.decision,
+            )
+            await db.commit()
+        except Exception as audit_error:                       # noqa: BLE001
+            logger.warning(f"[PROMOTE] Failed to audit successful promotion: {audit_error}")
+
+        # Invalidate ONLY after the commit: the cached Unknown list has a 30h
+        # TTL, so without this a promoted face keeps appearing there for over a
+        # day. A Redis outage must not fail a durable promotion.
+        try:
+            from backend.core.redis_cache import redis_cache_service
+            await redis_cache_service.invalidate_unknown_cache()
+            await redis_cache_service.invalidate_dashboard_cache()
+        except Exception as cache_error:                       # noqa: BLE001
+            logger.warning(f"[PROMOTE] Cache invalidation failed (non-fatal): {cache_error}")
+
         logger.info(f"[PROMOTE] ✅✅✅ Promotion successful!")
         logger.info(f"[PROMOTE]   Identity: {identity_id}")
         logger.info(f"[PROMOTE]   New name: '{display_name_clean}'")
@@ -1671,6 +2060,7 @@ async def promote_unknown_to_known(
                 "id": str(identity.id),
                 "type": identity.type.value,
                 "display_name": identity.display_name,
+                "person_code": identity.person_code,
                 "status": identity.status.value
             }
         }
@@ -1758,8 +2148,7 @@ async def _batch_pipeline_ids(db: AsyncSession, identity_ids: list) -> dict:
 def _identity_iso_z(dt) -> Optional[str]:
     if dt is None:
         return None
-    s = dt.isoformat()
-    return s + "Z" if dt.tzinfo is None else s.replace("+00:00", "Z")
+    return iso_utc(dt)
 
 
 @router.get("/admin/identities", summary="List / Search Identities", description="List identities for Intelligence Analysis. Pass 'page' for the server-side paginated search mode - Admin only")
@@ -1802,6 +2191,10 @@ async def list_all_identities(
             filters.append(or_(
                 Identity.display_name.ilike(f"%{escaped}%", escape="\\"),
                 sa_cast(Identity.id, SAString).ilike(f"{escaped}%", escape="\\"),
+                # Search by badge/employee number. Matched against the
+                # normalized key so the query is case-insensitive for free:
+                # someone typing emp-001 finds EMP-001.
+                Identity.person_code_key.ilike(f"%{escaped.upper()}%", escape="\\"),
             ))
 
         if pipeline_id:
@@ -1979,7 +2372,7 @@ async def search_identities(
                         "type": identity.type.value,
                         "status": identity.status.value,
                         "appearances_count": identity.appearances_count,
-                        "first_seen_at": identity.first_seen_at.isoformat(),
+                        "first_seen_at": _identity_iso_z(identity.first_seen_at),
                         "best_snapshot_path": best_snapshot_path,  # Keep for reference
                         "snapshot_url": snapshot_url  # Backend provides ready-to-use URL
                     }],
@@ -2085,7 +2478,7 @@ async def search_identities(
                 "type": identity.type.value,
                 "status": identity.status.value,
                 "appearances_count": identity.appearances_count,
-                "first_seen_at": identity.first_seen_at.isoformat(),
+                "first_seen_at": _identity_iso_z(identity.first_seen_at),
                 "best_snapshot_path": best_snapshot_path,  # Keep for reference
                 "snapshot_url": snapshot_url  # Backend provides ready-to-use URL
             })
@@ -2167,7 +2560,28 @@ async def merge_identities(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="One or both identities not found"
             )
-        
+
+        # Controlled re-run: a source that is already merged is a completed
+        # operation, not an error to retry — 409 names its winner so the caller
+        # can tell "already done" from "wrong". Previously this fell through to
+        # a generic 400 via the service's ValueError.
+        if from_identity.status == IdentityStatus.MERGED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Identity {request.from_identity_id} is already merged "
+                       f"into identity {from_identity.merged_into_id}."
+            )
+        # Merging INTO a merged identity would build a chain nothing walks
+        # (merged_into_id is never resolved transitively). merge-multiple's
+        # service already refuses this; the pair path did not.
+        if to_identity.status == IdentityStatus.MERGED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Target identity {request.to_identity_id} is itself merged "
+                       f"into identity {to_identity.merged_into_id}; merge into that "
+                       f"identity instead."
+            )
+
         # Check access for non-admin users
         if current_user.role != "admin":
             from backend.auth.auth_service import check_identity_access
@@ -2202,14 +2616,24 @@ async def merge_identities(
         
         # Get identity_service dynamically
         identity_service = get_identity_service()
-        
-        # Merge identities
+
+        # Absolute paths of gallery files the merge copies into the winner's
+        # folder. Filesystem writes cannot join the DB transaction, so if the
+        # commit below fails these copies are the one thing rollback cannot
+        # undo — the except handler unlinks them instead.
+        copied_files: list = []
+
+        # Merge identities. The service runs the compatibility gate BEFORE
+        # any mutation; MergeCompatibilityBlocked surfaces as the structured
+        # 409 in the handler below.
         merged_identity = await identity_service.merge_identities(
             from_identity_id=from_uuid,
             to_identity_id=to_uuid,
             user_id=current_user.id,
             notes=request.notes,
-            db=db
+            db=db,
+            copied_files=copied_files,
+            confirm_merge_risk=request.confirm_merge_risk,
         )
         
         # Capture after state for audit
@@ -2224,8 +2648,7 @@ async def merge_identities(
         }
         
         # Save identity index
-        if identity_index:
-            identity_index.save()
+        await request_snapshot(trigger="identity_mutation")
         
         await db.commit()
         
@@ -2240,12 +2663,26 @@ async def merge_identities(
             after_state=after_state,
             ip_address=ip_address,
             user_agent=user_agent,
-            notes=request.notes
+            notes=request.notes,
+            # Absent for an ordinary admin merge; "merge_existing" when the
+            # promote match-suggestion modal made the choice. Unrecognised
+            # values are dropped by normalize_decision, never stored.
+            decision=request.decision,
         )
         await db.commit()
-        
+
         logger.info(f"Admin {current_user.username} merged identity {request.from_identity_id} into {request.to_identity_id}")
-        
+
+        # Invalidate ONLY after the commit — the cached Unknown list has a 30h
+        # TTL, so a merged loser would otherwise keep appearing there. A Redis
+        # outage must not fail a durable merge.
+        try:
+            from backend.core.redis_cache import redis_cache_service
+            await redis_cache_service.invalidate_unknown_cache()
+            await redis_cache_service.invalidate_dashboard_cache()
+        except Exception as cache_error:                       # noqa: BLE001
+            logger.warning(f"[MERGE] Cache invalidation failed (non-fatal): {cache_error}")
+
         return {
             "success": True,
             "message": "Identities merged successfully",
@@ -2256,8 +2693,32 @@ async def merge_identities(
                 "status": merged_identity.status.value
             }
         }
-    
+
+    except HTTPException:
+        # 404/403/409 raised above must reach the client as themselves.
+        # Without this clause they fell into `except Exception` and came back
+        # as 500s. Nothing was written before they are raised, but roll back
+        # defensively and drop any copied files.
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
+        raise
+    except MergeCompatibilityBlocked as blocked:
+        # The gate refused BEFORE any write; rollback is defensive only.
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
+        return _merge_confirmation_response(blocked)
     except ValueError as e:
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -2265,10 +2726,142 @@ async def merge_identities(
     except Exception as e:
         logger.error(f"Error merging identities: {e}", exc_info=True)
         await db.rollback()
+        _cleanup_copied_files(locals().get("copied_files"))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to merge identities: {str(e)}"
         )
+
+
+# =====================================================
+# Unmerge (reverse one pair merge)
+# =====================================================
+
+class UnmergeRequest(BaseModel):
+    """Optional justification, recorded on the reversal's audit row."""
+    notes: Optional[str] = None
+
+
+@router.post("/admin/identities/merges/{merge_id}/unmerge",
+             summary="Unmerge Identities",
+             description="Reverse a single pair merge using its recorded "
+                         "provenance (Admin only)")
+async def unmerge_identities(
+    merge_id: int,
+    http_request: Request,
+    request: Optional[UnmergeRequest] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(["admin"])),
+):
+    """Reverse one merge.
+
+    Admin-only, unlike merge itself: a merge can be re-done by merging again,
+    but an unmerge deletes the gallery row and file the merge created. That is
+    not reversible by repeating it, so it does not follow merge's
+    pipeline-access model.
+
+    Every refusal is a 409 (or 404) carrying a stable `reason`, raised by the
+    service's verification phase before it writes anything. Files are unlinked
+    only after the commit succeeds.
+    """
+    from backend.core.identity_service import UnmergeConflict
+
+    identity_service = get_identity_service()
+    if not identity_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Identity service not available")
+
+    ip_address, user_agent = get_client_info(http_request)
+    # Read BEFORE anything can roll back. A rollback expires every ORM
+    # attribute, so touching current_user.username in an except block triggers
+    # a lazy reload on a dead transaction — which turned every 409 into a 500.
+    actor_id, actor_name = current_user.id, current_user.username
+    # Staged, never unlinked before the commit: deleting a file the database
+    # still references after a rollback is unrecoverable, while an orphan file
+    # left by a failed cleanup is only disk space.
+    files_to_delete: list = []
+
+    try:
+        details = await identity_service.unmerge_identity(
+            merge_id,
+            user_id=actor_id,
+            username=actor_name,
+            db=db,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            notes=(request.notes if request else None),
+            files_to_delete=files_to_delete,
+        )
+        await request_snapshot(trigger="identity_mutation")
+        await db.commit()
+    except UnmergeConflict as conflict:
+        # Nothing was written — the service raises these only from its
+        # verification phase — but roll back defensively and stage nothing.
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        logger.info("[UNMERGE] refused merge %s for %s: %s",
+                    merge_id, actor_name, conflict.reason)
+        raise HTTPException(
+            status_code=conflict.status_code,
+            detail={"reason": conflict.reason, "message": conflict.detail})
+    except HTTPException:
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        raise
+    except Exception as exc:
+        logger.error("[UNMERGE] merge %s failed: %s", merge_id, exc, exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to unmerge: {exc}")
+
+    # ---- committed; only now may anything leave the database ----
+    deleted_files = 0
+    for path in files_to_delete:
+        try:
+            if path and os.path.isfile(path):
+                os.unlink(path)
+                deleted_files += 1
+        except Exception as exc:                               # noqa: BLE001
+            # The row is already gone and committed. An un-deleted file is an
+            # orphan occupying disk, never a correctness problem.
+            logger.warning("[UNMERGE] could not remove %s: %s", path, exc)
+
+    try:
+        from backend.core.redis_cache import redis_cache_service
+        await redis_cache_service.invalidate_unknown_cache()
+        await redis_cache_service.invalidate_dashboard_cache()
+    except Exception as cache_error:                           # noqa: BLE001
+        logger.warning("[UNMERGE] cache invalidation failed (non-fatal): %s",
+                       cache_error)
+
+    logger.info("Admin %s unmerged merge %s (%s restored to %s)",
+                actor_name, merge_id, details["restored"],
+                details["from_identity_id"])
+
+    return {
+        "success": True,
+        "message": "Merge reversed",
+        "merge_id": merge_id,
+        "restored_identity_id": details["from_identity_id"],
+        "target_identity_id": details["to_identity_id"],
+        "restored_status": details["restored_status"],
+        "restored": details["restored"],
+        "restored_images": details["restored_images"],
+        "adopted_image_removed": details["adopted_image_removed"],
+        "files_deleted": deleted_files,
+        # An adopted primary may have been the winner's ONLY primary. Removing
+        # it can leave them with none, which is legal (the constraint is AT
+        # MOST one) and is reported rather than silently back-filled: choosing
+        # a replacement is an administrator's decision.
+        "target_has_primary_image": details["winner_has_primary_after"],
+        "partial": details.get("partial", False),
+    }
 
 
 # =====================================================
@@ -2680,13 +3273,19 @@ async def merge_multiple_identities(
         # Get identity_service dynamically
         identity_service = get_identity_service()
         
+        # Files copied into the winner's gallery; unlinked by the except
+        # handlers if the transaction later fails (rollback cannot undo disk).
+        copied_files: list = []
+
         # Merge identities (production-grade with smart selection if target not provided)
         merge_result = await identity_service.merge_multiple_identities(
             identity_ids=identity_uuids,
             target_identity_id=target_uuid,
             user_id=current_user.id,
             notes=request.notes,
-            db=db
+            db=db,
+            copied_files=copied_files,
+            confirm_merge_risk=request.confirm_merge_risk,
         )
         
         # Extract merged identity from result
@@ -2710,8 +3309,7 @@ async def merge_multiple_identities(
         }
         
         # Save identity index
-        if identity_index:
-            identity_index.save()
+        await request_snapshot(trigger="identity_mutation")
         
         await db.commit()
         
@@ -2742,6 +3340,15 @@ async def merge_multiple_identities(
         
         logger.info(f"Admin {current_user.username} merged {len(source_ids)} identities into {merged_identity.id} "
                    f"(pipelines: {merge_statistics.get('pipeline_count', 0)}, type_changed: {type_promotion.get('changed', False)})")
+
+        # Invalidate ONLY after the commit (30h Unknown-list TTL); a Redis
+        # outage must not fail a durable merge.
+        try:
+            from backend.core.redis_cache import redis_cache_service
+            await redis_cache_service.invalidate_unknown_cache()
+            await redis_cache_service.invalidate_dashboard_cache()
+        except Exception as cache_error:                       # noqa: BLE001
+            logger.warning(f"[MERGE] Cache invalidation failed (non-fatal): {cache_error}")
         
         # Return enhanced response with all production details
         return {
@@ -2766,7 +3373,27 @@ async def merge_multiple_identities(
             "timestamps": merge_result.get("timestamps", {})
         }
     
+    except HTTPException:
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
+        raise
+    except MergeCompatibilityBlocked as blocked:
+        # The gate refused BEFORE any write; rollback is defensive only.
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
+        return _merge_confirmation_response(blocked)
     except ValueError as e:
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -2774,6 +3401,7 @@ async def merge_multiple_identities(
     except Exception as e:
         logger.error(f"Error merging multiple identities: {e}", exc_info=True)
         await db.rollback()
+        _cleanup_copied_files(locals().get("copied_files"))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error merging identities: {str(e)}"
@@ -2786,6 +3414,7 @@ async def merge_multiple_identities(
 
 @router.post("/search/by-image", response_model=List[SearchResult], summary="Search by Image", description="Search for identities by uploading an image (Admin only)")
 async def search_by_image(
+    response: Response,
     image: UploadFile = File(...),
     scope: str = Form("both"),
     top_k: int = Form(10),
@@ -2797,10 +3426,20 @@ async def search_by_image(
 ):
     """
     Search for identities by uploading an image (admin only).
+
+    Audit: exactly one search_history row per call, written through the ONE
+    writer (backend/core/search_audit.record_image_search) — the same path the
+    advanced and batch searches use. The row id is returned additively in the
+    X-Search-Id header; the response body stays the bare result array.
     """
+    import hashlib as _hashlib
+    import time as _time
+    _search_started = _time.monotonic()
+    _search_id = str(uuid.uuid4())
+    response.headers["X-Search-Id"] = _search_id
     try:
         # Check if pgvector backend is enabled
-        use_pgvector = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector'
+        use_pgvector = settings.VECTOR_BACKEND.lower() == 'pgvector'
         
         # Get pgvector index if enabled, otherwise use FAISS
         if use_pgvector:
@@ -2818,7 +3457,7 @@ async def search_by_image(
             current_identity_index = get_identity_index()
             
             if not current_identity_index or not model_manager:
-                logger.error(f"[SEARCH] Service unavailable: identity_index={current_identity_index is not None}, model_manager={model_manager is not None}")
+                logger.error(f"[SEARCH] Service unavailable: vector_index={current_identity_index is not None}, model_manager={model_manager is not None}")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Identity search service not available. Please wait for system initialization."
@@ -2826,6 +3465,7 @@ async def search_by_image(
         
         # Read and decode image
         image_bytes = await image.read()
+        _image_hash = _hashlib.sha256(image_bytes).hexdigest()   # never the bytes
         frame = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
         
         if frame is None:
@@ -2834,28 +3474,53 @@ async def search_by_image(
                 detail="Invalid image file"
             )
         
-        # Detect face
-        bboxes, kpss = model_manager.detector.detect(frame, max_num=1)
-        if kpss is None or len(kpss) == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No face detected in image"
-            )
-        
-        # Align and generate embedding
-        from utils.helpers import face_alignment, reference_alignment
-        
-        aligned_face, _ = face_alignment(frame, kpss[0], image_size=112)
-        aligned_face_rgb = cv2.cvtColor(aligned_face, cv2.COLOR_BGR2RGB)
-        aligned_face_rgb = np.clip(aligned_face_rgb, 0, 255).astype(np.uint8)
-        
-        aligned_landmarks = reference_alignment.copy()
-        embedding = model_manager.recognizer.get_embedding(
-            aligned_face_rgb,
-            aligned_landmarks
-        )
-        embedding = embedding / np.linalg.norm(embedding)  # Normalize
-        
+        # Detect the face and embed it, through the SAME extractor enrollment
+        # uses. Two defects lived in the code this replaces:
+        #
+        #  * detection was a bare `detect(max_num=1)` with no padded retry, so a
+        #    tightly cropped face — the kind that enrolls fine with "this is a
+        #    face image" ticked — came back as 400 "No face detected in image".
+        #
+        #  * the embedding was built by aligning here, converting BGR->RGB, and
+        #    then handing the aligned crop plus the REFERENCE landmarks to
+        #    get_embedding, which aligns a second time and applies swapRB again.
+        #    This was the only site feeding the model BGR while every stored
+        #    vector came from RGB: the same face against its own gallery entry
+        #    scored 0.9428 instead of 1.0000, eroding the margin on every query.
+        #
+        # Detection is uncapped so the face count is truthful; select_largest
+        # reproduces exactly what `max_num=1` chose, so the face searched is
+        # unchanged for every image that worked before.
+        from backend.core.face_extraction import (FaceExtractionError,
+                                                  embed_face_normalized,
+                                                  error_payload, extract_faces,
+                                                  select_largest)
+
+        try:
+            faces = extract_faces(frame)
+            if not faces:
+                raise FaceExtractionError(
+                    "no_face",
+                    "No face was detected in the image. Please upload a photo "
+                    "with a clear, visible face.",
+                    details=("Detection was retried on a padded canvas for the "
+                             "case of an already-cropped face, and still found "
+                             "nothing."),
+                    padded_retry=True)
+            best = select_largest(faces)
+            embedding = embed_face_normalized(frame, best)
+        except FaceExtractionError as exc:
+            logger.info("[SEARCH] by-image refused: %s (%d face(s) found)",
+                        exc.code, exc.faces_found)
+            return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                                content=error_payload(exc))
+
+        # The body is a bare list, so the count travels in headers rather than
+        # changing the response schema. A group photo still searches the largest
+        # face — as it always has — but the client can now say so.
+        response.headers["X-Faces-Detected"] = str(len(faces))
+        response.headers["X-Padded-Retry"] = "true" if best.padded_retry else "false"
+
         # Search based on scope using pgvector or FAISS
         results = []
         
@@ -2864,11 +3529,15 @@ async def search_by_image(
             logger.info(f"[SEARCH] Using pgvector backend for image search")
             
             if scope in ["known", "both"]:
+                # Configured, not hardcoded: this endpoint used a literal 0.4
+                # and so ignored SIMILARITY_THRESHOLD entirely — an operator
+                # tuning recognition saw no effect here. Over-fetch, because
+                # these rows are per-EMBEDDING and collapse to fewer people.
                 known_matches = await pgvector_index.search_known(
                     embedding=embedding,
                     db=db,
-                    top_k=top_k,
-                    threshold=0.4
+                    top_k=max(top_k * 5, top_k),
+                    threshold=float(settings.SIMILARITY_THRESHOLD)
                 )
                 results.extend([(id_str, sim, "known") for id_str, sim in known_matches])
             
@@ -2876,36 +3545,64 @@ async def search_by_image(
                 unknown_matches = await pgvector_index.search_unknown(
                     embedding=embedding,
                     db=db,
-                    top_k=top_k,
-                    threshold=0.35
+                    top_k=max(top_k * 5, top_k),
+                    threshold=float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
                 )
                 results.extend([(id_str, sim, "unknown") for id_str, sim in unknown_matches])
         else:
-            # Use FAISS for search (fallback)
-            logger.info(f"[SEARCH] Using FAISS backend for image search")
-            
+            # In-process index search, through the contract.
+            #
+            # The index returns embedding keys; identity resolution and the
+            # KNOWN/UNKNOWN split happen in the database, so this route no
+            # longer needs two indexes or hardcoded thresholds — it reuses the
+            # same resolution path recognition uses.
+            logger.info(f"[SEARCH] Using the in-process vector index for image search")
+            from backend.core.identity_service import identity_service as _svc
+
+            if _svc is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Identity service not available. Please wait for system initialization."
+                )
+
             if scope in ["known", "both"]:
-                known_matches = current_identity_index.search_known(embedding, top_k=top_k, threshold=0.4)
+                known_matches = await _svc.search_vector_index(
+                    db, embedding, top_k=top_k,
+                    threshold=_svc.known_threshold, index_type="known")
                 results.extend([(id_str, sim, "known") for id_str, sim in known_matches])
-            
+
             if scope in ["unknown", "both"]:
-                unknown_matches = current_identity_index.search_unknown(embedding, top_k=top_k, threshold=0.35)
+                unknown_matches = await _svc.search_vector_index(
+                    db, embedding, top_k=top_k,
+                    threshold=_svc.unknown_threshold, index_type="unknown")
                 results.extend([(id_str, sim, "unknown") for id_str, sim in unknown_matches])
         
-        # Sort by similarity
-        results.sort(key=lambda x: x[1], reverse=True)
+        # Collapse to one row per identity, keeping that identity's BEST score,
+        # before truncating. search_known/search_unknown return one row per
+        # EMBEDDING, so without this a person holding several vectors occupied
+        # several of the top_k slots and crowded out other people — and the
+        # truncation happened before the date/pipeline filters below, which then
+        # shrank the list rather than promoting the next distinct person.
+        # Mirrors AdvancedSearchService's collapse so the two endpoints agree.
+        best_by_identity = {}
+        for id_str, sim, idx_type in results:
+            current = best_by_identity.get(id_str)
+            if current is None or sim > current[1]:
+                best_by_identity[id_str] = (id_str, sim, idx_type)
+        results = sorted(best_by_identity.values(), key=lambda x: x[1], reverse=True)
         results = results[:top_k]
         
         # Get identity details from database
         identity_ids = [uuid.UUID(id_str) for id_str, _, _ in results]
         
-        if not identity_ids:
-            return []
-        
-        identities_result = await db.execute(
-            select(Identity).where(Identity.id.in_(identity_ids))
-        )
-        identities_dict = {str(id.id): id for id in identities_result.scalars().all()}
+        # A search that found nothing is still a search: it is audited below
+        # with results_count 0 (no early return before the audit row).
+        identities_dict = {}
+        if identity_ids:
+            identities_result = await db.execute(
+                select(Identity).where(Identity.id.in_(identity_ids))
+            )
+            identities_dict = {str(id.id): id for id in identities_result.scalars().all()}
         
         # Build response
         search_results = []
@@ -2941,13 +3638,24 @@ async def search_by_image(
                 "display_name": identity.display_name,
                 "similarity": float(similarity),
                 "best_snapshot_path": identity.best_snapshot_path,
-                "last_seen_at": identity.last_seen_at.isoformat(),
+                "last_seen_at": _identity_iso_z(identity.last_seen_at),
                 "appearances_count": identity.appearances_count
             })
         
-        # Log search
-        logger.info(f"Admin {current_user.username} searched by image: {len(search_results)} results")
-        
+        # Audit — one row, one writer
+        from backend.core.search_audit import record_image_search
+        from db_models import SearchType as _SearchType
+        await record_image_search(
+            db, search_id=_search_id, user_id=current_user.id, search_type=_SearchType.SINGLE,
+            scope=scope, top_k=top_k,
+            filters={"date_from": date_from, "date_to": date_to, "pipeline_id": pipeline_id},
+            image_hash=_image_hash, faces_count=len(faces), quality_scores=None,
+            results_count=len(search_results), watchlist_alerts_count=0,
+            unique_identities=len(search_results),
+            processing_time_ms=int((_time.monotonic() - _search_started) * 1000),
+            ip_address=None, user_agent=None)
+        logger.info(f"Admin {current_user.username} searched by image: {len(search_results)} results (search_id={_search_id})")
+
         return search_results
     
     except HTTPException:
@@ -3039,7 +3747,7 @@ async def get_merge_suggestions_for_pipeline(
         identity_order = []  # Track order of identities for cluster mapping
         
         # Determine which backend to use
-        USE_PGVECTOR = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower() == 'pgvector'
+        USE_PGVECTOR = settings.VECTOR_BACKEND.lower() == 'pgvector'
         
         if USE_PGVECTOR:
             # Get embeddings from pgvector (PostgreSQL)
@@ -3114,39 +3822,36 @@ async def get_merge_suggestions_for_pipeline(
                     else:
                         logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Found {len(embedding_records)} embedding records but all have NULL embeddings for identity {identity.id}")
         else:
-            # FAISS backend - reconstruct from FAISS index
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] Using FAISS backend to extract embeddings...")
-            from backend.core.identity_index import identity_index
-            if identity_index and identity_index.unknown_index:
+            # FAISS backend - read the stored vectors, same source of truth
+            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] Reading stored vectors...")
+            if True:
                 for identity in pipeline_identities:
-                    # Get FAISS ID from embedding record
                     emb_result = await db.execute(
                         select(IdentityEmbedding).where(
                             and_(
                                 IdentityEmbedding.identity_id == identity.id,
-                                IdentityEmbedding.faiss_id.isnot(None),
+                                IdentityEmbedding.embedding.isnot(None),
                                 IdentityEmbedding.faiss_index_type == 'unknown'
                             )
                         ).order_by(IdentityEmbedding.quality.desc().nulls_last()).limit(1)
                     )
                     embedding_record = emb_result.scalar_one_or_none()
-                    
-                    if embedding_record and embedding_record.faiss_id is not None:
+
+                    if embedding_record is not None:
                         try:
-                            with identity_index.lock:
-                                if embedding_record.faiss_id < identity_index.unknown_index.ntotal:
-                                    embedding_array = identity_index.unknown_index.reconstruct(int(embedding_record.faiss_id))
-                                    # Normalize
-                                    norm = np.linalg.norm(embedding_array)
-                                    if norm > 0:
-                                        embedding_array = embedding_array / norm
-                                    
-                                    identity_embeddings_map[str(identity.id)] = (embedding_array.astype(np.float32), embedding_record.quality or 0.5)
-                                    embeddings_list.append(embedding_array.astype(np.float32))
-                                    identity_order.append(str(identity.id))
-                                    logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   ✅ Reconstructed embedding for {identity.id} from FAISS")
+                            _vecs = await load_vectors(db, [embedding_record.id])
+                            embedding_array = _vecs.get(int(embedding_record.id))
+                            if embedding_array is not None and embedding_array.size:
+                                norm = np.linalg.norm(embedding_array)
+                                if norm > 0:
+                                    embedding_array = embedding_array / norm
+
+                                identity_embeddings_map[str(identity.id)] = (embedding_array.astype(np.float32), embedding_record.quality or 0.5)
+                                embeddings_list.append(embedding_array.astype(np.float32))
+                                identity_order.append(str(identity.id))
+                                logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   ✅ Loaded stored vector for {identity.id}")
                         except Exception as e:
-                            logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Failed to reconstruct embedding for {identity.id}: {e}")
+                            logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Failed to load vector for {identity.id}: {e}")
         
         logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ✅ Collected {len(embeddings_list)} embeddings from {len(pipeline_identities)} identities")
         
@@ -3164,8 +3869,8 @@ async def get_merge_suggestions_for_pipeline(
         logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] 🔍 Step 3: Running DBSCAN clustering on {len(embeddings_list)} embeddings...")
         
         # Get DBSCAN parameters from config
-        eps = getattr(settings, 'CLUSTER_EPS', 0.35)
-        min_samples = getattr(settings, 'CLUSTER_MIN_SAMPLES', 2)
+        eps = settings.CLUSTER_EPS
+        min_samples = settings.CLUSTER_MIN_SAMPLES
         
         logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] DBSCAN parameters: eps={eps}, min_samples={min_samples}")
         
@@ -3264,7 +3969,7 @@ async def get_merge_suggestions_for_pipeline(
                 "status": "pending",
                 "representative_snapshots": formatted_snapshots,
                 "snapshot_count": len(formatted_snapshots),
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": iso_utc(utc_now()),
                 "recommendation": recommendation,
                 "display_name": f"Pipeline {pipeline_id} - Cluster of {cluster_size} identities (DBSCAN)"
             }
@@ -3430,9 +4135,11 @@ async def get_merge_suggestions(
                 "confidence": float(s.confidence),
                 "confidence_percent": round(float(s.confidence) * 100, 1),
                 "status": s.status.value,
+                "invalidated_reason": getattr(s, "invalidated_reason", None),
+                "invalidated_at": (s.invalidated_at.isoformat() + "Z") if getattr(s, "invalidated_at", None) else None,
                 "representative_snapshots": formatted_snapshots,
                 "snapshot_count": len(formatted_snapshots),
-                "created_at": s.created_at.isoformat(),
+                "created_at": _identity_iso_z(s.created_at),
                 "cluster_type": cluster_type,
                 "is_large_cluster": is_large_cluster,
                 "is_cross_camera": is_cross_camera,  # NEW
@@ -3462,6 +4169,7 @@ async def get_merge_suggestions(
 async def approve_merge_suggestion(
     suggestion_id: int,
     http_request: Request,
+    request: Optional[MergeSuggestionApproveRequest] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -3522,13 +4230,44 @@ async def approve_merge_suggestion(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Suggestion must have at least 2 identities"
             )
-        
+
+        # Every identity in the suggestion must still be actionable: present,
+        # ACTIVE/PROMOTED and not merged away. A stale suggestion is invalidated
+        # (recorded why) and refused — never partially applied.
+        _ids = [uuid.UUID(i) for i in suggestion.identity_ids]
+        _live = (await db.execute(
+            select(Identity.id).where(
+                Identity.id.in_(_ids),
+                Identity.status.in_([IdentityStatus.ACTIVE, IdentityStatus.PROMOTED]),
+                Identity.merged_into_id.is_(None))
+        )).scalars().all()
+        _stale = [str(i) for i in _ids if i not in set(_live)]
+        if _stale:
+            from backend.core.identity_service import invalidate_merge_suggestions
+            await invalidate_merge_suggestions(db, _stale, "stale at approval: identity not actionable")
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "SUGGESTION_STALE",
+                        "message": "One or more identities in this suggestion were merged, retired or removed; "
+                                   "the suggestion has been invalidated.",
+                        "stale_identity_ids": _stale})
+
         # Merge all identities into the first one
         primary_id = uuid.UUID(suggestion.identity_ids[0])
         
         # Get identity_service dynamically
         identity_service = get_identity_service()
-        
+
+        # Files copied into the winner's gallery across ALL pairs; unlinked by
+        # the except handlers if the one transaction later fails.
+        copied_files: list = []
+
+        # Suggestion approval executes real merges, so it passes the same
+        # compatibility gate as every other entry point — a machine-generated
+        # suggestion is a hypothesis, never an authorization. A blocked pair
+        # aborts the whole approval (transaction rolls back; nothing partial).
+        confirm_merge_risk = bool(request and request.confirm_merge_risk)
         for identity_id_str in suggestion.identity_ids[1:]:
             from_id = uuid.UUID(identity_id_str)
             await identity_service.merge_identities(
@@ -3536,7 +4275,9 @@ async def approve_merge_suggestion(
                 to_identity_id=primary_id,
                 user_id=current_user.id,
                 notes=f"Auto-merged from suggestion {suggestion_id}",
-                db=db
+                db=db,
+                copied_files=copied_files,
+                confirm_merge_risk=confirm_merge_risk,
             )
         
         # Update suggestion status
@@ -3584,12 +4325,12 @@ async def approve_merge_suggestion(
                     emb2 = emb2_result.scalar_one_or_none()
                     
                     if emb1 and emb2:
-                        # Calculate features
-                        from backend.core.identity_index import identity_index
-                        if identity_index:
+                        # Calculate features from the stored vectors
+                        _vecs= await load_vectors(db, [emb1.id, emb2.id])
+                        if _vecs:
                             try:
-                                emb1_vec = identity_index.unknown_index.reconstruct(int(emb1.faiss_id)) if emb1.faiss_id is not None else None
-                                emb2_vec = identity_index.unknown_index.reconstruct(int(emb2.faiss_id)) if emb2.faiss_id is not None else None
+                                emb1_vec = _vecs.get(int(emb1.id))
+                                emb2_vec = _vecs.get(int(emb2.id))
                                 
                                 if emb1_vec is not None and emb2_vec is not None:
                                     emb1_vec = emb1_vec / np.linalg.norm(emb1_vec)
@@ -3635,20 +4376,50 @@ async def approve_merge_suggestion(
             logger.debug(f"Training data collection failed: {e}")
         
         # Save identity index
-        if identity_index:
-            identity_index.save()
+        await request_snapshot(trigger="identity_mutation")
         
         await db.commit()
         
         logger.info(f"Admin {current_user.username} approved merge suggestion {suggestion_id}")
-        
+
+        # Invalidate ONLY after the commit (30h Unknown-list TTL); a Redis
+        # outage must not fail a durable merge.
+        try:
+            from backend.core.redis_cache import redis_cache_service
+            await redis_cache_service.invalidate_unknown_cache()
+            await redis_cache_service.invalidate_dashboard_cache()
+        except Exception as cache_error:                       # noqa: BLE001
+            logger.warning(f"[MERGE] Cache invalidation failed (non-fatal): {cache_error}")
+
         return {
             "success": True,
             "message": "Merge suggestion approved and executed",
             "merged_identities": len(suggestion.identity_ids) - 1
         }
-    
+
+    except HTTPException:
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
+        raise
+    except MergeCompatibilityBlocked as blocked:
+        # A blocked pair aborts the WHOLE approval. Any merges from earlier
+        # loop iterations were uncommitted; the rollback discards them, so
+        # nothing partial survives and the suggestion stays PENDING.
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
+        return _merge_confirmation_response(blocked)
     except ValueError as e:
+        try:
+            await db.rollback()
+        except Exception:                                      # noqa: BLE001
+            pass
+        _cleanup_copied_files(locals().get("copied_files"))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
@@ -3656,6 +4427,7 @@ async def approve_merge_suggestion(
     except Exception as e:
         logger.error(f"Error approving merge suggestion: {e}", exc_info=True)
         await db.rollback()
+        _cleanup_copied_files(locals().get("copied_files"))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to approve merge suggestion: {str(e)}"
@@ -3735,11 +4507,11 @@ async def reject_merge_suggestion(
                     emb2 = emb2_result.scalar_one_or_none()
                     
                     if emb1 and emb2:
-                        from backend.core.identity_index import identity_index
-                        if identity_index:
+                        _vecs = await load_vectors(db, [emb1.id, emb2.id])
+                        if _vecs:
                             try:
-                                emb1_vec = identity_index.unknown_index.reconstruct(int(emb1.faiss_id)) if emb1.faiss_id is not None else None
-                                emb2_vec = identity_index.unknown_index.reconstruct(int(emb2.faiss_id)) if emb2.faiss_id is not None else None
+                                emb1_vec = _vecs.get(int(emb1.id))
+                                emb2_vec = _vecs.get(int(emb2.id))
                                 
                                 if emb1_vec is not None and emb2_vec is not None:
                                     emb1_vec = emb1_vec / np.linalg.norm(emb1_vec)
@@ -3814,10 +4586,18 @@ async def generate_pipeline_aware_suggestions(
     
     Admin only.
     """
+    # The feature flag now gates the feature. It was declared, described as
+    # "Enable pipeline-aware ML clustering", offered on the settings page and
+    # read by nothing — so turning it off changed nothing.
+    if not settings.PIPELINE_AWARE_CLUSTERING_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Pipeline-aware clustering is disabled (PIPELINE_AWARE_CLUSTERING_ENABLED)")
+
     try:
         from backend.core.pipeline_aware_clustering import pipeline_aware_clustering
         from backend.auth.auth_service import AuthService
-        
+
         # Get current user's pipelines (for filtering)
         user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
         
@@ -3853,6 +4633,7 @@ async def generate_pipeline_aware_suggestions(
 
 from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse as _MLJSONResponse
+from backend.utils.time_utils import iso_utc, utc_now
 
 
 def _require_ml_csrf(request: Request):
@@ -3947,6 +4728,7 @@ async def get_training_job(
     job_id: str,
     current_user: User = Depends(require_role(["admin"]))
 ):
+    """Status of one similarity-model training job from task history. Job ids of any other type are 404 — this endpoint reads only similarity_model_training jobs."""
     from backend.core.task_history import task_history_manager
     task = await task_history_manager.get_task_by_job_id(job_id)
     if not task or task.get("task_type") != "similarity_model_training":
@@ -4037,6 +4819,7 @@ async def reject_similarity_model(
     current_user: User = Depends(require_role(["admin"])),
     _csrf: None = Depends(_require_ml_csrf)
 ):
+    """Reject a candidate similarity model with an optional reason (audited). 409 when the model is not in a rejectable status, 404 when it does not exist."""
     from backend.core import model_training_service as mts
     try:
         row = await mts.reject_candidate(db, model_id, getattr(current_user, "id", None), reason)
@@ -4130,7 +4913,7 @@ async def get_model_status(
         readiness = await mts.dataset_readiness(db)
         active = await mts.get_active_model(db)
         candidate = await mts.get_latest_candidate(db)
-        min_samples = int(getattr(settings, 'SIMILARITY_MODEL_MIN_SAMPLES', 50))
+        min_samples = int(settings.SIMILARITY_MODEL_MIN_SAMPLES)
 
         payload = {
             "is_trained": bool(runtime['is_trained']),
@@ -4149,7 +4932,7 @@ async def get_model_status(
             "candidate_model": mts.serialize_registry_row(candidate) if candidate else None,
             "training_job_running": mts.running_training_job(),
             "configuration": {
-                "auto_train": bool(getattr(settings, 'SIMILARITY_MODEL_AUTO_TRAIN', True)),
+                "auto_train": bool(settings.SIMILARITY_MODEL_AUTO_TRAIN),
                 "minimum_samples": min_samples,
                 "feature_schema_version": mts.FEATURE_SCHEMA_VERSION,
                 "quality_gates": mts.QUALITY_GATES,

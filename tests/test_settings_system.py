@@ -365,6 +365,12 @@ def test_retention_real_run_deletes_expired_keeps_recent(token):
         from sqlalchemy import text as sa_text
         await _ensure_db()
         async with db_manager.get_session() as db:
+            # detections.pipeline_id is RESTRICT: evidence goes first, then the camera
+            await db.execute(sa_text("DELETE FROM faces WHERE detection_id IN "
+                                     "(SELECT id FROM detections WHERE pipeline_id='retention-test')"))
+            await db.execute(sa_text("DELETE FROM detections WHERE pipeline_id='retention-test'"))
+            await db.execute(sa_text("DELETE FROM identity_appearances WHERE pipeline_id='retention-test'"))
+            await db.execute(sa_text("DELETE FROM identity_embeddings WHERE pipeline_id='retention-test'"))
             await db.execute(sa_text("DELETE FROM pipelines WHERE pipeline_id='retention-test'"))
             await db.commit()
     run_async(_cleanup())

@@ -58,6 +58,32 @@ export PUBLIC_HOST=face-detector.internal
 
 Add it to DNS, or to each client's hosts file.
 
+### 1.1 Assets that must be present before first start
+
+The production server is offline; these are fetched on a connected machine and
+transferred. **Without the model weights the API refuses to start** (ONNX load
+failure at boot); without the map archives the basemap picker reports every
+style unavailable; without the Ollama models the chatbot returns errors while
+everything else works.
+
+| Asset | Where it lives | How to obtain |
+|---|---|---|
+| Model weights | `weights/det_10g.onnx` (16 MB), `weights/w600k_r50.onnx` (166 MB) | `bash scripts/setup/download.sh` on a connected machine, then copy `weights/` over |
+| Map archives | `map-data/production/*.mbtiles` (streets vector ~39 MB, DEM ~80 MB, satellite when built) | Build on a connected machine with `scripts/map_data/build_all.sh`, copy `map-data/production/` over, then **verify on the target**: `curl -X POST /api/maps/verify`. Copying the files is not enough — an archive whose content has not been measured is reported unavailable, by design (see `46_MAP_SERVICE_GUIDE.md` §4). |
+| Chatbot LLMs | inside the `ollama_data` volume | after first start: `docker compose $COMPOSE_PROD exec ollama ollama pull qwen2.5:1.5b` and the SQL model named by `OLLAMA_SQL_MODEL` in the compose file — on an offline server, `ollama pull` on a connected machine and transfer the volume, or ship the models with the server |
+
+Verify before deploying:
+
+```bash
+ls -la weights/         # det_10g.onnx and w600k_r50.onnx present
+
+# Map archives: presence proves nothing. The Light basemap was once 145,718
+# copies of an "Access blocked" image and passed every file-level check there
+# was. Ask what the content actually IS:
+docker exec face_recognition_api python3 /app/scripts/map_data/production_gate.py \
+    --allow-unavailable satellite
+```
+
 ---
 
 ## 2. Generate secrets
@@ -66,19 +92,65 @@ Add it to DNS, or to each client's hosts file.
 bash scripts/setup/generate-secrets.sh
 ```
 
-Writes `secrets/jwt_secret` and `secrets/bootstrap_admin_password` (mode 600),
-generates `docker/redis/users.acl` with SHA-256 password hashes, and prints the
-`.env` lines to add. Both directories are gitignored.
+Writes `secrets/jwt_secret`, `secrets/bootstrap_admin_password` and
+`secrets/webhook_api_keys` (mode 600), generates `docker/redis/users.acl` with
+SHA-256 password hashes, and writes **`docker/.env`** with the deployment
+credentials. All are gitignored.
 
-Copy the printed block into `.env`, and add:
+> **`docker/.env`, not the repository-root `.env`.** Compose reads `.env` from
+> the *project directory* — the directory of the first `-f` file, i.e.
+> `docker/`. A root `.env` is never consulted for `${VAR}` substitution. The
+> generator used to print these values for you to paste into the root `.env`,
+> which produced a deployment that still failed with
+> "POSTGRES_SUPERUSER_PASSWORD is required" while you stared at a file that
+> plainly contained it.
+>
+> Two files, two jobs: root `.env` is **application** config read inside the
+> container; `docker/.env` is **deployment** credentials used only for
+> interpolation. See [`docker/.env.example`](../docker/.env.example).
+
+`secrets/webhook_api_keys` is the **break-glass ingest key**, mounted as a Docker
+secret and required by both production compose files — the stack will not start
+without it. Senders present it as `Authorization: Bearer <key>` or
+`X-Webhook-Key: <key>`.
+
+Treat it as break-glass, not as the fleet credential. After the first admin
+login, issue one **named credential per external system** at
+**Admin → Ingest Credentials** (`/admin/ingest-credentials`): the token is shown
+once, only its SHA-256 is stored, and revoking one sender is a row deletion
+rather than a fleet-wide rotation. Keeping the environment key configured is what
+lets startup and a database outage stay independent of that table.
+
+**Revocation latency.** Each worker caches issued credentials for
+`WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS` (default 30). Deleting a credential takes
+effect on every worker within that window, and a frame presented inside it may
+still be accepted. For immediate effect, rotate the environment key and restart.
+
+**Migrations.** `MIGRATIONS_EXPECTED_HEAD` in the compose files pins the expected
+Alembic revision; bump it in the same change as any new migration.
+
+`docker/.env` is written for you. Confirm it, and set `PUBLIC_ORIGIN` to the
+host clients will actually use:
 
 ```bash
-ENVIRONMENT=production
-PUBLIC_ORIGIN=https://face-detector.internal
-GRAFANA_ADMIN_PASSWORD=<generate one>
+cat docker/.env          # contains live credentials — do not paste elsewhere
 ```
 
-Existing files are never overwritten. To rotate, delete the file and re-run.
+`ENVIRONMENT=production` is not set here: the production compose file pins it
+per-service, so it cannot be switched off by an environment file.
+
+> **On a Windows dev host the `chmod 600` silently does nothing** — NTFS
+> ignores POSIX modes, so the generated files come out world-readable. It
+> applies normally on the Linux production target. If you generate secrets on
+> Windows and copy them across, re-apply the mode on the server:
+>
+> ```bash
+> chmod 600 secrets/* docker/.env docker/redis/users.acl
+> ```
+
+Existing files are never overwritten — including `docker/.env`. To rotate one
+credential, delete its line and re-run; to rotate a secret file, delete the
+file and re-run.
 **Rotating `jwt_secret` invalidates every issued token and logs everyone out.**
 That is intended, and it is how you evict a stolen token.
 
@@ -151,7 +223,48 @@ Start order is enforced by the compose file: `postgres` → `migrate` (runs to
 completion) → `face_recognition` → `nginx`. API replicas cannot race on
 migrations because they wait for `service_completed_successfully`.
 
-GPU deployments use `docker/docker-compose.gpu.yml` instead.
+**GPU production** does NOT swap compose files — it LAYERS an override on top,
+so the backup, prometheus and grafana services and the edge/data/ai/monitoring
+network segmentation defined in `prod.yml` are all retained:
+
+```bash
+docker compose -f docker/docker-compose.prod.yml \
+               -f docker/docker-compose.prod.gpu.yml up -d
+```
+
+`docker/docker-compose.gpu.yml` is a **development** GPU override, layered
+on `docker-compose.cpu.yml`. It is not a production stack and cannot be
+used as one — it declares no database, no backup service and no monitoring.
+
+### The four invocations — the only supported ones
+
+Two base stacks × two hardware overrides. There is no other combination.
+
+| Stack | Command | Project |
+|---|---|---|
+| Development, CPU | `docker compose -f docker/docker-compose.cpu.yml …` | `face_detector_dev` |
+| Development, GPU | `docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml …` | `face_detector_dev` |
+| **Production, CPU** | `docker compose -f docker/docker-compose.prod.yml …` | `face_detector_prod` |
+| **Production, GPU** | `docker compose -f docker/docker-compose.prod.yml -f docker/docker-compose.prod.gpu.yml …` | `face_detector_prod` |
+
+The GPU files are **overrides**, never used alone — alone they declare no
+database, no proxy and no application dependencies.
+
+**The project names are load-bearing, not cosmetic.** Compose namespaces every
+volume by project. Neither file used to declare one, so both defaulted to the
+parent directory (`docker`) and both declared volumes called `postgres_data`,
+`redis_data`, `face_database_data` and `chromadb_cache` — meaning **starting
+production mounted the development database**. Never set
+`COMPOSE_PROJECT_NAME`: it overrides the `name:` key and reintroduces exactly
+this bug.
+
+Define the pair once so every later command is identical:
+
+```bash
+export COMPOSE_PROD="-f docker/docker-compose.prod.yml"                       # CPU
+export COMPOSE_PROD="-f docker/docker-compose.prod.yml -f docker/docker-compose.prod.gpu.yml"  # GPU
+docker compose $COMPOSE_PROD ps
+```
 
 ---
 
@@ -263,12 +376,12 @@ Provider discovery alone is **not** acceptance. It reports what the build
 supports, not what initialised.
 
 ```bash
-docker compose -f docker/docker-compose.gpu.yml exec -T face_recognition python -c "
+docker compose $COMPOSE_PROD exec -T face_recognition python -c "
 import onnxruntime as ort
 print(ort.__version__, ort.get_available_providers())
 assert 'CUDAExecutionProvider' in ort.get_available_providers()"
 
-docker compose -f docker/docker-compose.gpu.yml exec -T face_recognition nvidia-smi
+docker compose $COMPOSE_PROD exec -T face_recognition nvidia-smi
 ```
 
 Then put real inference load through the service and confirm `nvidia-smi` shows
@@ -277,22 +390,33 @@ aborts if CUDA is not actually in use, but sustained load is what reveals OOM
 and thermal limits.
 
 ```bash
-docker compose -f docker/docker-compose.gpu.yml logs face_recognition | grep -i "running on"
+docker compose $COMPOSE_PROD logs face_recognition | grep -i "running on"
 # expected: SCRFD: running on CUDA / ArcFace: running on CUDA
 ```
 
 ### 6.7 Regression suite
 
+Run this on the **development** stack. Do not run it against production, and do
+not install the test runner into a production container: the suite creates and
+deletes records, and the integration tests authenticate as `admin`/`admin123`,
+an account that exists only in the development stack.
+
+The development image already ships pytest — `docker-compose.cpu.yml` builds it
+with `INSTALL_DEV=true` — so there is nothing to install first:
+
 ```bash
-docker compose -f docker/docker-compose.prod.yml exec -T face_recognition \
-  pip install -r /app/requirements-dev.txt
-docker compose -f docker/docker-compose.prod.yml exec -T face_recognition \
-  python -m pytest tests/ -q
+docker exec face_recognition_api python -m pytest tests/ -q
 ```
 
-Note the integration tests authenticate as `admin`/`admin123`, which exists only
-in the development stack. Against production they will fail on login — run the
-suite on the development stack, and use the checks above for production.
+If pytest is genuinely absent, rebuild rather than installing by hand; anything
+added ad-hoc is lost the next time the container is recreated:
+
+```bash
+docker compose -f docker/docker-compose.cpu.yml build \
+  --build-arg INSTALL_DEV=true face_recognition
+```
+
+For production, use the read-only checks in the sections above.
 
 ---
 
@@ -393,3 +517,38 @@ docker compose -f docker/docker-compose.prod.yml down         # stop everything 
   Verify §6.3 from a real LAN machine rather than assuming.
 - **Prometheus and Grafana are not authenticated at the network edge.** Grafana
   is bound to loopback; reach it over an SSH tunnel.
+
+
+## 11. Data-model corrective pass (2026-08-16) — operational semantics
+
+### 11.1 Detection persistence: three failure classes
+Every frame is persisted by ONE function, `backend/core/detection_evidence.persist_detection` (batch writer and direct path), one transaction per detection:
+
+| Class | What failed | What is committed | Signal |
+|---|---|---|---|
+| **A — core evidence** | detection / faces / appearance insert, or the exact embedding back-link (`CROSS_LINK_REFUSED`, `EMBEDDING_MISSING`) | **nothing** — the whole per-detection transaction rolls back; no alert rows, no broadcast; the embedding THIS frame created is compensated (deleted) and an evidence-free frame-created unknown identity removed | metric `metrics_db_operation_failures{reason="detection_core"}` + structured error log; the frame is reported not persisted |
+| **B — optional alert enrichment** | live-alert lookup/trigger insert (savepoint A) or watchlist lookup/alert insert (savepoint B) | core evidence + the OTHER subsystem's rows; only the failing savepoint rolls back | `reason="alert_enrichment_live"` / `"alert_enrichment_watchlist"`; nothing claims an alert that was not persisted |
+| **C — post-commit broadcast** | the `detection_alerts` WebSocket send | everything — rows stay | `reason="alert_broadcast"`; the DB is authoritative (`GET /api/watchlist-alerts`, live-alert listing) |
+
+**Reliability limitation (recorded, deliberately NOT implemented as a fallback):** after a class-B failure the alert is not recreated automatically. A future enhancement is a durable alert-evaluation retry / outbox / reconciliation over committed detections — not a fallback broadcast, not a duplicate legacy path, not a silent retry loop.
+
+Crash safety: a worker dying between the identity/embedding commit and the detection commit leaves a camera embedding with `detection_id NULL`; `identity_retention.reconcile_orphan_camera_embeddings` (startup phase 2.2f + every retention cycle) removes such rows older than `STALE_CAMERA_EMBEDDING_GRACE` (10 min) through the canonical vector-removal path. Steady state: `SELECT count(*) FROM identity_embeddings WHERE pipeline_id IS NOT NULL AND detection_id IS NULL AND created_at < now() - interval '10 minutes'` = 0.
+
+### 11.2 Camera (pipeline) delete policy
+`identity_appearances`, `identity_embeddings`, `detections` reference `pipelines` with **RESTRICT**. A camera with evidence is deactivated (`is_active = 0`), never hard-deleted; the rename flow moves every child first; wipe scripts pre-clear. There is no delete route.
+
+### 11.3 Schema lifecycle
+Alembic is the only schema initializer (root `000_baseline`; head `f6a7b8c9d0e1`); `init_db` verifies the exact head fail-closed everywhere; `MIGRATIONS_FAIL_CLOSED` was **REMOVED**. Legacy dev/demo databases: `python scripts/repair_relationship_integrity.py` (dry-run → `--apply --yes-i-understand`) BEFORE `alembic upgrade head`; migrations refuse (never delete) when a precondition fails. Never run the repair on production.
+
+### 11.4 Full regression — isolated only
+`scripts/run_regression_isolated.sh [pytest args]`: unique scratch database on the dev PostgreSQL server, a dedicated `redis_regression`, a throwaway `face_recognition_regression` container (its own service name — the dev nginx upstream `face_recognition` never resolves to it, asserted), ephemeral volumes for storage / ML artifacts / database / logs / chroma; isolation assertions run inside the container BEFORE pytest (DB name, `current_database()`, Redis host + IP + sentinel key + pub/sub invisibility from the dev Redis, mount sources, `ENVIRONMENT`, DSN template) and abort on any failure; `trap teardown EXIT` drops the database and removes the stack on every exit path and prints whether the dev side is unchanged. The standing "wipe after regression" rule does not apply to isolated runs. Focused suites may still run in the dev container.
+
+### 11.5 Configuration inventory (this pass)
+| Variable | Status | Note |
+|---|---|---|
+| `MIGRATIONS_MODE` | ACTIVE | `run` (dev) / `verify` (prod) — the head check itself is unconditional |
+| `MIGRATIONS_EXPECTED_HEAD` | ACTIVE | operator-visible second pin; must equal the scripts' head (`f6a7b8c9d0e1`) |
+| `MIGRATIONS_FAIL_CLOSED` | REMOVED | no consumer controlled a distinct behaviour; schema mismatch is never permissive |
+| `DATABASE_URL`, `REDIS_URL`, `ENVIRONMENT`, storage paths, `ML_ARTIFACT_DIR` | ACTIVE | one central `config.py`; scripts import `settings` (the regression isolation checker is the one allowed raw-environment reader — it reports ON the environment) |
+| `REGRESSION_ISOLATION_ID` | ACTIVE (regression only) | run marker injected by the runner, asserted inside the container; not an application setting |
+| `STALE_CAMERA_EMBEDDING_GRACE` | code constant | 10 minutes; deliberately not an operator setting |

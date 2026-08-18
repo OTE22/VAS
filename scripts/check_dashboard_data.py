@@ -48,7 +48,7 @@ async def check_dashboard_data():
     
     async with db_manager.get_session() as db:
         # Get display hours from config
-        display_hours = getattr(settings, 'DASHBOARD_FACE_DISPLAY_HOURS', 3)
+        display_hours = settings.DASHBOARD_FACE_DISPLAY_HOURS
         cutoff_time = datetime.utcnow() - timedelta(hours=display_hours)
         
         logger.info("")
@@ -133,7 +133,7 @@ async def check_dashboard_data():
         logger.info("=" * 80)
         
         # Check SHOW_UNKNOWN_FACES_ON_DASHBOARD setting
-        show_unknown = getattr(settings, 'SHOW_UNKNOWN_FACES_ON_DASHBOARD', False)
+        show_unknown = settings.SHOW_UNKNOWN_FACES_ON_DASHBOARD
         logger.info("")
         logger.info("⚙️  Dashboard Configuration:")
         logger.info("=" * 80)

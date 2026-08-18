@@ -18,31 +18,39 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from db_connection import get_db
+from backend.utils.pagination import resolve_page, resolve_page_size
 from db_models import Detection, Face
 from backend.routes.utils import validate_pipeline_id
 from backend.auth.auth_service import get_current_user, require_pipeline_access
 from db_models import User
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Detections"])
 
 
 @router.get("/api/detections")
 async def get_all_detections(
-    limit: int = 100,
+    limit: int = None,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get recent detections - filtered by user's pipeline access"""
+    # Bounds from configuration; this used to accept any limit a caller sent.
+    limit = resolve_page_size(limit, field="limit")
     try:
         from backend.auth.auth_service import AuthService
         
+        # Eager-load faces: the response counts d.faces, and the async engine
+        # cannot lazy-load a relationship after the request coroutine has left
+        # the greenlet (it raised "greenlet_spawn has not been called" and
+        # 500'd every call).
         # Get user's accessible pipelines
         if current_user.role == "admin":
             # Admin sees all detections
-            query = select(Detection)
+            query = select(Detection).options(selectinload(Detection.faces))
         else:
             # Regular users only see detections from their assigned pipelines
             user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
@@ -52,7 +60,9 @@ async def get_all_detections(
                     "total": 0,
                     "detections": []
                 }
-            query = select(Detection).where(Detection.pipeline_id.in_(user_pipelines))
+            query = (select(Detection)
+                     .options(selectinload(Detection.faces))
+                     .where(Detection.pipeline_id.in_(user_pipelines)))
         
         result = await db.execute(
             query.order_by(Detection.timestamp.desc())
@@ -67,7 +77,7 @@ async def get_all_detections(
                 {
                     "id": d.id,
                     "pipeline_id": d.pipeline_id,
-                    "timestamp": d.timestamp.isoformat(),
+                    "timestamp": iso_utc(d.timestamp),
                     "processing_time_ms": d.processing_time_ms,
                     "faces_count": len(d.faces) if d.faces else 0,
                 }
@@ -82,11 +92,12 @@ async def get_all_detections(
 @router.get("/api/detections/{pipeline_id}")
 async def get_pipeline_detections(
     pipeline_id: str,
-    limit: int = 50,
+    limit: int = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_pipeline_access)
 ):
     """Get detections for specific pipeline with face details"""
+    limit = resolve_page_size(limit, field="limit")
     try:
         pipeline_id = validate_pipeline_id(pipeline_id)
 
@@ -115,7 +126,7 @@ async def get_pipeline_detections(
                 output.append({
                     "detection_id": detection.id,
                     "pipeline_id": detection.pipeline_id,
-                    "timestamp": detection.timestamp.isoformat(),
+                    "timestamp": iso_utc(detection.timestamp),
                     "processing_time_ms": detection.processing_time_ms,
                     "worker_id": detection.worker_id,
                     "faces": [

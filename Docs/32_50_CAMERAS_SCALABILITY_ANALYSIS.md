@@ -1,4 +1,10 @@
 # 50 Cameras Scalability Analysis
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 ## Can the System Handle 50 Concurrent Camera Streams?
 
 ### ✅ **YES, with proper configuration!**
@@ -290,12 +296,14 @@ PIPELINE_BATCH_SIZE=5        # Optimal for GPU
 
 # GPU Configuration
 USE_GPU=true                  # Enable if available
-GPU_BATCH_SIZE=32            # Optimal for GPU
+PIPELINE_BATCH_SIZE=20       # GPU_BATCH_SIZE is not read by anything
 
 # FAISS Index
 KNOWN_INDEX_TYPE=ivf         # Use IVF for 1M+ vectors
-KNOWN_INDEX_NLIST=1000
-KNOWN_INDEX_NPROBE=20
+# KNOWN_INDEX_NLIST / KNOWN_INDEX_NPROBE are NOT settings. They belonged to
+# the deleted FAISS IdentityIndexService. pgvector tuning uses
+# PGVECTOR_HNSW_M / _EF_CONSTRUCTION / _EF_SEARCH — see 70_VECTOR_INDEX_CONTRACT.md.
+
 
 # Memory Management
 FACE_TRACKING_MAX_ENTRIES=5000
@@ -394,7 +402,7 @@ docker stats <container_name>
 
 2. **Restart Services:**
    ```bash
-   docker-compose restart
+   docker compose -f docker/docker-compose.cpu.yml restart
    ```
 
 3. **Monitor Performance:**
@@ -416,7 +424,7 @@ docker stats <container_name>
 ## 📚 Additional Resources
 
 - **Performance Optimization Guide:** `Docs/15_PERFORMANCE_OPTIMIZATION.md`
-- **FAISS Scaling Guide:** `Docs/30_FAISS_PRODUCTION_SCALING.md`
+- **FAISS Scaling Guide:** `Docs/70_VECTOR_INDEX_CONTRACT.md`
 - **Database Tuning:** PostgreSQL documentation
 
 ---

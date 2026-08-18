@@ -1,5 +1,11 @@
 # GPU Support Guide
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 This guide explains how to use GPU acceleration in the Face Recognition Service.
 
 ## Automatic GPU Detection
@@ -7,7 +13,15 @@ This guide explains how to use GPU acceleration in the Face Recognition Service.
 The system automatically detects GPU availability and configures itself accordingly:
 
 - **ONNX Runtime**: Uses `CUDAExecutionProvider` if GPU is available, falls back to `CPUExecutionProvider`
-- **FAISS**: Uses `faiss-gpu` if GPU is available, falls back to `faiss-cpu`
+- **FAISS**: the variant is fixed when the IMAGE is built, not chosen at
+  runtime — `requirements-gpu.txt` declares `faiss-gpu`, `requirements-cpu.txt`
+  declares `faiss-cpu`. There is no fallback between them. (FAISS is also not
+  the default backend; pgvector is — see
+  [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md).)
+- **PyTorch**: both images install the **CPU** wheel deliberately. Nothing in
+  this application imports torch; it exists only for a 384-dim MiniLM sentence
+  embedding used by query-history search. Installing the CUDA build would add
+  several GB and contend with SCRFD/ArcFace for the same device.
 
 ## Installation
 
@@ -38,8 +52,14 @@ pip install -r requirements-gpu.txt
 
 **Prerequisites for GPU:**
 - NVIDIA GPU with CUDA support
-- CUDA Toolkit (11.8 or 12.x recommended)
-- cuDNN library
+- **CUDA 12.x and cuDNN 9** — not 11.8. `requirements-gpu.txt` pins
+  `onnxruntime-gpu==1.20.1`, which is built against CUDA 12.x, and
+  `docker/Dockerfile.gpu` is based on `nvidia/cuda:12.4.1-cudnn-runtime`.
+  These three move together; changing one alone is how the CUDA execution
+  provider silently stops registering and every inference quietly runs on the
+  CPU with clean logs and a passing healthcheck.
+- NVIDIA driver **>= 525**. Verify before deploying:
+  `nvidia-smi --query-gpu=driver_version --format=csv`
 
 ## Docker Deployment
 
@@ -68,7 +88,7 @@ docker-compose -f docker/docker-compose.cpu.yml up --build
 #### GPU Deployment
 ```bash
 # Prerequisites: Install nvidia-docker2
-docker-compose -f docker/docker-compose.gpu.yml up --build
+docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml up -d --build
 ```
 
 **GPU Docker Requirements:**
@@ -90,14 +110,14 @@ recognizer = ArcFace(model_path)  # Uses GPU if available
 detector = SCRFD(model_path)     # Uses GPU if available
 ```
 
-### FAISS (Face Database)
+### FAISS (Vector Index)
 
-```python
-# Automatically uses GPU if available
-from database import FaceDatabase
-
-face_db = FaceDatabase()  # Uses GPU FAISS if available
-```
+The display-name-keyed `FaceDatabase` (`from database import FaceDatabase`)
+was deleted 2026-08 — it was write-never under pgvector and its fallback could
+only answer Unknown. Vector search runs through the `backend/core/vector_index`
+contract: `VECTOR_BACKEND=pgvector` searches PostgreSQL in place;
+`VECTOR_BACKEND=faiss` uses `FlatFaissIndex`, which selects the GPU FAISS
+build automatically via `utils/gpu_detection.get_faiss_backend()`.
 
 ## Verification
 

@@ -1,5 +1,14 @@
 # Avatar Visibility and Real-Time Detection Guide
 
+> **⚠ Superseded in part (2026-08-17).** The sections below that describe a
+> server-side Folium/Leaflet map renderer document code that has been REMOVED.
+> `GET /api/identities/{id}/map`, `/map/geojson` and `/api/map/stats` return 404;
+> `folium` is not a dependency of this project and must not be installed. Maps
+> are drawn in the browser by MapLibre GL JS over a local Martin tile server —
+> see [`46_MAP_SERVICE_GUIDE.md`](46_MAP_SERVICE_GUIDE.md). Everything else in
+> this document still applies.
+
+
 **Version:** 5.0.0  
 **Last Updated:** January 2025
 
@@ -71,7 +80,7 @@ WHERE latitude IS NULL OR longitude IS NULL;
 
 **Solution**: Ensure `folium` and `folium.plugins` are installed:
 ```bash
-pip install folium>=0.15.0
+# (removed: folium is no longer a dependency of this project)
 ```
 
 ---
@@ -284,7 +293,7 @@ async def debug_map_data(
 - [ ] Look for start/end markers (green play, red flag)
 - [ ] Check layer control panel for feature groups
 - [ ] Try different map styles (light/dark)
-- [ ] Verify folium is installed: `pip list | grep folium`
+- [ ] (removed — folium is not a dependency)
 
 ---
 

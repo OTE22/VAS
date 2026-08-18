@@ -24,7 +24,7 @@ from db_models import (
     IdentityType, IdentityStatus, MergeSuggestionStatus,
     IdentityAppearance, UserPipelineAccess
 )
-from backend.core.identity_index import identity_index
+from backend.core.vector_index.access import load_vector
 from backend.core.similarity_model import similarity_model
 
 logger = logging.getLogger(__name__)
@@ -61,12 +61,30 @@ class PipelineAwareClusteringService:
     4. Leverages image features and embeddings together
     """
     
-    def __init__(self):
-        self.min_similarity_threshold = 0.35
-        self.cross_pipeline_similarity_threshold = 0.50
-        self.pipeline_weight = 0.3  # Weight for pipeline overlap in similarity
-        self.embedding_weight = 0.7  # Weight for embedding similarity
-    
+    # Properties, not __init__ assignments. This class is instantiated as a
+    # module-level singleton, so capturing these in __init__ froze them at
+    # first import and no admin edit could ever reach them. The four literals
+    # they replaced also duplicated four declared settings exactly, which the
+    # settings page offered for editing while nothing read them.
+    @property
+    def min_similarity_threshold(self) -> float:
+        return float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
+
+    @property
+    def cross_pipeline_similarity_threshold(self) -> float:
+        return float(settings.CROSS_PIPELINE_SIMILARITY_THRESHOLD)
+
+    @property
+    def pipeline_weight(self) -> float:
+        """Weight for pipeline overlap in the blended similarity."""
+        return float(settings.PIPELINE_SIMILARITY_WEIGHT)
+
+    @property
+    def embedding_weight(self) -> float:
+        """Weight for embedding similarity in the blended similarity."""
+        return float(settings.EMBEDDING_SIMILARITY_WEIGHT)
+
+
     async def generate_pipeline_aware_suggestions(
         self,
         db: AsyncSession,
@@ -259,26 +277,27 @@ class PipelineAwareClusteringService:
         embedding_record: IdentityEmbedding,
         db: AsyncSession
     ) -> Optional[np.ndarray]:
-        """Get embedding vector from FAISS index or database."""
-        if not identity_index:
-            return None
-        
+        """Read the stored vector for an embedding row.
+
+        Reads `identity_embeddings.embedding`, the authoritative copy. The
+        previous implementation reconstructed the vector out of the UNKNOWN
+        FAISS index by positional `faiss_id`; those positions shift on every
+        rebuild, so after one rebuild it returned a DIFFERENT PERSON'S vector
+        and fed that into merge-suggestion scoring.
+        """
         try:
-            if embedding_record.faiss_id is not None:
-                # Reconstruct from FAISS
-                with identity_index.lock:
-                    if (identity_index.unknown_index.ntotal > 0 and 
-                        embedding_record.faiss_id < identity_index.unknown_index.ntotal):
-                        vector = identity_index.unknown_index.reconstruct(int(embedding_record.faiss_id))
-                        # Normalize for cosine similarity
-                        norm = np.linalg.norm(vector)
-                        if norm > 0:
-                            vector = vector / norm
-                        return vector.astype(np.float32)
+            vector = await load_vector(db, embedding_record.id)
         except Exception as e:
-            logger.debug(f"[PIPELINE_CLUSTERING] Error reconstructing embedding: {e}")
-        
-        return None
+            logger.debug(f"[PIPELINE_CLUSTERING] Error loading embedding: {e}")
+            return None
+        if vector is None or vector.size == 0:
+            return None
+
+        # Normalize for cosine similarity
+        norm = float(np.linalg.norm(vector))
+        if norm > 0:
+            vector = vector / norm
+        return vector.astype(np.float32)
     
     async def _generate_ml_suggestions(
         self,
@@ -475,18 +494,27 @@ class PipelineAwareClusteringService:
             )
             
             # Set threshold based on whether model is trained
+            base_threshold = (self.cross_pipeline_similarity_threshold
+                              if is_cross_pipeline else self.min_similarity_threshold)
             if similarity_model.is_trained:
-                # Trained model: use slightly lower threshold (model is more accurate)
-                min_threshold = 0.30 if not is_cross_pipeline else 0.45
+                # Trained model: the same configured bar, relaxed by a fixed
+                # margin because the model is more accurate. Derived rather
+                # than written out, so raising the configured threshold raises
+                # this one too — the two used to be independent literals
+                # (0.30/0.45) that ignored the settings entirely.
+                min_threshold = max(0.0, base_threshold
+                                    - float(settings.CLUSTER_TRAINED_MODEL_MARGIN))
             else:
-                # Heuristic: use original thresholds
-                min_threshold = self.cross_pipeline_similarity_threshold if is_cross_pipeline else self.min_similarity_threshold
-            
+                min_threshold = base_threshold
+
         except Exception as e:
             logger.warning(f"[PIPELINE_CLUSTERING] Error using similarity model: {e}, falling back to heuristic")
-            # Fallback to heuristic
+            # Fallback to heuristic. Same weights as the non-cross-pipeline
+            # branch below: this used to blend 0.9/0.1 while its sibling used
+            # the configured 0.7/0.3, so one code path silently ignored both
+            # weight settings.
             if is_cross_pipeline:
-                combined_score = (avg_embedding_similarity * 0.9) + (pipeline_overlap_ratio * 0.1)
+                combined_score = (avg_embedding_similarity * self.embedding_weight) + (pipeline_overlap_ratio * self.pipeline_weight)
                 min_threshold = self.cross_pipeline_similarity_threshold
             else:
                 combined_score = (avg_embedding_similarity * self.embedding_weight) + (pipeline_overlap_ratio * self.pipeline_weight)

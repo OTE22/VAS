@@ -28,9 +28,14 @@ class OllamaProvider(LLMProvider):
     # response budget to discover that helps nobody.
     CONNECT_TIMEOUT_SECONDS = 20.0
 
-    def __init__(self, base_url: str, default_temperature: float = 0.1):
+    def __init__(self, base_url: str, default_temperature: float = None):
+        from config import settings as _settings
         self.base_url = base_url.rstrip("/")
-        self.default_temperature = default_temperature
+        # None, not 0.1: the literal default here shadowed the declared
+        # OLLAMA_TEMPERATURE setting for every caller that omitted the argument.
+        self.default_temperature = (float(_settings.OLLAMA_TEMPERATURE)
+                                    if default_temperature is None
+                                    else default_temperature)
 
     @classmethod
     def _client_timeout(cls, response_timeout: float):

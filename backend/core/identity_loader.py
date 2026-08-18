@@ -21,8 +21,12 @@ from db_models import Identity, IdentityType, IdentityStatus, IdentityEmbedding
 from config import settings
 
 # Check vector backend
-VECTOR_BACKEND = getattr(settings, 'VECTOR_BACKEND', 'faiss').lower()
+VECTOR_BACKEND = settings.VECTOR_BACKEND.lower()
 USE_PGVECTOR = VECTOR_BACKEND == 'pgvector'
+
+from backend.core.vector_index.access import index_stats, request_snapshot
+from backend.core.face_extraction import (FaceExtractionError, embed_face,
+                                          extract_single_face)
 
 logger = logging.getLogger(__name__)
 logger.info(f"[IDENTITY_LOADER] Vector backend: {VECTOR_BACKEND}")
@@ -55,31 +59,46 @@ class IdentityLoader:
             logger.warning(f"Faces directory not found: {faces_dir}")
             return 0, 0, 0
         
-        # Support both flat structure (old) and folder structure (new)
-        # New structure: faces/John_Doe/image1.jpg, faces/John_Doe/image2.jpg
-        # Old structure: faces/john_doe.jpg (backward compatible)
+        # ONE supported layout: FACES_DIR/<identity_uuid>/image_NNN.ext
+        #
+        # This loader used to accept flat files and display-name folders and to
+        # derive display_name from whatever the folder was called, which meant a
+        # restart re-created identities from disk — undoing any cleanup, and (once
+        # folders became UUIDs) creating people literally named "a75c5b6d-...".
+        # It now resolves an identity by ID only and NEVER creates one.
+        import uuid as _uuid
+
         image_files = []
-        person_folders = []
-        
-        # Check if we have folder structure (person folders)
-        for item in os.listdir(faces_dir):
+        skipped_entries = []
+
+        for item in sorted(os.listdir(faces_dir)):
             item_path = os.path.join(faces_dir, item)
-            if os.path.isdir(item_path):
-                # This is a person folder - scan for images inside
-                person_folders.append(item)
-                folder_images = [
-                    os.path.join(item, f) for f in os.listdir(item_path)
-                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
-                ]
-                image_files.extend(folder_images)
-            elif item.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
-                # Flat structure (old format) - backward compatible
-                image_files.append(item)
-        
-        if person_folders:
-            logger.info(f"Found {len(person_folders)} person folders with {len(image_files)} total images")
-        else:
-            logger.info(f"Using flat structure: found {len(image_files)} image files")
+            if not os.path.isdir(item_path):
+                if item.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
+                    skipped_entries.append((item, "loose file — not a <uuid>/ folder"))
+                continue
+            if item.startswith("."):
+                continue          # .incoming staging area
+            try:
+                _uuid.UUID(item)
+            except (ValueError, AttributeError, TypeError):
+                skipped_entries.append((item, "folder name is not an identity UUID"))
+                continue
+            folder_images = [
+                os.path.join(item, f) for f in sorted(os.listdir(item_path))
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
+            ]
+            image_files.extend(folder_images)
+
+        if skipped_entries:
+            logger.warning(
+                "[IDENTITY_LOADER] Skipped %d entr%s not in the <identity_uuid>/ "
+                "layout (nothing was enrolled from them):",
+                len(skipped_entries), "y" if len(skipped_entries) == 1 else "ies")
+            for name, reason in skipped_entries[:20]:
+                logger.warning("[IDENTITY_LOADER]   - %s: %s", name, reason)
+
+        logger.info("Found %d image(s) under identity-UUID folders", len(image_files))
         
         if not image_files:
             logger.info(f"No image files found in {faces_dir}")
@@ -87,15 +106,12 @@ class IdentityLoader:
         
         logger.info(f"Loading {len(image_files)} known faces from {faces_dir}...")
         
-        # Check if index needs training (IVF/IVFPQ indexes)
-        index = self.identity_service.identity_index.known_index
-        needs_training = hasattr(index, 'is_trained') and not index.is_trained
-        
-        if needs_training:
-            logger.warning("KNOWN index requires training! Collecting embeddings for training first...")
-            # Collect embeddings for training (use 10-20% of data or min 10k samples)
-            training_embeddings = []
-            training_count = min(max(10000, len(image_files) // 10), len(image_files))
+        # No index training: the contract ships an exact flat index, and only
+        # IVF/IVFPQ ever needed a training pass. The old check dereferenced the
+        # legacy service unconditionally, so it raised on every startup once
+        # that service stopped being constructed.
+        needs_training = False
+        training_count = 0
         
         loaded_count = 0
         skipped_count = 0
@@ -107,30 +123,27 @@ class IdentityLoader:
                 logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ========================================")
                 logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 📸 Processing image: {filename}")
                 
-                # Extract person name from filename or folder
-                # New structure: "John_Doe/image1.jpg" -> person_name = "John_Doe"
-                # Old structure: "john_doe.jpg" -> person_name = "john_doe"
-                if os.sep in filename or "/" in filename:
-                    # Folder structure: extract folder name as person name
-                    person_name = filename.split(os.sep)[0].split("/")[0]
-                    image_path = os.path.join(faces_dir, filename)
-                else:
-                    # Flat structure: extract from filename (remove extension)
-                    person_name = filename.rsplit(".", 1)[0]
-                    image_path = os.path.join(faces_dir, filename)
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] Person name: {person_name}")
+                # The owning identity is the FOLDER UUID — never the folder text.
+                folder_uuid = filename.split(os.sep)[0].split("/")[0]
+                image_path = os.path.join(faces_dir, filename)
+                owner = (await db.execute(
+                    select(Identity).where(Identity.id == uuid.UUID(folder_uuid))
+                )).scalar_one_or_none()
+                if owner is None:
+                    logger.warning(
+                        "[IDENTITY_LOADER] Skipping %s — no identity %s exists. "
+                        "This loader never creates identities from disk.",
+                        filename, folder_uuid)
+                    skipped_count += 1
+                    continue
+                person_name = owner.display_name
+                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] Identity: {owner.id} ({person_name})")
                 logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] Image path: {image_path}")
-                
+
                 # Check if identity already exists
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 🔍 Checking if identity '{person_name}' already exists...")
+                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 🔍 Checking embeddings for identity {owner.id}...")
                 if not force_reload:
-                    result = await db.execute(
-                        select(Identity).where(
-                            Identity.type == IdentityType.KNOWN,
-                            Identity.display_name == person_name
-                        )
-                    )
-                    existing = result.scalar_one_or_none()
+                    existing = owner
                     if existing:
                         logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ Identity '{person_name}' already exists (ID: {existing.id})")
                         identity_id_str = str(existing.id)
@@ -140,8 +153,12 @@ class IdentityLoader:
                         backend_name = "unknown"
                         
                         if USE_PGVECTOR and self.identity_service.use_pgvector:
-                            # Check for pgvector embeddings in database
-                            from db_models import IdentityEmbedding
+                            # Check for pgvector embeddings in database.
+                            # (IdentityEmbedding is imported at module level. A
+                            # local `from db_models import ...` here made the
+                            # name function-local for the WHOLE function, so the
+                            # summary block at the end raised UnboundLocalError
+                            # whenever no image reached this line.)
                             # NOTE: do NOT filter on faiss_index_type here - historical
                             # rows have NULL there, and filtering made this check miss
                             # them, re-adding a duplicate embedding on EVERY restart.
@@ -156,13 +173,17 @@ class IdentityLoader:
                             backend_name = "pgvector"
                             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Checking pgvector embeddings: {'✅ found' if has_embeddings else '❌ not found'}")
                         else:
-                            # Check for FAISS embeddings
-                            has_embeddings = (
-                                identity_id_str in self.identity_service.identity_index.known_identity_to_faiss and
-                                len(self.identity_service.identity_index.known_identity_to_faiss[identity_id_str]) > 0
+                            # Same question, same answer source: the index is
+                            # derived, so a stored vector is what counts.
+                            emb_result = await db.execute(
+                                select(IdentityEmbedding).where(
+                                    IdentityEmbedding.identity_id == existing.id,
+                                    IdentityEmbedding.embedding.isnot(None)
+                                ).limit(1)
                             )
-                            backend_name = "FAISS"
-                            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Checking FAISS embeddings: {'✅ found' if has_embeddings else '❌ not found'}")
+                            has_embeddings = emb_result.scalar_one_or_none() is not None
+                            backend_name = "index"
+                            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Checking stored embeddings: {'✅ found' if has_embeddings else '❌ not found'}")
                         
                         if has_embeddings:
                             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Identity has {backend_name} embeddings - skipping")
@@ -208,51 +229,41 @@ class IdentityLoader:
                                                 identity_id=str(existing.id),
                                                 embedding=embedding_normalized,
                                                 detection_id=None,
-                                                pipeline_id="preloaded",
+                                                pipeline_id=None,  # preloaded gallery: not a camera sighting
                                                 quality_score=None,
                                                 index_type='known',
-                                                db=db
+                                                db=db,
+                                                # Without this the row is written
+                                                # with a NULL model version and can
+                                                # never prove it matches the index.
+                                                model_version=self.identity_service.embedding_model_version,
                                             )
                                         if emb_id:
                                             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding saved to pgvector: emb_id={emb_id}")
                                         else:
                                             logger.warning(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ❌ Failed to save embedding to pgvector")
                                     else:
-                                        # Add to FAISS
-                                        logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Adding to FAISS...")
-                                        faiss_id = self.identity_service.identity_index.add_known(identity_id_str, embedding)
-                                        logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding added to FAISS: faiss_id={faiss_id}")
-                                        
-                                        # Check if embedding record exists in database
-                                        logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Checking for existing embedding record...")
-                                        emb_result = await db.execute(
-                                            select(IdentityEmbedding).where(
-                                                IdentityEmbedding.identity_id == existing.id,
-                                                IdentityEmbedding.faiss_index_type == 'known',
-                                                IdentityEmbedding.faiss_id.is_(None)
-                                            ).limit(1)
+                                        # Persist the vector, then index it.
+                                        # save_embedding owns that ordering and
+                                        # records the sync outcome; the old code
+                                        # wrote a row with a faiss_id and NO
+                                        # vector, so the database could not
+                                        # rebuild the index it pointed into.
+                                        logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Saving embedding...")
+                                        emb_record = await self.identity_service.save_embedding(
+                                            identity=existing,
+                                            embedding=embedding,
+                                            detection_id=None,
+                                            pipeline_id=None,  # preloaded gallery: not a camera sighting
+                                            quality_score=None,
+                                            db=db
                                         )
-                                        emb_record = emb_result.scalar_one_or_none()
-                                        
-                                        if emb_record:
-                                            # Update existing record
-                                            emb_record.faiss_id = faiss_id
-                                            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Updated existing embedding record with faiss_id={faiss_id}")
-                                        else:
-                                            # Create new embedding record
-                                            emb_record = IdentityEmbedding(
-                                                identity_id=existing.id,
-                                                detection_id=None,
-                                                pipeline_id="preloaded",
-                                                faiss_id=faiss_id,
-                                                faiss_index_type='known',
-                                                quality=None,
-                                                created_at=datetime.utcnow()
-                                            )
-                                            db.add(emb_record)
-                                            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Created new embedding record with faiss_id={faiss_id}")
-                                        
-                                        await db.flush()
+                                        if emb_record is None:
+                                            raise RuntimeError(
+                                                f"save_embedding returned no record for {person_name}")
+                                        logger.info(
+                                            f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding saved: "
+                                            f"id={emb_record.id} state={emb_record.vector_index_sync_state}")
                                     
                                     # Also check and update best_snapshot_path if missing
                                     if not existing.best_snapshot_path:
@@ -273,7 +284,7 @@ class IdentityLoader:
                                     logger.warning(f"[IDENTITY_LOADER] ⚠️ Failed to extract embedding for {person_name}, skipping")
                                     skipped_count += 1
                             except Exception as e:
-                                logger.error(f"[IDENTITY_LOADER] ❌ Error adding FAISS embedding for {person_name}: {e}", exc_info=True)
+                                logger.error(f"[IDENTITY_LOADER] ❌ Error adding embedding for {person_name}: {e}", exc_info=True)
                                 skipped_count += 1
                             continue
                 
@@ -303,23 +314,12 @@ class IdentityLoader:
                 error_count += 1
                 logger.error(f"❌ Error processing {filename}: {e}", exc_info=True)
         
-        # Train index if needed (before adding vectors)
-        if needs_training and len(embeddings_for_training) > 0:
-            logger.info(f"Training KNOWN index with {len(embeddings_for_training)} samples...")
-            training_array = np.array(embeddings_for_training)
-            trained = self.identity_service.identity_index.train_known_index(training_array)
-            if not trained:
-                logger.error("❌ Index training failed! Cannot add vectors.")
-                return loaded_count, skipped_count, error_count
-            logger.info("✅ Index training complete")
-        
-        # Save indexes after loading
-        if loaded_count > 0 and self.identity_service.identity_index:
-            try:
-                self.identity_service.identity_index.save()
-                logger.info(f"💾 Saved identity indexes after loading {loaded_count} known faces")
-            except Exception as e:
-                logger.error(f"Failed to save identity indexes: {e}")
+        # Snapshot request after a bulk load. The manager may decline if a save
+        # is already running — the vectors are already durable in PostgreSQL, so
+        # a declined snapshot costs nothing but a later rebuild.
+        if loaded_count > 0:
+            snap = await request_snapshot(trigger="load_known_faces")
+            logger.info(f"💾 Snapshot after loading {loaded_count} known faces: {snap}")
         
         logger.info(f"✅ Known faces loading complete: {loaded_count} loaded, {skipped_count} skipped, {error_count} errors")
         
@@ -345,15 +345,15 @@ class IdentityLoader:
                     logger.info(f"[IDENTITY_LOADER] ✅ KNOWN pgvector index ready with {known_count} embeddings")
             except Exception as e:
                 logger.warning(f"[IDENTITY_LOADER] Could not verify pgvector index state: {e}")
-        elif self.identity_service and self.identity_service.identity_index:
-            # FAISS backend - log FAISS state
-            known_index_size = self.identity_service.identity_index.known_index.ntotal if self.identity_service.identity_index.known_index else 0
-            known_identities_count = len(self.identity_service.identity_index.known_identity_to_faiss)
-            logger.info(f"[IDENTITY_LOADER] [FAISS] Final KNOWN index state: {known_index_size} vectors, {known_identities_count} identities")
-            if known_index_size == 0:
-                logger.error(f"[IDENTITY_LOADER] ❌❌❌ CRITICAL: KNOWN index is EMPTY after loading! No known faces are available for recognition!")
+        else:
+            stats = index_stats()
+            size = int((stats or {}).get("count", 0) or 0)
+            logger.info(f"[IDENTITY_LOADER] Final index state: {stats}")
+            if size == 0:
+                logger.error("[IDENTITY_LOADER] ❌ Index is EMPTY after loading - "
+                             "no known faces are available for recognition")
             else:
-                logger.info(f"[IDENTITY_LOADER] ✅ KNOWN FAISS index ready with {known_index_size} vectors")
+                logger.info(f"[IDENTITY_LOADER] ✅ Index ready with {size} vectors")
         
         return loaded_count, skipped_count, error_count
     
@@ -381,78 +381,59 @@ class IdentityLoader:
             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ Image loaded: shape={image_shape} (HxWxC)")
             
             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 🔍 Step 2: Face Detection (SCRFD Model)...")
-            # Detect face
-            bboxes, kpss = self.model_manager.detector.detect(image, max_num=1)
-            if kpss is None or len(kpss) == 0:
-                # No face detected - check if this is a small face image (already cropped)
+            # Detect through the shared extractor, which retries on a padded
+            # canvas. What this replaces synthesized five keypoints from image
+            # geometry for any small squarish image and fed them to ArcFace —
+            # and unlike the search paths, the resulting vector was WRITTEN TO
+            # THE GALLERY. A stored embedding built from invented geometry is
+            # not merely a bad row: every future query is compared against it,
+            # so it can neither be matched by its own person nor be recognised
+            # as wrong. A face whose real landmarks cannot be found is now
+            # skipped and logged instead.
+            #
+            # on_multiple="best" is required, not preferred: this used to be
+            # max_num=1, so a folder containing a group photo silently loaded
+            # the largest face. Rejecting here would empty that identity's
+            # gallery slot at startup.
+            try:
+                face = extract_single_face(image, on_multiple="best",
+                                           manager=self.model_manager)
+            except FaceExtractionError as exc:
                 h, w = image.shape[:2]
-                # Common face crop sizes: 112x112, 128x128, 160x160, etc.
-                # If image is small and roughly square, treat as face image
-                is_small_image = (h <= 200 and w <= 200) and (abs(h - w) <= 20)
-                
-                if is_small_image:
-                    logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ℹ️  No face detected, but image is small ({h}x{w}) - treating as face image")
-                    logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Skipping face detection, using entire image for embedding")
-                    
-                    # Create approximate keypoints at image center (for face alignment)
-                    center_x, center_y = w // 2, h // 2
-                    kpss = np.array([[
-                        [center_x - w * 0.15, center_y - h * 0.1],  # Left eye
-                        [center_x + w * 0.15, center_y - h * 0.1],  # Right eye
-                        [center_x, center_y],                         # Nose
-                        [center_x - w * 0.1, center_y + h * 0.15],  # Left mouth corner
-                        [center_x + w * 0.1, center_y + h * 0.15]   # Right mouth corner
-                    ]], dtype=np.float32)
-                    bboxes = np.array([[0, 0, w, h, 1.0]], dtype=np.float32)
-                    logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ Using entire image as face region for embedding generation")
-                else:
-                    logger.warning(f"[IDENTITY_LOADER] [STEP-BY-STEP] ❌ No face detected in {image_path} (image size: {h}x{w})")
-                    return False, None
-            else:
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ SCRFD: Face detected successfully")
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Bounding boxes: {len(bboxes)}, Landmarks: {len(kpss)}")
-                if len(bboxes) > 0:
-                    confidence = bboxes[0][4] if len(bboxes[0]) > 4 else 'N/A'
-                    logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Confidence: {confidence}")
-            
+                logger.warning(
+                    "[IDENTITY_LOADER] [STEP-BY-STEP] ❌ Skipping %s (%dx%d): %s (%s). "
+                    "No embedding was stored for this image.",
+                    image_path, w, h, exc.message, exc.code)
+                return False, None
+
+            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ SCRFD: Face detected successfully")
+            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Confidence: {face.score:.4f}"
+                        f"{' (padded retry)' if face.padded_retry else ''}")
+
             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 🔍 Step 3: Embedding Generation (ArcFace Model)...")
             # Generate embedding
-            embedding = self.model_manager.recognizer.get_embedding(image, kpss[0])
+            embedding = embed_face(image, face, manager=self.model_manager)
             
             embedding_norm = np.linalg.norm(embedding)
             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ ArcFace: Embedding generated successfully")
             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Embedding shape: {embedding.shape}, norm: {embedding_norm:.6f}")
             
-            # Create Identity record
-            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 🔍 Step 4: Creating Identity Record...")
-            identity_id = uuid.uuid4()
+            # Reuse the identity that owns this folder. The loader resolved it
+            # from the folder UUID above and skipped anything unmatched, so it
+            # never creates an identity from disk — that behaviour is what used
+            # to resurrect purged people (and, under UUID folders, would have
+            # created people named after a UUID) on every restart.
+            identity = owner
+            identity_id = identity.id
             now = datetime.utcnow()
-            
-            # Try to find existing images in storage/pipeline_id/person_name/ structure
-            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Searching for existing images in storage for {person_name}...")
-            best_snapshot_path = await self._find_best_image_from_storage(person_name, db)
-            
-            if best_snapshot_path:
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Found existing image: {best_snapshot_path}")
-            else:
-                logger.warning(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ⚠️ No existing image found. Will be set when person is first detected.")
-            
-            identity = Identity(
-                id=identity_id,
-                type=IdentityType.KNOWN,
-                status=IdentityStatus.ACTIVE,
-                display_name=person_name,
-                first_seen_at=now,
-                last_seen_at=now,
-                appearances_count=0,
-                best_snapshot_path=best_snapshot_path,
-                created_at=now,
-                updated_at=now
-            )
-            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ Identity record created: ID={identity_id}, name='{person_name}'")
-            db.add(identity)
-            await db.flush()
-            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Identity saved to database")
+            if not identity.best_snapshot_path:
+                best_snapshot_path = await self._find_best_image_from_storage(
+                    person_name, db, identity_id=identity.id)
+                if best_snapshot_path:
+                    identity.best_snapshot_path = best_snapshot_path
+                    logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Set best_snapshot_path: {best_snapshot_path}")
+            identity.updated_at = now
+            logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] ✅ Using existing identity {identity_id} ('{person_name}')")
             
             # Add embedding to appropriate backend (FAISS or pgvector)
             logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP] 🔍 Step 5: Saving Embedding...")
@@ -471,10 +452,13 @@ class IdentityLoader:
                     identity_id=str(identity_id),
                     embedding=embedding_normalized,
                     detection_id=None,
-                    pipeline_id="preloaded",
+                    pipeline_id=None,  # preloaded gallery: not a camera sighting
                     quality_score=None,
                     index_type='known',
-                    db=db
+                    db=db,
+                    # Same reason as the enrichment path above: a preloaded
+                    # known face is a searchable vector like any other.
+                    model_version=self.identity_service.embedding_model_version,
                 )
                 
                 if emb_id:
@@ -483,39 +467,23 @@ class IdentityLoader:
                 else:
                     logger.warning(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ❌ Failed to save embedding to pgvector")
             else:
-                # FAISS backend - add to in-memory index
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Using FAISS backend")
-                
-                # Check if index needs training (IVF indexes)
-                index = self.identity_service.identity_index.known_index
-                if hasattr(index, 'is_trained') and not index.is_trained:
-                    logger.warning(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ⚠️ KNOWN index is not trained! Training required for IVF indexes.")
-                    # For now, we'll add anyway (will fail for IVF, but at least we log it)
-                
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Adding to FAISS known_index (will normalize internally)...")
-                faiss_id = self.identity_service.identity_index.add_known(
-                    str(identity_id),
-                    embedding
+                # In-process index backend: persist first, index second.
+                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Saving embedding via the vector index contract...")
+                embedding_record = await self.identity_service.save_embedding(
+                    identity=identity,
+                    embedding=embedding,
+                    detection_id=None,       # no detection for pre-loaded faces
+                    pipeline_id=None,  # preloaded gallery: not a camera sighting
+                    quality_score=None,      # not calculated for pre-loaded faces
+                    db=db
                 )
-                
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding added to FAISS: faiss_id={faiss_id}")
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    Saving embedding record to database...")
-                
-                # Save embedding record
-                embedding_record = IdentityEmbedding(
-                    identity_id=identity_id,
-                    detection_id=None,  # No detection for pre-loaded faces
-                    pipeline_id="preloaded",  # Special pipeline ID for pre-loaded faces
-                    faiss_id=faiss_id,
-                    faiss_index_type='known',
-                    quality=None,  # Quality not calculated for pre-loaded faces
-                    created_at=now
-                )
-                db.add(embedding_record)
-                await db.flush()
-                
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding record saved to database (faiss_id={faiss_id})")
-                logger.info(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding stored in FAISS index (in-memory)")
+                if embedding_record is None:
+                    logger.error(f"[IDENTITY_LOADER] [STEP-BY-STEP]    ❌ save_embedding returned no record")
+                    return False, None
+                logger.info(
+                    f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding stored in "
+                    f"identity_embeddings (id={embedding_record.id}, "
+                    f"state={embedding_record.vector_index_sync_state})")
             
             return True, identity
             
@@ -530,30 +498,19 @@ class IdentityLoader:
             if image is None:
                 return None
             
-            bboxes, kpss = self.model_manager.detector.detect(image, max_num=1)
-            if kpss is None or len(kpss) == 0:
-                # No face detected - check if this is a small face image (already cropped)
-                h, w = image.shape[:2]
-                # Common face crop sizes: 112x112, 128x128, 160x160, etc.
-                # If image is small and roughly square, treat as face image
-                is_small_image = (h <= 200 and w <= 200) and (abs(h - w) <= 20)
-                
-                if is_small_image:
-                    logger.debug(f"[IDENTITY_LOADER] No face detected in {image_path}, but image is small ({h}x{w}) - treating as face image")
-                    # Create approximate keypoints at image center
-                    center_x, center_y = w // 2, h // 2
-                    kpss = np.array([[
-                        [center_x - w * 0.15, center_y - h * 0.1],  # Left eye
-                        [center_x + w * 0.15, center_y - h * 0.1],  # Right eye
-                        [center_x, center_y],                         # Nose
-                        [center_x - w * 0.1, center_y + h * 0.15],  # Left mouth corner
-                        [center_x + w * 0.1, center_y + h * 0.15]   # Right mouth corner
-                    ]], dtype=np.float32)
-                else:
-                    return None
-            
-            embedding = self.model_manager.recognizer.get_embedding(image, kpss[0])
-            return embedding
+            # Same shared extractor as everywhere else: a padded retry for tight
+            # crops, and a refusal rather than invented keypoints when no real
+            # face is there. Returning None is the existing "skip this image"
+            # signal for both callers.
+            try:
+                face = extract_single_face(image, on_multiple="best",
+                                           manager=self.model_manager)
+            except FaceExtractionError as exc:
+                logger.warning("[IDENTITY_LOADER] No usable face in %s: %s (%s)",
+                               image_path, exc.message, exc.code)
+                return None
+
+            return embed_face(image, face, manager=self.model_manager)
             
         except Exception as e:
             logger.warning(f"Failed to extract embedding from {image_path}: {e}")
@@ -573,7 +530,7 @@ class IdentityLoader:
             from config import settings
             from db_models import Face, Detection, IdentityEmbedding
             
-            storage_dir = getattr(settings, 'STORAGE_DIR', './storage')
+            storage_dir = settings.STORAGE_DIR
             storage_dir_abs = os.path.abspath(storage_dir)
             safe_name = "".join(c for c in person_name if c.isalnum() or c in ('-', '_')).lower()
             
@@ -722,11 +679,6 @@ class IdentityLoader:
                 "database_embedding_count": 0,
                 "match": False,
                 "issues": []
-            },
-            "assets_faces": {
-                "directory_exists": False,
-                "file_count": 0,
-                "loaded_count": 0
             }
         }
         
@@ -821,8 +773,8 @@ class IdentityLoader:
                 logger.info("[IDENTITY_LOADER] [VERIFY] Using FAISS backend for verification")
                 
                 # Check KNOWN index
-                if self.identity_service.identity_index:
-                    results["known_index"]["faiss_count"] = self.identity_service.identity_index.known_index.ntotal if self.identity_service.identity_index.known_index else 0
+                if index_stats() is not None:
+                    results["known_index"]["faiss_count"] = int((index_stats() or {}).get("count", 0) or 0)
                     
                     # Count KNOWN identities in database
                     result = await db.execute(
@@ -849,7 +801,9 @@ class IdentityLoader:
                         )
                     
                     # Check UNKNOWN index
-                    results["unknown_index"]["faiss_count"] = self.identity_service.identity_index.unknown_index.ntotal if self.identity_service.identity_index.unknown_index else 0
+                    # One index now; the KNOWN/UNKNOWN split lives in the
+                    # database, so both report the same total.
+                    results["unknown_index"]["faiss_count"] = int((index_stats() or {}).get("count", 0) or 0)
                     
                     result = await db.execute(
                         select(Identity).where(Identity.type == IdentityType.UNKNOWN)
@@ -873,26 +827,13 @@ class IdentityLoader:
                             f"Database embedding count ({unknown_embedding_count})"
                         )
             
-            # Check storage/faces directory
-            faces_dir = getattr(settings, 'FACES_DIR', './storage/faces')
-            if os.path.exists(faces_dir):
-                results["assets_faces"]["directory_exists"] = True
-                image_files = [
-                    f for f in os.listdir(faces_dir)
-                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
-                ]
-                results["assets_faces"]["file_count"] = len(image_files)
-                
-                # Count how many are loaded in Identity system
-                result = await db.execute(
-                    select(Identity).where(Identity.type == IdentityType.KNOWN)
-                )
-                all_known = result.scalars().all()
-                # Check which ones match files in assets/faces
-                loaded_names = {id.display_name for id in all_known}
-                file_names = {f.rsplit(".", 1)[0] for f in image_files}
-                results["assets_faces"]["loaded_count"] = len(loaded_names & file_names)
-            
+            # The old "assets_faces" block that stood here scanned FACES_DIR
+            # for LOOSE image files and matched their basenames against display
+            # names — both halves of a representation this system no longer
+            # uses (the gallery is <identity_uuid>/ folders). It counted 0 on
+            # every deployment while looking like a real check, so it was
+            # removed rather than kept as reassuring noise.
+
         except Exception as e:
             logger.error(f"Error verifying indexes: {e}", exc_info=True)
             results["error"] = str(e)

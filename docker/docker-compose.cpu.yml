@@ -1,3 +1,30 @@
+# =============================================================================
+# DEVELOPMENT (CPU) — Face Recognition Service
+# =============================================================================
+# For GPU development, LAYER the override on top of this file:
+#   docker compose -f docker/docker-compose.cpu.yml \
+#                  -f docker/docker-compose.gpu.yml up -d
+#
+# Production is a different pair entirely — see docker-compose.prod.yml.
+# =============================================================================
+
+# The project name namespaces every volume, network and container. It is NOT
+# cosmetic: without it Compose derives the project from this file's parent
+# directory — "docker" — and so did docker-compose.prod.yml. Both declare
+# volumes named postgres_data, redis_data, face_database_data and
+# chromadb_cache, so both resolved to docker_postgres_data &c. and STARTING
+# PRODUCTION MOUNTED THIS DEVELOPMENT DATABASE.
+#
+# Deliberately not plain "face_detector": volumes under that prefix already
+# exist on some hosts from an older layout, and adopting them silently would
+# resurrect stale data — the same failure in a different costume.
+#
+# docker-compose.gpu.yml intentionally omits `name:`, so a GPU development run
+# inherits this project and therefore the SAME database as a CPU run.
+#
+# Never set COMPOSE_PROJECT_NAME: it outranks this key.
+name: face_detector_dev
+
 services:
   # PostgreSQL Database with pgvector extension
   postgres:
@@ -76,9 +103,23 @@ services:
 
   # Face Recognition Service (CPU Version)
   face_recognition:
+    # Name the built image explicitly. Without this, Compose derives it from
+    # the project name, so renaming the project silently orphans the existing
+    # image and forces a full rebuild — hours, on a slow link, for a change
+    # that has nothing to do with the image contents. An explicit tag also
+    # means `docker images` shows something meaningful instead of
+    # <project>-face_recognition.
+    image: face-detector/api:dev
     build:
       context: ..
       dockerfile: docker/Dockerfile.cpu
+      args:
+        # This is the DEVELOPMENT stack and the suite runs inside this
+        # container, so the image ships its own test runner. Without it, any
+        # `docker compose up` that recreates the container loses pytest and the
+        # next test run fails for reasons unrelated to the code.
+        # Production images leave this at its default of false.
+        INSTALL_DEV: "true"
     container_name: face_recognition_api
     user: "1000:1000"
     environment:
@@ -104,7 +145,6 @@ services:
       BOOTSTRAP_ADMIN_PASSWORD: admin123
       BOOTSTRAP_ADMIN_REQUIRE_ROTATION: "false"
       MIGRATIONS_MODE: run
-      MIGRATIONS_FAIL_CLOSED: "false"
       DATABASE_URL: postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition
       DB_POOL_SIZE: 30
       DB_MAX_OVERFLOW: 60
@@ -119,8 +159,6 @@ services:
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
       SIMILARITY_THRESHOLD: 0.4
       CONFIDENCE_THRESHOLD: 0.5
-      FACES_DIR: /app/storage/faces
-      DB_PATH: /app/database/face_database
       VECTOR_BACKEND: pgvector
       PGVECTOR_INDEX_TYPE: hnsw
       PGVECTOR_HNSW_M: "32"
@@ -138,6 +176,10 @@ services:
       FACE_TRACKING_MAX_ENTRIES: 2000
       FACE_TRACKING_MAX_MEMORY_MB: 1000
       FACE_TRACKING_CLEANUP_INTERVAL: 300
+      # STORAGE_DIR is the only settable storage root. FACES_DIR,
+      # UPLOAD_TEMP_DIR, WEBHOOK_IMAGES_DIR and CROPPED_IMAGES_DIR are
+      # derived from it in config.py; setting them here has no effect
+      # and config_guard refuses to start on a divergent value.
       STORAGE_DIR: /app/storage
       SAVE_IMAGES: "true"
       MAX_STORAGE_GB: 5000
@@ -153,7 +195,17 @@ services:
       MAX_CONCURRENT_INFERENCE_PER_PIPELINE: 2
       # Webhook fast-path knobs
       WEBHOOK_MAX_BODY_MB: 25
-      WEBHOOK_DEDUP_TTL_SECONDS: 60
+      # 600 covers the VMS worst-case same-event retry horizon (~360s) with margin
+      WEBHOOK_DEDUP_TTL_SECONDS: 600
+      # Ingest authentication. This is a DEVELOPMENT key, committed on purpose so
+      # the enforcement tests exercise a real 401/202 split rather than the
+      # no-keys-configured escape hatch. Production supplies its own via
+      # WEBHOOK_API_KEYS_FILE and config_guard refuses to start without one.
+      WEBHOOK_API_KEYS: "dev-ingest-key-Zr6Xk1Nd8Bq3Ly7Vt5Wc0Mj2Hf9Ps4Ga"
+      # Senders present the credential as `Authorization: Bearer <token>` or
+      # `X-Webhook-Key: <token>`. WEBHOOK_AUTH_TOKEN is an accepted alias env
+      # var that folds into the key set above. `off` is refused in production.
+      WEBHOOK_AUTH_MODE: enforce
       # SQL agent isolation
       # Generated SQL executes as a SELECT-only role, never as the
       # application's. The AST guard in sql_agent/security/sql_guard.py
@@ -162,10 +214,13 @@ services:
       SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:-TestRo-8jT5nKd3Yc}
       SQL_AGENT_MAX_CONCURRENT: 2
       SQL_AGENT_TOTAL_TIMEOUT: 300
-      ENABLE_METRICS: "true"
-      METRICS_PORT: 9090
       LOG_LEVEL: INFO
       LOG_DIR: /var/log/face-recognition
+      # Sentence-transformer / HuggingFace model cache. Declared here so the
+      # location is configuration rather than a library default nobody can
+      # find. Identical across cpu/gpu/prod; docker-entrypoint.sh creates it,
+      # chowns it to appuser, and refuses to start if it is not writable.
+      HF_HOME: /home/appuser/.cache/huggingface
       # Explicit origins, not a wildcard: a wildcard forces credentialed CORS
       # off, and '["*"]' previously parsed as one malformed literal origin.
       CORS_ORIGINS: "http://localhost,http://localhost:8000,http://127.0.0.1,http://127.0.0.1:8000"
@@ -192,14 +247,12 @@ services:
       - ../assets:/app/assets:ro
       - ../storage:/app/storage  # Unified storage: faces/ for known faces, {pipeline_id}/ for detected faces
       - face_database_data:/app/database
-      - chromadb_data:/app/chromadb_data
       - chromadb_cache:/home/appuser/.cache/chroma
       - ../:/app
       - ../logs:/var/log/face-recognition
     # Expose ports internally only (nginx will proxy)
     expose:
       - "8000"
-      - "9090"
     depends_on:
       postgres:
         condition: service_healthy
@@ -247,8 +300,16 @@ services:
       # Log every HTTP request/response (GIN framework) with status and latency
       - GIN_MODE=debug
     volumes:
-      # Use host directory for Ollama models (Windows path - must use quotes and double backslashes)
-      - "C:/Users/Raven/.ollama:/root/.ollama"
+      # A named volume, not a host path. This used to be
+      # "C:/Users/Raven/.ollama:/root/.ollama" — one developer's home
+      # directory, hardcoded, which made the repository unusable on any other
+      # machine and silently produced an Ollama with no models elsewhere.
+      #
+      # Point OLLAMA_MODELS_PATH (docker/.env) at an existing host model
+      # directory to reuse already-downloaded models — worth doing on an
+      # air-gapped host. Otherwise models live in the named volume and are
+      # pulled once.
+      - ${OLLAMA_MODELS_PATH:-ollama_models}:/root/.ollama
     ports:
       - "11434:11434"
     healthcheck:
@@ -267,6 +328,44 @@ services:
       - face_recognition_network
 
   # Nginx Reverse Proxy
+  # ---------------------------------------------------------------------------
+  # Martin — offline tile server for the MapLibre maps.
+  #
+  # Serves the prepared Lebanon datasets in ./map-data/production (mounted
+  # read-only; data lives outside image layers and survives down/up
+  # --force-recreate). Reachable ONLY through nginx at /maps/ — no host port,
+  # so the browser never sees martin:3000. Configuration is explicit
+  # (config/martin.yaml, validated against this exact image tag); nothing is
+  # auto-detected and nothing is downloaded at start-up.
+  #
+  # Air-gapped hosts: `docker save ghcr.io/maplibre/martin:1.13.0 -o martin.tar`
+  # on the connected machine, `docker load -i martin.tar` on the target.
+  # ---------------------------------------------------------------------------
+  martin:
+    image: ghcr.io/maplibre/martin:1.13.0
+    container_name: face_recognition_martin
+    command: ["--config", "/config/martin.yaml"]
+    volumes:
+      - ../map-data:/map-data:ro
+      - ../config/martin.yaml:/config/martin.yaml:ro
+    # A REAL readiness probe: Martin's /health only answers once the config is
+    # parsed and every configured source has been opened. wget is present in
+    # the image; curl is not.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    restart: unless-stopped
+    networks:
+      - face_recognition_network
+
   nginx:
     image: nginx:alpine
     container_name: face_recognition_nginx
@@ -274,11 +373,17 @@ services:
       - ../nginx.conf:/etc/nginx/nginx.conf:ro
       - ../frontend:/usr/share/nginx/html/frontend:ro
       - ../icons:/usr/share/nginx/html/icons:ro
+      # Offline Lebanon basemap (~1 GB, excluded from images by .dockerignore
+      # on purpose) — read-only bind, one copy on disk, served by nginx.
     ports:
       - "80:80"
       - "443:443"
     depends_on:
       face_recognition:
+        condition: service_healthy
+      # /maps/ is proxied to Martin; do not accept traffic before it can
+      # serve tiles, or the first map view is a wall of 502s.
+      martin:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "nginx", "-t"]
@@ -293,6 +398,61 @@ services:
         max-file: "3"
     restart: unless-stopped
     networks:
+      face_recognition_network:
+      # Webhook ingress from the VMS project (separate compose project, separate
+      # private network). ONLY nginx joins; the API/db/redis stay private and the
+      # existing /webhook/ location proxies onward to face_recognition:8000.
+      webhook_integration:
+        aliases:
+          - face-webhook
+
+  # ===========================================================================
+  # Optional dev observability — OFF by default. Start with:
+  #     docker compose -f docker/docker-compose.cpu.yml --profile monitoring up -d
+  # Reuses the same monitoring/ configs as production, so a dashboard or alert
+  # edited here is exactly what prod runs. The prometheus.yml target
+  # `face_recognition:8000` resolves on this compose network too.
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: face_recognition_prometheus
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts:/etc/prometheus/alerts:ro
+      - prometheus_dev_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"   # loopback only — dev inspection, not exposed
+    restart: unless-stopped
+    networks:
+      - face_recognition_network
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: face_recognition_grafana
+    profiles: ["monitoring"]
+    environment:
+      # Dev-only default; override with GRAFANA_ADMIN_PASSWORD in .env.
+      # (Production compose REQUIRES the variable and has no default.)
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-face-detector-dev}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_dev_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"   # loopback only
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
       - face_recognition_network
 
 volumes:
@@ -302,13 +462,26 @@ volumes:
     driver: local
   face_database_data:
     driver: local
-  chromadb_data:
-    driver: local
   chromadb_cache:
     driver: local
-  # ollama_data volume removed - using host directory C:\Users\Raven\.ollama instead
+  prometheus_dev_data:
+    driver: local
+  grafana_dev_data:
+    driver: local
+  # Ollama models. Declared even though OLLAMA_MODELS_PATH can substitute a
+  # host path for it: an unused volume declaration costs nothing, whereas a
+  # missing one breaks the default (and default is the case everyone hits
+  # first on a fresh clone).
+  ollama_models:
+    driver: local
 
 networks:
   face_recognition_network:
     driver: bridge
+  # Shared webhook path with the VMS project. External so neither project owns
+  # (or can tear down) the other's connectivity; provisioned once:
+  #   docker network create webhook_integration
+  webhook_integration:
+    external: true
+    name: webhook_integration
 

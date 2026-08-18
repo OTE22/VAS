@@ -27,7 +27,6 @@ storage/
 chromadb_data/
 conversation_cache/
 sql_agent/chromadb_data/
-tiles/
 debug/
 backup/
 *.dump
@@ -197,3 +196,23 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# ML artifacts (pickles/parquet/tracking) — never committed
+models/candidates/
+models/ml/
+models/mlruns/
+
+# Offline map datasets (hundreds of MB to several GB). Mounted read-only into
+# Martin at runtime; never in git, never in an image.
+# The committed parts of map-data/ are metadata/ and the .gitkeep only —
+# EXCEPT content_verdicts.json, which records what THIS deployment measured
+# about ITS archives. Committing one machine's verdicts would let another
+# machine's archives inherit them.
+map-data/production/
+map-data/source/
+map-data/metadata/content_verdicts.json
+
+# Regression map fixtures: generated in seconds by
+# scripts/map_data/make_test_fixtures.py, deterministic, a few MB of binary.
+# Reproducible artifacts do not belong in git.
+map-data-test/

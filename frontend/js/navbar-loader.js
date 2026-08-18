@@ -89,10 +89,14 @@
         if (path.startsWith('/admin/users')) return 'users';
         if (path.startsWith('/admin/pipelines')) return 'pipelines';
         if (path.startsWith('/admin/unknown')) return 'unknown';
+        // The identity profile page has no navbar entry of its own; keep the
+        // UNKNOWN FACES item highlighted since that is where identities live.
+        if (path.startsWith('/admin/identity/')) return 'unknown';
         if (path.startsWith('/admin/search-history')) return 'search-history';
         if (path.startsWith('/admin/search')) return 'search';
         if (path.startsWith('/admin/intelligence')) return 'intelligence';
         if (path.startsWith('/admin/security-intelligence')) return 'security-intelligence';
+        if (path.startsWith('/admin/ml-ops')) return 'ml-ops';
         if (path.startsWith('/admin/ml-model')) return 'ml-model';
         if (path.startsWith('/admin/background-tasks')) return 'background-tasks';
         if (path.startsWith('/admin/live-alerts')) return 'live-alerts';

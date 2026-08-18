@@ -53,7 +53,47 @@
             <span id="uploadSuccessText"></span>
         </div>
 
-        <form class="upload-form" data-action-submit="handleGlobalUpload">
+        <!--
+            Identity review. Shown when the server recognises the uploaded face
+            as somebody already on file, INSTEAD of silently creating a second
+            record for the same person. The form above is hidden while this is
+            open; nothing has been saved at this point, and closing the modal
+            cancels the upload server-side.
+        -->
+        <div class="enrollment-decision" id="enrollmentDecision" style="display: none;">
+            <div class="enrollment-decision__intro">
+                <i class="fas fa-user-check"></i>
+                <span id="enrollmentDecisionMessage"></span>
+            </div>
+
+            <!--
+                Filled in at runtime with the person's name. Neutral styling and
+                an information icon on purpose: a duplicate upload SUCCEEDS and
+                stores nothing, so a green tick here would be a lie.
+            -->
+            <div class="enrollment-decision__duplicate" id="enrollmentDuplicateNotice"
+                 role="status" style="display: none;">
+                <i class="fas fa-circle-info" aria-hidden="true"></i>
+                <span id="enrollmentDuplicateText"></span>
+            </div>
+
+            <div class="enrollment-decision__candidates" id="enrollmentCandidates"></div>
+
+            <div class="enrollment-decision__actions">
+                <button type="button" class="upload-submit-btn enrollment-decision__new"
+                        id="enrollmentCreateNewBtn" data-action="enrollmentCreateNew">
+                    <i class="fas fa-user-plus"></i>
+                    <span id="enrollmentCreateNewLabel">Create as a new person</span>
+                </button>
+                <button type="button" class="upload-cancel-btn"
+                        data-action="enrollmentCancel">
+                    <i class="fas fa-times"></i>
+                    Cancel upload
+                </button>
+            </div>
+        </div>
+
+        <form class="upload-form" id="uploadPersonForm" data-action-submit="handleGlobalUpload">
             <div class="form-group">
                 <label class="form-label" for="globalPersonName">
                     <i class="fas fa-user"></i>

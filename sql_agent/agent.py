@@ -17,6 +17,31 @@ from .graph import create_sql_agent
 # Setup logger for SQL Agent
 logger = logging.getLogger(__name__)
 
+# Neutral placeholder. Every transport replaces this with the policy layer's
+# verdict, but if one ever forgets, the fallback the user sees must still be
+# true — a refusal, never a claim about their account.
+_SECURITY_PLACEHOLDER = ("That operation is not permitted — the assistant can "
+                         "only read data.")
+
+
+def _security_event(state: dict, reason: str) -> dict:
+    """A DETECTION event: structured, and silent about account state.
+
+    `security_violation` is what the transports key off. They must never key off
+    the wording of `message` — that was the original defect: the API matched
+    `message.startswith("Security:")` while the agent emitted "SECURITY ALERT:",
+    so the policy layer was never invoked on streaming transports.
+    """
+    return {
+        "type": "error",
+        "step": "security_block",
+        "security_violation": True,
+        "security_reason_code": state.get("security_reason_code",
+                                          "FORBIDDEN_SQL_ATTEMPT"),
+        "security_reason": reason,
+        "message": _SECURITY_PLACEHOLDER,
+    }
+
 
 class SQLIntelligenceAgent:
     """
@@ -109,13 +134,15 @@ class SQLIntelligenceAgent:
             logger.info(f"[SQL_AGENT] {response}")
             logger.info(f"[SQL_AGENT] {'='*80}")
             
-            # Check if user should be blocked (security flag from agent tools)
+            # A violation was DETECTED. The API route runs it through the policy
+            # layer, which decides — and states — what happens to the account.
+            # This response is a placeholder the route replaces; it must not
+            # claim an account action that may not occur.
             if result.get("security_block_user"):
                 block_reason = result.get("security_block_reason", "Attempted forbidden SQL operation")
                 user_id_from_state = result.get("security_block_user_id")  # Get user_id from state if available
-                response = f"SECURITY ALERT: {block_reason}. Your account has been blocked. Please contact an administrator immediately."
-                logger.error(f"[SECURITY] 🚨 Agent marked user for blocking: {block_reason}")
-                logger.error(f"[SECURITY] 📤 SECURITY BLOCK RESPONSE: {response}")
+                response = _SECURITY_PLACEHOLDER
+                logger.error(f"[SECURITY] 🚨 Agent flagged a violation for policy review: {block_reason}")
                 # Include user_id in result_dict if available
                 if user_id_from_state:
                     result["security_block_user_id"] = user_id_from_state
@@ -200,21 +227,28 @@ class SQLIntelligenceAgent:
                         # Update accumulated state with node output
                         accumulated_state.update(node_output)
                         
-                        # Check if user was blocked (security detected)
+                        # A violation was DETECTED. What happens to the account is
+                        # decided by sql_agent/security_policy.py, not here — so
+                        # this event carries a structured marker and says nothing
+                        # about account state. The transport replaces `message`
+                        # with the policy's verdict before the client sees it.
+                        #
+                        # This used to yield "…Your account has been blocked."
+                        # directly, while the policy layer was never reached at
+                        # all on this transport: the user was told they were
+                        # blocked on every attempt and never actually was.
                         if accumulated_state.get("security_block_user"):
                             block_reason = accumulated_state.get("security_block_reason", "Security violation detected")
-                            final_response = accumulated_state.get("final_response", f"SECURITY ALERT: {block_reason}. Your account has been blocked.")
-                            logger.error(f"[SECURITY] Stream ended early - User blocked: {block_reason}")
-                            yield {"type": "error", "message": final_response, "step": "security_block"}
+                            logger.error(f"[SECURITY] Stream ended early - violation detected: {block_reason}")
+                            yield _security_event(accumulated_state, block_reason)
                             stream_ended_early = True
                             break
-                        
+
                         if node_name == "detect_malicious_intent":
                             # Security scan completed
                             if accumulated_state.get("security_block_user"):
                                 block_reason = accumulated_state.get("security_block_reason", "Malicious intent detected")
-                                final_response = accumulated_state.get("final_response", f"SECURITY ALERT: {block_reason}. Your account has been blocked.")
-                                yield {"type": "error", "message": final_response, "step": "security_block"}
+                                yield _security_event(accumulated_state, block_reason)
                                 stream_ended_early = True
                                 break
                         elif node_name == "fix_language":
@@ -268,7 +302,7 @@ class SQLIntelligenceAgent:
             if stream_ended_early or accumulated_state.get("security_block_user"):
                 # Stream ended early - ensure we send completion
                 if not final_response:
-                    final_response = accumulated_state.get("final_response", "SECURITY ALERT: Your account has been blocked.")
+                    final_response = accumulated_state.get("final_response", _SECURITY_PLACEHOLDER)
                 yield {"type": "complete", "message": "Stream ended", "step": "done", "success": False}
                 return
             

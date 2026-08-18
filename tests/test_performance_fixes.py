@@ -40,6 +40,18 @@ def _http(method: str, path: str, body: dict = None, headers: dict = None,
     )
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    # Ingest now requires a credential. Read it from the settings object this
+    # container was started with rather than hard-coding one, so the test tracks
+    # the deployment instead of pinning a literal that would rot.
+    if path.startswith("/webhook") or path.startswith("/api/webhook"):
+        try:
+            from config import settings
+            from backend.security.webhook_auth import header_name, parse_keys
+            keys = parse_keys(getattr(settings, "WEBHOOK_API_KEYS", ""))
+            if keys:
+                req.add_header(header_name(settings), keys[0])
+        except Exception:
+            pass
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     start = time.time()

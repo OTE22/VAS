@@ -29,7 +29,7 @@ from db_models import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Authentication"])
 
 
 class LoginRequest(BaseModel):
@@ -394,9 +394,9 @@ async def get_user_privileges(
             # Admin: Show all links (order matches admin-navbar.html)
             navbar_links = [
                 NavbarLink(page="home", href="/home", label="HOME", icon="fas fa-home", visible=True),
-                NavbarLink(page="dashboard", href="/dashboard", label="DASHBOARD", icon="fas fa-tachometer-alt", visible=True),
+                NavbarLink(page="dashboard", href="/dashboard", label="LIVE FEEDS", icon="fas fa-video", visible=True),
                 # Management Dropdown items
-                NavbarLink(page="add-person", href="/dashboard", label="ADD PERSON", icon="fas fa-user-plus", visible=True, title="Add a person to track", parent_page="management"),
+                NavbarLink(page="add-person", href="#", label="ADD PERSON", icon="fas fa-user-plus", visible=True, title="Add a person to track", parent_page="management"),
                 NavbarLink(page="users", href="/admin/users", label="USERS", icon="fas fa-users", visible=True, parent_page="management"),
                 NavbarLink(page="pipelines", href="/admin/pipelines", label="PIPELINES", icon="fas fa-video", visible=True, parent_page="management"),
                 NavbarLink(page="audit", href="/admin/audit", label="AUDIT LOG", icon="fas fa-clipboard-list", visible=True, parent_page="management"),
@@ -415,10 +415,16 @@ async def get_user_privileges(
                 NavbarLink(page="security-intelligence", href="/admin/security-intelligence", label="SECURITY INTELLIGENCE", icon="fas fa-shield-alt", visible=True, title="Security Intelligence - Network Analysis, Pattern Detection, Threat Assessment", parent_page="search"),
                 # System Dropdown items
                 NavbarLink(page="ml-model", href="/admin/ml-model", label="ML MODEL", icon="fas fa-brain", visible=True, title="ML Similarity Model - Train and manage merge suggestion model", parent_page="system"),
+                NavbarLink(page="ml-ops", href="/admin/ml-ops", label="ML OPERATIONS", icon="fas fa-project-diagram", visible=True, title="ML Operations - anomaly pipeline, shadow evaluation, drift, labels", parent_page="system"),
                 NavbarLink(page="background-tasks", href="/admin/background-tasks", label="BACKGROUND TASKS", icon="fas fa-tasks", visible=True, title="Monitor background task executions", parent_page="system"),
                 NavbarLink(page="live-alerts", href="/admin/live-alerts", label="LIVE ALERTS", icon="fas fa-bell", visible=True, title="Live Search Alerts - Get notified when tracked faces appear", parent_page="system"),
                 NavbarLink(page="tutorial", href="/admin/tutorial", label="TUTORIAL", icon="fas fa-graduation-cap", visible=True, title="Admin Tutorial & Learning Guide", parent_page="system"),
                 NavbarLink(page="settings", href="/admin/settings", label="SETTINGS", icon="fas fa-cog", visible=True, title="System Settings Management", parent_page="system"),
+                # Admin branch only. navbar-loader hides every .dropdown-item and
+                # shows just the ones named here, so this entry and the markup in
+                # components/admin-navbar.html are two halves of one link: either
+                # alone renders nothing.
+                NavbarLink(page="ingest-credentials", href="/admin/ingest-credentials", label="INGEST CREDENTIALS", icon="fas fa-key", visible=True, title="Issue and revoke camera ingest credentials", parent_page="system"),
                 NavbarLink(page="logs", href="/admin/logs", label="ERROR LOGS", icon="fas fa-exclamation-triangle", visible=True, title="System Error Logs Viewer", parent_page="system"),
                 NavbarLink(page="docs", href="/docs", label="API DOCS", icon="fas fa-book", visible=True, title="Open API Documentation in new tab", parent_page="system"),
             ]
@@ -427,7 +433,7 @@ async def get_user_privileges(
             # Regular users: Only show DASHBOARD, UNKNOWN FACES (if they have access)
             # Note: Merge suggestions are accessed via the UNKNOWN FACES page, not a separate navbar link
             navbar_links = [
-                NavbarLink(page="dashboard", href="/dashboard", label="DASHBOARD", icon="fas fa-tachometer-alt", visible=True),
+                NavbarLink(page="dashboard", href="/dashboard", label="LIVE FEEDS", icon="fas fa-video", visible=True),
             ]
             
             # Add UNKNOWN FACES and LIVE ALERTS links only if user has pipeline access

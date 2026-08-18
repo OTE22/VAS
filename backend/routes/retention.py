@@ -28,6 +28,7 @@ from db_models import User, SettingsAuditLog
 from backend.auth.auth_service import require_role
 from backend.core import runtime_settings
 from backend.core.data_retention import retention_manager
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,8 @@ async def retention_status(
         if hist:
             last_history = {
                 "status": hist[0],
-                "created_at": hist[1].isoformat() if hist[1] else None,
-                "completed_at": hist[2].isoformat() if hist[2] else None,
+                "created_at": iso_utc(hist[1]),
+                "completed_at": iso_utc(hist[2]),
                 "duration_seconds": hist[3],
                 "details": hist[4],
             }
@@ -94,7 +95,7 @@ async def retention_status(
     interval_hours = retention_manager.cleanup_interval_hours
     next_run = None
     if retention_manager.last_run_at:
-        next_run = (retention_manager.last_run_at + timedelta(hours=interval_hours)).isoformat()
+        next_run = iso_utc(retention_manager.last_run_at + timedelta(hours=interval_hours))
 
     from backend.core.retention_job import retention_busy
     last = retention_manager.last_result or {}
@@ -109,7 +110,7 @@ async def retention_status(
         "apply_mode": dr.get("apply_mode"),
         "cleanup_interval_seconds": interval_hours * 3600,
         "currently_running": retention_busy(),
-        "last_run_at": retention_manager.last_run_at.isoformat() if retention_manager.last_run_at else None,
+        "last_run_at": iso_utc(retention_manager.last_run_at),
         "last_run_status": last.get("status"),
         "last_run_dry_run": last.get("dry_run"),
         "last_run_duration_seconds": last.get("duration_seconds"),

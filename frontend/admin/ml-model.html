@@ -105,7 +105,11 @@
                             </button>
                             <div class="training-params">
                                 <label for="min-samples-input">Minimum Samples:</label>
-                                <input type="number" id="min-samples-input" value="50" min="10" max="1000" step="10">
+                                <!-- No value=: the literal 50 combined with the
+                                     `if (!input.value)` guard in admin-ml-model.js
+                                     meant the field was never empty, so the server's
+                                     configured minimum_samples could never populate it. -->
+                                <input type="number" id="min-samples-input" min="10" max="1000" step="10" placeholder="server default">
                             </div>
                         </div>
                         <div id="training-result" class="training-result"></div>
@@ -178,7 +182,7 @@
 
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
-    <script src="/frontend/js/navbar-loader.js?v=nav-5"></script>
+    <script src="/frontend/js/navbar-loader.js?v=nav-6"></script>
     <script src="/frontend/js/footer-loader.js"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-ml-model.js?v=ml-2"></script>

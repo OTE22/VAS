@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Background Tasks"])
 
 NO_STORE = "no-store, no-cache, must-revalidate"
 
@@ -161,6 +161,7 @@ async def get_running_tasks(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """Currently running background tasks (up to 50), newest first, as a bare JSON array. Non-admin callers get error internals replaced by a correlation reference."""
     response.headers["Cache-Control"] = NO_STORE
     user_is_admin = current_user.role == "admin"
     return await task_history_manager.get_running_tasks(user_is_admin=user_is_admin)

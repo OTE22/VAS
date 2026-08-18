@@ -1,5 +1,17 @@
 # SCRFD & ArcFace Integration Pipeline
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
+> **Storage note (2026-08):** face enrollment now lives ONLY in
+> `storage/faces/<identity_uuid>/image_NNN.ext`. The old flat
+> `assets/faces/<Name>.jpg` gallery was removed and is no longer read
+> at startup; enroll through the upload API instead.
+
+
 **Face Recognition Surveillance System**  
 **ITDIR-AI DEPARTMENT**
 
@@ -36,7 +48,7 @@ Both stages use the same SCRFD → ArcFace pipeline.
 #### Step 1.1: Load Image
 ```python
 # backend/core/identity_loader.py:168
-image = cv2.imread(image_path)  # Read image from assets/faces/
+image = cv2.imread(image_path)  # Read image from storage/faces/<identity_uuid>/
 # Image format: BGR (OpenCV default)
 ```
 
@@ -104,7 +116,7 @@ faiss_id = self.identity_service.identity_index.add_known(
 )
 ```
 
-**What `add_known()` does** (`backend/core/identity_index.py`):
+**What `add_known()` does** (`backend/core/vector_index/`):
 1. **Normalize embedding**: `embedding / np.linalg.norm(embedding)`
 2. **Add to FAISS**: `known_index.add(normalized_embedding)`
 3. **Store metadata**: `known_metadata[faiss_id] = identity_id`
@@ -193,13 +205,13 @@ embedding = embedding / np.linalg.norm(embedding)
 # backend/services/image_processing.py:195-201
 # Calls identity_service.find_or_create_identity()
 # backend/core/identity_service.py:66-70 (Search KNOWN)
-known_matches = identity_index.search_known(embedding, top_k=1, threshold=0.4)
+known_matches = identity_index.search_known(embedding, top_k=1)  # threshold=None -> SIMILARITY_THRESHOLD
 
 # backend/core/identity_service.py:106-110 (Search UNKNOWN)
-unknown_matches = identity_index.search_unknown(embedding, top_k=1, threshold=0.35)
+unknown_matches = identity_index.search_unknown(embedding, top_k=1)  # -> UNKNOWN_SIMILARITY_THRESHOLD
 ```
 
-**What FAISS search does** (`backend/core/identity_index.py:190-228`):
+**What FAISS search does** (`backend/core/vector_index/`:190-228`):
 1. **Normalize query**: Query embedding is already normalized (Line 198)
 2. **FAISS search**: `index.search(normalized_embedding, k=1)` (Line 202)
 3. **Filter by threshold**: Only return matches above threshold (Line 210)
@@ -230,7 +242,7 @@ await identity_service.save_embedding(
 ### Database Build Flow
 
 ```
-assets/faces/person_name.jpg
+storage/faces/<identity_uuid>/image_001.jpg
     ↓
 cv2.imread() → BGR image
     ↓
@@ -284,9 +296,9 @@ ArcFace.get_embedding(crop, landmarks)
 Normalize embedding (L2 norm)
     ↓
 FAISS Search:
-    ├─→ Search KNOWN index (threshold=0.4)
+    ├─→ Search KNOWN index (SIMILARITY_THRESHOLD, default 0.4)
     │   └─→ If match: Return known identity
-    ├─→ Search UNKNOWN index (threshold=0.35)
+    ├─→ Search UNKNOWN index (UNKNOWN_SIMILARITY_THRESHOLD, default 0.35)
     │   └─→ If match: Return unknown identity
     └─→ If no match: Create new unknown identity
     ↓

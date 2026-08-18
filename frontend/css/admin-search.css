@@ -454,8 +454,28 @@
     height: 26px;
 }
 
+/* Visually hidden, NOT display:none.
+   `display: none` removed #batch-mode-toggle and #check-watchlist from both
+   the tab order and the accessibility tree, so batch mode and watchlist
+   checking were mouse-only. This keeps the input focusable and announced
+   while the styled slider remains the visible control. */
 .toggle-switch input {
-    display: none;
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    top: 0;
+    left: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 1;
+}
+
+/* The input itself is invisible, so the focus ring has to be drawn on the
+   slider it controls. */
+.toggle-switch input:focus-visible + .toggle-slider {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
 }
 
 .toggle-slider {
@@ -1085,3 +1105,679 @@
     }
 }
 
+
+/* ============================================================
+   Modal — owned by this page
+
+   admin-search.js opens modals with classList.add('active'), but no
+   stylesheet search.html loads defined `.modal.active`. admin.css sets
+   `.modal { display: none }` and only un-hides on an inline
+   `style*="display: flex"`. The single `.modal.active` rule that made Export
+   render arrived from upload-modal.css, which upload-modal-loader.js injects
+   at runtime for an unrelated component — so if that fetch failed, Export was
+   a silent no-op. These rules remove that cross-component dependency.
+   ============================================================ */
+.modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(5px);
+    z-index: 2000;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal.active {
+    display: flex;
+}
+
+/* ============================================================
+   Upload dropzone as a real button
+   The element is now <button>; strip the UA chrome so it still looks like a
+   dropzone, and keep a visible focus ring now that it is reachable.
+   ============================================================ */
+.upload-area {
+    display: block;
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    appearance: none;
+    -webkit-appearance: none;
+}
+
+.upload-area:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
+    border-color: #00ff96;
+}
+
+/* ============================================================
+   Capability gating + inline hints
+   ============================================================ */
+.form-hint {
+    margin: 0.35rem 0 0;
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.75rem;
+}
+
+.batch-unsupported-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    margin: 0 0 0.75rem;
+    padding: 0.5rem 0.65rem;
+    border-left: 2px solid rgba(255, 190, 0, 0.6);
+    background: rgba(255, 190, 0, 0.08);
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.75rem;
+    line-height: 1.35;
+}
+
+.batch-unsupported-note i {
+    margin-top: 0.15rem;
+    color: rgba(255, 190, 0, 0.9);
+}
+
+/* Dimmed, not hidden: the controls stay visible so the reason next to them
+   makes sense, but they are inert (their inputs are also `disabled`). */
+.search-section.capability-disabled .form-group,
+.search-section.capability-disabled .exclude-group {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+/* Watchlist alert levels in the exclusion list */
+.exclude-item.alert-level-critical .exclude-item-type {
+    color: #ff6b6b;
+}
+
+.exclude-item.alert-level-warning .exclude-item-type {
+    color: #ffbe00;
+}
+
+.exclude-item.alert-level-info .exclude-item-type {
+    color: rgba(0, 255, 150, 0.8);
+}
+
+/* Alert card body — replaces the inline styles the old innerHTML string
+   carried, now that the cards are DOM-built. */
+.alert-notes {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.alert-action {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 0.75rem;
+    border-radius: 6px;
+    margin-top: 0.5rem;
+}
+
+.alert-action-label {
+    color: #ffcc00;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    margin-bottom: 0.25rem;
+}
+
+.alert-action-body {
+    color: #fff;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.search-alert-icon.info {
+    background: rgba(0, 255, 150, 0.2);
+    color: #00ff96;
+}
+
+.alert-card.info {
+    border-color: rgba(0, 255, 150, 0.4);
+    background: rgba(0, 255, 150, 0.08);
+}
+
+/* Remove controls are <button> elements now (keyboard-activatable, and
+   `disabled` works). Strip the UA chrome so they look unchanged. */
+.exclude-chip-remove,
+.batch-file-item .remove-file {
+    appearance: none;
+    -webkit-appearance: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    background-color: transparent;
+}
+
+.exclude-chip-remove {
+    background: rgba(255, 100, 100, 0.3);
+    color: #fff;
+}
+
+.batch-file-item .remove-file {
+    padding: 0.2rem;
+}
+
+.exclude-chip-remove:focus-visible,
+.batch-file-item .remove-file:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
+}
+
+/* ============================================================
+   Modal panel — dark, to match the page
+
+   admin.css sets `.modal-content { background: white }` for the light admin
+   forms. This page is dark (white text, #00ff96 accents), and upload-modal.css
+   only styles `.upload-modal-content`, never `.modal-content` — so the export
+   modal rendered as a white panel with white text on it. admin-search.css
+   loads last, so these plain-class rules win.
+   ============================================================ */
+.modal-content {
+    background: linear-gradient(135deg, rgba(10, 25, 41, 0.98) 0%, rgba(26, 71, 42, 0.98) 100%);
+    border: 1px solid rgba(0, 255, 150, 0.25);
+    border-radius: 12px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+    width: 90%;
+    max-width: 520px;
+    max-height: 90vh;
+    overflow-y: auto;
+    color: #fff;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    background: transparent;
+    border-bottom: 1px solid rgba(0, 255, 150, 0.2);
+    border-radius: 12px 12px 0 0;
+}
+
+.modal-header h2,
+.modal-header h3 {
+    margin: 0;
+    color: #fff;
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
+.modal-body {
+    padding: 1.5rem;
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding: 1rem 1.5rem 1.5rem;
+}
+
+.modal-content .form-group {
+    margin-bottom: 1.25rem;
+}
+
+.modal-content .form-group > label {
+    display: block;
+    margin-bottom: 0.4rem;
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.modal-content .form-control {
+    width: 100%;
+    padding: 0.6rem 0.75rem;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(0, 255, 150, 0.2);
+    border-radius: 6px;
+    color: #fff;
+    font-size: 0.9rem;
+}
+
+.modal-content .form-control:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 1px;
+}
+
+/* A <select>'s dropdown list is painted by the OS, which does not inherit the
+   dark panel — set it explicitly or the options are white-on-white. */
+.modal-content .form-control option {
+    background: #0a1929;
+    color: #fff;
+}
+
+.modal-content .modal-close {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 1rem;
+    background: rgba(255, 100, 100, 0.15);
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: #ff6b6b;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.modal-content .modal-close:hover {
+    background: rgba(255, 100, 100, 0.28);
+    border-color: #ff6b6b;
+}
+
+.modal-content .modal-close:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
+}
+
+/* ============================================================
+   Native control chrome — dark everywhere on this page
+
+   `.search-panel .form-control` darkened the CLOSED select, but the option
+   list that drops open is painted by the browser, not by that rule, so every
+   dropdown on the page opened as a white sheet with black text. Same for the
+   date inputs: the calendar popup and its indicator icon are browser chrome.
+
+   Two levers, both needed:
+     - `color-scheme: dark` tells the browser to render native widgets (option
+       lists, date pickers, scrollbars, autofill) in their dark variant.
+     - explicit `option` colours, because Chromium on Windows/Linux paints the
+       list from CSS and ignores color-scheme for the option rows themselves.
+
+   This stylesheet is loaded by frontend/admin/search.html and nothing else, so
+   these plain selectors cannot reach another page.
+   ============================================================ */
+select,
+input,
+textarea,
+.form-control {
+    color-scheme: dark;
+}
+
+/* Every option list on the page, including the ones rendered into
+   #pipeline-filter at runtime. */
+select option,
+select optgroup {
+    background-color: #0a1929;
+    color: #ffffff;
+}
+
+select option:checked,
+select option:hover {
+    background-color: rgba(0, 255, 150, 0.18);
+    color: #ffffff;
+}
+
+/* The calendar glyph ships as a dark icon: invisible on a dark field. */
+input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(1) opacity(0.65);
+    cursor: pointer;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+    filter: invert(1) opacity(1);
+}
+
+/* Chromium renders an empty date input's placeholder text near-black. */
+input[type="date"]::-webkit-datetime-edit-text,
+input[type="date"]::-webkit-datetime-edit-month-field,
+input[type="date"]::-webkit-datetime-edit-day-field,
+input[type="date"]::-webkit-datetime-edit-year-field {
+    color: #ffffff;
+}
+
+input[type="date"]:invalid::-webkit-datetime-edit {
+    color: rgba(255, 255, 255, 0.45);
+}
+
+/* Autofill repaints the field white with its own !important background;
+   a large inset shadow is the only way to override it. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+    -webkit-text-fill-color: #ffffff;
+    box-shadow: 0 0 0 1000px #0a1929 inset;
+    caret-color: #ffffff;
+}
+
+/* The custom exclusion list was translucent (alpha 0.6), so whatever sat
+   behind it showed through the rows. Opaque, same palette as the native
+   option lists above. Its :hover / .selected rules are already dark and are
+   deliberately left alone. */
+.exclude-dropdown {
+    background: #0a1929;
+}
+
+/* ============================================================
+   Identity detail panel
+
+   Opens over the results instead of navigating to
+   /admin/unknown ("Unknown Faces Center"), which is the wrong page for a
+   known person and threw away the search on the way there.
+   Inherits the dark .modal-content treatment defined above.
+   ============================================================ */
+.identity-modal-content {
+    max-width: 620px;
+}
+
+.identity-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid rgba(0, 255, 150, 0.15);
+}
+
+.identity-snapshot {
+    width: 84px;
+    height: 84px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 255, 150, 0.25);
+    flex-shrink: 0;
+}
+
+.identity-summary {
+    min-width: 0;
+}
+
+.identity-name {
+    margin: 0 0 0.4rem;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #fff;
+    overflow-wrap: anywhere;
+}
+
+.identity-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+
+.identity-badge {
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.identity-badge.type-known {
+    background: rgba(0, 255, 150, 0.18);
+    color: #00ff96;
+}
+
+.identity-badge.type-unknown {
+    background: rgba(255, 190, 0, 0.18);
+    color: #ffbe00;
+}
+
+/* Facts grid */
+.identity-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.4rem 1.5rem;
+    padding: 1rem 0;
+}
+
+.identity-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: 0.85rem;
+    padding: 0.2rem 0;
+}
+
+.identity-row-label {
+    color: rgba(255, 255, 255, 0.5);
+    flex-shrink: 0;
+}
+
+.identity-row-value {
+    color: #fff;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+/* Sections */
+.identity-section {
+    padding-top: 1rem;
+    border-top: 1px solid rgba(0, 255, 150, 0.12);
+}
+
+.identity-section-title {
+    margin: 0 0 0.6rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(0, 255, 150, 0.75);
+}
+
+.identity-empty,
+.identity-loading {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.identity-sightings,
+.identity-watchlists {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.identity-sighting {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.4rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.82rem;
+}
+
+.identity-sighting:nth-child(odd) {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.sighting-camera {
+    color: #fff;
+    overflow-wrap: anywhere;
+}
+
+.sighting-time {
+    color: rgba(255, 255, 255, 0.5);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.identity-watchlist {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.5rem;
+    margin-bottom: 0.3rem;
+    border-radius: 4px;
+    border-left: 3px solid transparent;
+    background: rgba(255, 255, 255, 0.04);
+    font-size: 0.85rem;
+}
+
+.identity-watchlist .watchlist-name {
+    flex: 1;
+    color: #fff;
+    overflow-wrap: anywhere;
+}
+
+.identity-watchlist .watchlist-level {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(255, 255, 255, 0.55);
+}
+
+.identity-watchlist.alert-level-critical {
+    border-left-color: #ff6b6b;
+}
+
+.identity-watchlist.alert-level-critical i {
+    color: #ff6b6b;
+}
+
+.identity-watchlist.alert-level-warning {
+    border-left-color: #ffbe00;
+}
+
+.identity-watchlist.alert-level-warning i {
+    color: #ffbe00;
+}
+
+.identity-watchlist.alert-level-info {
+    border-left-color: rgba(0, 255, 150, 0.6);
+}
+
+.identity-watchlist.alert-level-info i {
+    color: rgba(0, 255, 150, 0.8);
+}
+
+/* The "Open full profile" link sits in the footer next to a button, so it
+   needs the button's box without the button's element type. */
+#identity-full-profile {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    text-decoration: none;
+}
+
+@media (max-width: 600px) {
+    .identity-facts {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ============================================================
+   Result cards: keyboard reachability
+   The card is a div with role="button"; without a visible ring a keyboard
+   user cannot tell which card is active.
+   ============================================================ */
+.match-card:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
+    border-color: rgba(0, 255, 150, 0.5);
+}
+
+/* ============================================================
+   Identity panel: "This match" context
+   Similarity/confidence of the CLICKED match, and — when the match hit a
+   watchlist — the operator notes and action instructions from that hit.
+   ============================================================ */
+.identity-match-alert {
+    margin-top: 0.6rem;
+    padding: 0.65rem 0.75rem;
+    border-radius: 6px;
+    border-left: 3px solid rgba(0, 255, 150, 0.6);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.identity-match-alert.alert-level-critical {
+    border-left-color: #ff6b6b;
+    background: rgba(255, 0, 0, 0.08);
+}
+
+.identity-match-alert.alert-level-warning {
+    border-left-color: #ffbe00;
+    background: rgba(255, 190, 0, 0.07);
+}
+
+.match-alert-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #fff;
+    font-size: 0.85rem;
+}
+
+.identity-match-alert.alert-level-critical .match-alert-head i {
+    color: #ff6b6b;
+}
+
+.identity-match-alert.alert-level-warning .match-alert-head i {
+    color: #ffbe00;
+}
+
+.identity-match-alert.alert-level-info .match-alert-head i {
+    color: rgba(0, 255, 150, 0.8);
+}
+
+.match-alert-level {
+    margin-left: auto;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: rgba(255, 255, 255, 0.55);
+}
+
+.match-alert-notes {
+    margin: 0.5rem 0 0;
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.match-alert-action {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.match-alert-action-label {
+    display: block;
+    color: #ffcc00;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.25rem;
+}
+
+.match-alert-action-body {
+    margin: 0;
+    color: #fff;
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* Footer holds two links + the Done button now; let them wrap on small
+   screens instead of overflowing. */
+#identity-modal .modal-footer {
+    flex-wrap: wrap;
+}
+
+/* VERY_LOW: the backend emits five confidence bands, the page previously knew
+   four, so an unlikely match was painted with the LOW colour. */
+.match-similarity.very-low {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: rgba(255, 255, 255, 0.65);
+}

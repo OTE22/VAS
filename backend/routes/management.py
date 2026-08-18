@@ -7,7 +7,7 @@ Routes for system management (cleanup, circuit breaker, face tracker).
 import os
 import sys
 import logging
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,10 +17,21 @@ if parent_dir not in sys.path:
 from backend.config import FACE_TRACKING_ENABLED
 from backend.core import retention_manager, db_circuit_breaker, face_tracker
 from backend.routes.utils import validate_pipeline_id
+from backend.auth.auth_service import require_role
+from db_models import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# System-management surface: cleanup triggers data deletion, the face-tracker
+# reset drops in-memory state, and the status probes expose infrastructure
+# internals. All of it is administrator-only — a router-level dependency so no
+# individual route can be added later without a gate. (Previously every route
+# here was unauthenticated: anyone could POST /api/cleanup/manual to trigger a
+# retention sweep, or reset a pipeline's tracker.)
+router = APIRouter(
+    tags=["System Management"],
+    dependencies=[Depends(require_role(["admin"]))],
+)
 
 
 @router.post("/api/cleanup/manual")

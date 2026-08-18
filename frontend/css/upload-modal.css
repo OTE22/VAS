@@ -244,3 +244,211 @@
     cursor: not-allowed;
 }
 
+
+/* ---------------------------------------------------------------------------
+   Identity review
+   ---------------------------------------------------------------------------
+   Shown when the uploaded face matches somebody already on file. The upload
+   form is hidden while this is open and NOTHING has been saved yet: the photo
+   is held server-side under a short-lived token until one of these buttons is
+   pressed, and closing the modal cancels it.
+   --------------------------------------------------------------------------- */
+
+.enrollment-decision {
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.enrollment-decision__intro {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    color: rgba(255, 200, 0, 0.95);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.enrollment-decision__intro i {
+    margin-top: 0.15rem;
+    font-size: 1.1rem;
+}
+
+.enrollment-decision__duplicate {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    padding: 0.65rem 0.85rem;
+    border: 1px solid rgba(0, 200, 255, 0.35);
+    border-radius: 6px;
+    background: rgba(0, 200, 255, 0.08);
+    color: rgba(150, 220, 255, 0.95);
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
+.enrollment-decision__candidates {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    max-height: 22rem;
+    overflow-y: auto;
+}
+
+.enrollment-candidate {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.7rem;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.enrollment-candidate--recommended {
+    border-color: rgba(0, 255, 150, 0.5);
+    background: rgba(0, 255, 150, 0.07);
+}
+
+.enrollment-candidate__avatar {
+    width: 56px;
+    height: 56px;
+    flex: 0 0 56px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.enrollment-candidate__body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.enrollment-candidate__name {
+    color: rgba(255, 255, 255, 0.95);
+    font-weight: 600;
+    font-size: 0.95rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.enrollment-candidate__meta {
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 0.8rem;
+    margin-top: 0.15rem;
+}
+
+.enrollment-candidate__badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 3px;
+    border: 1px solid rgba(0, 255, 150, 0.4);
+    color: rgba(0, 255, 150, 0.9);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.enrollment-candidate__choose {
+    flex: 0 0 auto;
+    padding: 0.5rem 0.9rem;
+    background: rgba(0, 255, 150, 0.15);
+    border: 1px solid rgba(0, 255, 150, 0.4);
+    border-radius: 5px;
+    color: rgba(0, 255, 150, 0.9);
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: 'Inter', monospace;
+}
+
+.enrollment-candidate__choose:hover:not(:disabled) {
+    background: rgba(0, 255, 150, 0.28);
+    box-shadow: 0 0 12px rgba(0, 255, 150, 0.25);
+}
+
+.enrollment-candidate__choose:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.enrollment-decision__actions {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.enrollment-decision__actions > * {
+    flex: 1 1 12rem;
+}
+
+/* Creating a separate record for a face we already hold is the action that
+   reintroduces the duplicate this flow exists to prevent, so it is styled as
+   the secondary choice rather than the obvious one. */
+.enrollment-decision__new {
+    background: rgba(255, 200, 0, 0.15);
+    border-color: rgba(255, 200, 0, 0.4);
+    color: rgba(255, 210, 80, 0.95);
+}
+
+.enrollment-decision__new:hover:not(:disabled) {
+    background: rgba(255, 200, 0, 0.25);
+    border-color: rgba(255, 200, 0, 0.6);
+    box-shadow: 0 0 15px rgba(255, 200, 0, 0.25);
+}
+
+.upload-cancel-btn {
+    padding: 0.75rem 1.5rem;
+    background: rgba(255, 255, 255, 0.06);
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 1rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-family: 'Inter', monospace;
+}
+
+.upload-cancel-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* The candidate that already holds this EXACT file. Adding it again is a
+   correct no-op, so the card says so instead of promising an addition —
+   operators were clicking "Add to this person" and then hunting for an
+   image_002.jpg the server had rightly declined to write. */
+.enrollment-candidate--duplicate {
+    border-color: rgba(0, 200, 255, 0.4);
+    background: rgba(0, 200, 255, 0.06);
+}
+
+.enrollment-candidate__badge--duplicate {
+    border-color: rgba(0, 200, 255, 0.45);
+    color: rgba(150, 220, 255, 0.95);
+}
+
+.enrollment-candidate--duplicate .enrollment-candidate__choose {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.enrollment-candidate--duplicate .enrollment-candidate__choose:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+    box-shadow: none;
+}

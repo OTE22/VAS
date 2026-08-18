@@ -43,13 +43,17 @@ from sqlalchemy import select, update, delete, func
 from config import settings
 import logging
 
-# Try to import identity_index (may not be available)
+# Index access goes through the contract. Running standalone there is usually
+# no in-process index at all — which is fine: the index is derived state, so a
+# script that deletes rows can leave re-derivation to reconciliation.
 try:
-    from backend.core.identity_index import identity_index
-    IDENTITY_INDEX_AVAILABLE = identity_index is not None
-except (ImportError, AttributeError):
+    from backend.core.vector_index.access import (get_vector_index,
+                                                  remove_identity_vectors)
+    IDENTITY_INDEX_AVAILABLE = True
+except ImportError:
     IDENTITY_INDEX_AVAILABLE = False
-    identity_index = None
+    get_vector_index = None
+    remove_identity_vectors = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -353,31 +357,26 @@ async def cleanup_unknown_identities(db, delete_images=False, dry_run=False, ski
         else:
             logger.info(f"    ℹ️  No merge suggestions to delete")
         
-        # 5g. Remove from FAISS index
-        logger.info("  [5g] Removing from FAISS index...")
-        if IDENTITY_INDEX_AVAILABLE and identity_ids:
-            removed_from_faiss = 0
+        # 5g. Remove from the vector index
+        logger.info("  [5g] Removing from the vector index...")
+        if IDENTITY_INDEX_AVAILABLE and identity_ids and get_vector_index() is not None:
+            removed_from_index = 0
             for identity_id in identity_ids:
                 if not dry_run:
                     try:
-                        removed = identity_index.remove_from_unknown(str(identity_id))
-                        removed_from_faiss += removed
+                        removed_from_index += await remove_identity_vectors(db, identity_id)
                     except Exception as e:
-                        logger.warning(f"    Failed to remove {identity_id} from FAISS: {e}")
+                        logger.warning(f"    Failed to remove {identity_id} from the index: {e}")
                 else:
-                    logger.info(f"    [DRY RUN] Would remove identity {identity_id} from FAISS unknown index")
-            
+                    logger.info(f"    [DRY RUN] Would remove identity {identity_id} from the index")
+
             if not dry_run:
-                if removed_from_faiss > 0:
-                    identity_index.save()  # Save FAISS index after cleanup
-                    logger.info(f"    ✅ Removed {removed_from_faiss} embeddings from FAISS unknown index")
-                else:
-                    logger.info(f"    ℹ️  No FAISS embeddings to remove")
+                logger.info(f"    ✅ Removed {removed_from_index} vector(s) from the index")
+                # No snapshot forced here: the index is derived from PostgreSQL,
+                # and the rows are about to be deleted, so the next autosave or
+                # reconciliation converges to the same state either way.
         else:
-            if not IDENTITY_INDEX_AVAILABLE:
-                logger.info(f"    ℹ️  FAISS index not available, skipping")
-            else:
-                logger.info(f"    ℹ️  No identities to remove from FAISS")
+            logger.info(f"    ℹ️  No in-process index to update (rows are authoritative)")
         
         # 5h. Delete Identity records
         logger.info("  [5h] Deleting Identity records...")

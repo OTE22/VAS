@@ -1,5 +1,17 @@
 # Identity Recognition System - Complete Explanation
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
+> **Storage note (2026-08):** face enrollment now lives ONLY in
+> `storage/faces/<identity_uuid>/image_NNN.ext`. The old flat
+> `assets/faces/<Name>.jpg` gallery was removed and is no longer read
+> at startup; enroll through the upload API instead.
+
+
 **Face Recognition Surveillance System**  
 **Date:** January 2025
 
@@ -87,7 +99,7 @@ Identity (1) ──< (N) IdentityEmbedding
 ### Critical Checkpoints
 
 **Checkpoint 1: FAISS Search**
-- **Location:** `backend/core/identity_index.py:search_known()`
+- **Location:** `backend/core/vector_index/`:search_known()`
 - **Checks:**
   - Similarity >= threshold (0.4)
   - FAISS ID exists in metadata
@@ -305,7 +317,7 @@ curl -X GET "http://localhost:8000/api/admin/identities/debug/{identity_id}" \
 │              IDENTITY RECOGNITION DATA FLOW                  │
 └─────────────────────────────────────────────────────────────┘
 
-assets/faces/Joey.png
+storage/faces/<identity_uuid>/Joey.png
     ↓
 IdentityLoader._load_single_face()
     ├── SCRFD.detect() → landmarks

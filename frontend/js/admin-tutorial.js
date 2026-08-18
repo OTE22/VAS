@@ -87,6 +87,9 @@ function renderTutorial() {
     const content = document.getElementById('tutorial-content');
     content.innerHTML = '';
 
+    // Nav first, so every rendered section is guaranteed a way to reach it.
+    renderNav();
+
     // Render quick start
     renderQuickStart(content);
 
@@ -96,6 +99,9 @@ function renderTutorial() {
         sectionDiv.className = 'tutorial-section';
         sectionDiv.id = `section-${getSectionId(section.title)}`;
         sectionDiv.style.display = 'none';
+        // Pairs with role="tab" + aria-controls on the nav buttons.
+        sectionDiv.setAttribute('role', 'tabpanel');
+        sectionDiv.setAttribute('tabindex', '0');
 
         sectionDiv.innerHTML = `
             <h2>${section.title}</h2>
@@ -107,6 +113,13 @@ function renderTutorial() {
 
         content.appendChild(sectionDiv);
     });
+
+    // The region has finished populating; stop announcing it as busy.
+    content.setAttribute('aria-busy', 'false');
+
+    // Which build is serving this. Deliberately not awaited: the tutorial must
+    // render whether or not the health endpoint answers.
+    renderBuildInfo();
 
     // Show initial section
     showSection(currentSection);
@@ -223,11 +236,15 @@ function renderAPIEndpoints(endpoints) {
 function showSection(sectionId) {
     currentSection = sectionId;
 
-    // Update nav buttons
+    // Mark the button that owns this section, rather than whatever the global
+    // `event` happened to be. The old form relied on the implicit window.event
+    // and so highlighted nothing when called programmatically (including the
+    // initial render) and the wrong thing when the click landed on a child.
     document.querySelectorAll('.tutorial-nav button').forEach(btn => {
-        btn.classList.remove('active');
+        const current = btn.dataset.section === sectionId;
+        btn.classList.toggle('active', current);
+        btn.setAttribute('aria-selected', current ? 'true' : 'false');
     });
-    event?.target?.classList.add('active');
 
     // Hide all sections
     document.querySelectorAll('.tutorial-section, .quick-start').forEach(section => {
@@ -243,6 +260,17 @@ function showSection(sectionId) {
 }
 
 // Get section ID from title
+//
+// The short ids exist only so the legacy deep links (#authentication, #merge,
+// ...) keep working. Anything not listed falls back to a slug of the title —
+// and the nav is now built from the API response rather than hardcoded in the
+// HTML, so a new backend section always gets a working button.
+//
+// The old hardcoded nav had drifted badly: five of thirteen sections had no
+// button at all (including "Platform Hardening: What Changed", which the
+// documentation index tells administrators to read), and two buttons pointed
+// at ids no section produced. Deriving both sides from one function is what
+// stops that recurring.
 function getSectionId(title) {
     const map = {
         'API Authentication': 'authentication',
@@ -255,7 +283,83 @@ function getSectionId(title) {
         'System Workflow': 'workflow',
         'Advanced SNA Features': 'advanced-sna'
     };
-    return map[title] || title.toLowerCase().replace(/\s+/g, '-');
+    // Punctuation must go, not just whitespace: "Platform Hardening: What
+    // Changed" produced the id "platform-hardening:-what-changed", which is
+    // not a valid CSS selector fragment and broke getElementById lookups.
+    return map[title] || title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+// Build the nav from the sections the API actually returned.
+function renderNav() {
+    const nav = document.querySelector('.tutorial-nav');
+    if (!nav || !tutorialData) return;
+
+    const items = [{ id: 'quick-start', label: 'Quick Start' }];
+    tutorialData.sections.forEach(section => {
+        items.push({ id: getSectionId(section.title), label: navLabel(section.title) });
+    });
+
+    nav.innerHTML = '';
+    items.forEach((item, index) => {
+        const button = document.createElement('button');
+        button.textContent = item.label;
+        button.title = item.label;
+        button.dataset.action = 'showSection';
+        button.dataset.section = item.id;
+        // The container is role="tablist"; without role="tab" on the children
+        // a screen reader announces a bare row of buttons and never says which
+        // one is current.
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
+        button.setAttribute('aria-controls', `section-${item.id}`);
+        if (index === 0) button.classList.add('active');
+        nav.appendChild(button);
+    });
+}
+
+// Which build is serving this tutorial.
+//
+// The content comes from the API, so it is by construction the running build's
+// copy — but "always matches the running build" is a claim the reader cannot
+// check. The runtime fingerprint on /health/detailed makes it checkable.
+// Best-effort: a failure here must never block the tutorial.
+async function renderBuildInfo() {
+    const wrapper = document.getElementById('tutorial-build');
+    const text = document.getElementById('tutorial-build-text');
+    if (!wrapper || !text) return;
+    try {
+        const response = await fetch('/health/detailed', { credentials: 'same-origin' });
+        if (!response.ok) return;
+        const runtime = (await response.json()).runtime;
+        if (!runtime) return;
+        const commit = runtime.git_commit && runtime.git_commit !== 'unknown'
+            ? ` · ${runtime.git_commit}` : '';
+        text.textContent =
+            `This tutorial is served by the running build: v${runtime.version}${commit}` +
+            ` · ${runtime.environment}`;
+        wrapper.hidden = false;
+    } catch (err) {
+        // Offline or health endpoint unavailable — the tutorial still works.
+    }
+}
+
+// Long titles make an unusable button row; keep the label short but honest.
+function navLabel(title) {
+    const shortened = {
+        'Advanced Search Intelligence': 'Advanced Search',
+        'Live Alerts and Watchlists for Unknown Persons': 'Live Alerts & Watchlists',
+        'System Settings Management': 'System Settings',
+        'Complete Configuration Guide': 'Configuration',
+        'Platform Hardening: What Changed': 'Platform Hardening',
+        'Operating This System: Docs, Drift and the API Reference': 'Operating This System',
+        'Promoting Unknown to Known': 'Promote to Known',
+        'Merging Identities': 'Merge Identities',
+        'Understanding Unknown Faces': 'Unknown Faces'
+    };
+    return shortened[title] || title;
 }
 
 // Format markdown (simple implementation)

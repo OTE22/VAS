@@ -92,11 +92,20 @@ async def ensure_bootstrap_admin(db_manager, *, cfg=None) -> BootstrapOutcome:
             )
             return BootstrapOutcome.EXISTS
 
-        user_count = (await db.execute(select(func.count()).select_from(User))).scalar_one()
+        # HUMAN accounts only. The `system` audit principal is seeded by
+        # migration a3b4c5d6e7f8 on every fresh database (role='system',
+        # inactive, unusable hash): it is a machine actor, not a user, and its
+        # presence must not make a fresh database look like a damaged one —
+        # counting it here made a fresh production bootstrap impossible.
+        from backend.services.system_principal import SYSTEM_ROLE, SYSTEM_USERNAME
+        user_count = (await db.execute(
+            select(func.count()).select_from(User).where(
+                func.lower(User.username) != SYSTEM_USERNAME,
+                func.lower(User.role) != SYSTEM_ROLE))).scalar_one()
 
-    # Users exist but none is an active admin. That is a damaged deployment,
-    # not a fresh one — creating another admin here would be a privilege
-    # escalation path, so refuse in production.
+    # Human users exist but none is an active admin. That is a damaged
+    # deployment, not a fresh one — creating another admin here would be a
+    # privilege escalation path, so refuse in production.
     if user_count:
         message = (
             f"{user_count} user account(s) exist but none is an active administrator; "

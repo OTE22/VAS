@@ -1,5 +1,11 @@
 # Backend Persistence Status
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 ## Summary
 
 **YES, we needed to adjust the backend for persistence**, and I've now added the necessary features. Here's what was already in place and what was added:
@@ -46,7 +52,7 @@
 ## 🆕 What Was Added (Just Now)
 
 ### 1. **Periodic Auto-Save for FAISS Indexes**
-**File:** `backend/core/identity_index.py`
+**File:** `backend/core/vector_index/`
 
 **Features:**
 - ✅ Automatic periodic saves every 5 minutes (configurable)
@@ -172,7 +178,7 @@ self.auto_save_interval_seconds = 300  # 5 minutes
 ## ⚙️ Configuration
 
 ### **Auto-Save Settings**
-Located in: `backend/core/identity_index.py`
+Located in: `backend/core/vector_index/`
 
 ```python
 self.auto_save_enabled = True                    # Enable/disable auto-save

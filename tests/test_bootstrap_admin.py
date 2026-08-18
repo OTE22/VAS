@@ -252,3 +252,15 @@ def test_creation_is_audited():
 
     assert any("[AUDIT]" in message for message in records)
     assert all(secret not in message for message in records)
+
+
+def test_the_system_principal_alone_does_not_count_as_an_existing_user():
+    """A fresh migrated database already holds the `system` audit principal
+    (migration a3b4c5d6e7f8). It is a machine actor: its presence must not turn
+    a fresh database into a 'damaged deployment' and block the first admin —
+    the count in ensure_bootstrap_admin excludes it explicitly."""
+    import inspect as _inspect
+    from backend.services import bootstrap_admin
+    src = _inspect.getsource(bootstrap_admin.ensure_bootstrap_admin)
+    assert "SYSTEM_USERNAME" in src and "SYSTEM_ROLE" in src, (
+        "ensure_bootstrap_admin must exclude the system principal from the human-user count")

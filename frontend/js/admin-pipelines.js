@@ -220,10 +220,11 @@ function openCoordinatesModal(pipelineId) {
     // Set modal title
     document.getElementById('coordinates-modal-subtitle').textContent = `Pipeline: ${pipelineId}`;
     
-    // Populate form
-    document.getElementById('location-name-input').value = pipeline?.location_name || '';
-    document.getElementById('latitude-input').value = pipeline?.latitude || '';
-    document.getElementById('longitude-input').value = pipeline?.longitude || '';
+    // Populate form. Nullish, not falsy-OR: a stored coordinate of exactly 0
+    // is a real place, and `|| ''` erased it from the form.
+    document.getElementById('location-name-input').value = pipeline?.location_name ?? '';
+    document.getElementById('latitude-input').value = pipeline?.latitude ?? '';
+    document.getElementById('longitude-input').value = pipeline?.longitude ?? '';
     
     // Show modal
     document.getElementById('coordinates-modal').style.display = 'flex';
@@ -242,81 +243,115 @@ function openCoordinatesModal(pipelineId) {
 function closeCoordinatesModal() {
     document.getElementById('coordinates-modal').style.display = 'none';
     currentEditingPipelineId = null;
+    // Dispose the WebGL map; it is rebuilt on next open with fresh inputs.
+    if (coordinatesMarker) { coordinatesMarker.remove(); coordinatesMarker = null; }
+    if (coordinatesMap) { coordinatesMap.remove(); coordinatesMap = null; }
 }
 
-function initCoordinatesMap() {
+async function initCoordinatesMap() {
     const mapContainer = document.getElementById('coordinates-map');
     if (!mapContainer || coordinatesMap) return;
-    
-    // Default center (can be set from existing coordinates or use a default)
-    const lat = parseFloat(document.getElementById('latitude-input').value) || 0;
-    const lng = parseFloat(document.getElementById('longitude-input').value) || 0;
-    const center = (lat && lng) ? [lat, lng] : [0, 0];
-    const zoom = (lat && lng) ? 13 : 2;
-    
-    // Create map
-    coordinatesMap = L.map('coordinates-map').setView(center, zoom);
-    
-    // Add OpenStreetMap tiles
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
-        maxZoom: 19
-    }).addTo(coordinatesMap);
-    
-    // Add click handler
+
+    // Existing coordinates, if any. Number.isFinite instead of truthiness:
+    // 0 is a valid coordinate and `lat && lng` treated it as "unset".
+    const lat = parseFloat(document.getElementById('latitude-input').value);
+    const lng = parseFloat(document.getElementById('longitude-input').value);
+    const hasCoords = Number.isFinite(lat) && Number.isFinite(lng);
+
+    // MapLibre GL JS over the offline Martin basemap — the same renderer and
+    // the same Light style as the intelligence maps (one map stack). The
+    // style carries the tileset's bounds and zoom range, so this file no
+    // longer hard-codes Lebanon's bbox/zooms/centre — they were drifting from
+    // config.py. Bounds are still enforced here so panning cannot leave the
+    // dataset into blank space.
+    const IM = window.IdentityMap;
+    if (!IM || !IM.maplibregl) {
+        console.error('[PIPELINES] map module not loaded (identity-map.js)');
+        return;
+    }
+    const maplibregl = IM.maplibregl;
+
+    // Which basemap is REAL right now, asked of the backend — never a
+    // hard-coded style. This picker used to open Light unconditionally, so
+    // when the Light archive turned out to be placeholder images it painted
+    // "Access blocked" tiles here with no dropdown and no error path. The
+    // style URL (and its cache-busting version) comes from the one map module
+    // instead of a literal copied into this file.
+    const style = await IM.firstUsableStyleUrl('light', (detail) => {
+        const reason = (detail && detail.reason) || IM.UNAVAILABLE;
+        showNotification(`Basemap unavailable: ${reason}`, 'warning');
+    });
+    if (!style) {
+        mapContainer.textContent = 'No offline basemap is installed — coordinates can still be typed in.';
+        return;
+    }
+
+    coordinatesMap = new maplibregl.Map({
+        container: 'coordinates-map',
+        style,
+        center: hasCoords ? [lng, lat] : [35.85, 33.87],
+        zoom: hasCoords ? 13 : 10,
+        minZoom: 8,
+        maxZoom: 17,
+        maxBounds: [[34.60, 32.70], [37.10, 35.00]],
+        attributionControl: { compact: true }
+    });
+    coordinatesMap.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+    // Click to set
     coordinatesMap.on('click', (e) => {
-        const { lat, lng } = e.latlng;
+        const { lat, lng } = e.lngLat;
         document.getElementById('latitude-input').value = lat.toFixed(6);
         document.getElementById('longitude-input').value = lng.toFixed(6);
         updateMapMarker(lat, lng);
     });
-    
-    // Initialize marker if coordinates exist
-    if (lat && lng) {
+
+    // Initialize marker if coordinates exist (zero is a valid coordinate)
+    if (hasCoords) {
         updateMapMarker(lat, lng);
     }
 }
 
 function updateMapMarker(lat, lng) {
     if (!coordinatesMap) return;
-    
-    // Remove existing marker
+    const maplibregl = window.IdentityMap.maplibregl;
+
     if (coordinatesMarker) {
-        coordinatesMap.removeLayer(coordinatesMarker);
+        coordinatesMarker.setLngLat([lng, lat]);
+    } else {
+        // DOM element built with createElement — no HTML string injection.
+        const pin = document.createElement('div');
+        pin.className = 'coordinates-marker';
+        const icon = document.createElement('i');
+        icon.className = 'fas fa-map-marker-alt';
+        pin.appendChild(icon);
+
+        coordinatesMarker = new maplibregl.Marker({ element: pin, draggable: true, anchor: 'bottom' })
+            .setLngLat([lng, lat])
+            .addTo(coordinatesMap);
+
+        // Update inputs when marker is dragged
+        coordinatesMarker.on('dragend', () => {
+            const ll = coordinatesMarker.getLngLat();
+            document.getElementById('latitude-input').value = ll.lat.toFixed(6);
+            document.getElementById('longitude-input').value = ll.lng.toFixed(6);
+        });
     }
-    
-    // Add new marker
-    coordinatesMarker = L.marker([lat, lng], {
-        draggable: true,
-        icon: L.divIcon({
-            className: 'coordinates-marker',
-            html: '<div style="background: #00ff96; color: #000; border: 3px solid #fff; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; font-weight: bold; box-shadow: 0 2px 10px rgba(0,0,0,0.5);"><i class="fas fa-map-marker-alt"></i></div>',
-            iconSize: [30, 30],
-            iconAnchor: [15, 30]
-        })
-    }).addTo(coordinatesMap);
-    
-    // Update inputs when marker is dragged
-    coordinatesMarker.on('dragend', (e) => {
-        const { lat, lng } = e.target.getLatLng();
-        document.getElementById('latitude-input').value = lat.toFixed(6);
-        document.getElementById('longitude-input').value = lng.toFixed(6);
-    });
-    
+
     // Center map on marker
-    coordinatesMap.setView([lat, lng], Math.max(coordinatesMap.getZoom(), 13));
+    coordinatesMap.easeTo({ center: [lng, lat], zoom: Math.max(coordinatesMap.getZoom(), 13) });
 }
 
 function updateMapFromInputs() {
     const lat = parseFloat(document.getElementById('latitude-input').value);
     const lng = parseFloat(document.getElementById('longitude-input').value);
-    
-    if (lat && lng && !isNaN(lat) && !isNaN(lng)) {
+
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
         if (coordinatesMap) {
             updateMapMarker(lat, lng);
         }
     } else if (coordinatesMarker) {
-        coordinatesMap.removeLayer(coordinatesMarker);
+        coordinatesMarker.remove();
         coordinatesMarker = null;
     }
 }

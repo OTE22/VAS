@@ -4,6 +4,14 @@
  * Admin interface for managing unknown faces and identities.
  */
 
+// This page ships the canonical face-alert implementation AND wires the
+// alert's buttons itself. upload-modal.js (injected later at runtime) checks
+// this flag and its typeof guards so it neither overwrites the functions nor
+// binds a second set of listeners. Set at parse time — this script always
+// parses before the upload-modal loader's fetch resolves, so the handshake
+// cannot race.
+window.__pageOwnsFaceAlertWiring = true;
+
 let currentPage = 1;
 let pageSize = 20;
 let totalPages = 1;
@@ -64,11 +72,75 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadUnknownFaces();
     setupEventListeners();
     connectWebSocket(); // Connect to WebSocket for real-time updates
-    
-    // Backend handles ?view= parameter logic and injects identity data
-    // Frontend just reads the injected data if present (no URL parsing needed)
-    // The injected script tag will automatically call viewIdentityDetails()
+
+    // ?view= deep link (from search results, intelligence, the dashboard).
+    // Parsed HERE. The server used to string-inject an inline <script> that
+    // called viewIdentityDetails() — a script-src 'self' CSP violation — and
+    // when the identity was missing or not permitted it injected nothing, so
+    // the click appeared to do nothing at all.
+    await openDeepLinkedIdentity();
 });
+
+// UUID shape — the identity id column. Anything else never reaches fetch.
+const DEEP_LINK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Same-origin path only: one leading slash (protocol-relative '//host' has
+ *  two), with any stray view/from params stripped so closing the modal cannot
+ *  bounce straight back into it. */
+function sanitizeReferrerPath(value) {
+    if (typeof value !== 'string' || !/^\/(?!\/)/.test(value)) return null;
+    return value.split('?view=')[0].split('&view=')[0];
+}
+
+async function openDeepLinkedIdentity() {
+    const params = new URLSearchParams(window.location.search);
+    const view = params.get('view');
+    if (!view) return;
+
+    const from = sanitizeReferrerPath(params.get('from'));
+    // The close handler reads this to decide whether to navigate back.
+    window.identityModalReferrer = from || '/admin/unknown';
+
+    if (!DEEP_LINK_UUID_RE.test(view)) {
+        showNotification('Invalid identity link', 'error');
+        return;
+    }
+
+    const identity = await viewIdentityDetails(view);
+    if (identity) {
+        reframeForKnownIdentity(identity, from);
+    }
+}
+
+/**
+ * When the deep-linked identity is KNOWN, stop the page claiming to be the
+ * "Unknown Faces Center": retitle the header and offer a way back. The grid
+ * behind the modal is still the unknown-faces list — the description says so
+ * rather than pretending otherwise. Everything set via textContent.
+ */
+function reframeForKnownIdentity(identity, from) {
+    if (!identity || String(identity.type).toLowerCase() !== 'known') return;
+
+    const name = identity.display_name || 'Known identity';
+    const title = document.querySelector('.page-title');
+    const description = document.querySelector('.page-description');
+    if (title) title.textContent = 'Identity Profile';
+    if (description) {
+        description.textContent =
+            `Viewing ${name} — a known identity. The list below shows unknown faces only.`;
+    }
+    document.title = `${name} - Identity Profile | Face Recognition Service`;
+
+    if (from && from !== window.location.pathname && title &&
+            !document.getElementById('identity-back-link')) {
+        const back = document.createElement('a');
+        back.id = 'identity-back-link';
+        back.className = 'identity-back-link';
+        back.href = from;                    // sanitized same-origin path
+        back.textContent = '\u2190 Back';
+        title.parentElement.insertBefore(back, title);
+    }
+}
 
 // Load user info for UI customization only - BACKEND HANDLES ALL AUTHENTICATION
 // Backend route already authenticated user and validated access, exception handler handles redirects
@@ -302,15 +374,15 @@ function setupEventListeners() {
 
     // Quick search
     document.getElementById('search-by-image-btn').addEventListener('click', () => {
-        document.getElementById('search-image-modal').style.display = 'flex';
+        ModalStack.open(document.getElementById('search-image-modal'));
     });
 
     document.getElementById('close-search-modal').addEventListener('click', () => {
-        document.getElementById('search-image-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('search-image-modal'));
     });
 
     document.getElementById('cancel-search-btn').addEventListener('click', () => {
-        document.getElementById('search-image-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('search-image-modal'));
     });
 
     // Image preview
@@ -334,14 +406,22 @@ function setupEventListeners() {
 
     // Promote modal
     document.getElementById('close-promote-modal').addEventListener('click', () => {
-        document.getElementById('promote-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('promote-modal'));
     });
 
     document.getElementById('cancel-promote-btn').addEventListener('click', () => {
-        document.getElementById('promote-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('promote-modal'));
     });
 
-    // Face detection alert modal event listeners
+    // "None of these" is static markup, so an external listener is enough —
+    // no data-action dispatch needed. Inline onclick would be CSP-blocked.
+    const noneOfTheseBtn = document.getElementById('promote-none-of-these');
+    if (noneOfTheseBtn) noneOfTheseBtn.addEventListener('click', chooseNoneOfThese);
+
+    // Face detection alert modal event listeners.
+    // Backdrop-click and Escape are deliberately NOT bound here: ModalStack
+    // owns both, exactly once per document. The alert opts into backdrop
+    // close at open time (see showFaceDetectionAlert).
     const faceAlertModal = document.getElementById('face-detection-alert-modal');
     if (faceAlertModal) {
         // Close button
@@ -349,26 +429,12 @@ function setupEventListeners() {
         if (closeBtn) {
             closeBtn.addEventListener('click', closeFaceDetectionAlert);
         }
-        
+
         // OK button
         const okBtn = document.getElementById('face-alert-ok-btn');
         if (okBtn) {
             okBtn.addEventListener('click', closeFaceDetectionAlert);
         }
-        
-        // Close on background click
-        faceAlertModal.addEventListener('click', (e) => {
-            if (e.target === faceAlertModal) {
-                closeFaceDetectionAlert();
-            }
-        });
-        
-        // Close on Escape key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && faceAlertModal.style.display === 'flex') {
-                closeFaceDetectionAlert();
-            }
-        });
     }
 
     document.getElementById('promote-form').addEventListener('submit', async (e) => {
@@ -376,47 +442,36 @@ function setupEventListeners() {
         await promoteIdentity();
     });
 
-    // Detail modal
+    // Detail modal. The URL/referrer cleanup lives in handleDetailModalClose,
+    // registered as the modal's onClose at open time — so it also runs when
+    // ModalStack closes the modal via Escape or a cascade, not only via this
+    // button. Previously Escape could not close this modal at all, so the
+    // cleanup could never be skipped; now that it can, the hook guarantees it.
     document.getElementById('close-detail-modal').addEventListener('click', () => {
-        const modal = document.getElementById('identity-detail-modal');
-        modal.style.display = 'none';
-        
-        // Backend handles redirect logic - check if we came from another page
-        if (window.identityModalReferrer && window.identityModalReferrer !== window.location.pathname) {
-            // Redirect back to the page we came from (without view parameter)
-            window.location.href = window.identityModalReferrer;
-        } else {
-            // Remove view parameter from current URL if present
-            const url = new URL(window.location.href);
-            if (url.searchParams.has('view')) {
-                url.searchParams.delete('view');
-                url.searchParams.delete('from');
-                window.history.replaceState({}, '', url.toString());
-            }
-        }
+        ModalStack.close(document.getElementById('identity-detail-modal'));
     });
 
     // Merge suggestions
     document.getElementById('merge-suggestions-btn').addEventListener('click', () => {
-        document.getElementById('merge-suggestions-modal').style.display = 'flex';
+        ModalStack.open(document.getElementById('merge-suggestions-modal'));
         loadMergeSuggestions();
     });
 
     document.getElementById('close-suggestions-modal').addEventListener('click', () => {
-        document.getElementById('merge-suggestions-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('merge-suggestions-modal'));
     });
-    
+
     // Pipeline merge suggestions modal
     document.getElementById('close-pipeline-suggestions-modal').addEventListener('click', () => {
-        document.getElementById('pipeline-merge-suggestions-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('pipeline-merge-suggestions-modal'));
     });
-    
+
     // Live Alert modal
     document.getElementById('close-live-alert-modal').addEventListener('click', () => {
-        document.getElementById('create-live-alert-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('create-live-alert-modal'));
     });
     document.getElementById('cancel-live-alert-btn').addEventListener('click', () => {
-        document.getElementById('create-live-alert-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('create-live-alert-modal'));
     });
     document.getElementById('create-live-alert-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -430,12 +485,12 @@ function setupEventListeners() {
     
     if (closeWatchlistModal) {
         closeWatchlistModal.addEventListener('click', () => {
-            document.getElementById('add-to-watchlist-modal').style.display = 'none';
+            ModalStack.close(document.getElementById('add-to-watchlist-modal'));
         });
     }
     if (cancelWatchlistBtn) {
         cancelWatchlistBtn.addEventListener('click', () => {
-            document.getElementById('add-to-watchlist-modal').style.display = 'none';
+            ModalStack.close(document.getElementById('add-to-watchlist-modal'));
         });
     }
     if (addToWatchlistForm) {
@@ -456,11 +511,11 @@ function setupEventListeners() {
 
     // Merge modal
     document.getElementById('close-merge-modal').addEventListener('click', () => {
-        document.getElementById('merge-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('merge-modal'));
     });
 
     document.getElementById('cancel-merge-btn').addEventListener('click', () => {
-        document.getElementById('merge-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('merge-modal'));
     });
 
     document.getElementById('merge-form').addEventListener('submit', async (e) => {
@@ -478,25 +533,14 @@ function setupEventListeners() {
         }
     });
     
-    // Pipeline merge suggestions buttons (delegated event listener for dynamically created buttons)
-    document.addEventListener('click', async (e) => {
-        if (e.target.closest('.pipeline-merge-suggestions-btn')) {
-            const btn = e.target.closest('.pipeline-merge-suggestions-btn');
-            const pipelineId = btn.getAttribute('data-pipeline-id');
-            if (pipelineId) {
-                console.log('[PIPELINE_MERGE] Button clicked for pipeline:', pipelineId);
-                await openPipelineMergeSuggestions(pipelineId);
-            }
-        }
-    });
-    
-    // Pipeline merge suggestions modal close button
-    const closePipelineModal = document.getElementById('close-pipeline-suggestions-modal');
-    if (closePipelineModal) {
-        closePipelineModal.addEventListener('click', () => {
-            document.getElementById('pipeline-merge-suggestions-modal').style.display = 'none';
-        });
-    }
+    // NOTE: the pipeline merge-suggestions button is owned solely by its
+    // data-action attribute (dispatched once by actions.js). The extra
+    // document-delegated listener that used to live here was a second owner
+    // of the same click.
+
+    // NOTE: the pipeline-suggestions close button is wired once, earlier in
+    // this function. A second, duplicate listener used to live here and fire
+    // the same close twice per click.
 }
 
 // Load unknown faces
@@ -1336,7 +1380,7 @@ function createPipelineGroup(pipelineId, identities) {
             <h2 class="pipeline-group-title" data-pipeline-id="${escapeHtml(pipelineId)}" title="${escapeHtml(pipelineId)}" style="margin: 0; color: #00ff96; font-size: 0.95rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(getPipelineDisplayName(pipelineId))}</h2>
             <span style="color: #999; font-size: 0.7rem; display: block; margin-top: 0.15rem;">${identities.length} ${identities.length === 1 ? 'identity' : 'identities'}</span>
         </div>
-        <button class="pipeline-merge-suggestions-btn" data-pipeline-id="${pipelineId}" title="View merge suggestions for this pipeline" data-action="openPipelineMergeSuggestions" data-arg="${pipelineId}" style="
+        <button class="pipeline-merge-suggestions-btn merge-hover-btn" data-pipeline-id="${pipelineId}" title="View merge suggestions for this pipeline" data-action="openPipelineMergeSuggestions" data-arg="${pipelineId}" style="
             background: rgba(0, 255, 150, 0.2);
             border: 1px solid rgba(0, 255, 150, 0.4);
             color: #00ff96;
@@ -1350,29 +1394,18 @@ function createPipelineGroup(pipelineId, identities) {
             gap: 0.4rem;
             transition: all 0.2s;
             white-space: nowrap;
-        " class="merge-hover-btn">
+        ">
             <i class="fas fa-object-group"></i>
             <span>MERGE</span>
         </button>
     `;
-    
-    // Also attach event listener programmatically as backup
-    const mergeBtn = groupHeader.querySelector('.pipeline-merge-suggestions-btn');
-    if (mergeBtn) {
-        mergeBtn.addEventListener('click', async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const pipelineId = mergeBtn.getAttribute('data-pipeline-id');
-            console.log('[PIPELINE_MERGE] Button clicked (event listener), pipelineId:', pipelineId);
-            if (pipelineId && typeof openPipelineMergeSuggestions === 'function') {
-                await openPipelineMergeSuggestions(pipelineId);
-            } else {
-                console.error('[PIPELINE_MERGE] Function not available or pipelineId missing');
-                showNotification('Error: Function not loaded. Please refresh the page.', 'error');
-            }
-        });
-    }
-    
+    // This button's ONE owner is data-action="openPipelineMergeSuggestions"
+    // via the Actions registry. It used to have three: the attribute, a
+    // per-button "backup" listener attached here, and a document-delegated
+    // .pipeline-merge-suggestions-btn listener — so one click could call the
+    // handler more than once. (The markup also carried two class= attributes;
+    // the second, merge-hover-btn, was silently discarded by the parser.)
+
     const groupGrid = document.createElement('div');
     groupGrid.className = 'pipeline-identities-grid';
     groupGrid.style.cssText = `
@@ -1417,8 +1450,20 @@ function createIdentityCard(identity) {
     const card = document.createElement('div');
     card.className = 'identity-card-compact';
 
-    // Click handler - depends on mode
+    // Click handler - depends on mode.
+    //
+    // BOUNDARY GUARD: the action buttons inside this card carry data-action
+    // attributes handled by the DOCUMENT-level Actions dispatcher, which runs
+    // only after the event has already bubbled through this card listener.
+    // Without the guard, clicking the Merge icon ran viewIdentityDetails()
+    // here first and openMergeModal() afterwards — two stacked modals from
+    // one click. Handled at the card boundary because by the time any
+    // document-level handler could stopPropagation, this listener has
+    // already fired.
     card.addEventListener('click', (e) => {
+        if (e.target.closest('.identity-actions')) {
+            return; // the button's own data-action handler owns this click
+        }
         if (multiSelectMode) {
             toggleIdentitySelection(identity.id, e);
         } else {
@@ -1812,7 +1857,14 @@ async function viewIdentityDetails(identityId) {
         });
 
         if (!response.ok) {
-            throw new Error('Failed to load identity details');
+            // Say WHICH failure: the deep-link path used to fail silently, and
+            // a generic message is barely better.
+            throw new Error(
+                response.status === 404
+                    ? 'Identity not found \u2014 it may have been merged or deleted'
+                    : response.status === 403
+                        ? 'You do not have access to this identity'
+                        : 'Failed to load identity details');
         }
 
         const identity = await response.json();
@@ -1907,10 +1959,31 @@ async function viewIdentityDetails(identityId) {
             </div>
         `;
 
-        modal.style.display = 'flex';
+        ModalStack.open(modal, { onClose: handleDetailModalClose });
+        return identity;
     } catch (error) {
         console.error('Error loading identity details:', error);
-        showNotification('Error loading identity details', 'error');
+        showNotification(error.message || 'Error loading identity details', 'error');
+        return null;
+    }
+}
+
+// Runs whenever the detail modal leaves the stack — X button, Escape, or a
+// cascade — so a deep-linked ?view= URL is always cleaned up and a referrer
+// redirect is never skipped, regardless of HOW the modal was dismissed.
+function handleDetailModalClose() {
+    // Backend handles redirect logic - check if we came from another page
+    if (window.identityModalReferrer && window.identityModalReferrer !== window.location.pathname) {
+        // Redirect back to the page we came from (without view parameter)
+        window.location.href = window.identityModalReferrer;
+    } else {
+        // Remove view parameter from current URL if present
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('view')) {
+            url.searchParams.delete('view');
+            url.searchParams.delete('from');
+            window.history.replaceState({}, '', url.toString());
+        }
     }
 }
 
@@ -1926,7 +1999,229 @@ function promoteIdentityModal(identityId) {
     currentIdentityId = identityId;
     document.getElementById('promote-name').value = '';
     document.getElementById('promote-code').value = '';
-    document.getElementById('promote-modal').style.display = 'flex';
+    // Undo any collapse left by a previous "none of these" on another face.
+    const candidatesSection = document.getElementById('promote-candidates-section');
+    if (candidatesSection) candidatesSection.style.display = '';
+    setNoneOfTheseVisible(false);
+    ModalStack.open(document.getElementById('promote-modal'));
+    // Fire-and-forget: the name field and PROMOTE button are usable immediately,
+    // so a slow or failing lookup never blocks creating a new person.
+    loadPromoteCandidates(identityId);
+}
+
+/**
+ * Ask the backend who this unknown face might already be.
+ *
+ * The endpoint is read-only and answers 200 even when it cannot compare
+ * (missing file, unreadable bytes, no detectable face, vector search down),
+ * carrying a `warning` instead. That is deliberate: the administrator must
+ * always be able to fall through to "promote as a new person".
+ *
+ * Thresholds are never decided here — the backend applies the ENROLL_* values
+ * from config.py and echoes them back for display only.
+ */
+async function loadPromoteCandidates(identityId) {
+    const list = document.getElementById('promote-candidates');
+    const warning = document.getElementById('promote-candidates-warning');
+    if (!list || !warning) return;
+
+    warning.textContent = '';
+    list.replaceChildren();
+    const loading = document.createElement('p');
+    loading.className = 'promote-candidates-loading';
+    loading.textContent = 'Checking whether this face is already enrolled…';
+    list.appendChild(loading);
+
+    let data;
+    try {
+        const response = await fetch(
+            `/api/admin/unknown/${encodeURIComponent(identityId)}/match-candidates`,
+            { credentials: 'include' });
+        if (!response.ok) {
+            list.replaceChildren();
+            warning.textContent =
+                'Could not check for existing people. You can still promote this face as a new person.';
+            return;
+        }
+        data = await response.json();
+    } catch (err) {
+        list.replaceChildren();
+        warning.textContent =
+            'Could not reach the server to check for existing people. You can still promote this face as a new person.';
+        return;
+    }
+
+    // Guard against a late response for a face the admin already moved on from.
+    if (currentIdentityId !== identityId) return;
+
+    list.replaceChildren();
+    if (data.warning) warning.textContent = data.warning;
+
+    const candidates = data.candidates || [];
+    if (candidates.length === 0) {
+        // No candidates: the modal is already in create-new mode, so the
+        // "none of these" button would be answering a question nobody asked.
+        setNoneOfTheseVisible(false);
+        if (!data.warning) {
+            const none = document.createElement('p');
+            none.className = 'promote-candidates-empty';
+            none.textContent = 'No similar known person was found.';
+            const guidance = document.createElement('p');
+            guidance.className = 'promote-candidates-empty';
+            guidance.textContent = 'Enter a name below to promote this face as a new person.';
+            list.append(none, guidance);
+        }
+        return;
+    }
+
+    candidates.forEach((candidate) => list.appendChild(buildCandidateRow(candidate)));
+    setNoneOfTheseVisible(true);
+}
+
+/** Show or hide the "none of these" escape hatch. */
+function setNoneOfTheseVisible(visible) {
+    const button = document.getElementById('promote-none-of-these');
+    if (button) button.style.display = visible ? '' : 'none';
+}
+
+/**
+ * Dismiss the suggestions and commit to creating a new person.
+ *
+ * Purely a view change — no request, no mutation. It collapses the candidate
+ * section so the modal reads as one decision already taken, and moves focus to
+ * the name field, which is the only thing left to do.
+ */
+function chooseNoneOfThese() {
+    const section = document.getElementById('promote-candidates-section');
+    if (section) section.style.display = 'none';
+    setNoneOfTheseVisible(false);
+    const name = document.getElementById('promote-name');
+    if (name) name.focus();
+}
+
+/** One candidate card. Reuses the merge-search-result markup so a suggestion
+ *  looks like every other person card on this page. */
+function buildCandidateRow(candidate) {
+    const row = document.createElement('div');
+    row.className = 'merge-search-result promote-candidate';
+
+    const imageWrap = document.createElement('div');
+    imageWrap.className = 'result-image';
+    const img = document.createElement('img');
+    img.src = candidate.preview_image || '';
+    img.alt = candidate.display_name || 'Candidate';
+    // data-fallback-* is handled by the capture-phase listener in actions.js;
+    // an inline onerror would be blocked by the page's CSP.
+    img.setAttribute('data-fallback-icon', 'fas fa-user');
+    img.setAttribute('data-fallback-class', 'no-image');
+    imageWrap.appendChild(img);
+
+    const info = document.createElement('div');
+    info.className = 'result-info';
+
+    const name = document.createElement('h4');
+    name.textContent = candidate.display_name || 'Unnamed person';
+    info.appendChild(name);
+
+    const percent = Math.round((Number(candidate.similarity) || 0) * 1000) / 10;
+    const score = document.createElement('p');
+    score.className = 'promote-candidate-score';
+    score.textContent = `${percent}% match · ${String(candidate.confidence_band || '')
+        .replace(/_/g, ' ').toLowerCase()}`;
+    info.appendChild(score);
+
+    const seenAt = candidate.last_seen_location_at || candidate.last_seen_at;
+    const place = candidate.last_seen_pipeline_id
+        ? getPipelineDisplayName(candidate.last_seen_pipeline_id)
+        : null;
+    if (seenAt || place) {
+        const seen = document.createElement('p');
+        seen.className = 'promote-candidate-seen';
+        const when = seenAt ? new Date(seenAt).toLocaleString() : 'time unknown';
+        seen.textContent = place ? `Last seen at ${place} · ${when}` : `Last seen ${when}`;
+        info.appendChild(seen);
+    }
+
+    const id = document.createElement('p');
+    id.className = 'promote-candidate-id';
+    id.textContent = candidate.identity_id;
+    info.appendChild(id);
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'intelligence-admin-btn promote-candidate-merge';
+    // data-action + data-arg, registered in the Actions block: dynamically
+    // rendered rows need no rebinding and inline handlers are CSP-blocked.
+    button.setAttribute('data-action', 'mergeIntoKnownCandidate');
+    button.setAttribute('data-arg', candidate.identity_id);
+    button.setAttribute('data-arg2', candidate.display_name || '');
+    const content = document.createElement('div');
+    content.className = 'btn-content';
+    const iconWrap = document.createElement('div');
+    iconWrap.className = 'btn-icon-wrapper';
+    const icon = document.createElement('i');
+    icon.className = 'fas fa-code-merge';
+    iconWrap.appendChild(icon);
+    const title = document.createElement('span');
+    title.className = 'btn-title';
+    title.textContent = 'MERGE WITH THIS PERSON';
+    content.append(iconWrap, title);
+    button.appendChild(content);
+    info.appendChild(button);
+
+    row.append(imageWrap, info);
+    return row;
+}
+
+/**
+ * Merge the unknown face into the chosen known person.
+ *
+ * Uses the existing pair-merge endpoint unchanged. Direction matters and is not
+ * symmetric: `from_identity_id` is the LOSER (soft-deleted, status=MERGED,
+ * merged_into_id set) and `to_identity_id` is the survivor. The unknown must
+ * therefore be `from`, so the known person keeps its own type — which is why
+ * the Known count is unchanged by this branch.
+ */
+async function mergeIntoKnownCandidate(knownIdentityId, knownDisplayName) {
+    if (!currentIdentityId) return;
+    if (mergeSubmitInFlight) return;   // one candidate merge at a time
+    const label = knownDisplayName || knownIdentityId;
+
+    // Ordinary application confirmation (stacked above the promote modal).
+    // If the backend then judges the pair suspicious, the HIGH-RISK
+    // confirmation inside postMergeWithRiskGate becomes the meaningful final
+    // ask — the two only appear together in the suspicious case.
+    const intent = await AppConfirm.confirm({
+        title: `Merge this face into ${label}?`,
+        lines: [
+            'Its sightings and images move to that person, and this unknown '
+            + 'entry is marked as merged. This cannot be undone.'
+        ],
+        confirmLabel: 'Merge',
+        cancelLabel: 'Cancel',
+        danger: true
+    });
+    if (!intent) return;
+
+    mergeSubmitInFlight = true;
+    try {
+        const result = await postMergeWithRiskGate('/api/admin/identities/merge', {
+            from_identity_id: currentIdentityId,   // the unknown = loser
+            to_identity_id: knownIdentityId,       // the known  = winner
+            notes: 'Merged from the promote match suggestions',
+            // Recorded in the merge audit row, so this is distinguishable
+            // from an ordinary admin merge. Allowlisted server-side.
+            decision: 'merge_existing'
+        });
+        if (result === null) { return; }   // cancelled at the risk confirmation
+        showNotification(result.message || `Merged into ${label}`, 'success');
+        ModalStack.close(document.getElementById('promote-modal'));
+        loadUnknownFaces();
+    } catch (err) {
+        showNotification(err.message || 'Could not reach the server. Nothing was merged.', 'error');
+    } finally {
+        mergeSubmitInFlight = false;
+    }
 }
 
 // Promote identity - ALL VALIDATION IN BACKEND
@@ -1944,7 +2239,10 @@ async function promoteIdentity() {
             credentials: 'include', // Include HttpOnly cookies
             body: JSON.stringify({
                 display_name: name,
-                person_code: code || null
+                person_code: code || null,
+                // Mandatory. This form is the create-new branch; the merge
+                // branch lives in mergeIntoKnownCandidate().
+                decision: 'create_new'
             })
         });
 
@@ -1970,7 +2268,7 @@ async function promoteIdentity() {
 
         const result = await response.json(); // Backend sends success message
         showNotification(result.message || 'Identity promoted successfully', 'success');
-        document.getElementById('promote-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('promote-modal'));
         loadUnknownFaces();
     } catch (error) {
         console.error('Error promoting identity:', error);
@@ -1987,16 +2285,19 @@ async function promoteIdentity() {
     }
 }
 
-// Show face detection alert modal (popup in front of user)
+// Show the face detection alert. THE canonical implementation for this page:
+// upload-modal.js (injected later) checks for an existing definition and does
+// not overwrite it, so exactly one implementation is live after all scripts
+// load. The stack places it above whatever opened it — the z-index 99999
+// special case is gone; "opened last" is what puts it on top.
 function showFaceDetectionAlert(message) {
     const modal = document.getElementById('face-detection-alert-modal');
     const messageElement = document.getElementById('face-alert-message');
-    
+
     if (modal && messageElement) {
         messageElement.textContent = message;
-        modal.style.display = 'flex';
-        modal.style.zIndex = '99999'; // Ensure it's on top of everything
-        
+        ModalStack.open(modal, { backdropClose: true });
+
         // Add pulse animation
         const icon = modal.querySelector('.fa-user-slash');
         if (icon && icon.parentElement) {
@@ -2008,11 +2309,12 @@ function showFaceDetectionAlert(message) {
     }
 }
 
-// Close face detection alert modal
+// Close face detection alert modal. Safe to call twice — ModalStack.close is
+// an idempotent no-op for a modal that is not open.
 function closeFaceDetectionAlert() {
     const modal = document.getElementById('face-detection-alert-modal');
     if (modal) {
-        modal.style.display = 'none';
+        ModalStack.close(modal);
     }
 }
 
@@ -2304,7 +2606,7 @@ function openMergeModal(identityId) {
     
     document.getElementById('merge-notes').value = '';
     document.getElementById('merge-search-results').style.display = 'none';
-    document.getElementById('merge-modal').style.display = 'flex';
+    ModalStack.open(document.getElementById('merge-modal'));
 }
 
 // Helper function to escape HTML (XSS protection)
@@ -2422,72 +2724,129 @@ function selectIdentityForMerge(identityId) {
     showNotification('Identity selected for merge', 'success');
 }
 
+// ---------------------------------------------------------------------------
+// Merge risk gate (frontend side of the backend's MERGE_CONFIRMATION_REQUIRED
+// contract). The first request never mutates when the backend judges the
+// identities suspicious; it answers a structured 409, and the ONLY way past
+// it is the explicit "Merge Anyway" in the high-risk confirmation below —
+// which resends with confirm_merge_risk so the backend re-checks and audits.
+// ---------------------------------------------------------------------------
+
+function confirmMergeRisk(payload) {
+    const risk = (payload && payload.risk) || {};
+    const unavailable = risk.risk_level === 'unavailable';
+    const lines = [];
+    if (unavailable) {
+        lines.push('There are insufficient compatible embeddings to verify these identities.');
+    } else {
+        lines.push('These identities have low visual similarity and may represent unrelated persons.');
+        if (typeof risk.robust_similarity === 'number') {
+            lines.push(`Similarity: ${Math.round(risk.robust_similarity * 100)}%`);
+        }
+        if (typeof risk.threshold === 'number') {
+            lines.push(`Warning threshold: ${Math.round(risk.threshold * 100)}%`);
+        }
+    }
+    lines.push('Merging them will combine identity history, detections and embeddings.');
+    return AppConfirm.confirm({
+        title: unavailable
+            ? 'Identity Similarity Could Not Be Verified'
+            : 'Potential Identity Mismatch',
+        lines: lines,
+        confirmLabel: 'Merge Anyway',
+        cancelLabel: 'Cancel',
+        danger: true
+    });
+}
+
+/**
+ * POST a merge, honouring the risk gate. Returns the success payload, or
+ * null when the user cancelled at the high-risk confirmation. Throws on any
+ * other failure. At most ONE override resend can ever happen (the loop runs
+ * twice at most), so a stuck button cannot spray repeated merges.
+ */
+async function postMergeWithRiskGate(url, payload) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(payload)
+        });
+        let result = {};
+        try { result = await response.json(); } catch (ignored) { /* empty body */ }
+
+        if (response.ok) { return result; }
+
+        if (response.status === 409
+                && result && result.code === 'MERGE_CONFIRMATION_REQUIRED'
+                && attempt === 0) {
+            const proceed = await confirmMergeRisk(result);
+            if (!proceed) { return null; }
+            payload = Object.assign({}, payload, { confirm_merge_risk: true });
+            continue;
+        }
+        throw new Error(
+            (result && (result.detail || result.message)) || 'Failed to merge identities');
+    }
+    return null;
+}
+
+// One merge submission at a time — a second submit while the first is in
+// flight (or while its risk confirmation is open) is dropped.
+let mergeSubmitInFlight = false;
+
 // Merge identities - ALL VALIDATION IN BACKEND
 async function mergeIdentities() {
+    if (mergeSubmitInFlight) { return; }
+    mergeSubmitInFlight = true;
+
     const notes = document.getElementById('merge-notes').value.trim();
-    
+
     // Check if multi-merge or single merge
     const multiMergeForm = document.getElementById('multi-merge-form');
     const isMultiMerge = multiMergeForm.style.display !== 'none' && selectedIdentities.size >= 2;
-    
+
     try {
-        let response;
-        
+        let result;
+
         if (isMultiMerge) {
-            // Multi-merge: use new endpoint
             const identityIds = Array.from(selectedIdentities);
             const targetId = document.getElementById('multi-merge-target-id').value.trim() || null;
-            
-            response = await fetch('/api/admin/identities/merge-multiple', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'include', // Include HttpOnly cookies
-                body: JSON.stringify({
-                    identity_ids: identityIds,
-                    target_identity_id: targetId,
-                    notes: notes || null
-                })
+            result = await postMergeWithRiskGate('/api/admin/identities/merge-multiple', {
+                identity_ids: identityIds,
+                target_identity_id: targetId,
+                notes: notes || null
             });
         } else {
-            // Single merge: use existing endpoint
             const fromId = document.getElementById('merge-from-id').value.trim();
             const toId = document.getElementById('merge-to-id').value.trim();
-            
-            response = await fetch('/api/admin/identities/merge', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'include', // Include HttpOnly cookies
-                body: JSON.stringify({
-                    from_identity_id: fromId,
-                    to_identity_id: toId,
-                    notes: notes || null
-                })
+            result = await postMergeWithRiskGate('/api/admin/identities/merge', {
+                from_identity_id: fromId,
+                to_identity_id: toId,
+                notes: notes || null,
+                // Mandatory on every merge, not just suggestion merges.
+                decision: 'merge_existing'
             });
         }
 
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to merge identities');
-        }
+        if (result === null) { return; }   // cancelled at the risk confirmation
 
-        const result = await response.json(); // Backend sends success message
         showNotification(result.message || 'Identities merged successfully', 'success');
-        document.getElementById('merge-modal').style.display = 'none';
-        
+        ModalStack.close(document.getElementById('merge-modal'));
+
         // Clear selections if multi-merge
         if (isMultiMerge) {
             selectedIdentities.clear();
             document.getElementById('multi-merge-target-id').value = '';
         }
-        
+
         loadUnknownFaces(); // Refresh the list
     } catch (error) {
         console.error('Error merging identities:', error);
         showNotification(error.message || 'Error merging identities', 'error');
+    } finally {
+        mergeSubmitInFlight = false;
     }
 }
 
@@ -2507,7 +2866,7 @@ async function openAdvancedMergePreview() {
     const previewLoading = document.getElementById('merge-preview-loading');
     
     // Show modal with loading state
-    previewModal.style.display = 'flex';
+    ModalStack.open(previewModal);
     previewLoading.style.display = 'block';
     previewContent.style.display = 'none';
     
@@ -2740,29 +3099,18 @@ async function executeMergeFromPreview() {
     executeBtn.disabled = true;
     
     try {
-        const response = await fetch('/api/admin/identities/merge-multiple', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            credentials: 'include', // Include HttpOnly cookies
-            body: JSON.stringify({
-                identity_ids: identityIds,
-                target_identity_id: targetId,
-                notes: notes || null
-            })
+        const result = await postMergeWithRiskGate('/api/admin/identities/merge-multiple', {
+            identity_ids: identityIds,
+            target_identity_id: targetId,
+            notes: notes || null
         });
-        
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to merge identities');
-        }
-        
-        const result = await response.json();
-        
-        // Close preview modal
-        document.getElementById('merge-preview-modal').style.display = 'none';
-        document.getElementById('merge-modal').style.display = 'none';
+        if (result === null) { return; }   // cancelled at the risk confirmation
+
+        // Close the whole merge flow. Closing the merge modal cascades the
+        // preview above it (LIFO); each modal's cleanup runs exactly once.
+        // If the flow started from the detail modal, that stays open — same
+        // behavior as before.
+        ModalStack.close(document.getElementById('merge-modal'));
         
         // Show success notification with enhanced details
         let message = result.message || 'Identities merged successfully';
@@ -2790,9 +3138,9 @@ async function executeMergeFromPreview() {
     }
 }
 
-// Close preview modal
+// Close preview modal — the merge modal underneath becomes active again.
 function closeMergePreviewModal() {
-    document.getElementById('merge-preview-modal').style.display = 'none';
+    ModalStack.close(document.getElementById('merge-preview-modal'));
 }
 
 // =====================================================
@@ -2966,22 +3314,23 @@ async function approveMergeSuggestion(suggestionId) {
         return;
     }
 
-    if (!confirm('Are you sure you want to approve and execute this merge?')) {
-        return;
-    }
+    const intent = await AppConfirm.confirm({
+        title: 'Approve this merge suggestion?',
+        lines: ['The suggested identities are merged immediately. This cannot be undone from this page.'],
+        confirmLabel: 'Approve & Merge',
+        cancelLabel: 'Cancel',
+        danger: true
+    });
+    if (!intent) return;
 
     try {
-        const response = await fetch(`/api/admin/merge-suggestions/${suggestionId}/approve`, {
-            method: 'POST',
-            credentials: 'include' // Include HttpOnly cookies
-        });
+        // A suggestion is a machine hypothesis — approval still passes the
+        // backend compatibility gate, and a suspicious pair comes back as
+        // the structured 409 handled by the risk-gate helper.
+        const result = await postMergeWithRiskGate(
+            `/api/admin/merge-suggestions/${suggestionId}/approve`, {});
+        if (result === null) { return; }   // cancelled at the risk confirmation
 
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to approve merge suggestion');
-        }
-
-        const result = await response.json(); // Backend sends success message
         showNotification(result.message || `Merge approved: ${result.merged_identities || 'identities'} merged`, 'success');
         loadMergeSuggestions(); // Refresh the list
         loadUnknownFaces(); // Refresh unknown faces list
@@ -2993,9 +3342,13 @@ async function approveMergeSuggestion(suggestionId) {
 
 // Reject merge suggestion - ALL LOGIC IN BACKEND
 async function rejectMergeSuggestion(suggestionId) {
-    if (!confirm('Are you sure you want to reject this merge suggestion?')) {
-        return;
-    }
+    const intent = await AppConfirm.confirm({
+        title: 'Reject this merge suggestion?',
+        lines: ['The suggestion is dismissed; the identities stay separate.'],
+        confirmLabel: 'Reject',
+        cancelLabel: 'Cancel'
+    });
+    if (!intent) return;
 
     try {
         const response = await fetch(`/api/admin/merge-suggestions/${suggestionId}/reject`, {
@@ -3036,8 +3389,8 @@ async function openPipelineMergeSuggestions(pipelineId) {
     mergeTitleEl.title = pipelineId;
     
     // Show modal
-    document.getElementById('pipeline-merge-suggestions-modal').style.display = 'flex';
-    
+    ModalStack.open(document.getElementById('pipeline-merge-suggestions-modal'));
+
     // Load suggestions for this pipeline
     await loadPipelineMergeSuggestions(pipelineId);
 }
@@ -3178,7 +3531,7 @@ async function openCreateLiveAlertModal(identityId, identityName) {
     
     // Show loading state
     const modal = document.getElementById('create-live-alert-modal');
-    modal.style.display = 'flex';
+    ModalStack.open(modal);
     document.getElementById('live-alert-identity-name').textContent = 'Loading...';
     
     // Set identity ID immediately (we already have it, no need to wait for backend)
@@ -3307,7 +3660,7 @@ async function createLiveAlert() {
         const result = await response.json();
         console.log('[LIVE_ALERT] Alert created successfully:', result);
         showNotification(`Live alert "${name}" created successfully!`, 'success');
-        document.getElementById('create-live-alert-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('create-live-alert-modal'));
         
         // Backend logic: redirect to live alerts page after successful creation
         // Use setTimeout to ensure notification is visible before redirect
@@ -3334,7 +3687,7 @@ async function openAddToWatchlistModal(identityId, identityName) {
     
     // Show loading state
     const modal = document.getElementById('add-to-watchlist-modal');
-    modal.style.display = 'flex';
+    ModalStack.open(modal);
     document.getElementById('watchlist-identity-name').textContent = 'Loading...';
     document.getElementById('watchlist-select').innerHTML = '<option value="">Loading watchlists...</option>';
     
@@ -3378,7 +3731,7 @@ async function openAddToWatchlistModal(identityId, identityName) {
     } catch (error) {
         console.error('Error loading defaults:', error);
         showNotification(error.message || 'Error loading defaults', 'error');
-        modal.style.display = 'none';
+        ModalStack.close(modal);
     }
 }
 
@@ -3448,7 +3801,7 @@ async function addToWatchlist() {
         const result = await response.json();
         console.log('[WATCHLIST] Identity added successfully:', result);
         showNotification(`Identity added to watchlist successfully!`, 'success');
-        document.getElementById('add-to-watchlist-modal').style.display = 'none';
+        ModalStack.close(document.getElementById('add-to-watchlist-modal'));
         
     } catch (error) {
         console.error('Error adding to watchlist:', error);
@@ -3521,6 +3874,8 @@ Actions.register({
 
     viewIdentityDetails: (el) => viewIdentityDetails(el.dataset.arg),
     promoteIdentityModal: (el) => promoteIdentityModal(el.dataset.arg),
+    mergeIntoKnownCandidate: (el) =>
+        mergeIntoKnownCandidate(el.dataset.arg, el.dataset.arg2),
     openMergeModal: (el) => openMergeModal(el.dataset.arg),
     analyzeInSecurityIntelligence: (el) => analyzeInSecurityIntelligence(el.dataset.arg),
     selectIdentityForMerge: (el) => selectIdentityForMerge(el.dataset.arg),

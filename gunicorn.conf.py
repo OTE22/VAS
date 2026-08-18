@@ -4,37 +4,41 @@ Optimized for 100+ concurrent requests with high reliability
 """
 import multiprocessing
 import os
+import logging
 
 # =====================================================
 # Server Socket
 # =====================================================
-# Import settings from central config
-try:
-    from config import settings
-    bind = f"{settings.HOST}:{settings.PORT}"
-except ImportError:
-    # Fallback to environment variables if config not available
-    bind = os.getenv("HOST", "0.0.0.0") + ":" + os.getenv("PORT", "8000")
+# No try/except around this import, and no os.getenv fallback anywhere in this
+# file. This module IS the production entry point: if central configuration
+# cannot be loaded, the correct outcome is a failure to start, not a server
+# bound to 0.0.0.0:8000 with default credentials. The previous version caught
+# ImportError and silently continued on os.getenv defaults, which meant a
+# broken config.py produced a running-but-misconfigured service.
+from config import settings
+
+bind = f"{settings.HOST}:{settings.PORT}"
 backlog = 2048  # Maximum number of pending connections
 
 # =====================================================
 # Worker Processes
 # =====================================================
-# Optimized for 50+ cameras and 20 concurrent users
-# GPU scenarios can handle more workers efficiently
 cpu_count = multiprocessing.cpu_count()
+USE_GPU = settings.USE_GPU
 
-# Check if GPU is available - Use central config
-try:
-    USE_GPU = settings.USE_GPU
-    workers = settings.WORKERS if settings.WORKERS > 0 else (max(16, int(cpu_count * 2) + 10) if USE_GPU else max(8, int(cpu_count * 1.5)))
-except NameError:
-    # Fallback if settings not imported
-    USE_GPU = os.getenv("USE_GPU", "false").lower() == "true"
-    if USE_GPU:
-        workers = int(os.getenv("WORKERS", max(16, int(cpu_count * 2) + 10)))
-    else:
-        workers = int(os.getenv("WORKERS", max(8, int(cpu_count * 1.5))))
+# WORKERS is taken literally. It used to fall back to an auto-derived count
+# (8-26 processes) whenever WORKERS was not positive — which would silently
+# break the single-worker invariant this deployment depends on: admin settings
+# propagation, SQL-agent cancellation and single-flight job guards are all
+# process-local (see backend/core/runtime_settings.py). Raising worker count by
+# accident is not a performance decision, it is a correctness change.
+workers = settings.WORKERS
+if workers < 1:
+    raise SystemExit(
+        f"WORKERS={settings.WORKERS} is not a valid process count. "
+        "Set WORKERS=1 (the supported deployment) or a deliberate positive "
+        "number together with ALLOW_MULTI_WORKER=true."
+    )
 
 if USE_GPU:
     print(f"🚀 GPU mode: Using {workers} workers (CPU cores: {cpu_count})")
@@ -63,8 +67,10 @@ threads = 1  # Threads per worker (keep at 1 for async)
 # outage every few hundred requests.
 max_requests = 1000 if workers > 1 else 0   # 0 = recycling disabled
 max_requests_jitter = 200 if workers > 1 else 0
-# Increased timeout for long-running SSE streams (up to 10 minutes)
-timeout = 600 if USE_GPU else 600  # 10 minutes for streaming requests
+# Long-running SSE streams need a generous request timeout. This was
+# written `600 if USE_GPU else 600` — a ternary with identical branches,
+# which reads as a deliberate GPU/CPU distinction and is not one.
+timeout = 600  # 10 minutes, both CPU and GPU
 graceful_timeout = 60  # Increased for graceful shutdown of long-running requests
 keepalive = 10  # Increased keepalive for better connection reuse
 
@@ -82,10 +88,7 @@ proc_name = "face-recognition-service"
 # "-" sends them to stdout/stderr -> the container's log stream. The
 # application's own logs go to stdout via utils/logging.py (which also keeps
 # a bounded rotating file copy in LOG_DIR for persistence).
-try:
-    loglevel = settings.LOG_LEVEL.lower()
-except NameError:
-    loglevel = os.getenv("LOG_LEVEL", "info").lower()
+loglevel = settings.LOG_LEVEL.lower()
 
 accesslog = "-"   # stdout -> Docker logs
 errorlog = "-"    # stderr -> Docker logs
@@ -163,10 +166,39 @@ reuse_port = True if hasattr(os, 'SO_REUSEPORT') else False
 # Worker Lifecycle Hooks
 # =====================================================
 
+def _log_configuration_summary():
+    """Emit the startup banner through the central logger.
+
+    Called from on_starting, NOT at module import. Importing this file is
+    how tooling introspects the configuration (tests/test_config_contract.py
+    execs it and parses stdout), and the QueueListener writes from a
+    THREAD — so logging at import made this module's stdout arrive in a
+    non-deterministic order and corrupted anything parsing it.
+    """
+    from utils.logging import setup_logging
+    setup_logging(log_to_file=True)
+    _conf_log = logging.getLogger("gunicorn.conf")
+    _conf_log.info("\n" + "=" * 70)
+    _conf_log.info("📋 Gunicorn Configuration Loaded")
+    _conf_log.info("=" * 70)
+    _conf_log.info(f"Workers: {workers} (based on {cpu_count} CPU cores)")
+    _conf_log.info(f"Worker Class: {worker_class}")
+    _conf_log.info(f"Bind Address: {bind}")
+    _conf_log.info(f"Timeout: {timeout}s")
+    _conf_log.info(f"Max Requests per Worker: {max_requests}")
+    _conf_log.info(f"Access Log: {accesslog}")
+    _conf_log.info(f"Error Log: {errorlog}")
+    _conf_log.info(f"Log Level: {loglevel}")
+    _conf_log.info(f"Preload App: {preload_app}")
+    _conf_log.info("=" * 70 + "\n")
+
+
 def on_starting(server):
     """
     Called just before the master process is initialized.
     """
+
+    _log_configuration_summary()
     # Second layer of the fail-closed configuration gate. docker-entrypoint.sh
     # is the primary one, but docker-compose.gpu.yml overrides `entrypoint:`
     # and would otherwise skip it entirely. Runs once in the master, before any
@@ -271,8 +303,17 @@ def pre_fork(server, worker):
 def post_fork(server, worker):
     """
     Called after a worker is forked.
+
+    Re-arms logging in the child. A QueueListener runs in a THREAD, and threads
+    do not survive fork(). With preload_app=True (this config enables it for
+    GPU) setup_logging() runs in the master, so each worker inherits a listener
+    object whose thread is dead — the idempotence guard then short-circuits and
+    the worker logs NOTHING, silently. Rebuilding it here is what keeps worker
+    logs flowing to stdout and the rotating file.
     """
-    print(f"👷 Worker {worker.pid} spawned")
+    from utils.logging import reinitialize_after_fork
+    reinitialize_after_fork()
+    logging.getLogger(__name__).info("Worker %s spawned", worker.pid)
 
 
 def post_worker_init(worker):
@@ -352,16 +393,3 @@ raw_paste_global_conf = []
 # =====================================================
 # Configuration Summary
 # =====================================================
-print("\n" + "=" * 70)
-print("📋 Gunicorn Configuration Loaded")
-print("=" * 70)
-print(f"Workers: {workers} (based on {cpu_count} CPU cores)")
-print(f"Worker Class: {worker_class}")
-print(f"Bind Address: {bind}")
-print(f"Timeout: {timeout}s")
-print(f"Max Requests per Worker: {max_requests}")
-print(f"Access Log: {accesslog}")
-print(f"Error Log: {errorlog}")
-print(f"Log Level: {loglevel}")
-print(f"Preload App: {preload_app}")
-print("=" * 70 + "\n")

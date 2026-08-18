@@ -8,7 +8,7 @@ import os
 import sys
 import logging
 from datetime import datetime
-from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -18,29 +18,47 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from db_connection import get_db
-from db_models import Detection
+from backend.utils.pagination import resolve_page, resolve_page_size
+from db_models import Detection, User
 from backend.core import production_cache_manager
-from backend.core.face_recognition_cache import face_recognition_cache
 from backend.core.circuit_breaker import CircuitState
+from backend.auth.auth_service import require_role
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+
+# Cache administration + diagnostics expose Redis internals (server version,
+# memory, key counts) and let a caller wipe cache keys. Administrator-only,
+# enforced at the router so no route here can be unauthenticated. (Previously
+# every /api/cache/* route was open: POST /api/cache/clear?pattern=* let any
+# anonymous caller flush the whole cache.)
+router = APIRouter(
+    tags=["Cache"],
+    dependencies=[Depends(require_role(["admin"]))],
+)
 
 
 @router.get("/api/cache/stats")
 async def get_cache_stats():
-    """Get detailed cache statistics"""
+    """Get detailed cache statistics.
+
+    `face_cache` is retained as a literal None for response-shape stability:
+    the FaceRecognitionCache it reported on cached lookups against the retired
+    display-name FaceDatabase, which was write-never under pgvector — a cache
+    accelerating an always-empty answer.
+    """
     return {
         "cache_manager": await production_cache_manager.get_stats(),
-        "face_cache": await face_recognition_cache.get_performance_stats(),
+        "face_cache": None,
         "timestamp": datetime.utcnow().isoformat()
     }
 
 
 @router.post("/api/cache/warm/{pipeline_id}")
-async def warm_cache_for_pipeline(pipeline_id: str, limit: int = 100, db: AsyncSession = Depends(get_db)):
+async def warm_cache_for_pipeline(pipeline_id: str, limit: int = None, db: AsyncSession = Depends(get_db)):
     """Warm cache for a specific pipeline"""
+    # Bounds from configuration; this used to accept any limit a caller sent.
+    limit = resolve_page_size(limit, field="limit")
     # Get recent detections
     result = await db.execute(
         select(Detection)
@@ -52,11 +70,16 @@ async def warm_cache_for_pipeline(pipeline_id: str, limit: int = 100, db: AsyncS
 
     warmed = 0
     for detection in detections:
-        # Cache detection metadata
-        await face_recognition_cache.cache_detection_result(
-            pipeline_id,
-            detection.id,
-            [{"name": f.name, "similarity": f.similarity} for f in detection.faces]
+        # Cache detection metadata. Written directly through the production
+        # cache — the FaceRecognitionCache wrapper this used to call was a
+        # one-line delegation to exactly this, plus the retired legacy lookup.
+        cache_key = (f"{production_cache_manager.cache_version}:detection:"
+                     f"{pipeline_id}:{detection.id}")
+        await production_cache_manager.set_with_ttl_jitter(
+            cache_key,
+            {"faces": [{"name": f.name, "similarity": f.similarity}
+                       for f in detection.faces]},
+            base_ttl=300,
         )
         warmed += 1
 
@@ -119,7 +142,7 @@ async def cache_health():
             "capacity": cache_stats['local_cache_capacity'],
             "usage_percent": (cache_stats['local_cache_size'] / cache_stats['local_cache_capacity'] * 100) if cache_stats['local_cache_capacity'] > 0 else 0
         },
-        "performance": await face_recognition_cache.get_performance_stats()
+        "performance": None,  # was the retired FaceRecognitionCache's stats
     }
 
 
@@ -151,7 +174,7 @@ async def test_redis_connection():
         # Redacted: this diagnostics payload is returned over HTTP, and the
         # URL carries the Redis password once authentication is enabled.
         from backend.security.redaction import redact_url
-        diagnostics["redis_url"] = redact_url(getattr(settings, 'REDIS_URL', '') or '')
+        diagnostics["redis_url"] = redact_url(settings.REDIS_URL or '')
         diagnostics["redis_configured"] = diagnostics["redis_url"] is not None
         
         if not diagnostics["redis_configured"]:
@@ -256,7 +279,7 @@ async def get_redis_stats():
     
     stats = {
         "cache_manager": await production_cache_manager.get_stats(),
-        "face_cache": await face_recognition_cache.get_performance_stats() if face_recognition_cache else None,
+        "face_cache": None,  # retired with the legacy FaceDatabase chain
         "redis_connection": {
             "enabled": cache_manager._enabled,
             "connected": cache_manager.redis_client is not None,

@@ -34,7 +34,7 @@ class SQLKnowledgeBase:
         },
         {
             "question": "Track Joey",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -44,7 +44,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Where is Joey",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -74,7 +74,7 @@ ORDER BY d.timestamp DESC LIMIT 10""",
         },
         {
             "question": "Show recent detections",
-            "sql": "SELECT id, pipeline_id, timestamp, uuid, image_path FROM detections ORDER BY timestamp DESC LIMIT 20",
+            "sql": "SELECT id, pipeline_id, timestamp, uuid, processing_time_ms FROM detections ORDER BY timestamp DESC LIMIT 20",
             "purpose": "Get the most recent detection events"
         },
         {
@@ -114,7 +114,7 @@ ORDER BY d.timestamp DESC""",
         },
         {
             "question": "Find a specific person by name",
-            "sql": """SELECT f.name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 WHERE LOWER(f.name) LIKE LOWER('%{name}%')
@@ -213,7 +213,7 @@ ORDER BY detection_count DESC""",
         },
         {
             "question": "Track person movement across cameras",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -300,7 +300,7 @@ ORDER BY last_detection DESC NULLS LAST""",
         },
         {
             "question": "Get all detections from a specific camera",
-            "sql": """SELECT f.name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -311,7 +311,7 @@ ORDER BY d.timestamp DESC LIMIT 50""",
         # ========== SURVEILLANCE & TRACKING EXAMPLES ==========
         {
             "question": "Track Monica",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -321,7 +321,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Ross",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -331,7 +331,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Rachel",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -341,7 +341,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Chandler",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -351,7 +351,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Phoebe",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, d.image_path
+            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -628,17 +628,6 @@ ORDER BY hour_of_day""",
             "purpose": "Analyze detection patterns by hour of day"
         },
         {
-            "question": "Find detections with no image path",
-            "sql": """SELECT d.id, d.timestamp, d.pipeline_id, d.uuid,
-    COUNT(f.id) as face_count
-FROM detections d
-LEFT JOIN faces f ON d.id = f.detection_id
-WHERE d.image_path IS NULL OR d.image_path = ''
-GROUP BY d.id, d.timestamp, d.pipeline_id, d.uuid
-ORDER BY d.timestamp DESC LIMIT 50""",
-            "purpose": "Find detections missing image file paths"
-        },
-        {
             "question": "Show average detection rate per camera",
             "sql": """SELECT p.pipeline_id as camera_name,
     COUNT(d.id) as total_detections,
@@ -878,7 +867,7 @@ ORDER BY total_detections DESC""",
             # Modify collection metadata
             self.collection.modify(metadata={"seed_hash": seed_hash})
         except Exception as e:
-            print(f"⚠️ Warning: Could not update seed hash: {e}")
+            logger.warning(f"⚠️ Warning: Could not update seed hash: {e}")
 
     def _clear_seed_examples(self):
         """Remove all seed examples from the collection."""
@@ -893,9 +882,9 @@ ORDER BY total_detections DESC""",
 
             if seed_ids:
                 self.collection.delete(ids=seed_ids)
-                print(f"🗑️  Removed {len(seed_ids)} old seed examples")
+                logger.info(f"🗑️  Removed {len(seed_ids)} old seed examples")
         except Exception as e:
-            print(f"⚠️ Warning: Could not clear old examples: {e}")
+            logger.warning(f"⚠️ Warning: Could not clear old examples: {e}")
 
     def _auto_initialize_seed_examples(self):
         """
@@ -913,16 +902,16 @@ ORDER BY total_detections DESC""",
         # Check if we need to re-initialize
         if stored_hash is None:
             # First time initialization
-            print("🌱 First-time initialization of knowledge base...")
+            logger.info("🌱 First-time initialization of knowledge base...")
             self._load_seed_examples()
             self._update_seed_hash(current_hash)
-            print(f"✅ Knowledge base initialized with {len(self.SEED_EXAMPLES)} seed examples")
+            logger.info(f"✅ Knowledge base initialized with {len(self.SEED_EXAMPLES)} seed examples")
 
         elif current_hash != stored_hash:
             # Seed examples have changed - re-initialize
-            print("🔄 SEED EXAMPLES CHANGED - Auto-updating knowledge base...")
-            print(f"   Old hash: {stored_hash[:8]}...")
-            print(f"   New hash: {current_hash[:8]}...")
+            logger.info("🔄 SEED EXAMPLES CHANGED - Auto-updating knowledge base...")
+            logger.info(f"   Old hash: {stored_hash[:8]}...")
+            logger.info(f"   New hash: {current_hash[:8]}...")
 
             # Clear old seed examples
             self._clear_seed_examples()
@@ -933,11 +922,11 @@ ORDER BY total_detections DESC""",
             # Update hash
             self._update_seed_hash(current_hash)
 
-            print(f"✅ Knowledge base updated with {len(self.SEED_EXAMPLES)} seed examples")
+            logger.info(f"✅ Knowledge base updated with {len(self.SEED_EXAMPLES)} seed examples")
 
         else:
             # No changes - skip initialization
-            print(f"✓ Knowledge base up-to-date ({self.collection.count()} total examples)")
+            logger.info(f"✓ Knowledge base up-to-date ({self.collection.count()} total examples)")
 
     def _load_seed_examples(self):
         """Load all seed examples into the knowledge base."""
@@ -984,7 +973,7 @@ ORDER BY total_detections DESC""",
             "sql": sql,
             "purpose": purpose,
             "source": source,
-            "added_at": datetime.now().isoformat(),
+            "added_at": datetime.utcnow().isoformat(),  # naive UTC (storage convention)
             **(metadata or {})
         }
 

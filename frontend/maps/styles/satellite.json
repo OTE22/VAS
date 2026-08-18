@@ -1,0 +1,26 @@
+{
+  "version": 8,
+  "name": "Lebanon Satellite",
+  "metadata": {
+    "armyeye:style": "satellite",
+    "armyeye:dataset": "lebanon-satellite",
+    "armyeye:note": "REAL imagery only — Copernicus Sentinel-2 L2A (10 m RGB) mosaicked to raster MBTiles in Phase D3. Never a filtered street map. Until the archive is installed, availability reports OFFLINE_MAP_DATASET_UNAVAILABLE and the UI disables the option.",
+    "armyeye:attribution": "Contains modified Copernicus Sentinel data"
+  },
+  "sources": {
+    "lebanon-satellite": {
+      "type": "raster",
+      "tiles": ["/maps/lebanon-satellite/{z}/{x}/{y}"],
+      "tileSize": 256,
+      "minzoom": 8,
+      "maxzoom": 14,
+      "bounds": [34.80, 32.84, 36.92, 34.89],
+      "attribution": "Contains modified Copernicus Sentinel data"
+    }
+  },
+  "layers": [
+    { "id": "background", "type": "background", "paint": { "background-color": "#0b0f14" } },
+    { "id": "satellite", "type": "raster", "source": "lebanon-satellite",
+      "paint": { "raster-fade-duration": 0 } }
+  ]
+}

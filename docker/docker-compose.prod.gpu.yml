@@ -1,0 +1,36 @@
+# GPU production override — apply ON TOP of docker-compose.prod.yml:
+#
+#   docker compose -f docker/docker-compose.prod.yml \
+#                  -f docker/docker-compose.prod.gpu.yml up -d
+#
+# Contains ONLY the GPU delta, copied from the proven GPU dev configuration
+# (docker-compose.gpu.yml). Everything else — edge/data/ai/monitoring network
+# segmentation, nginx as the only public + webhook front door, private API port
+# 8000, webhook_integration attachment and face-webhook alias, secrets, volumes,
+# restart policies, backup and monitoring — is inherited from prod unchanged.
+#
+# `migrate` deliberately stays on Dockerfile.cpu: backend/utils/migrations.py and
+# alembic/env.py import only sqlalchemy/alembic/db_models/config — database
+# migrations have no CUDA dependency, so they gain none here.
+#
+# WORKERS stays 1 (set in prod): one process = one CUDA session, the same
+# constraint documented in docker-compose.gpu.yml.
+
+services:
+  face_recognition:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    environment:
+      USE_GPU: "true"
+      # Fail startup rather than silently running GPU inference on the CPU.
+      ALLOW_CPU_FALLBACK: "false"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -87,10 +87,10 @@ class BatchSearchService:
     async def search_batch(
         self,
         db: AsyncSession,
-        images: List[Tuple[str, np.ndarray]],  # [(filename, image), ...]
+        images: List[Tuple[str, np.ndarray, str]],  # [(filename, image, sha256 of the upload bytes), ...]
         user_id: int,
         scope: str = "both",
-        top_k: int = 5,
+        top_k: int = None,
         min_quality: float = None,
         check_watchlist: bool = True,
         ip_address: str = None,
@@ -123,11 +123,17 @@ class BatchSearchService:
         if not self.is_initialized:
             raise RuntimeError("Batch search service not initialized")
         
+        # Same depth as a single-image search. This defaulted to 5 while
+        # /api/search/advanced defaulted to 10, and the search page drives both
+        # from one control — so a batch ran at half the requested depth.
+        if top_k is None:
+            top_k = settings.SEARCH_DEFAULT_TOP_K
+
         max_images = settings.BATCH_SEARCH_MAX_IMAGES
         if len(images) > max_images:
             images = images[:max_images]
             logger.warning(f"[BATCH_SEARCH] Truncated batch to {max_images} images")
-        
+
         results = []
         all_identity_ids = set()
         total_watchlist_alerts = 0
@@ -135,11 +141,16 @@ class BatchSearchService:
         total_matches = 0
         
         # Process images with concurrency limit
-        # IMPORTANT: Limit concurrency to avoid overwhelming the database pool
-        max_concurrent = min(5, settings.DB_POOL_SIZE // 10 if hasattr(settings, 'DB_POOL_SIZE') else 5)
+        # IMPORTANT: Limit concurrency to avoid overwhelming the database pool.
+        # The pool is the real constraint, so the configured cap is bounded by
+        # it — but neither bound is a literal any more. (The old expression
+        # guarded DB_POOL_SIZE with hasattr on a declared field, so the guard
+        # never fired and the divisor silently decided the cap.)
+        max_concurrent = max(1, min(settings.BATCH_SEARCH_MAX_CONCURRENCY,
+                                    settings.DB_POOL_SIZE))
         semaphore = asyncio.Semaphore(max_concurrent)
         
-        async def process_single_image(idx: int, filename: str, image: np.ndarray):
+        async def process_single_image(idx: int, filename: str, image: np.ndarray, image_hash: str):
             """Process a single image with its own database session."""
             async with semaphore:
                 img_start = time.time()
@@ -158,7 +169,8 @@ class BatchSearchService:
                             min_quality=min_quality,
                             check_watchlist=check_watchlist,
                             ip_address=ip_address,
-                            user_agent=user_agent
+                            user_agent=user_agent,
+                            image_hash=image_hash,
                         )
                         
                         # Extract matches
@@ -207,12 +219,30 @@ class BatchSearchService:
         
         # Process all images
         tasks = [
-            process_single_image(idx, filename, image)
-            for idx, (filename, image) in enumerate(images)
+            process_single_image(idx, filename, image, image_hash)
+            for idx, (filename, image, image_hash) in enumerate(images)
         ]
         
-        batch_results = await asyncio.gather(*tasks)
-        
+        # BATCH_SEARCH_TIMEOUT_SECONDS is registered as an immediate-apply
+        # setting and reported back on every batch response, but nothing ever
+        # enforced it — this gather was unbounded. Same shape as the working
+        # bound in backend/ml/inference_service.py.
+        timeout_s = float(settings.BATCH_SEARCH_TIMEOUT_SECONDS)
+        gathered = asyncio.gather(*tasks)
+        try:
+            batch_results = await asyncio.wait_for(gathered, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            gathered.cancel()
+            try:
+                await gathered
+            except (asyncio.CancelledError, Exception):
+                pass
+            logger.error(
+                "[BATCH_SEARCH] Batch %s exceeded BATCH_SEARCH_TIMEOUT_SECONDS=%.0f "
+                "with %d image(s); aborted", batch_id, timeout_s, len(images))
+            raise TimeoutError(
+                f"Batch search exceeded the configured timeout of {timeout_s:.0f}s")
+
         # Aggregate results
         successful = 0
         failed = 0
@@ -283,27 +313,15 @@ class BatchSearchService:
         ip_address: str,
         user_agent: str
     ):
-        """Log batch search to history."""
-        try:
-            history = SearchHistory(
-                id=uuid.UUID(batch_id),
-                user_id=user_id,
-                search_type=SearchType.BATCH,
-                input_faces_count=total_images,  # Using this field for image count
-                results_count=results_count,
-                unique_identities_count=unique_identities,
-                watchlist_alerts_count=watchlist_alerts,
-                processing_time_ms=processing_time_ms,
-                ip_address=ip_address,
-                user_agent=user_agent
-            )
-            db.add(history)
-            await db.commit()
-            logger.debug(f"[BATCH_SEARCH] Logged batch history: {batch_id}")
-        except Exception as e:
-            logger.error(f"[BATCH_SEARCH] Failed to log batch history: {e}")
-            await db.rollback()
-    
+        """Log batch search to history — through the ONE writer."""
+        from backend.core.search_audit import record_image_search
+        await record_image_search(
+            db, search_id=batch_id, user_id=user_id, search_type=SearchType.BATCH,
+            faces_count=total_images,  # image count for a batch
+            results_count=results_count, unique_identities=unique_identities,
+            watchlist_alerts_count=watchlist_alerts, processing_time_ms=processing_time_ms,
+            ip_address=ip_address, user_agent=user_agent)
+
     def to_dict(self, result: BatchSearchResult) -> Dict:
         """Convert BatchSearchResult to dictionary."""
         return {

@@ -1,0 +1,29 @@
+{
+  "version": 8,
+  "name": "Lebanon Terrain",
+  "metadata": {
+    "armyeye:style": "terrain",
+    "armyeye:dataset": "lebanon-dem",
+    "armyeye:note": "Real elevation — Copernicus GLO-30 DEM encoded as raster-dem (Phase D2). DEM = elevation values; terrain = MapLibre geometry from it; hillshade = visualization derived from the same source client-side. Not a sepia street map. Until the archive is installed, availability reports OFFLINE_MAP_DATASET_UNAVAILABLE.",
+    "armyeye:attribution": "Copernicus DEM © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA"
+  },
+  "sources": {
+    "lebanon-dem": {
+      "type": "raster-dem",
+      "tiles": ["/maps/lebanon-dem/{z}/{x}/{y}"],
+      "tileSize": 256,
+      "encoding": "terrarium",
+      "minzoom": 6,
+      "maxzoom": 12,
+      "bounds": [34.80, 32.84, 36.92, 34.89],
+      "attribution": "Copernicus DEM"
+    }
+  },
+  "terrain": { "source": "lebanon-dem", "exaggeration": 1.0 },
+  "layers": [
+    { "id": "background", "type": "background", "paint": { "background-color": "#e8e4dc" } },
+    { "id": "hillshade", "type": "hillshade", "source": "lebanon-dem",
+      "paint": { "hillshade-exaggeration": 0.6, "hillshade-shadow-color": "#3b3020",
+                 "hillshade-highlight-color": "#ffffff", "hillshade-accent-color": "#5c4a2a" } }
+  ]
+}

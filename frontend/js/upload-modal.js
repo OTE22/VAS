@@ -21,7 +21,17 @@ function openUploadModal() {
         }
         const modal = document.getElementById('uploadModal');
         if (modal) {
-            modal.style.display = 'flex';
+            if (window.ModalStack) {
+                // Pages with the modal stack (Unknown Faces): the stack owns
+                // layering, Escape and backdrop, so an error alert raised
+                // during upload lands ABOVE this dialog instead of under it.
+                window.ModalStack.open(modal, {
+                    backdropClose: true,
+                    onClose: () => closeUploadModal()
+                });
+            } else {
+                modal.style.display = 'flex';
+            }
             modal.classList.add('active');
         }
     })
@@ -34,7 +44,20 @@ function openUploadModal() {
 /**
  * Show alert popup for upload errors/success
  */
+// 'error' | 'info' | anything else (treated as success).
+//
+// The 'info' state exists because a duplicate upload is neither: the request
+// succeeded and nothing was stored. Rendering that green with a tick is what
+// sent operators looking for a file the server had correctly declined to write.
+const _ALERT_PALETTE = {
+    error: { bg: '#f8d7da', border: '#f5c6cb', text: '#721c24', icon: '⚠️' },
+    info:  { bg: '#cce5ff', border: '#b8daff', text: '#004085', icon: 'ℹ️' },
+    success: { bg: '#d4edda', border: '#c3e6cb', text: '#155724', icon: '✅' },
+};
+
+
 function showUploadAlert(title, message, type = 'error') {
+    const palette = _ALERT_PALETTE[type] || _ALERT_PALETTE.success;
     // Create or get alert container
     let alertContainer = document.getElementById('uploadAlertContainer');
     if (!alertContainer) {
@@ -54,9 +77,9 @@ function showUploadAlert(title, message, type = 'error') {
     // Create alert element
     const alert = document.createElement('div');
     alert.style.cssText = `
-        background: ${type === 'error' ? '#f8d7da' : '#d4edda'};
-        border: 1px solid ${type === 'error' ? '#f5c6cb' : '#c3e6cb'};
-        color: ${type === 'error' ? '#721c24' : '#155724'};
+        background: ${palette.bg};
+        border: 1px solid ${palette.border};
+        color: ${palette.text};
         padding: 16px 20px;
         border-radius: 8px;
         margin-bottom: 12px;
@@ -97,7 +120,7 @@ function showUploadAlert(title, message, type = 'error') {
     alert.innerHTML = `
         <div style="display: flex; align-items: flex-start; gap: 12px;">
             <div style="font-size: 20px; flex-shrink: 0;">
-                ${type === 'error' ? '⚠️' : '✅'}
+                ${palette.icon}
             </div>
             <div style="flex: 1;">
                 <div style="font-weight: 600; font-size: 16px; margin-bottom: 4px;">${title}</div>
@@ -141,6 +164,19 @@ function showUploadAlert(title, message, type = 'error') {
 function closeUploadModal() {
     const modal = document.getElementById('uploadModal');
     if (modal) {
+        if (window.ModalStack && window.ModalStack.isOpen(modal)) {
+            // The stack's onClose hook re-enters this function once the
+            // entry has left the stack; the cleanup below then runs once.
+            window.ModalStack.close(modal);
+            return;
+        }
+        // An upload awaiting a decision has a file and a claim ticket on the
+        // server. Closing the dialog is an answer — "not now" — so say so
+        // rather than leaving it to expire.
+        if (typeof pendingDecision !== 'undefined' && pendingDecision) {
+            cancelPendingUpload(pendingDecision.token);
+            hideEnrollmentDecision();
+        }
         modal.style.display = 'none';
         modal.classList.remove('active');
         // Reset form
@@ -156,26 +192,77 @@ function closeUploadModal() {
 }
 
 function closeUploadModalOnOutsideClick(event) {
+    // With the modal stack present, backdrop clicks are handled centrally
+    // (the modal opts in via backdropClose at open time) — reacting here too
+    // would double-close. Kept registered so the data-action name resolves.
+    if (window.ModalStack) { return; }
     if (event.target === document.getElementById('uploadModal')) {
         closeUploadModal();
     }
+}
+
+// Upload limits, fetched once from GET /api/dashboard/config.
+//
+// These were literals: a 5 MB ceiling against an enforced MAX_FILE_SIZE of
+// 10 MB, with the message "File size exceeds 5MB limit". Half of every legal
+// upload was refused in the browser and the user was told a limit that was
+// not the real one. Null until the fetch lands; a client-side check that has
+// not loaded yet simply defers to the server, which enforces it anyway.
+const uploadLimits = { maxFileSizeBytes: null, allowedExtensions: null };
+
+async function loadUploadLimits() {
+    try {
+        const response = await fetch('/api/dashboard/config', { credentials: 'same-origin' });
+        if (!response.ok) return;
+        const payload = await response.json();
+        const cfg = (payload && payload.config) || {};
+        if (Number.isFinite(cfg.max_file_size_bytes)) {
+            uploadLimits.maxFileSizeBytes = cfg.max_file_size_bytes;
+        }
+        if (Array.isArray(cfg.allowed_extensions) && cfg.allowed_extensions.length) {
+            uploadLimits.allowedExtensions = cfg.allowed_extensions.map(
+                ext => String(ext).replace(/^\./, '').toLowerCase());
+        }
+    } catch (err) {
+        // The server enforces the real limit; a failed pre-check is not fatal.
+        console.warn('[UPLOAD] Could not load upload limits, deferring to server:', err);
+    }
+}
+
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', loadUploadLimits, { once: true });
+    } else {
+        loadUploadLimits();
+    }
+}
+
+function formatMegabytes(bytes) {
+    return `${Math.round((bytes / (1024 * 1024)) * 10) / 10}MB`;
 }
 
 function handleGlobalFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Validate file size (5MB max)
-    const maxSize = 5 * 1024 * 1024; // 5MB in bytes
-    if (file.size > maxSize) {
-        alert('File size exceeds 5MB limit. Please choose a smaller file.');
+    // Size limit from the server, never a literal.
+    const maxSize = uploadLimits.maxFileSizeBytes;
+    if (maxSize && file.size > maxSize) {
+        alert(`File size exceeds the ${formatMegabytes(maxSize)} limit. Please choose a smaller file.`);
         event.target.value = '';
         return;
     }
 
-    // Validate file type
-    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
-    if (!allowedTypes.includes(file.type)) {
+    // Extension list from the server when available, with a MIME-type check
+    // as the always-available fallback.
+    const extension = (file.name.split('.').pop() || '').toLowerCase();
+    if (uploadLimits.allowedExtensions) {
+        if (!uploadLimits.allowedExtensions.includes(extension)) {
+            alert(`Invalid file type. Allowed: ${uploadLimits.allowedExtensions.join(', ')}.`);
+            event.target.value = '';
+            return;
+        }
+    } else if (!['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(file.type)) {
         alert('Invalid file type. Please upload a PNG, JPG, or WEBP image.');
         event.target.value = '';
         return;
@@ -252,7 +339,16 @@ function handleGlobalUpload(event) {
     })
     .then(async response => {
         const data = await response.json();
-        
+
+        // The server recognised this face as somebody already on file and is
+        // asking who it is, rather than quietly creating a second record for
+        // the same person. Checked BEFORE the error handling below: this is a
+        // 202 and an expected outcome, not a failure.
+        if (response.status === 202 && data.decision_required) {
+            showEnrollmentDecision(data);
+            return;
+        }
+
         if (!response.ok || !data.success) {
             // Handle different error types with specific alerts
             let errorTitle = 'Upload Failed';
@@ -302,6 +398,19 @@ function handleGlobalUpload(event) {
         
         // Success
         if (data.success) {
+            // Same rule as the review flow: a duplicate is a successful no-op.
+            // The server stored nothing, so this must not look like an add.
+            if (data.duplicate === true || data.image_created === false) {
+                showUploadAlert(
+                    'Nothing was added',
+                    (data.message || 'This exact image is already stored for that '
+                     + 'person.')
+                    + ' Nothing was added. Upload a different photo of them to add '
+                    + 'another image.',
+                    'info');
+                setTimeout(closeUploadModal, 500);
+                return;
+            }
             // Show success message
             if (successMsg && successText) {
                 successText.textContent = `✅ ${data.message} (Total: ${data.total_faces || 0} faces)`;
@@ -335,64 +444,89 @@ function handleGlobalUpload(event) {
 }
 
 
-// Show face detection alert modal (popup in front of user)
-function showFaceDetectionAlert(message) {
-    const modal = document.getElementById('face-detection-alert-modal');
-    const messageElement = document.getElementById('face-alert-message');
-    
-    if (modal && messageElement) {
-        messageElement.textContent = message;
-        modal.style.display = 'flex';
-        modal.style.zIndex = '99999'; // Ensure it's on top of everything
-        
-        // Add pulse animation
-        const icon = modal.querySelector('.fa-user-slash');
-        if (icon && icon.parentElement) {
-            icon.parentElement.style.animation = 'pulse 2s infinite';
+// Face detection alert — FALLBACK implementation only.
+//
+// This script is injected at runtime and therefore executes AFTER any page
+// script. It used to declare these two as plain function declarations, which
+// silently REPLACED the page's own implementations at global scope (the
+// Unknown Faces page ships the canonical pair in admin-unknown.js). The
+// guards make the page's copy win: exactly one implementation is live after
+// all scripts load — the page's where one exists, this fallback elsewhere.
+if (typeof window.showFaceDetectionAlert !== 'function') {
+    window.showFaceDetectionAlert = function (message) {
+        const modal = document.getElementById('face-detection-alert-modal');
+        const messageElement = document.getElementById('face-alert-message');
+
+        if (modal && messageElement) {
+            messageElement.textContent = message;
+            if (window.ModalStack) {
+                window.ModalStack.open(modal, { backdropClose: true });
+            } else {
+                modal.style.display = 'flex';
+            }
+
+            // Add pulse animation
+            const icon = modal.querySelector('.fa-user-slash');
+            if (icon && icon.parentElement) {
+                icon.parentElement.style.animation = 'pulse 2s infinite';
+            }
+        } else {
+            // Fallback to notification if modal not found
+            showUploadAlert('No Face Detected', message, 'error');
         }
-    } else {
-        // Fallback to notification if modal not found
-        showUploadAlert('No Face Detected', message, 'error');
-    }
+    };
 }
 
-// Close face detection alert modal
-function closeFaceDetectionAlert() {
-    const modal = document.getElementById('face-detection-alert-modal');
-    if (modal) {
-        modal.style.display = 'none';
-    }
+if (typeof window.closeFaceDetectionAlert !== 'function') {
+    window.closeFaceDetectionAlert = function () {
+        const modal = document.getElementById('face-detection-alert-modal');
+        if (modal) {
+            if (window.ModalStack) {
+                window.ModalStack.close(modal);
+            } else {
+                modal.style.display = 'none';
+            }
+        }
+    };
 }
 
 // Initialize face detection alert modal event listeners
 function initFaceDetectionAlertModal() {
     const faceAlertModal = document.getElementById('face-detection-alert-modal');
     if (faceAlertModal) {
-        // Close button
-        const closeBtn = document.getElementById('close-face-alert-modal');
-        if (closeBtn) {
-            closeBtn.addEventListener('click', closeFaceDetectionAlert);
-        }
-        
-        // OK button
-        const okBtn = document.getElementById('face-alert-ok-btn');
-        if (okBtn) {
-            okBtn.addEventListener('click', closeFaceDetectionAlert);
-        }
-        
-        // Close on background click
-        faceAlertModal.addEventListener('click', (e) => {
-            if (e.target === faceAlertModal) {
-                closeFaceDetectionAlert();
+        // The Unknown Faces page wires these same buttons itself; a second
+        // listener would only repeat an idempotent close. Bind only when the
+        // page has NOT provided its own implementation (i.e. we installed
+        // the fallback above and own this modal's wiring).
+        const pageOwnsAlert = window.__pageOwnsFaceAlertWiring === true;
+        if (!pageOwnsAlert) {
+            const closeBtn = document.getElementById('close-face-alert-modal');
+            if (closeBtn) {
+                closeBtn.addEventListener('click', window.closeFaceDetectionAlert);
             }
-        });
-        
-        // Close on Escape key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && faceAlertModal.style.display === 'flex') {
-                closeFaceDetectionAlert();
+
+            const okBtn = document.getElementById('face-alert-ok-btn');
+            if (okBtn) {
+                okBtn.addEventListener('click', window.closeFaceDetectionAlert);
             }
-        });
+        }
+
+        // Backdrop-click and Escape belong to ModalStack when it is present
+        // (bound exactly once at document level). These legacy bindings exist
+        // only for pages without the stack.
+        if (!window.ModalStack) {
+            faceAlertModal.addEventListener('click', (e) => {
+                if (e.target === faceAlertModal) {
+                    window.closeFaceDetectionAlert();
+                }
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && faceAlertModal.style.display === 'flex') {
+                    window.closeFaceDetectionAlert();
+                }
+            });
+        }
     }
 }
 
@@ -401,6 +535,278 @@ if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initFaceDetectionAlertModal);
 } else {
     initFaceDetectionAlertModal();
+}
+
+// ---------------------------------------------------------------------------
+// Identity review
+//
+// POST /api/upload-person answers 202 + decision_required when the uploaded
+// face matches somebody already enrolled. At that point NOTHING has been
+// saved: the photo is held server-side under a single-use token with a short
+// expiry, and one of the three actions below resolves it. Closing the modal
+// cancels, so an abandoned dialog does not leave an upload in limbo.
+// ---------------------------------------------------------------------------
+
+// The token for the upload currently under review, or null. Also the flag that
+// tells closeUploadModal() there is something to cancel.
+let pendingDecision = null;
+
+function decisionPanel() {
+    return document.getElementById('enrollmentDecision');
+}
+
+function showEnrollmentDecision(data) {
+    const panel = decisionPanel();
+    const form = document.getElementById('uploadPersonForm');
+    const list = document.getElementById('enrollmentCandidates');
+    const message = document.getElementById('enrollmentDecisionMessage');
+    const duplicate = document.getElementById('enrollmentDuplicateNotice');
+    if (!panel || !list) {
+        // No panel on this page: cancel server-side rather than strand the
+        // upload, and fall back to telling the operator what happened.
+        cancelPendingUpload(data.upload_token);
+        showUploadAlert('Person Already On File',
+            data.message || 'This photo matches someone already enrolled.', 'error');
+        return;
+    }
+
+    pendingDecision = {
+        token: data.upload_token,
+        displayName: data.display_name || '',
+        strong: data.match_confidence === 'strong'
+    };
+
+    const candidates = data.candidate_identities || [];
+    // The person who already holds these EXACT bytes. Adding to them is a
+    // correct no-op, so that action is withdrawn rather than offered.
+    const duplicateId = data.duplicate_of_identity_id || null;
+    const duplicateOf = duplicateId
+        ? candidates.find(c => c.identity_id === duplicateId)
+        : null;
+    const duplicateName = duplicateOf
+        ? (duplicateOf.display_name || 'that person')
+        : null;
+
+    if (message) {
+        // The server's own message recommends adding to the best match. When
+        // the best match is the one that already has this exact file, that
+        // recommendation is wrong, so it does not get shown.
+        message.textContent = duplicateName
+            ? 'This upload already exists on file. Choose a different person, '
+              + 'or cancel.'
+            : (data.message || '');
+    }
+    if (duplicate) {
+        duplicate.style.display = duplicateName ? 'flex' : 'none';
+        const duplicateText = document.getElementById('enrollmentDuplicateText');
+        if (duplicateText && duplicateName) {
+            duplicateText.textContent =
+                `This exact image is already stored for ${duplicateName}. `
+                + 'Nothing will be added.';
+        }
+    }
+
+    const label = document.getElementById('enrollmentCreateNewLabel');
+    if (label) {
+        label.textContent = pendingDecision.strong
+            ? 'No, this is a different person'
+            : 'Create as a new person';
+    }
+
+    list.textContent = '';
+    candidates.forEach((candidate, index) => {
+        const holdsThisFile = Boolean(duplicateId)
+            && candidate.identity_id === duplicateId;
+        // Never recommend the duplicate holder, even when it ranks first.
+        const recommended = index === 0 && pendingDecision.strong && !holdsThisFile;
+        list.appendChild(buildCandidateRow(candidate, recommended, holdsThisFile));
+    });
+
+    if (form) form.style.display = 'none';
+    panel.style.display = 'flex';
+}
+
+function buildCandidateRow(candidate, recommended, holdsThisFile) {
+    const row = document.createElement('div');
+    row.className = 'enrollment-candidate'
+        + (recommended ? ' enrollment-candidate--recommended' : '')
+        + (holdsThisFile ? ' enrollment-candidate--duplicate' : '');
+
+    // Built with DOM calls rather than innerHTML: display_name is operator-
+    // supplied text, and textContent cannot execute it.
+    const avatar = document.createElement('img');
+    avatar.className = 'enrollment-candidate__avatar';
+    avatar.alt = '';
+    if (candidate.preview_image) avatar.src = candidate.preview_image;
+    row.appendChild(avatar);
+
+    const body = document.createElement('div');
+    body.className = 'enrollment-candidate__body';
+
+    const name = document.createElement('div');
+    name.className = 'enrollment-candidate__name';
+    name.textContent = candidate.display_name || 'Unnamed person';
+    if (holdsThisFile) {
+        const badge = document.createElement('span');
+        badge.className = 'enrollment-candidate__badge enrollment-candidate__badge--duplicate';
+        badge.textContent = 'Already has this photo';
+        name.appendChild(badge);
+    } else if (recommended) {
+        const badge = document.createElement('span');
+        badge.className = 'enrollment-candidate__badge';
+        badge.textContent = 'Best match';
+        name.appendChild(badge);
+    }
+    body.appendChild(name);
+
+    const meta = document.createElement('div');
+    meta.className = 'enrollment-candidate__meta';
+    const percent = Math.round((candidate.similarity || 0) * 100);
+    const band = (candidate.confidence_band || '').replace(/_/g, ' ').toLowerCase();
+    meta.textContent = holdsThisFile
+        ? 'This is the same file, so adding it stores nothing new'
+        : `${percent}% match${band ? ' · ' + band + ' confidence' : ''}`;
+    body.appendChild(meta);
+    row.appendChild(body);
+
+    const choose = document.createElement('button');
+    choose.type = 'button';
+    choose.className = 'enrollment-candidate__choose';
+
+    if (holdsThisFile) {
+        // Withdrawn, not relabelled. "Add to this person" here would store
+        // nothing, and offering an action that cannot do what it says is what
+        // sent operators looking under storage/faces/<uuid>/ for a file the
+        // server had correctly declined to write.
+        //
+        // `disabled` is load-bearing twice: it stops the click, and actions.js
+        // refuses to dispatch for a disabled element (Actions.isDisabled), so
+        // the handler cannot fire even if something re-enables the pointer.
+        choose.textContent = 'Already stored';
+        choose.disabled = true;
+        choose.setAttribute('aria-disabled', 'true');
+        // Permanently disabled, not busy-disabled. setDecisionBusy() re-enables
+        // every button when a recoverable refusal returns, and without this
+        // marker it would hand the withdrawn action back to the operator.
+        choose.dataset.permanentlyDisabled = 'true';
+        choose.title = 'This exact image is already stored for this person.';
+    } else {
+        choose.textContent = 'Add to this person';
+        choose.dataset.action = 'enrollmentAddToExisting';
+        choose.dataset.identityId = candidate.identity_id;
+    }
+    row.appendChild(choose);
+
+    return row;
+}
+
+function hideEnrollmentDecision() {
+    const panel = decisionPanel();
+    const form = document.getElementById('uploadPersonForm');
+    if (panel) panel.style.display = 'none';
+    if (form) form.style.display = '';
+    const list = document.getElementById('enrollmentCandidates');
+    if (list) list.textContent = '';
+    pendingDecision = null;
+}
+
+function setDecisionBusy(busy) {
+    const panel = decisionPanel();
+    if (!panel) return;
+    panel.querySelectorAll('button').forEach(button => {
+        if (button.dataset.permanentlyDisabled === 'true') return;
+        button.disabled = busy;
+    });
+}
+
+function submitDecision(payload) {
+    setDecisionBusy(true);
+    return fetch('/api/enrollment/confirm', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+            'Content-Type': 'application/json',
+            // Cookie-authenticated mutation: required by require_upload_csrf.
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify(payload)
+    })
+    .then(async response => {
+        const data = await response.json();
+
+        // A strong match needs the "different person" answer twice. The second
+        // press carries confirm_create_new, so this asks once and only once.
+        if (response.status === 409 && data.requires_confirmation) {
+            setDecisionBusy(false);
+            if (window.confirm(data.message)) {
+                return submitDecision(Object.assign({}, payload,
+                    { confirm_create_new: true }));
+            }
+            return;
+        }
+
+        if (!response.ok || !data.success) {
+            setDecisionBusy(false);
+            // The upload is gone in these cases; let the operator start over
+            // rather than leave a panel whose buttons cannot work.
+            if (response.status === 410) {
+                hideEnrollmentDecision();
+                closeUploadModal();
+            }
+            showUploadAlert('Could Not Save',
+                data.message || 'The decision could not be applied.', 'error');
+            return;
+        }
+
+        // A duplicate is a SUCCESSFUL no-op: the request worked and the photo
+        // was already on file, so nothing was stored. Reporting that with the
+        // same green tick as a real addition sent operators looking for an
+        // image_002.jpg that, correctly, was never written. `image_created`
+        // is the authoritative flag; `duplicate` is the reason.
+        const nothingStored = data.duplicate === true || data.image_created === false;
+        hideEnrollmentDecision();
+
+        if (nothingStored) {
+            showUploadAlert(
+                'Already On File',
+                (data.message || 'This photo is already stored for that person.')
+                + ' Nothing was added. Upload a different photo of them to add '
+                + 'another image.',
+                'info');
+            setTimeout(closeUploadModal, 500);
+            return;
+        }
+
+        const successMsg = document.getElementById('uploadSuccessMessage');
+        const successText = document.getElementById('uploadSuccessText');
+        if (successMsg && successText) {
+            successText.textContent = `✅ ${data.message}`;
+            successMsg.style.display = 'block';
+        }
+        setTimeout(closeUploadModal, 1500);
+    })
+    .catch(error => {
+        console.error('Enrollment decision error:', error);
+        setDecisionBusy(false);
+        showUploadAlert('Could Not Save',
+            'The decision could not be applied. Please try again.', 'error');
+    });
+}
+
+function cancelPendingUpload(token) {
+    if (!token) return;
+    // keepalive so the cancel still reaches the server when this fires from a
+    // modal close that is followed by a navigation.
+    fetch('/api/enrollment/cancel', {
+        method: 'POST',
+        credentials: 'include',
+        keepalive: true,
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify({ upload_token: token })
+    }).catch(() => { /* the upload expires on its own within minutes */ });
 }
 
 // Make functions globally available
@@ -432,6 +838,31 @@ Actions.register({
     },
     handleGlobalUpload: (el, event) => handleGlobalUpload(event),
     handleGlobalFileSelect: (el, event) => handleGlobalFileSelect(event),
+    // Identity review. The candidate rows are rendered at runtime, which is
+    // exactly why these are delegated actions rather than bound listeners.
+    enrollmentAddToExisting: (el) => {
+        if (!pendingDecision) return;
+        submitDecision({
+            action: 'add_to_existing',
+            identity_id: el.dataset.identityId,
+            upload_token: pendingDecision.token
+        });
+    },
+    enrollmentCreateNew: () => {
+        if (!pendingDecision) return;
+        submitDecision({
+            action: 'create_new',
+            display_name: pendingDecision.displayName,
+            upload_token: pendingDecision.token
+        });
+    },
+    enrollmentCancel: () => {
+        if (!pendingDecision) return;
+        const token = pendingDecision.token;
+        hideEnrollmentDecision();
+        cancelPendingUpload(token);
+        closeUploadModal();
+    },
     triggerFileInput: (el) => {
         const input = document.getElementById(el.dataset.targetInput);
         if (input) input.click();

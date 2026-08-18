@@ -23,7 +23,8 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (Any, Callable, Iterable, List, Mapping, Optional,
+                    Sequence, Set, Tuple)
 
 from backend.security.origins import parse_origins
 from backend.security.redaction import (
@@ -78,6 +79,24 @@ _SIMPLE_PATTERNS = (
 
 _ORIGIN_RE = re.compile(r"^https?://[A-Za-z0-9._~%-]+(?::\d{1,5})?$")
 
+# Paths that are computed, not configured. config.Settings owns the derivation;
+# this table mirrors it as data so the guard can state where a path SHOULD
+# resolve even when handed a partially built namespace. tests/test_config_guard
+# asserts the two agree, so a change in config.py that is not reflected here is
+# caught rather than shipped.
+#
+#   name -> (root setting, path components appended to it)
+DERIVED_PATHS = {
+    "FACES_DIR":           ("STORAGE_DIR",     ("faces",)),
+    "UPLOAD_TEMP_DIR":     ("STORAGE_DIR",     ("faces", ".incoming")),
+    "PENDING_UPLOAD_DIR":  ("STORAGE_DIR",     ("pending",)),
+    "WEBHOOK_IMAGES_DIR":  ("STORAGE_DIR",     ("debug", "webhook_images")),
+    "CROPPED_IMAGES_DIR":  ("STORAGE_DIR",     ("debug", "cropped")),
+    "MODEL_CANDIDATE_DIR": ("ML_ARTIFACT_DIR", ("candidates",)),
+    "MAP_PRODUCTION_DIR":  ("MAP_DATA_DIR",     ("production",)),
+    "MAP_METADATA_DIR":    ("MAP_DATA_DIR",     ("metadata",)),
+}
+
 # Settings that must never be mutable at runtime through the admin settings API.
 # backend/core/runtime_settings.apply_to_runtime does a literal setattr on the
 # live settings object, so without this an admin token could flip ENVIRONMENT
@@ -96,7 +115,21 @@ SECURITY_CRITICAL_KEYS = frozenset({
     "REDIS_URL", "REDIS_URL_FILE",
     "BOOTSTRAP_ADMIN_ENABLED", "BOOTSTRAP_ADMIN_PASSWORD",
     "BOOTSTRAP_ADMIN_PASSWORD_FILE", "BOOTSTRAP_ADMIN_REQUIRE_ROTATION",
-    "MIGRATIONS_MODE", "MIGRATIONS_FAIL_CLOSED", "MIGRATIONS_EXPECTED_HEAD",
+    "MIGRATIONS_MODE", "MIGRATIONS_EXPECTED_HEAD",
+    # Storage locations. Repointing face storage at runtime would strand every
+    # persisted relative path and let an admin token write images outside the
+    # audited tree; these are fixed at boot and validated by the preflight.
+    "FACES_DIR", "STORAGE_DIR", "IDENTITY_INDEX_DB_PATH",
+    # Ingest authentication. Without these here, an admin token could set
+    # WEBHOOK_AUTH_MODE=off at runtime and reopen the unauthenticated webhook
+    # that this module refuses to start with.
+    "WEBHOOK_API_KEYS", "WEBHOOK_API_KEYS_FILE", "WEBHOOK_AUTH_MODE",
+    "WEBHOOK_AUTH_HEADER", "WEBHOOK_AUTH_INSECURE_ACK",
+    "WEBHOOK_AUTH_TOKEN", "WEBHOOK_AUTH_TOKEN_FILE",
+    # The revocation latency for issued credentials. An admin token that can set
+    # this to 86400 can make a revoked credential keep working for a day, which
+    # is the same class of hole as flipping WEBHOOK_AUTH_MODE to off.
+    "WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS",
 })
 
 
@@ -197,6 +230,36 @@ def default_gpu_probe() -> Tuple[bool, str]:
 
 
 # --------------------------------------------------------------------------
+# Storage probe
+# --------------------------------------------------------------------------
+
+def default_storage_probe(path: str) -> Tuple[bool, str]:
+    """Whether the process can actually write face images to `path`.
+
+    A read-only or absent storage root does not fail at startup — it fails at
+    the first enrollment, as a 500 from deep inside the image pipeline, hours
+    after deploy. `.env` once pointed the gallery at ./assets, which is mounted
+    read-only, and that is exactly how it surfaced.
+
+    Injected rather than called directly so the rules stay unit-testable
+    without a filesystem, mirroring `gpu_probe`.
+    """
+    import os
+
+    if not os.path.isdir(path):
+        parent = os.path.dirname(path.rstrip(os.sep)) or os.sep
+        if not os.path.isdir(parent):
+            return False, f"neither {path} nor its parent {parent} exists"
+        if not os.access(parent, os.W_OK):
+            return False, f"{path} does not exist and {parent} is not writable"
+        return True, f"{path} will be created under {parent}"
+
+    if not os.access(path, os.W_OK | os.X_OK):
+        return False, f"{path} exists but is not writable by this process"
+    return True, f"{path} is writable"
+
+
+# --------------------------------------------------------------------------
 # Rules
 # --------------------------------------------------------------------------
 
@@ -216,6 +279,8 @@ def collect_violations(
     *,
     environment: Optional[str] = None,
     gpu_probe: Optional[GpuProbe] = None,
+    env: Optional[Mapping[str, str]] = None,
+    storage_probe: Optional[Callable[[str], Tuple[bool, str]]] = None,
 ) -> List[ConfigViolation]:
     """Every configuration problem, collected in a single pass.
 
@@ -437,13 +502,18 @@ def collect_violations(
     if production and workers > 1 and not _truthy(getattr(cfg, "ALLOW_MULTI_WORKER", False)):
         add(ConfigViolation(
             "WORKERS_GT_ONE", "WORKERS",
-            f"WORKERS={workers} but process-local state is not shared across "
-            "processes: runtime settings, the SQL-agent cancellation registry, "
-            "the relationship/threshold/training single-flight guards, webhook "
-            "dedup, FAISS autosave and the in-process revocation fallback all "
-            "live in one process. Admin settings would apply to 1 worker in "
-            f"{workers}, and 'single-flight' jobs could run {workers} times.",
-            "Set WORKERS=1, or move that state to Redis/Postgres and then set "
+            f"WORKERS={workers} but some process-local state is still not "
+            "shared across processes: runtime settings, the SQL-agent "
+            "cancellation registry, the model-training single-flight guard, "
+            "webhook dedup, FAISS autosave and the in-process revocation "
+            "fallback live in one process. (The intelligence relationship/"
+            "threshold single-flight guards and threat assessments ARE "
+            "multi-worker safe via Redis locks + DB idempotency when Redis "
+            "is available.) Admin settings would apply to 1 worker in "
+            f"{workers}, and the remaining 'single-flight' paths could run "
+            f"{workers} times.",
+            "Set WORKERS=1, or accept the remaining caveats (with Redis "
+            "configured for the distributed locks) and set "
             "ALLOW_MULTI_WORKER=true.",
         ))
 
@@ -483,7 +553,369 @@ def collect_violations(
                 "openssl rand -base64 24  → set BOOTSTRAP_ADMIN_PASSWORD_FILE",
             ))
 
+    # ---- Derived filesystem layout --------------------------------------
+    # FACES_DIR, UPLOAD_TEMP_DIR, WEBHOOK_IMAGES_DIR and CROPPED_IMAGES_DIR are
+    # computed from STORAGE_DIR (see config.Settings) and are no longer settable.
+    #
+    # A value left in the environment is therefore INERT, and silently ignoring
+    # it is the worst outcome: the operator reads their compose file, believes
+    # face storage lives where it says, and is wrong. (.env once shipped
+    # FACES_DIR=./assets/faces while compose set /app/storage/faces — the two
+    # halves of the application disagreed about where a person's photos lived,
+    # and ./assets is a read-only mount, so enrollment simply failed there.)
+    #
+    # Enforced in EVERY environment: a stale override is a data-integrity fault
+    # anywhere, not only in production.
+    import os as _os
+
+    storage_dir = str(getattr(cfg, "STORAGE_DIR", "") or "")
+    if not storage_dir:
+        add(ConfigViolation(
+            "STORAGE_DIR_MISSING", "STORAGE_DIR",
+            "No storage root is configured; every derived path depends on it.",
+            "STORAGE_DIR=/app/storage",
+        ))
+    elif not _os.path.isabs(storage_dir):
+        add(ConfigViolation(
+            "STORAGE_DIR_RELATIVE", "STORAGE_DIR",
+            f"STORAGE_DIR={storage_dir!r} is relative, so every stored path "
+            "depends on the process working directory — which differs between "
+            "gunicorn, alembic and a maintenance script.",
+            "STORAGE_DIR=/app/storage",
+        ))
+    elif storage_probe is not None:
+        # Fatal in every environment: a gallery that cannot be written to is a
+        # broken deployment, and finding out at the first enrollment instead of
+        # at startup costs a debugging session.
+        writable, detail = storage_probe(storage_dir)
+        if not writable:
+            add(ConfigViolation(
+                "STORAGE_DIR_NOT_WRITABLE", "STORAGE_DIR",
+                f"Face storage is not usable: {detail}. Enrollment and every "
+                "saved detection image write under this root.",
+                "Mount it read-write, or chown it to the service account "
+                "(the container runs as uid 1000 / appuser).",
+            ))
+
+    # `env` is passed in rather than read from os.environ, preserving this
+    # module's contract that every rule is exercisable with a SimpleNamespace
+    # and an explicit mapping. Reading the process environment here would make
+    # this one rule fire spuriously in every other test.
+    _env = env if env is not None else {}
+    for _name, (_root_attr, _parts) in DERIVED_PATHS.items():
+        _present = _env.get(_name)
+        if _present is None:
+            continue
+        # Recomputed from the root rather than read off cfg: the guard must be
+        # able to say where a path SHOULD resolve even when cfg is a partially
+        # built namespace that has no such attribute — otherwise "absent" and
+        # "pointed somewhere wrong" become the same answer.
+        _root = str(getattr(cfg, _root_attr, "") or "")
+        _derived = _os.path.join(_root, *_parts) if _root else ""
+        if _derived and _os.path.normpath(_present) == _os.path.normpath(_derived):
+            severity = "warn"
+            message = (f"{_name} is set in the environment but is now derived "
+                       f"from {_root_attr}. The value matches, so nothing breaks "
+                       f"— but it is inert and will not track a "
+                       f"{_root_attr} change.")
+        else:
+            severity = "fatal"
+            message = (f"{_name}={_present!r} is set in the environment, but "
+                       f"{_name} is derived from {_root_attr} and resolves to "
+                       f"{_derived!r}. The configured value has NO effect; "
+                       f"anything relying on it is writing somewhere else.")
+        add(ConfigViolation(
+            "DERIVED_PATH_OVERRIDE", _name, message,
+            f"Remove {_name} from the environment and set {_root_attr} instead.",
+            severity=severity,
+        ))
+
+    # ---- Enrollment review bands -----------------------------------------
+    # The two thresholds partition similarity into three actions: enroll
+    # directly, ask the administrator, recommend an existing person. An
+    # inverted or out-of-range pair does not degrade gracefully — it produces a
+    # band that can never be reached, so one of the three outcomes silently
+    # stops happening. The pool/display pair has the same property: a pool no
+    # larger than the display count truncates candidates BEFORE per-identity
+    # collapsing, so several embeddings of one person can crowd out every other
+    # candidate and the operator reviews a list that is missing the right answer.
+    #
+    # Fatal in EVERY environment, and never silently corrected: clamping the
+    # values at read time would mean the operator who typed them never learns
+    # the configuration they wrote does not exist.
+    def _enroll_number(name, default, cast):
+        raw = getattr(cfg, name, default)
+        try:
+            return cast(raw), None
+        except (TypeError, ValueError):
+            return None, raw
+
+    strong, strong_bad = _enroll_number("ENROLL_STRONG_MATCH_MIN", 0.75, float)
+    floor, floor_bad = _enroll_number("ENROLL_CANDIDATE_MIN", 0.45, float)
+    pool, pool_bad = _enroll_number("ENROLL_CANDIDATE_POOL", 25, int)
+    shown, shown_bad = _enroll_number("ENROLL_MAX_CANDIDATES", 5, int)
+
+    for _name, _bad in (("ENROLL_STRONG_MATCH_MIN", strong_bad),
+                        ("ENROLL_CANDIDATE_MIN", floor_bad),
+                        ("ENROLL_CANDIDATE_POOL", pool_bad),
+                        ("ENROLL_MAX_CANDIDATES", shown_bad)):
+        if _bad is not None:
+            add(ConfigViolation(
+                "ENROLL_THRESHOLD_NOT_A_NUMBER", _name,
+                f"{_name}={_bad!r} is not a number.",
+                "Set a numeric value (similarities are 0-1, counts are whole "
+                "numbers).",
+            ))
+
+    if strong is not None and not (0.0 <= strong <= 1.0):
+        add(ConfigViolation(
+            "ENROLL_THRESHOLD_OUT_OF_RANGE", "ENROLL_STRONG_MATCH_MIN",
+            f"ENROLL_STRONG_MATCH_MIN={strong} is outside 0-1. Cosine "
+            "similarity between unit vectors cannot exceed 1, so this band "
+            "would never be entered.",
+            "ENROLL_STRONG_MATCH_MIN=0.75",
+        ))
+    if floor is not None and not (0.0 <= floor <= 1.0):
+        add(ConfigViolation(
+            "ENROLL_THRESHOLD_OUT_OF_RANGE", "ENROLL_CANDIDATE_MIN",
+            f"ENROLL_CANDIDATE_MIN={floor} is outside 0-1.",
+            "ENROLL_CANDIDATE_MIN=0.45",
+        ))
+    if (strong is not None and floor is not None
+            and 0.0 <= strong <= 1.0 and 0.0 <= floor <= 1.0
+            and floor > strong):
+        add(ConfigViolation(
+            "ENROLL_THRESHOLDS_INVERTED", "ENROLL_CANDIDATE_MIN",
+            f"ENROLL_CANDIDATE_MIN={floor} is above "
+            f"ENROLL_STRONG_MATCH_MIN={strong}. The 'uncertain' band between "
+            "them is empty, so no upload could ever be sent for review — every "
+            "match would be reported as a confident one.",
+            "Set ENROLL_CANDIDATE_MIN <= ENROLL_STRONG_MATCH_MIN "
+            "(defaults: 0.45 and 0.75).",
+        ))
+
+    # Advisory, not fatal: this is a calibration judgment an operator may make
+    # deliberately, but it silently reopens the defect the review flow exists to
+    # close, so it must never pass unremarked.
+    recognition_min, recognition_bad = _enroll_number("SIMILARITY_THRESHOLD", 0.4, float)
+    if (floor is not None and recognition_min is not None and recognition_bad is None
+            and 0.0 <= floor <= 1.0 and floor > recognition_min):
+        add(ConfigViolation(
+            "ENROLL_CANDIDATE_MIN_ABOVE_RECOGNITION", "ENROLL_CANDIDATE_MIN",
+            f"ENROLL_CANDIDATE_MIN={floor} is above SIMILARITY_THRESHOLD="
+            f"{recognition_min}. Two faces scoring between them are the SAME "
+            "person as far as recognition is concerned, but enrollment will not "
+            "ask about them — so a second identity is created silently and "
+            "recognition then reports either name for that face.",
+            f"Set ENROLL_CANDIDATE_MIN to {recognition_min} or lower.",
+            severity="warn",
+        ))
+
+    if shown is not None and shown < 1:
+        add(ConfigViolation(
+            "ENROLL_CANDIDATE_COUNT_INVALID", "ENROLL_MAX_CANDIDATES",
+            f"ENROLL_MAX_CANDIDATES={shown} would show the administrator no "
+            "candidates at all, leaving a review prompt with nothing to review.",
+            "ENROLL_MAX_CANDIDATES=5",
+        ))
+    if pool is not None and shown is not None and pool <= shown:
+        add(ConfigViolation(
+            "ENROLL_CANDIDATE_POOL_TOO_SMALL", "ENROLL_CANDIDATE_POOL",
+            f"ENROLL_CANDIDATE_POOL={pool} is not larger than "
+            f"ENROLL_MAX_CANDIDATES={shown}. The pool is truncated before "
+            "per-identity collapsing, so one person holding several embeddings "
+            "can fill it and hide every other candidate.",
+            "Set ENROLL_CANDIDATE_POOL well above ENROLL_MAX_CANDIDATES "
+            "(defaults: 25 and 5).",
+        ))
+
+    # ---- Search retrieval floor vs display threshold ----------------------
+    # SEARCH_RETRIEVAL_FLOOR is how deep the vector index is asked to look;
+    # SIMILARITY_THRESHOLD is the bar a match must clear to be shown. Retrieval
+    # has to sit at or below display, because display filters what retrieval
+    # returned. Inverted, the display threshold silently stops meaning anything:
+    # nothing between the two bars is ever retrieved, so raising it changes
+    # nothing and lowering it cannot recover the matches it excluded.
+    #
+    # Same contract as the enrollment bands above: refuse, never clamp.
+    retrieval, retrieval_bad = _enroll_number("SEARCH_RETRIEVAL_FLOOR", 0.2, float)
+    if retrieval_bad is not None:
+        add(ConfigViolation(
+            "SEARCH_RETRIEVAL_FLOOR_NOT_A_NUMBER", "SEARCH_RETRIEVAL_FLOOR",
+            f"SEARCH_RETRIEVAL_FLOOR={retrieval_bad!r} is not a number.",
+            "Set a cosine similarity between 0 and 1 (default: 0.2).",
+        ))
+    elif retrieval is not None and not (0.0 <= retrieval <= 1.0):
+        add(ConfigViolation(
+            "SEARCH_RETRIEVAL_FLOOR_OUT_OF_RANGE", "SEARCH_RETRIEVAL_FLOOR",
+            f"SEARCH_RETRIEVAL_FLOOR={retrieval} is outside 0-1.",
+            "SEARCH_RETRIEVAL_FLOOR=0.2",
+        ))
+    elif (retrieval is not None and recognition_min is not None
+            and recognition_bad is None and retrieval > recognition_min):
+        add(ConfigViolation(
+            "SEARCH_RETRIEVAL_FLOOR_ABOVE_DISPLAY", "SEARCH_RETRIEVAL_FLOOR",
+            f"SEARCH_RETRIEVAL_FLOOR={retrieval} is above SIMILARITY_THRESHOLD="
+            f"{recognition_min}. The index would never return a candidate the "
+            "display threshold could admit, so lowering SIMILARITY_THRESHOLD "
+            "would appear to do nothing.",
+            f"Set SEARCH_RETRIEVAL_FLOOR to {recognition_min} or lower.",
+        ))
+
+    # ---- Search result depth ---------------------------------------------
+    default_k, default_k_bad = _enroll_number("SEARCH_DEFAULT_TOP_K", 10, int)
+    max_k, max_k_bad = _enroll_number("SEARCH_MAX_TOP_K", 100, int)
+    for _name, _bad in (("SEARCH_DEFAULT_TOP_K", default_k_bad),
+                        ("SEARCH_MAX_TOP_K", max_k_bad)):
+        if _bad is not None:
+            add(ConfigViolation(
+                "SEARCH_TOP_K_NOT_A_NUMBER", _name,
+                f"{_name}={_bad!r} is not a whole number.",
+                "Set a positive integer (defaults: 10 and 100).",
+            ))
+    if default_k is not None and default_k < 1:
+        add(ConfigViolation(
+            "SEARCH_TOP_K_INVALID", "SEARCH_DEFAULT_TOP_K",
+            f"SEARCH_DEFAULT_TOP_K={default_k} would return no matches at all.",
+            "SEARCH_DEFAULT_TOP_K=10",
+        ))
+    if default_k is not None and max_k is not None and default_k > max_k:
+        add(ConfigViolation(
+            "SEARCH_TOP_K_INVERTED", "SEARCH_DEFAULT_TOP_K",
+            f"SEARCH_DEFAULT_TOP_K={default_k} is above SEARCH_MAX_TOP_K={max_k}, "
+            "so every search that does not name a depth would be rejected by "
+            "the ceiling applied to the one that does.",
+            "Set SEARCH_DEFAULT_TOP_K <= SEARCH_MAX_TOP_K (defaults: 10 and 100).",
+        ))
+
+    # ---- Webhook ingest authentication -----------------------------------
+    # The ingest endpoint accepts frames that become identities, embeddings and
+    # stored face images. It shipped with no credential check at all.
+    from backend.security import webhook_auth as _webhook_auth
+
+    raw_mode = str(getattr(cfg, "WEBHOOK_AUTH_MODE", _webhook_auth.MODE_ENFORCE)
+                   or _webhook_auth.MODE_ENFORCE).strip().lower()
+    mode = _webhook_auth.auth_mode(cfg)
+    acknowledged = _truthy(getattr(cfg, "WEBHOOK_AUTH_INSECURE_ACK", False))
+    has_keys = _webhook_auth.keys_configured(cfg)
+
+    # Fatal in EVERY environment: a mistyped mode must never be interpreted
+    # leniently, and silently correcting it to `enforce` would hide the typo
+    # until someone edited the value again and got different behaviour.
+    if raw_mode not in _webhook_auth.VALID_MODES:
+        add(ConfigViolation(
+            "WEBHOOK_AUTH_MODE_INVALID", "WEBHOOK_AUTH_MODE",
+            f"WEBHOOK_AUTH_MODE={raw_mode!r} is not one of "
+            f"{', '.join(_webhook_auth.VALID_MODES)}.",
+            "WEBHOOK_AUTH_MODE=enforce",
+        ))
+
+    if production:
+        # No mode exemption. This used to read `mode != MODE_OFF and not
+        # has_keys`, so `off` skipped the keys check entirely — and `off` also
+        # suppressed its own violation below when acknowledged. The two
+        # exemptions combined into a production deployment that started clean
+        # with no credential and no enforcement.
+        if not has_keys:
+            add(ConfigViolation(
+                "WEBHOOK_AUTH_KEYS_MISSING", "WEBHOOK_API_KEYS",
+                "The pipeline ingest webhook has no key configured, so it "
+                "accepts frames from anyone who can reach the port.",
+                "openssl rand -base64 48  → set WEBHOOK_API_KEYS_FILE",
+            ))
+        # Unconditionally fatal: `WEBHOOK_AUTH_INSECURE_ACK` cannot buy a fully
+        # open ingest endpoint in production. `log_only` below remains
+        # acknowledgeable because it still REQUIRES a key and still verifies it —
+        # it is a migration posture for a fleet mid-rollout. `off` verifies
+        # nothing, so there is no rollout it serves that `log_only` does not.
+        if mode == _webhook_auth.MODE_OFF:
+            add(ConfigViolation(
+                "WEBHOOK_AUTH_DISABLED", "WEBHOOK_AUTH_MODE",
+                "Ingest authentication is disabled. Anyone who can reach the "
+                "port can enqueue frames, create identities and fill storage.",
+                "WEBHOOK_AUTH_MODE=enforce. If cameras are still being "
+                "credentialed, use WEBHOOK_AUTH_MODE=log_only with "
+                "WEBHOOK_AUTH_INSECURE_ACK=true — it keeps verifying keys. "
+                "'off' is not accepted in production under any acknowledgement.",
+            ))
+        if mode == _webhook_auth.MODE_LOG_ONLY and not acknowledged:
+            add(ConfigViolation(
+                "WEBHOOK_AUTH_LOG_ONLY", "WEBHOOK_AUTH_MODE",
+                "Ingest credentials are checked but not enforced; invalid keys "
+                "are logged and accepted.",
+                "WEBHOOK_AUTH_MODE=enforce once every camera carries the key "
+                "(or WEBHOOK_AUTH_INSECURE_ACK=true during the rollout)",
+            ))
+        for index, reason in _webhook_auth.weak_keys(cfg):
+            add(ConfigViolation(
+                "WEBHOOK_KEY_WEAK", "WEBHOOK_API_KEYS",
+                f"Ingest key #{index + 1} is guessable: {reason}.",
+                "openssl rand -base64 48",
+            ))
+        for index in _webhook_auth.reused_keys(cfg):
+            add(ConfigViolation(
+                "WEBHOOK_KEY_REUSED", "WEBHOOK_API_KEYS",
+                f"Ingest key #{index + 1} is also the JWT signing key or the "
+                "database password. It is distributed to every camera, so it is "
+                "the least-protected secret in the deployment.",
+                "Generate a distinct key for ingest.",
+            ))
+        for index in _webhook_auth.published_keys(cfg):
+            add(ConfigViolation(
+                "WEBHOOK_KEY_IS_PUBLISHED", "WEBHOOK_API_KEYS",
+                f"Ingest key #{index + 1} is the DEVELOPMENT key committed to "
+                "this repository. Anyone with the source can post frames.",
+                "openssl rand -base64 48  → set WEBHOOK_API_KEYS_FILE",
+            ))
+
+        # The secret FILE itself, when that is how the key is supplied.
+        #
+        # A missing or unreadable mount is the failure this catches: without it
+        # the file silently resolves to empty, WEBHOOK_API_KEYS ends up unset,
+        # and the deployment either refuses to start for a confusing reason or —
+        # if the mode was relaxed during a rollout — runs wide open.
+        for code, setting, message, remedy in _secret_file_violations(cfg):
+            add(ConfigViolation(code, setting, message, remedy))
+
     # ---- Advisory --------------------------------------------------------
+    # `log_only` only: `off` is now fatal above regardless of the acknowledgement,
+    # so it can never reach this branch. Narrowed from `mode != MODE_ENFORCE` so
+    # a fatal misconfiguration is never also reported as a mere warning.
+    if production and mode == _webhook_auth.MODE_LOG_ONLY and acknowledged:
+        add(ConfigViolation(
+            "WEBHOOK_AUTH_UNENFORCED_ACKNOWLEDGED", "WEBHOOK_AUTH_INSECURE_ACK",
+            f"Ingest authentication is running in {mode!r} with the risk "
+            "explicitly acknowledged. Keys ARE verified, but an invalid or "
+            "missing credential is logged and accepted. This is a migration "
+            "posture, not a destination.",
+            "Finish rolling keys to the cameras, then WEBHOOK_AUTH_MODE=enforce.",
+            severity="warn",
+        ))
+    if production:
+        try:
+            ttl = int(getattr(cfg, "WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS", 30) or 30)
+        except (TypeError, ValueError):
+            ttl = 30
+        if ttl > 300:
+            add(ConfigViolation(
+                "WEBHOOK_CREDENTIAL_CACHE_TTL_LONG",
+                "WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS",
+                f"Issued ingest credentials are cached for {ttl}s, so revoking "
+                "one in the admin UI leaves it working for that long on every "
+                "worker.",
+                "WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS=30",
+                severity="warn",
+            ))
+
+    if production and _truthy(getattr(cfg, "SAVE_WEBHOOK_IMAGES", False)):
+        add(ConfigViolation(
+            "WEBHOOK_DEBUG_IMAGES_ENABLED", "SAVE_WEBHOOK_IMAGES",
+            "Every ingested frame is written to disk for debugging, which "
+            "accumulates unbounded and stores faces outside the audited tree.",
+            "SAVE_WEBHOOK_IMAGES=false",
+            severity="warn",
+        ))
+
     try:
         ttl = int(getattr(cfg, "ACCESS_TOKEN_EXPIRE_MINUTES", 1440) or 1440)
     except (TypeError, ValueError):
@@ -496,6 +928,104 @@ def collect_violations(
             "Consider 1440 (24h) or less.",
             severity="warn",
         ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Secret files
+# ---------------------------------------------------------------------------
+
+# Docker mounts secrets 0444 by default. Anything group- or world-WRITABLE is a
+# tampering vector; anything world-readable on a shared host leaks the key to
+# every account on the box.
+_MAX_SECRET_MODE = 0o444
+
+
+def _secret_file_violations(cfg) -> List[Tuple[str, str, str, str]]:
+    """Check the ingest key file exists, is readable, tight, and non-trivial.
+
+    Returns tuples rather than ConfigViolations so the caller keeps ownership of
+    severity, and so this stays importable by the deployment preflight script.
+    """
+    import os
+    import stat
+
+    from backend.security import webhook_auth
+
+    out: List[Tuple[str, str, str, str]] = []
+    path = str(getattr(cfg, "WEBHOOK_API_KEYS_FILE", "") or "").strip()
+    if not path:
+        return out          # the key is supplied inline; other rules cover it
+
+    if not os.path.exists(path):
+        out.append((
+            "WEBHOOK_KEY_FILE_MISSING", "WEBHOOK_API_KEYS_FILE",
+            f"The ingest key file {path} does not exist. The secret is not "
+            "mounted, so no camera can authenticate.",
+            f"Create ../secrets/webhook_api_keys and mount it at {path}",
+        ))
+        return out
+
+    if not os.path.isfile(path):
+        out.append((
+            "WEBHOOK_KEY_FILE_NOT_A_FILE", "WEBHOOK_API_KEYS_FILE",
+            f"{path} is not a regular file.",
+            "Mount the secret as a file, not a directory.",
+        ))
+        return out
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+    except OSError as exc:
+        out.append((
+            "WEBHOOK_KEY_FILE_UNREADABLE", "WEBHOOK_API_KEYS_FILE",
+            f"The service account cannot read {path} ({exc.__class__.__name__}). "
+            "The container runs as a non-root user; a secret owned by root with "
+            "0400 is unreadable to it.",
+            "chown the secret to the service UID, or mount it 0444.",
+        ))
+        return out
+
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        mode = None
+    if mode is not None and mode & ~_MAX_SECRET_MODE:
+        out.append((
+            "WEBHOOK_KEY_FILE_PERMISSIONS", "WEBHOOK_API_KEYS_FILE",
+            f"{path} is mode {mode:04o}; anything beyond {_MAX_SECRET_MODE:04o} "
+            "lets another account on the host read or rewrite the ingest key.",
+            f"chmod 0400 {path} (or 0444 if the mount requires it)",
+        ))
+
+    keys = webhook_auth.parse_keys(contents)
+    if not keys:
+        out.append((
+            "WEBHOOK_KEY_FILE_EMPTY", "WEBHOOK_API_KEYS_FILE",
+            f"{path} contains no key. An empty secret file reads exactly like a "
+            "missing configuration and leaves ingest unauthenticated.",
+            "Write at least one key: openssl rand -base64 48 > the secret file",
+        ))
+        return out
+
+    for index, key in enumerate(keys):
+        if len(key) < webhook_auth.MIN_KEY_LENGTH:
+            out.append((
+                "WEBHOOK_KEY_FILE_WEAK", "WEBHOOK_API_KEYS_FILE",
+                f"Key #{index + 1} in {path} is only {len(key)} characters "
+                f"(need {webhook_auth.MIN_KEY_LENGTH}+).",
+                "openssl rand -base64 48",
+            ))
+            continue
+        reasons = assess_secret_strength(key)
+        if reasons:
+            out.append((
+                "WEBHOOK_KEY_FILE_WEAK", "WEBHOOK_API_KEYS_FILE",
+                f"Key #{index + 1} in {path} is guessable: {'; '.join(reasons)}.",
+                "openssl rand -base64 48",
+            ))
 
     return out
 
@@ -546,12 +1076,16 @@ def format_report(violations: Sequence[ConfigViolation]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def enforce(cfg: Any = None, *, gpu_probe: Optional[GpuProbe] = None) -> None:
+def enforce(cfg: Any = None, *, gpu_probe: Optional[GpuProbe] = None,
+            storage_probe: Optional[Callable[[str], Tuple[bool, str]]] = None) -> None:
     """Raise ConfigGuardError when the configuration is unsafe to serve."""
     if cfg is None:
         from config import settings as cfg
 
-    violations = collect_violations(cfg, gpu_probe=gpu_probe)
+    import os as _os_env
+    violations = collect_violations(cfg, gpu_probe=gpu_probe,
+                                    env=_os_env.environ,
+                                    storage_probe=storage_probe or default_storage_probe)
     if fatal_only(violations):
         raise ConfigGuardError(violations)
 
@@ -559,7 +1093,9 @@ def enforce(cfg: Any = None, *, gpu_probe: Optional[GpuProbe] = None) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     from config import settings
 
-    violations = collect_violations(settings)
+    import os as _os_env
+    violations = collect_violations(settings, env=_os_env.environ,
+                                    storage_probe=default_storage_probe)
     if violations:
         sys.stderr.write(format_report(violations))
     return EX_CONFIG if fatal_only(violations) else 0

@@ -1,4 +1,13 @@
 # Chapter 10: Tutorial Guide
+
+> **⚠ Superseded in part (2026-08-17).** The sections below that describe a
+> server-side Folium/Leaflet map renderer document code that has been REMOVED.
+> `GET /api/identities/{id}/map`, `/map/geojson` and `/api/map/stats` return 404;
+> `folium` is not a dependency of this project and must not be installed. Maps
+> are drawn in the browser by MapLibre GL JS over a local Martin tile server —
+> see [`46_MAP_SERVICE_GUIDE.md`](46_MAP_SERVICE_GUIDE.md). Everything else in
+> this document still applies.
+
 ## Step-by-Step Tutorials
 
 **Version:** 5.0.0  
@@ -19,16 +28,16 @@ This chapter provides step-by-step tutorials for common tasks, from basic setup 
 - Database configured
 - Redis running (for caching)
 
-### Step 1: Install Folium
+### Step 1: (removed — no Folium install is needed)
 
 ```bash
-pip install folium>=0.15.0
+# (removed: folium is no longer a dependency of this project)
 ```
 
-Or add to `requirements-cpu.txt`:
-```
-folium>=0.15.0
-```
+It is **already declared** in `requirements-base.txt`, so any correctly built
+image has it. Shared packages belong in `requirements-base.txt`, not in
+`requirements-cpu.txt` — the latter is included only by the CPU build, so a
+package added there is silently missing from every GPU deployment.
 
 ### Step 2: Configure Environment Variables
 
@@ -41,11 +50,28 @@ MAP_MAX_COORDINATES=10000
 MAP_GENERATION_TIMEOUT=30
 MAP_MAX_TRACKS=100
 MAP_DEFAULT_STYLE=dark
-MAP_ENABLE_SECURITY_FEATURES=true
-MAP_DETECT_PATTERNS=true
-MAP_SHOW_RISK_HEATMAP=true
-MAP_SHOW_TIMELINE=false
+# MAP_ENABLE_SECURITY_FEATURES=true   # NOT A SETTING - query parameter, see note below
+# MAP_DETECT_PATTERNS=true   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_RISK_HEATMAP=true   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_TIMELINE=false   # NOT A SETTING - query parameter, see note below
 ```
+
+
+> **These four are query parameters, not settings.** `enable_security_features`,
+> `detect_patterns`, `show_risk_heatmap` and `show_timeline` are passed per
+> request to `GET /api/identities/{identity_id}/map`, each defaulting to
+> `false`. There is no `MAP_ENABLE_SECURITY_FEATURES` / `MAP_DETECT_PATTERNS` /
+> `MAP_SHOW_RISK_HEATMAP` / `MAP_SHOW_TIMELINE` environment variable — setting
+> one in `.env` does nothing at all. The real `MAP_*` settings are listed in
+> [`36_CONFIGURATION_GUIDE.md`](36_CONFIGURATION_GUIDE.md).
+>
+> ```bash
+> curl -G "http://localhost/api/identities/$ID/map" \
+>   -H "Authorization: Bearer $TOKEN" \
+>   -d days_back=7 -d map_style=light \
+>   -d enable_security_features=true -d detect_patterns=true \
+>   -d show_risk_heatmap=true -d show_timeline=false
+> ```
 
 ### Step 3: Set Pipeline Coordinates
 
@@ -234,9 +260,9 @@ if error_rate > 0.05:  # 5%
 ### Problem: Map Not Loading
 
 **Solution**:
-1. Check Folium installation:
+1. (removed — Folium is not installed)
    ```bash
-   pip install folium>=0.15.0
+# (removed: folium is no longer a dependency of this project)
    ```
 
 2. Check logs:
@@ -350,16 +376,10 @@ map_style=light
 
 ```bash
 # Disable security features
-MAP_ENABLE_SECURITY_FEATURES=false
-
-# Disable pattern detection
-MAP_DETECT_PATTERNS=false
-
-# Disable risk heatmap
-MAP_SHOW_RISK_HEATMAP=false
-
-# Enable timeline
-MAP_SHOW_TIMELINE=true
+# MAP_ENABLE_SECURITY_FEATURES=false   # NOT A SETTING - query parameter, see note below
+# MAP_DETECT_PATTERNS=false   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_RISK_HEATMAP=false   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_TIMELINE=true   # NOT A SETTING - query parameter, see note below
 ```
 
 ### Performance Tuning
@@ -409,7 +429,6 @@ curl -X GET "http://localhost:8000/api/map/stats" \
 ## Related Documentation
 
 - **Chapter 8.1**: Map Service Guide (`46_MAP_SERVICE_GUIDE.md`)
-- **Chapter 8.4**: Map Service Production Guide (`49_MAP_SERVICE_PRODUCTION_GUIDE.md`)
 - **Chapter 9**: API Documentation (`50_API_DOCUMENTATION.md`)
 - **Chapter 6**: Configuration Guide (`36_CONFIGURATION_GUIDE.md`)
 

@@ -26,10 +26,23 @@ import sys
 
 import psycopg2
 
-DB_HOST = os.getenv("DB_HOST", "postgres")
-DB_NAME = os.getenv("POSTGRES_DB", "face_recognition")
-DB_USER = os.getenv("POSTGRES_USER", "postgres")
-DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "admin")
+# The repository root must be importable before `config` resolves.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+
+from config import settings  # noqa: E402
+
+# Connection details come from the SAME settings object the application uses.
+#
+# These four were previously read straight from os.getenv with
+# POSTGRES_PASSWORD defaulting to the literal "admin". That skipped
+# config.py's secret-file resolution entirely, so on any deployment supplying
+# the password through /run/secrets this script authenticated with a different
+# credential than the service it was maintaining.
+DB_HOST = settings.DB_HOST
+DB_NAME = settings.POSTGRES_DB
+DB_USER = settings.POSTGRES_USER
+DB_PASSWORD = settings.POSTGRES_PASSWORD
 
 
 def table_exists(cur, name: str) -> bool:

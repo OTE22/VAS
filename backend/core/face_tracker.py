@@ -70,7 +70,7 @@ class FaceTracker:
         so ALERT_NOTIFICATION_WINDOW_HOURS changes apply without restart."""
         if self._notification_window_override is not None:
             return self._notification_window_override
-        notification_hours = getattr(settings, 'ALERT_NOTIFICATION_WINDOW_HOURS', 1.0)
+        notification_hours = settings.ALERT_NOTIFICATION_WINDOW_HOURS
         return int(float(notification_hours) * 60 * 60)
 
     async def start(self):

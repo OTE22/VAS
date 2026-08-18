@@ -45,7 +45,7 @@ class LogCleanupManager:
     def retention_hours(self) -> int:
         if self._retention_hours_override is not None:
             return self._retention_hours_override
-        return int(getattr(settings, 'LOGS_LIFE_TIME_HOURS', 48))
+        return int(settings.LOGS_LIFE_TIME_HOURS)
     
     async def start(self):
         """Start periodic log cleanup"""
@@ -122,96 +122,87 @@ class LogCleanupManager:
             logger.debug(f"[LOG_CLEANUP] Failed to send completion notification: {e}")
     
     async def cleanup_old_logs(self) -> Tuple[int, float]:
-        """
-        Clean up old log entries from log files.
-        Removes log lines older than retention_hours.
-        
-        Returns:
-            Tuple of (deleted_lines_count, freed_space_mb)
+        """Apply the retention window by deleting whole ROTATED log files.
+
+        It never touches the ACTIVE file. That file is held open by the
+        RotatingFileHandler in utils/logging.py, which tracks its own write
+        offset; the previous implementation read the whole file, filtered the
+        lines, and rewrote it with open(..., 'w'). Two things went wrong with
+        that:
+
+          * the handler's next write lands at its remembered offset in a file
+            that just got shorter, producing NUL padding or losing records;
+          * it fights the handler's own maxBytes rotation, so the two mechanisms
+            take turns undoing each other.
+
+        Deleting a rotated file is atomic from the handler's point of view — it
+        has no descriptor open on app.log.N — and it is what every other log
+        retention system does. A rotated file's mtime is the time of its LAST
+        record, so a file whose mtime predates the cutoff contains nothing worth
+        keeping.
+
+        Returns (files_deleted, freed_space_mb) — the tuple shape is unchanged
+        for existing callers, but the first element now counts FILES, not lines.
         """
         if not self.log_dir.exists():
             logger.warning(f"Log directory not found: {self.log_dir}")
             return 0, 0.0
-        
-        # Use timezone-aware datetime to properly compare with timestamps in log files
+
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.retention_hours)
-        logger.info(f"🔄 Starting log cleanup - removing entries older than {cutoff_time} ({self.retention_hours} hours)")
-        
-        deleted_lines = 0
-        freed_space_mb = 0.0
-        
-        # List of log files to process
-        log_files = [
-            self.log_dir / "app.log",
-            self.log_dir / "error.log",
-            self.log_dir / "access.log",
-        ]
-        
-        # The full read/filter/rewrite of potentially large log files is
-        # BLOCKING — run it per-file in the default executor so the cleanup
-        # never stalls the event loop (previously it ran inline in async code).
-        loop = asyncio.get_running_loop()
+        logger.info(
+            "🔄 Starting log cleanup - deleting rotated files last written before "
+            f"{cutoff_time} ({self.retention_hours}h retention)"
+        )
 
-        def _clean_one_file_sync(log_file):
-            file_deleted = 0
-            file_freed_mb = 0.0
-            try:
-                file_size_before = log_file.stat().st_size
-                with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-                if not lines:
-                    return 0, 0.0
+        from utils.logging import active_log_path, rotated_log_paths
 
-                kept_lines = []
-                lines_without_timestamp = 0
-                for line in lines:
-                    line_time = self._extract_timestamp_from_line(line)
-                    if line_time:
-                        if line_time >= cutoff_time:
-                            kept_lines.append(line)
-                        else:
-                            file_deleted += 1
-                    else:
-                        # If we can't parse timestamp, keep the line (safer)
-                        kept_lines.append(line)
-                        lines_without_timestamp += 1
+        active = os.path.realpath(active_log_path())
+        # rotated_log_paths() is the SAME configured set the logger writes and
+        # /api/logs reads, so retention can never act on a file outside it.
+        candidates = [p for p in rotated_log_paths()
+                      if os.path.realpath(p) != active]
 
-                if len(kept_lines) < len(lines):
-                    with open(log_file, 'w', encoding='utf-8', errors='ignore') as f:
-                        f.writelines(kept_lines)
-                    file_size_after = log_file.stat().st_size
-                    file_freed_mb = (file_size_before - file_size_after) / (1024 * 1024)
+        def _delete_expired_sync():
+            removed = 0
+            freed_mb = 0.0
+            for path in candidates:
+                try:
+                    stat = os.stat(path)
+                    modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+                    if modified >= cutoff_time:
+                        continue
+                    size_mb = stat.st_size / (1024 * 1024)
+                    os.remove(path)
+                    removed += 1
+                    freed_mb += size_mb
                     logger.info(
-                        f"✅ Cleaned {log_file.name}: removed {len(lines) - len(kept_lines)} old lines, "
-                        f"kept {len(kept_lines)} lines ({lines_without_timestamp} without timestamps kept), "
-                        f"freed {file_freed_mb:.2f} MB"
+                        f"✅ Deleted rotated log {os.path.basename(path)} "
+                        f"(last written {modified}, freed {size_mb:.2f} MB)"
                     )
-            except PermissionError as e:
-                logger.error(f"Permission denied cleaning log file {log_file}: {e}")
-            except Exception as e:
-                logger.error(f"Error cleaning log file {log_file}: {e}", exc_info=True)
-            return file_deleted, file_freed_mb
+                except FileNotFoundError:
+                    continue                       # rotated away underneath us
+                except PermissionError as e:
+                    logger.error(f"Permission denied deleting log file {path}: {e}")
+                except Exception as e:             # noqa: BLE001
+                    logger.error(f"Error deleting log file {path}: {e}", exc_info=True)
+            return removed, freed_mb
 
-        for log_file in log_files:
-            if not log_file.exists():
-                continue
-            file_deleted, file_freed = await loop.run_in_executor(None, _clean_one_file_sync, log_file)
-            deleted_lines += file_deleted
-            freed_space_mb += file_freed
-        
-        if deleted_lines > 0:
+        loop = asyncio.get_running_loop()
+        deleted_files, freed_space_mb = await loop.run_in_executor(None, _delete_expired_sync)
+
+        if deleted_files:
             logger.info(
-                f"✅ Log cleanup completed: "
-                f"removed {deleted_lines} old log lines, "
+                f"✅ Log cleanup completed: deleted {deleted_files} rotated file(s), "
                 f"freed {freed_space_mb:.2f} MB"
             )
         else:
             logger.info(
-                f"ℹ️ Log cleanup completed: no old logs to remove "
-                f"(retention period: {self.retention_hours} hours, cutoff: {cutoff_time})"
+                "ℹ️ Log cleanup completed: no rotated logs past retention "
+                f"(retention: {self.retention_hours}h, cutoff: {cutoff_time})"
             )
-        
-        return deleted_lines, freed_space_mb
+
+        return deleted_files, freed_space_mb
+
     
     def _extract_timestamp_from_line(self, line: str) -> Optional[datetime]:
         """

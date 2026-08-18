@@ -102,7 +102,7 @@ This ensures users always see fresh data when new detections occur, while still 
 # Redis connection
 REDIS_URL=redis://redis:6379/0  # Docker: use container name
 REDIS_MAX_CONNECTIONS=100
-REDIS_POOL_SIZE=50
+REDIS_MAX_CONNECTIONS=50   # REDIS_POOL_SIZE is not read by anything
 
 # Cache TTL (Time To Live) in seconds
 CACHE_TTL=3600  # 1 hour (default)

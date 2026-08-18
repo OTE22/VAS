@@ -4,7 +4,7 @@
   "tags": ["face-detector"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
   "panels": [
@@ -23,14 +23,14 @@
     },
     {
       "type": "stat",
-      "title": "CUDA active (GPU deployments)",
-      "description": "0 means inference silently fell back to CPU. Every other signal looks healthy in that state, which is why it is surfaced here.",
+      "title": "Inference falling back to CPU",
+      "description": "Gated on cpu_fallback_active, matching the alert: a CPU deployment (where cuda_available is legitimately 0) reads OK here instead of permanent red.",
       "gridPos": { "h": 4, "w": 5, "x": 4, "y": 0 },
-      "targets": [{ "expr": "face_detector_cuda_available", "refId": "A" }],
+      "targets": [{ "expr": "face_detector_cpu_fallback_active", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "CPU FALLBACK", "color": "red" }, "1": { "text": "CUDA", "color": "green" } } }
+            { "type": "value", "options": { "0": { "text": "OK", "color": "green" }, "1": { "text": "CPU FALLBACK", "color": "red" } } }
           ]
         }
       }
@@ -39,16 +39,25 @@
       "type": "stat",
       "title": "Model loaded",
       "gridPos": { "h": 4, "w": 4, "x": 9, "y": 0 },
-      "targets": [{ "expr": "face_detector_model_loaded", "refId": "A" }]
+      "targets": [{ "expr": "face_detector_model_loaded", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "NOT LOADED", "color": "red" }, "1": { "text": "LOADED", "color": "green" } } }
+          ]
+        }
+      }
     },
     {
       "type": "stat",
       "title": "Backup age (hours)",
+      "description": "Guarded on the gauge being set — matches the alert rules; without the guard an unset gauge rendered ~490,000 red hours.",
       "gridPos": { "h": 4, "w": 5, "x": 13, "y": 0 },
-      "targets": [{ "expr": "(time() - face_detector_last_backup_timestamp_seconds) / 3600", "refId": "A" }],
+      "targets": [{ "expr": "(time() - face_detector_last_backup_timestamp_seconds) / 3600 and face_detector_last_backup_timestamp_seconds > 0", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
           "unit": "h",
+          "noValue": "no backups recorded",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -64,10 +73,11 @@
       "type": "stat",
       "title": "Cert expiry (days)",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "targets": [{ "expr": "(face_detector_tls_cert_expiry_timestamp_seconds - time()) / 86400", "refId": "A" }],
+      "targets": [{ "expr": "(face_detector_tls_cert_expiry_timestamp_seconds - time()) / 86400 and face_detector_tls_cert_expiry_timestamp_seconds > 0", "refId": "A" }],
       "fieldConfig": {
         "defaults": {
           "unit": "d",
+          "noValue": "no certificate configured",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -81,15 +91,17 @@
     },
     {
       "type": "timeseries",
-      "title": "Request rate by status",
+      "title": "Webhook ingest outcomes",
+      "description": "The webhook outcome counter (queued / duplicate / queue_full / dropped / error) — NOT HTTP status codes; those are in the HTTP panels.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
       "targets": [
         { "expr": "sum by (status) (rate(face_recognition_requests_total[5m]))", "legendFormat": "{{status}}", "refId": "A" }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
     },
     {
       "type": "timeseries",
-      "title": "Request latency (p50 / p95 / p99)",
+      "title": "HTTP request latency (p50 / p95 / p99)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
       "targets": [
         { "expr": "histogram_quantile(0.50, sum(rate(face_recognition_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
@@ -100,9 +112,131 @@
     },
     {
       "type": "timeseries",
+      "title": "HTTP 5xx rate",
+      "description": "From the middleware histogram, whose status label IS the HTTP code.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "sum(rate(face_recognition_request_duration_seconds_count{status=~\"5..\"}[5m])) / clamp_min(sum(rate(face_recognition_request_duration_seconds_count[5m])), 0.001)", "legendFormat": "5xx ratio", "refId": "A" },
+        { "expr": "sum by (status) (rate(face_recognition_request_duration_seconds_count{status=~\"4..|5..\"}[5m]))", "legendFormat": "{{status}}", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Frame processing latency (p50 / p95)",
+      "description": "Queue wait + inference + persistence enqueue, measured from batch flush. Not webhook HTTP time.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(face_recognition_processing_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(face_recognition_processing_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue utilization",
+      "description": "Depth as a share of MAX_QUEUE_SIZE. At 100% every webhook frame is refused with 503.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
+      "targets": [
+        { "expr": "face_recognition_queue_size / clamp_min(face_recognition_queue_capacity, 1)", "legendFormat": "utilization", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "red", "value": 0.8 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Inference in flight",
+      "description": "Crops holding the inference semaphore. Pinned at MAX_CONCURRENT_INFERENCE (3) while the queue grows = inference is the bottleneck.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
+      "targets": [
+        { "expr": "fr_inference_in_flight", "legendFormat": "in flight", "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Event loop lag",
+      "description": "WORKERS=1: one blocked loop stalls everything at once. Alert fires above 0.5s.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
+      "targets": [
+        { "expr": "face_recognition_event_loop_lag_seconds", "legendFormat": "lag", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Database pool",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
+      "targets": [
+        { "expr": "fr_db_pool_in_use", "legendFormat": "in use (incl. overflow)", "refId": "A" },
+        { "expr": "fr_db_pool_size", "legendFormat": "pool size", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Batch write latency and failures",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(face_recognition_db_operations_seconds_bucket[5m])) by (le))", "legendFormat": "flush p95", "refId": "A" },
+        { "expr": "sum by (reason) (rate(face_recognition_db_operation_failures_total[5m]))", "legendFormat": "failures {{reason}}", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Vector search latency and index size",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(fr_vector_search_seconds_bucket[5m])) by (le))", "legendFormat": "search p95", "refId": "A" },
+        { "expr": "fr_vector_index_size", "legendFormat": "index size ({{backend}})", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Background services up",
+      "description": "0 for any service = a supervised loop is down. Retention or reconciliation stalling shows up nowhere else.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "targets": [
+        { "expr": "fr_background_service_up", "legendFormat": "{{service}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "max": 1, "min": 0 } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Identity operations and faces",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "targets": [
+        { "expr": "sum by (op) (increase(fr_identity_ops_total[1h]))", "legendFormat": "{{op}} (1h)", "refId": "A" },
+        { "expr": "sum(rate(face_recognition_faces_detected_total[5m])) * 60", "legendFormat": "faces/min", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
       "title": "Login attempts and failures",
       "description": "A sustained failure rate with no matching success rate is the credential-stuffing signature.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
       "targets": [
         { "expr": "sum(rate(auth_login_attempts_total[5m]))", "legendFormat": "attempts", "refId": "A" },
         { "expr": "sum(rate(auth_login_failures_total[5m]))", "legendFormat": "failures", "refId": "B" },
@@ -111,9 +245,33 @@
     },
     {
       "type": "timeseries",
-      "title": "Processing queue depth",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
-      "targets": [{ "expr": "face_recognition_queue_size", "legendFormat": "queued", "refId": "A" }]
+      "title": "Intelligence endpoints (incl. cross-camera and map)",
+      "description": "Bounded outcome labels only: success / empty / error / timeout per feature.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "targets": [
+        { "expr": "sum by (feature, result) (rate(fr_intel_requests_total[15m]))", "legendFormat": "{{feature}} {{result}}", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum by (le, feature) (rate(fr_intel_duration_seconds_bucket[15m])))", "legendFormat": "{{feature}} p95", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Process memory and WebSocket connections",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "targets": [
+        { "expr": "fr_process_rss_bytes", "legendFormat": "RSS", "refId": "A" },
+        { "expr": "face_recognition_websocket_connections", "legendFormat": "websockets", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage free",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
+      "targets": [
+        { "expr": "face_detector_storage_free_bytes", "legendFormat": "free", "refId": "A" },
+        { "expr": "face_detector_storage_total_bytes", "legendFormat": "total", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
     }
   ]
 }

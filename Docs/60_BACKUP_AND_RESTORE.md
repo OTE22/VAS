@@ -29,7 +29,12 @@ Not backed up, deliberately:
   out. AOF persistence covers restart; a restore should start with an empty
   Redis and force everyone to log in again.
 - **Model weights** (`weights/*.onnx`) — large, immutable, redistributable.
-- **Map tiles** — regenerable with `scripts/download_lebanon_tiles.py`.
+- **Map archives** (`map-data/production/*.mbtiles`) — rebuildable with
+  `scripts/map_data/build_all.sh`. Restoring them is a file copy plus a
+  content verification (`POST /api/maps/verify`): a restored archive is
+  reported unavailable until its content has been measured on that machine.
+  The content ledger (`map-data/metadata/content_verdicts.json`) is
+  deliberately NOT portable — it describes the bytes of one deployment.
 - **The internal CA private key** — must be stored offline and encrypted,
   separately from these backups. Anyone holding it can mint a certificate for
   any hostname your clients trust.
@@ -111,6 +116,12 @@ docker compose -f docker/docker-compose.prod.yml exec -T postgres \
 ```
 
 Record the date. An untested backup is an assumption.
+
+**Drill log** (append a line each time the drill is run):
+
+| Date | Scope | Result |
+|---|---|---|
+| 2026-08-13 | dev stack: pg_dump → scratch-DB restore, 6-table row parity, alembic head match, live pgvector similarity query on restored data, faces tar round-trip byte-identical, `.env` round-trip byte-identical. `restore.sh` itself not exercised (prod-only service). | PASS |
 
 ### 4.2 Real restore
 

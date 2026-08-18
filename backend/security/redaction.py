@@ -22,6 +22,16 @@ SECRET_SETTINGS = frozenset({
     "BOOTSTRAP_ADMIN_PASSWORD",
     "BOOTSTRAP_ADMIN_PASSWORD_FILE",
     "OLLAMA_API_KEY",
+    # Distributed to every camera, so the least-protected secret in the
+    # deployment — and the one most likely to end up pasted into a support
+    # ticket if a report ever renders it.
+    "WEBHOOK_API_KEYS",
+    "WEBHOOK_API_KEYS_FILE",
+    # The bearer alias. Its value is folded into WEBHOOK_API_KEYS at startup,
+    # but the FIELD still exists and would otherwise be rendered verbatim by
+    # /api/settings and the config-guard report.
+    "WEBHOOK_AUTH_TOKEN",
+    "WEBHOOK_AUTH_TOKEN_FILE",
 })
 
 

@@ -3,22 +3,29 @@ Backend Configuration
 =====================
 Re-exports configuration from central config.py for backward compatibility.
 All configuration should be imported from the root config.py.
+
+This module declares NO defaults of its own and has NO import side effects.
+It used to run `os.makedirs(settings.STORAGE_DIR)` at import, which meant that
+importing a constant created a directory — as a side effect of `import` in
+alembic, in gunicorn's config, and in every test collection. Each writer
+creates the directory it needs (`exist_ok=True`), and the image creates the
+tree, so nothing depended on it happening here.
 """
 
-import os
 from config import settings
-
-# Create storage directory
-os.makedirs(settings.STORAGE_DIR, exist_ok=True)
 
 # =====================================================
 # Re-export all settings for backward compatibility
 # =====================================================
 
 # Data Retention
-DATA_RETENTION_DAYS = settings.DATA_RETENTION_DAYS
-CLEANUP_INTERVAL_HOURS = settings.CLEANUP_INTERVAL_HOURS
-BATCH_WRITE_SIZE = settings.BATCH_WRITE_SIZE
+#
+# DATA_RETENTION_DAYS and CLEANUP_INTERVAL_HOURS are NOT re-exported. Both are
+# registered `next_job_run`, so an admin edit takes effect on the next cleanup
+# pass — but a module-level copy freezes at import, and /api/stats was reporting
+# the frozen number from two fields while a third read the live one. Read them
+# as `settings.X` where they are used.
+BATCH_WRITE_SIZE = settings.BATCH_WRITE_SIZE   # api_restart: frozen on purpose
 
 # Redis availability
 try:
@@ -44,8 +51,6 @@ ALLOWED_IMAGE_EXTENSIONS = set(settings.allowed_image_extensions_list)
 # Export settings object for direct access
 __all__ = [
     'settings',
-    'DATA_RETENTION_DAYS',
-    'CLEANUP_INTERVAL_HOURS',
     'BATCH_WRITE_SIZE',
     'REDIS_AVAILABLE',
     'CACHE_ENABLED',

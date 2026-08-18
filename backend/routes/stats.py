@@ -21,72 +21,52 @@ if parent_dir not in sys.path:
 from config import settings
 from db_connection import get_db
 from db_models import Pipeline, Detection, Face, User, Identity, IdentityType, IdentityStatus, LabelState
-from backend.config import FACE_TRACKING_ENABLED, CACHE_ENABLED, DATA_RETENTION_DAYS
+from backend.config import FACE_TRACKING_ENABLED, CACHE_ENABLED
 from backend.core import (
     processing_queue, retention_manager, face_tracker,
     cache_manager
 )
 from backend.auth.auth_service import get_current_user, AuthService
+from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Statistics"])
 
 
 @router.get("/api/stats")
 async def get_stats(
     db: AsyncSession = Depends(get_db),
-    authorization: Optional[str] = Header(None, alias="Authorization")
+    current_user: User = Depends(get_current_user)
 ):
-    """Get system statistics - filtered by user's pipeline access if authenticated"""
+    """Get system statistics - filtered by the caller's pipeline access.
+
+    Authentication is required. Previously this endpoint parsed the Bearer
+    header by hand and, on any miss, fell through to an unfiltered ("show all
+    pipelines") anonymous branch. Two consequences: an unauthenticated caller
+    read system-wide aggregates, and a COOKIE-authenticated browser (which
+    sends no Authorization header) also hit the anonymous branch and saw every
+    pipeline regardless of its role. get_current_user resolves both cookie and
+    bearer credentials, so filtering now follows the real user.
+    """
     try:
-        current_user = None
         user_pipelines = None
-        
-        # Try to get current user if authorization header is provided
-        if authorization and authorization.startswith("Bearer "):
-            try:
-                # Extract token manually
-                token = authorization.replace("Bearer ", "").strip()
-                if token:
-                    payload = AuthService.decode_token(token)
-                    if payload:
-                        # JWT 'sub' claim is a string, convert to int for user lookup
-                        user_id_str = payload.get("sub")
-                        if user_id_str:
-                            try:
-                                user_id = int(user_id_str)
-                                result = await db.execute(
-                                    select(User).where(User.id == user_id)
-                                )
-                                current_user = result.scalar_one_or_none()
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"[STATS] Invalid user ID in token: {user_id_str}, error: {e}")
-                                current_user = None
-                        else:
-                            current_user = None
-                        if current_user:
-                            if current_user.role == "admin":
-                                # Admin sees all pipelines
-                                user_pipelines = None
-                                logger.info(f"[STATS] Admin {current_user.username} requesting stats - showing all data")
-                            else:
-                                # Regular users get their assigned pipelines
-                                user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
-                                logger.info(f"[STATS] User {current_user.username} requesting stats for pipelines: {user_pipelines}")
-            except Exception as e:
-                logger.warning(f"[STATS] Could not authenticate user: {e}", exc_info=True)
-                # Continue without authentication (backward compatibility)
+        if current_user.role == "admin":
+            # Admin sees all pipelines
+            user_pipelines = None
+            logger.info(f"[STATS] Admin {current_user.username} requesting stats - showing all data")
         else:
-            logger.debug("[STATS] No authorization header provided")
-        
+            # Regular users get their assigned pipelines
+            user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
+            logger.info(f"[STATS] User {current_user.username} requesting stats for pipelines: {user_pipelines}")
+
         # Build queries with optional filtering
         pipeline_query = select(func.count(Pipeline.id)).where(Pipeline.is_active == 1)
         detection_query = select(func.count(Detection.id))
         
         # CRITICAL: Count only KNOWN faces that are DETECTED, RECOGNIZED, and WITHIN RETENTION PERIOD
         # Same logic as dashboard - only faces that would be sent to dashboard
-        display_hours = getattr(settings, 'DASHBOARD_FACE_DISPLAY_HOURS', 3)
+        display_hours = settings.DASHBOARD_FACE_DISPLAY_HOURS
         retention_cutoff = datetime.utcnow() - timedelta(hours=display_hours)
         
         # Count KNOWN faces from:
@@ -140,7 +120,7 @@ async def get_stats(
                 )
                 # Join Face -> Detection to filter by pipeline_id AND only count KNOWN faces
                 # Count only KNOWN faces that are DETECTED, RECOGNIZED, and WITHIN RETENTION PERIOD
-                display_hours = getattr(settings, 'DASHBOARD_FACE_DISPLAY_HOURS', 3)
+                display_hours = settings.DASHBOARD_FACE_DISPLAY_HOURS
                 retention_cutoff = datetime.utcnow() - timedelta(hours=display_hours)
                 
                 # Subquery: Get KNOWN identities seen within retention period
@@ -177,9 +157,9 @@ async def get_stats(
                 total_detections = 0
                 total_faces = 0
                 return {
-                    "service": getattr(settings, 'APP_NAME', 'Face Recognition Service'),
-                    "version": getattr(settings, 'VERSION', '5.1'),
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "service": settings.APP_NAME,
+                    "version": settings.VERSION,
+                    "timestamp": iso_utc(utc_now()),
                     "pipelines": {
                         "active": 0,
                         "total_detections": 0,
@@ -190,7 +170,7 @@ async def get_stats(
                     "database": {},
                     "cache": {"enabled": CACHE_ENABLED, "healthy": False},
                     "tracker": {"enabled": FACE_TRACKING_ENABLED},
-                    "retention_days": DATA_RETENTION_DAYS,
+                    "retention_days": settings.DATA_RETENTION_DAYS,
                 }
         
         # Execute queries
@@ -235,9 +215,9 @@ async def get_stats(
             logger.warning("[STATS] database stats unavailable: %s", type(e).__name__)
 
         return {
-            "service": getattr(settings, 'APP_NAME', 'Face Recognition Service'),
-            "version": getattr(settings, 'VERSION', '5.1'),
-            "timestamp": datetime.utcnow().isoformat(),
+            "service": settings.APP_NAME,
+            "version": settings.VERSION,
+            "timestamp": iso_utc(utc_now()),
             "pipelines": {
                 "active": active_pipelines,
                 "total_detections": total_detections,
@@ -248,7 +228,7 @@ async def get_stats(
             "database": db_stats,
             "cache": cache_stats,
             "tracker": tracker_stats,
-            "retention_days": DATA_RETENTION_DAYS,
+            "retention_days": settings.DATA_RETENTION_DAYS,
         }
 
     except Exception as e:
@@ -269,8 +249,8 @@ async def get_dashboard_config(response: Response):
     try:
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         # Get alert notification window from face tracker
-        notification_window_hours = getattr(settings, 'ALERT_NOTIFICATION_WINDOW_HOURS', 1.0)
-        display_hours = getattr(settings, 'DASHBOARD_FACE_DISPLAY_HOURS', 3)
+        notification_window_hours = settings.ALERT_NOTIFICATION_WINDOW_HOURS
+        display_hours = settings.DASHBOARD_FACE_DISPLAY_HOURS
         
         # Calculate milliseconds
         face_display_ms = int(display_hours * 60 * 60 * 1000)
@@ -297,16 +277,25 @@ async def get_dashboard_config(response: Response):
                 "alert_notification_window_ms": alert_notification_window_ms,
                 
                 # Other useful settings
-                "show_unknown_on_dashboard": getattr(settings, 'SHOW_UNKNOWN_FACES_ON_DASHBOARD', False),
+                "show_unknown_on_dashboard": settings.SHOW_UNKNOWN_FACES_ON_DASHBOARD,
                 "face_tracking_enabled": FACE_TRACKING_ENABLED,
 
                 # DATABASE/file retention (owned by the backend retention job —
                 # the frontend must NEVER hard-code or invent this)
-                "database_retention_days": int(getattr(settings, 'DATA_RETENTION_DAYS', 30)),
+                "database_retention_days": int(settings.DATA_RETENTION_DAYS),
                 "retention_source": "settings",
 
                 # Cleanup interval for frontend expiry sweeps (in milliseconds)
-                "cleanup_interval_ms": 60000,  # 1 minute — displayed expiry stays accurate
+                "cleanup_interval_ms": int(settings.DASHBOARD_CLEANUP_INTERVAL_SECONDS * 1000),
+
+                # Upload limits the UI must mirror. upload-modal.js rejected at
+                # 5 MB against an enforced 10 MB and told the user "5MB limit",
+                # so half of every allowed upload was blocked before it left
+                # the browser. Published here because the upload modal appears
+                # on non-admin pages that cannot read /api/search/config.
+                "max_file_size_bytes": int(settings.MAX_FILE_SIZE),
+                "allowed_extensions": sorted(settings.allowed_image_extensions_list),
+
                 "source": "runtime",
                 "effective_at": datetime.utcnow().isoformat() + "Z",
             },

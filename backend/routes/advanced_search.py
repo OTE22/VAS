@@ -12,18 +12,50 @@ from typing import List, Optional
 from uuid import UUID
 
 import cv2
+import hashlib
+import os
 import numpy as np
+
+# Module level: the route body needs this, and the only other import of
+# this module is function-local inside get_advanced_search_service().
+from backend.core.advanced_search import _match_log
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db_connection import get_db
 from backend.auth.auth_service import get_current_user, require_admin
+from backend.core.face_extraction import (FaceExtractionError, error_payload,
+                                          extract_single_face)
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Search"])
+
+
+def require_search_csrf(request: Request):
+    """CSRF defense-in-depth for cookie-authenticated mutating requests.
+
+    Every sibling router that mutates state already carries this check
+    (watchlists, live_alerts, intelligence, conversations, identities); the
+    search routers were the outlier. SameSite=lax on the auth cookie blocks
+    cross-site POSTs in modern browsers, but AUTH_COOKIE_SAMESITE is
+    env-configurable and these are multipart endpoints, which a cross-site
+    form can submit directly. A cross-site page cannot attach a custom header
+    without a CORS preflight.
+
+    Bearer-token clients (curl, tests) are exempt: a token cannot be sent
+    cross-site by the browser on its own.
+    """
+    if request.headers.get("authorization"):
+        return
+    if request.headers.get("x-requested-with", "").lower() != "xmlhttprequest":
+        raise HTTPException(
+            status_code=403,
+            detail="CSRF check failed: X-Requested-With header required",
+        )
 
 # Function to get advanced_search_service dynamically (handles initialization timing)
 def get_advanced_search_service():
@@ -189,7 +221,11 @@ async def advanced_search(
     request: Request,
     image: UploadFile = File(..., description="Image file (JPG, PNG, WEBP)"),
     scope: str = Form(default="both", description="Search scope: known, unknown, or both"),
-    top_k: int = Form(default=10, ge=1, le=100, description="Max results per face"),
+    # No literal default/ceiling here: a Form(default=..., le=...) is evaluated
+    # once at import, so it would freeze SEARCH_DEFAULT_TOP_K / SEARCH_MAX_TOP_K
+    # at whatever they were when the module loaded and ignore every later edit.
+    # Resolved and bounds-checked below instead.
+    top_k: int = Form(default=None, ge=1, description="Max results per face"),
     min_quality: float = Form(default=None, ge=0, le=1, description="Minimum quality (0-1)"),
     check_watchlist: bool = Form(default=True, description="Check against watchlists"),
     exclude_identity_ids: str = Form(default=None, description="Comma-separated identity IDs to exclude"),
@@ -198,7 +234,8 @@ async def advanced_search(
     date_to: str = Form(default=None, description="Filter: ISO date string"),
     pipeline_id: str = Form(default=None, description="Filter by pipeline"),
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(require_admin())
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_search_csrf)
 ):
     """
     Perform advanced multi-face search with quality scoring and watchlist checking.
@@ -216,24 +253,54 @@ async def advanced_search(
             detail="Advanced search service not initialized. Please wait for system startup."
         )
     
+    # Result depth: configured default when the caller omits it, configured
+    # ceiling when the caller overreaches.
+    max_top_k = int(settings.SEARCH_MAX_TOP_K)
+    if top_k is None:
+        top_k = int(settings.SEARCH_DEFAULT_TOP_K)
+    elif top_k > max_top_k:
+        raise HTTPException(
+            status_code=422,
+            detail=f"top_k must not exceed the configured maximum of {max_top_k}")
+
     # Validate file type
     if not image.content_type or not image.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
-    
+
     try:
+        # The correlation id the HTTP middleware already minted for this
+        # request (backend/main.py). Read here rather than generated, so a
+        # [UPLOAD_MATCH] trace joins up with the access log and the
+        # X-Request-ID header the caller got back.
+        request_id = getattr(getattr(request, "state", None), "request_id", None)
+
         # Read image
         contents = await image.read()
+        _match_log("file_validated", request_id=request_id,
+                   filename=os.path.basename(image.filename or "") or "-",
+                   content_type=image.content_type,
+                   file_size=len(contents),
+                   checksum_prefix=hashlib.sha256(contents).hexdigest()[:12])
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if img is None:
             raise HTTPException(status_code=400, detail="Could not decode image")
         
-        # Parse exclude lists
+        # Parse exclude lists. Excluding identities or watchlists from a search
+        # IS the negative-search feature, so NEGATIVE_SEARCH_ENABLED gates it —
+        # the flag was declared, described and rendered as a switch that read
+        # nothing.
+        negative_search_on = bool(settings.NEGATIVE_SEARCH_ENABLED)
+        if not negative_search_on and (exclude_identity_ids or exclude_watchlist_ids):
+            raise HTTPException(
+                status_code=403,
+                detail="Negative search (exclusions) is disabled (NEGATIVE_SEARCH_ENABLED)")
+
         exclude_ids = None
         if exclude_identity_ids:
             exclude_ids = [i.strip() for i in exclude_identity_ids.split(',') if i.strip()]
-        
+
         exclude_wl_ids = None
         if exclude_watchlist_ids:
             exclude_wl_ids = [i.strip() for i in exclude_watchlist_ids.split(',') if i.strip()]
@@ -259,6 +326,7 @@ async def advanced_search(
         
         # Perform search
         result = await service.search_multi_face(
+            request_id=request_id,
             image=img,
             db=db,
             user_id=current_user['id'],
@@ -270,7 +338,8 @@ async def advanced_search(
             exclude_watchlist_ids=exclude_wl_ids,
             filters=filters if filters else None,
             ip_address=ip_address,
-            user_agent=user_agent
+            user_agent=user_agent,
+            image_hash=hashlib.sha256(contents).hexdigest(),
         )
         
         # Convert to response format
@@ -304,9 +373,30 @@ async def get_search_config(
             "LOW": {"min": settings.CONFIDENCE_LOW_MIN, "max": settings.CONFIDENCE_MEDIUM_MIN, "label": "Weak Match"},
             "VERY_LOW": {"min": 0.0, "max": settings.CONFIDENCE_LOW_MIN, "label": "Unlikely Match"}
         },
+        # Result depth, so the page's top_k control carries the server's
+        # default and ceiling instead of its own. One block for both surfaces:
+        # the single and batch searches ran at different depths from the same
+        # control because each had its own literal default.
+        "results": {
+            "default_top_k": settings.SEARCH_DEFAULT_TOP_K,
+            "max_top_k": settings.SEARCH_MAX_TOP_K
+        },
+        # The bar a match must clear to be shown at all. Distinct from the
+        # retrieval floor, which is an internal recall knob.
+        "display": {
+            "min_similarity": settings.SIMILARITY_THRESHOLD
+        },
         "batch": {
             "max_images": settings.BATCH_SEARCH_MAX_IMAGES,
             "timeout_seconds": settings.BATCH_SEARCH_TIMEOUT_SECONDS
+        },
+        # Upload limits the UI must mirror. Previously the search page
+        # hardcoded its own numbers, which drifted from the enforced values
+        # (it staged 100 images against a limit of 20 and only found out on
+        # the 400 that failed the whole batch).
+        "upload": {
+            "max_file_size_bytes": settings.MAX_FILE_SIZE,
+            "allowed_extensions": sorted(settings.allowed_image_extensions_list)
         },
         "history": {
             "retention_days": settings.SEARCH_HISTORY_RETENTION_DAYS,
@@ -323,7 +413,8 @@ async def get_search_config(
 )
 async def check_image_quality(
     image: UploadFile = File(..., description="Image file to assess"),
-    current_user: dict = Depends(require_admin())
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_search_csrf)
 ):
     """Check image quality without searching."""
     from backend.core.face_quality import assess_face_quality
@@ -350,44 +441,33 @@ async def check_image_quality(
         if img is None:
             raise HTTPException(status_code=400, detail="Could not decode image")
         
-        # Detect face
-        bboxes, kpss = service.model_manager.detector.detect(img, max_num=1)
-        
-        # If no faces detected, check if this is a small pre-cropped face image
-        if (bboxes is None or len(bboxes) == 0) or (kpss is None or len(kpss) == 0):
-            h, w = img.shape[:2]
-            # Common face crop sizes: 112x112, 128x128, 160x160, etc.
-            # If image is small and roughly square, treat as face image
-            is_small_image = (h <= 200 and w <= 200) and (abs(h - w) <= 20)
-            
-            if is_small_image:
-                logger.info(f"[QUALITY_CHECK] No face detected, but image is small ({h}x{w}) - treating as pre-cropped face image")
-                logger.info(f"[QUALITY_CHECK] Using entire image as face region for quality assessment")
-                
-                # Create approximate keypoints at image center (for face alignment)
-                center_x, center_y = w // 2, h // 2
-                kpss = np.array([[
-                    [center_x - w * 0.15, center_y - h * 0.1],  # Left eye
-                    [center_x + w * 0.15, center_y - h * 0.1],  # Right eye
-                    [center_x, center_y],                         # Nose
-                    [center_x - w * 0.1, center_y + h * 0.15],  # Left mouth corner
-                    [center_x + w * 0.1, center_y + h * 0.15]   # Right mouth corner
-                ]], dtype=np.float32)
-                bboxes = np.array([[0, 0, w, h, 1.0]], dtype=np.float32)
-                logger.info(f"[QUALITY_CHECK] Created approximate keypoints for pre-cropped face image")
-            else:
-                raise HTTPException(status_code=400, detail="No face detected in image")
-        
-        # Assess first face
-        bbox = bboxes[0]
-        kps = kpss[0] if kpss is not None and len(kpss) > 0 else None
-        x1, y1, x2, y2 = map(int, bbox[:4])
-        face_crop = img[max(0, y1):y2, max(0, x1):x2]
-        
+        # Detect the face through the shared extractor. What this replaces
+        # synthesized five keypoints from image geometry when detection failed
+        # on a small squarish image, and scored THOSE. Because the invented
+        # points are symmetric about the image midpoint by construction,
+        # _assess_angle computed yaw 0 and roll 0 every time — a constant
+        # perfect score for 25% of the weighted total, for any small upload,
+        # including one containing no face at all. The number it reported was
+        # not a measurement.
+        #
+        # on_multiple="best" preserves the previous max_num=1 semantics exactly:
+        # the largest face is assessed, group photos included.
+        try:
+            face = extract_single_face(img, on_multiple="best",
+                                       manager=service.model_manager)
+        except FaceExtractionError as exc:
+            logger.info("[QUALITY_CHECK] refused: %s", exc.code)
+            return JSONResponse(status_code=400, content=error_payload(exc))
+
+        # Clamped at both ends: a padded-retry face can have a box reaching past
+        # the original frame, and an unclamped slice would yield an empty crop.
+        x1, y1, x2, y2 = face.bbox_int(img.shape)
+        face_crop = img[y1:y2, x1:x2]
+
         quality = assess_face_quality(
             face_image=face_crop,
             bbox=(x1, y1, x2, y2),
-            landmarks=kps,
+            landmarks=face.landmarks,
             full_image=img
         )
         

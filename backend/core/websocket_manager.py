@@ -20,6 +20,31 @@ if parent_dir not in sys.path:
 from config import settings
 from backend.config import *
 from backend.core.metrics import *
+from backend.utils.time_utils import iso_utc
+
+# Client-went-away exceptions. A browser that refreshes, navigates away, or
+# closes the tab between opening a WebSocket and the server accepting it
+# produces one of these. It is normal traffic, not a fault: there is no server
+# defect and nothing an operator can act on. Logging it at ERROR with a stack
+# trace (which this code did, TWICE per disconnect — once here and once in the
+# caller that re-raised) inflates the error count and trains people to ignore
+# real errors.
+#
+# Resolved defensively: ClientDisconnected is uvicorn-internal and may move
+# between versions; losing the import must not break the server.
+_CLIENT_GONE: tuple = ()
+try:
+    from starlette.websockets import WebSocketDisconnect as _WSDisconnect
+    _CLIENT_GONE += (_WSDisconnect,)
+except Exception:                                              # noqa: BLE001
+    pass
+try:
+    from uvicorn.protocols.utils import ClientDisconnected as _ClientDisconnected
+    _CLIENT_GONE += (_ClientDisconnected,)
+except Exception:                                              # noqa: BLE001
+    pass
+_CLIENT_GONE += (ConnectionResetError, BrokenPipeError)
+
 from fastapi import WebSocket
 import json
 from datetime import datetime, date
@@ -77,7 +102,17 @@ def _serialize_for_redis(obj, visited=None, max_depth=10, current_depth=0):
     try:
         if isinstance(obj, UUID):
             return str(obj)
-        if isinstance(obj, (datetime, date)):
+        # datetime BEFORE date — datetime subclasses date, so the order
+        # decides which branch a datetime takes.
+        if isinstance(obj, datetime):
+            # Catch-all for any raw datetime placed in a broadcast payload:
+            # naive is UTC by the storage contract, aware is converted. Bare
+            # .isoformat() here was the silent source of naive strings on the
+            # wire regardless of what the producer intended.
+            return iso_utc(obj)
+        if isinstance(obj, date):
+            # A date carries no time and no zone. It must stay "2026-08-03";
+            # promoting it to midnight-UTC would invent an instant nobody sent.
             return obj.isoformat()
         
         # Handle mappingproxy (immutable dict-like objects)
@@ -155,7 +190,7 @@ class WebSocketManager:
             return self._redis_enabled
         
         try:
-            redis_url = getattr(settings, 'REDIS_URL', "redis://localhost:6379/0")
+            redis_url = settings.REDIS_URL
             from backend.security.redaction import redact_url
             logger.info(f"[WS-MANAGER] 🔗 Initializing Redis pub/sub for WebSocket broadcasts (URL: {redact_url(redis_url)})")
             
@@ -284,6 +319,11 @@ class WebSocketManager:
         try:
             await websocket.accept()
             logger.info(f"[WS-MANAGER] ✅ WebSocket handshake accepted")
+        except _CLIENT_GONE as gone:
+            # Routine: the client closed before the handshake completed.
+            logger.debug("[WS-MANAGER] Client disconnected during handshake (%s)",
+                         type(gone).__name__)
+            raise
         except Exception as accept_error:
             logger.error(f"[WS-MANAGER] ❌ Failed to accept WebSocket: {accept_error}", exc_info=True)
             raise

@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func, update
+from sqlalchemy import select, and_, or_, func, update, text
 from sqlalchemy.orm import selectinload
 
 from db_models import (
@@ -42,6 +42,7 @@ class AlertTriggerInfo:
     webhook_url: Optional[str]
     sound_alert: bool
     trigger_id: Optional[str] = None  # id of the created LiveAlertTrigger row
+    detection_id: Optional[int] = None  # the detection that fired it
 
 
 class LiveAlertService:
@@ -61,7 +62,7 @@ class LiveAlertService:
         name: str,
         identity_id: str,
         created_by: int,
-        min_similarity: float = 0.75,
+        min_similarity: float = None,
         pipeline_ids: List[str] = None,
         time_window_enabled: bool = False,
         time_window_start: str = None,
@@ -78,7 +79,7 @@ class LiveAlertService:
         sound_alert: bool = True,
         auto_capture_snapshot: bool = True,
         auto_record_clip: bool = False,
-        clip_duration_seconds: int = 60,
+        clip_duration_seconds: int = None,
         expiration_type: str = "never",
         expiration_date: datetime = None,
         expiration_detections: int = None
@@ -92,11 +93,17 @@ class LiveAlertService:
                 raise ValueError(f"Maximum alerts per user ({max_alerts}) reached")
             
             # Check identity's alert limit (max alerts per identity)
-            max_per_identity = min(settings.LIVE_ALERT_MAX_PER_IDENTITY, 10)  # Enforce max of 10
+            max_per_identity = settings.LIVE_ALERT_MAX_PER_IDENTITY
             identity_alert_count = await self._get_identity_alert_count(db, identity_id, created_by)
             if identity_alert_count >= max_per_identity:
                 raise ValueError(f"Maximum alerts per identity ({max_per_identity}) reached. This identity already has {identity_alert_count} active alert(s).")
             
+            # Resolve the omitted-argument defaults from configuration rather
+            # than from the signature, so an admin edit reaches them.
+            if min_similarity is None:
+                min_similarity = settings.LIVE_ALERT_MIN_SIMILARITY
+            if clip_duration_seconds is None:
+                clip_duration_seconds = settings.LIVE_ALERT_CLIP_DURATION_SECONDS
             if cooldown_minutes is None:
                 cooldown_minutes = settings.LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES
             
@@ -181,7 +188,7 @@ class LiveAlertService:
             # Generate default alert name (backend logic)
             # Identity model only has display_name field, not person_code
             identity_name = identity.display_name if identity.display_name else "Unknown Person"
-            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_date = datetime.utcnow().strftime("%Y-%m-%d")  # UTC, matching stored timestamps
             default_name = f"Track {identity_name} - {current_date}"
             
             # Check if identity already has active alerts
@@ -206,7 +213,7 @@ class LiveAlertService:
                 "identity_name": identity_name,
                 "identity_type": identity.type.value if identity.type else "unknown",
                 "default_name": default_name,
-                "default_min_similarity": 0.75,
+                "default_min_similarity": settings.LIVE_ALERT_MIN_SIMILARITY,
                 "default_notify_dashboard": True,
                 "default_sound_alert": True,
                 "default_auto_capture": True,
@@ -249,12 +256,12 @@ class LiveAlertService:
             # Generate default alert name (backend logic)
             # Identity model only has display_name field, not person_code
             identity_name = identity.display_name if identity.display_name else "Unknown Person"
-            current_date = datetime.now().strftime("%Y-%m-%d")
+            current_date = datetime.utcnow().strftime("%Y-%m-%d")  # UTC, matching stored timestamps
             default_name = f"Track {identity_name} - {current_date}"
             
             # Check if identity already has active alerts
             existing_count = await self._get_identity_alert_count(db, identity_id, created_by)
-            max_per_identity = min(settings.LIVE_ALERT_MAX_PER_IDENTITY, 10)  # Enforce max of 10
+            max_per_identity = settings.LIVE_ALERT_MAX_PER_IDENTITY
             can_create_for_identity = existing_count < max_per_identity
             
             warnings = []
@@ -271,7 +278,7 @@ class LiveAlertService:
                 "identity_name": identity_name,
                 "identity_type": identity.type.value if identity.type else "unknown",
                 "default_name": default_name,
-                "default_min_similarity": 0.75,
+                "default_min_similarity": settings.LIVE_ALERT_MIN_SIMILARITY,
                 "default_notify_dashboard": True,
                 "default_sound_alert": True,
                 "default_auto_capture": True,
@@ -372,8 +379,11 @@ class LiveAlertService:
         db: AsyncSession,
         identity_id: str
     ) -> List[LiveSearchAlert]:
-        """Get all active alerts for a specific identity."""
-        query = select(LiveSearchAlert).where(
+        """Get all active alerts for a specific identity (identity eager-loaded:
+        the trigger path reads alert.identity.display_name, and a lazy load on
+        an async session outside the identity map raises MissingGreenlet)."""
+        from sqlalchemy.orm import selectinload
+        query = select(LiveSearchAlert).options(selectinload(LiveSearchAlert.identity)).where(
             and_(
                 LiveSearchAlert.identity_id == uuid.UUID(identity_id),
                 LiveSearchAlert.status == LiveAlertStatus.ACTIVE
@@ -483,10 +493,16 @@ class LiveAlertService:
         similarity: float,
         pipeline_id: str,
         detection_id: int = None,
-        snapshot_path: str = None
+        snapshot_path: str = None,
+        *,
+        defer_commit: bool = False
     ) -> List[AlertTriggerInfo]:
         """
         Check if a detection should trigger any alerts.
+
+        `defer_commit=True` joins the caller's transaction (flush only, no
+        commit/rollback here) — the detection-evidence transaction passes the
+        real detection_id so the (alert_id, detection_id) idempotency is real.
         
         This method should be called whenever a face is detected and matched
         to an identity.
@@ -524,7 +540,8 @@ class LiveAlertService:
                     detection_id=detection_id,
                     pipeline_id=pipeline_id,
                     similarity=similarity,
-                    snapshot_path=snapshot_path
+                    snapshot_path=snapshot_path,
+                    defer_commit=defer_commit,
                 )
                 
                 if trigger:
@@ -549,11 +566,12 @@ class LiveAlertService:
                         email_recipients=alert.email_recipients or [],
                         sms_recipients=alert.sms_recipients or [],
                         webhook_url=alert.webhook_url,
-                        sound_alert=alert.sound_alert
+                        sound_alert=alert.sound_alert,
+                        detection_id=detection_id,
                     ))
-                    
+
                     # Check if alert should expire
-                    await self._check_alert_expiration(db, alert)
+                    await self._check_alert_expiration(db, alert, defer_commit=defer_commit)
         
         return triggers
     
@@ -622,15 +640,22 @@ class LiveAlertService:
         detection_id: int,
         pipeline_id: str,
         similarity: float,
-        snapshot_path: str
+        snapshot_path: str,
+        *,
+        defer_commit: bool = False,
     ) -> Optional[LiveAlertTrigger]:
         """Create a trigger record and update alert (idempotent per detection).
 
         Redis retries, webhook redeliveries and multiple publishers can call
         this more than once for the same detection — the (alert_id,
-        detection_id) partial unique index plus this pre-check guarantee at
-        most ONE trigger row per detection.
+        detection_id) partial unique index guarantees at most ONE trigger row
+        per detection: the insert is ON CONFLICT DO NOTHING RETURNING id, so a
+        concurrent duplicate never raises inside the caller's transaction.
+
+        defer_commit=True: flush only, errors propagate to the caller (who owns
+        the transaction / savepoint). Otherwise commit here as before.
         """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
         try:
             if detection_id is not None:
                 existing = (await db.execute(
@@ -645,49 +670,67 @@ class LiveAlertService:
                         alert.id, detection_id, existing)
                     return None
 
-            trigger = LiveAlertTrigger(
+            values = dict(
+                id=uuid.uuid4(),
                 alert_id=alert.id,
                 detection_id=detection_id,
                 pipeline_id=pipeline_id,
                 similarity_score=similarity,
-                snapshot_path=snapshot_path
+                snapshot_path=snapshot_path,
+                acknowledged=False,
+                created_at=datetime.utcnow(),
             )
-            db.add(trigger)
+            stmt = pg_insert(LiveAlertTrigger).values(**values)
+            if detection_id is not None:
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["alert_id", "detection_id"],
+                    index_where=text("detection_id IS NOT NULL"))
+            new_id = (await db.execute(stmt.returning(LiveAlertTrigger.id))).scalar_one_or_none()
+            if new_id is None:
+                logger.info("[ALERT] duplicate suppressed by unique index alert_id=%s detection_id=%s",
+                            alert.id, detection_id)
+                return None
 
             # Update alert
             alert.triggers_count += 1
             alert.last_triggered_at = datetime.utcnow()
 
-            await db.commit()
-            await db.refresh(trigger)
+            if defer_commit:
+                await db.flush()
+            else:
+                await db.commit()
+            trigger = await db.get(LiveAlertTrigger, new_id)
 
             logger.info(
                 "[ALERT] triggered alert_id=%s trigger_id=%s detection_id=%s pipeline_id=%s "
                 "similarity=%.3f total_triggers=%d",
-                alert.id, trigger.id, detection_id, pipeline_id,
+                alert.id, new_id, detection_id, pipeline_id,
                 similarity, alert.triggers_count)
             return trigger
 
         except Exception as e:
-            # IntegrityError on the unique index = concurrent duplicate — benign
+            if defer_commit:
+                raise
             await db.rollback()
-            if "uq_alert_trigger_alert_detection" in str(e):
-                logger.info(f"[ALERT] duplicate suppressed by unique index alert_id={alert.id} detection_id={detection_id}")
-            else:
-                logger.error(f"[ALERT] error creating trigger alert_id={alert.id}: {e}")
+            logger.error(f"[ALERT] error creating trigger alert_id={alert.id}: {e}")
             return None
-    
+
     async def _check_alert_expiration(
         self,
         db: AsyncSession,
-        alert: LiveSearchAlert
+        alert: LiveSearchAlert,
+        *,
+        defer_commit: bool = False,
     ):
         """Check if alert should expire based on triggers count."""
         try:
             if alert.expiration_type == LiveAlertExpirationType.DETECTIONS:
                 if alert.expiration_detections and alert.triggers_count >= alert.expiration_detections:
                     alert.status = LiveAlertStatus.EXPIRED
-                    await db.commit()
+                    if defer_commit:
+                        await db.flush()
+                    else:
+                        await db.commit()
                     logger.info(f"[LIVE_ALERT] Alert '{alert.name}' expired after {alert.triggers_count} triggers")
         except Exception as e:
             logger.error(f"[LIVE_ALERT] Error checking expiration: {e}")

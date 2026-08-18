@@ -12,7 +12,7 @@ This is the easiest method if you just want to create the tables quickly.
 
 2. **Run the migration script:**
    ```bash
-   python scripts/migrations/run_migration.py
+   docker exec -w /app/alembic face_recognition_api python -m alembic upgrade head   # Alembic is the ONLY schema tool (run_migration.py was retired)
    ```
 
    This script will:
@@ -94,7 +94,7 @@ alembic downgrade <revision_id>
 
 ## Option 3: Automatic Creation (Current Behavior)
 
-The application already uses `Base.metadata.create_all()` in `db_connection.py`, which automatically creates all tables defined in `db_models.py` when the app starts.
+**Alembic is the only schema initializer.** `Base.metadata.create_all()` no longer exists in the application (AST-asserted by `tests/test_migration_schema_parity.py`); an EMPTY database is built by `alembic upgrade head` from the root revision `000_baseline` (the 24 create_all-era tables as a frozen literal) through the whole chain, and `DatabaseManager.init_db()` refuses to boot unless `alembic_version` equals the scripts' exact head — fail-closed in every environment (`MIGRATIONS_FAIL_CLOSED` was removed). Historically the application used `create_all()` when the app starts.
 
 **However**, this method:
 - ✅ Works automatically
@@ -118,8 +118,8 @@ pip install psycopg2-binary
 **Solutions:**
 1. Make sure PostgreSQL is running:
    ```bash
-   # Docker
-   docker-compose up -d postgres
+   # Docker — there is no compose file at the repository root; they live in docker/
+   docker compose -f docker/docker-compose.cpu.yml up -d postgres
    
    # Or check if running
    docker ps | grep postgres

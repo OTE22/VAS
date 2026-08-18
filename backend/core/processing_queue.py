@@ -41,7 +41,7 @@ class ProcessingQueue:
 
         # Pipeline-specific batching for efficiency
         self.pipeline_batches: Dict[str, List[dict]] = defaultdict(list)
-        self.batch_size = getattr(settings, 'PIPELINE_BATCH_SIZE', 5)
+        self.batch_size = settings.PIPELINE_BATCH_SIZE
         self.batch_timeout = 0.5  # Flush batches after 0.5 seconds even if not full
         self._batch_lock = asyncio.Lock()
         self._batch_timestamps: Dict[str, float] = {}  # Track when batch started
@@ -181,6 +181,16 @@ class ProcessingQueue:
 
 
 processing_queue = ProcessingQueue(
-    max_size=getattr(settings, 'MAX_QUEUE_SIZE', 1000),
-    max_concurrent=getattr(settings, 'MAX_CONCURRENT_REQUESTS', 100)
+    max_size=settings.MAX_QUEUE_SIZE,
+    max_concurrent=settings.MAX_CONCURRENT_REQUESTS
 )
+
+# Publish the capacity once beside the depth gauge, so queue utilization is
+# `queue_size / queue_capacity` in PromQL instead of a hardcoded constant in
+# every dashboard and alert.
+try:
+    from backend.core import metrics as _metrics
+    if getattr(_metrics, "metrics_queue_capacity", None):
+        _metrics.metrics_queue_capacity.set(processing_queue.max_size)
+except Exception:                                              # noqa: BLE001
+    pass

@@ -93,15 +93,24 @@ The system has been optimized to handle:
 - Max memory: **1,000 MB**
 - Cleanup interval: **300 seconds**
 
-### 7. FAISS Face Database
+### 7. Vector search
 
-**GPU Mode:**
-- Workers: **16** (GPU can handle more parallel searches)
-- Uses: **faiss-gpu** for 10-50x faster searches
+**FAISS is not the default backend — pgvector is.** See
+[`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md); PostgreSQL is
+authoritative and the FAISS index is a disposable accelerator rebuilt from it.
 
-**CPU Mode:**
-- Workers: **8** (CPU parallel processing)
-- Uses: **faiss-cpu**
+The FAISS variant is fixed when the **image** is built, not chosen at runtime:
+`requirements-gpu.txt` declares `faiss-gpu`, `requirements-cpu.txt` declares
+`faiss-cpu`, and there is no fallback between them.
+
+**On worker counts:** this section previously claimed 16 workers on GPU and 8 on
+CPU. Neither is what the system runs. `WORKERS` is the gunicorn worker count,
+it defaults to **4** (`config.py`), and `docker-compose.gpu.yml` pins it to
+**1** — multiple workers each load their own CUDA session onto the one GPU, and
+every single-flight guard in the codebase is process-local. Raising it requires
+`ALLOW_MULTI_WORKER`, an escape hatch that defaults to false precisely because
+that process-local state has to be externalised first. There is no separate
+FAISS worker pool.
 
 ## Performance Expectations
 
@@ -119,7 +128,8 @@ The system has been optimized to handle:
 ## Configuration Files
 
 ### Docker Compose (GPU)
-See: `docker/docker-compose.gpu.yml`
+See: `docker/docker-compose.gpu.yml` (a GPU override layered on
+`docker-compose.cpu.yml`, not a standalone stack)
 
 All optimizations are pre-configured in the environment variables.
 
@@ -127,9 +137,17 @@ All optimizations are pre-configured in the environment variables.
 See: `config.py` for all available settings.
 
 ### Auto-Detection
-The system automatically detects GPU and applies optimizations via:
-- `utils/performance_config.py` - Auto-adjusts configuration
-- `utils/gpu_detection.py` - Detects GPU availability
+`utils/gpu_detection.py` detects GPU availability and selects the FAISS
+backend. It does **not** adjust any other setting.
+
+Sizing comes from configuration alone — pick the values in your compose file
+(`docker/docker-compose.gpu.yml` is the tuned GPU example). There is no
+auto-tuning layer: `utils/performance_config.py` claimed to be one, but it read
+15 values straight off `settings` and wrote them back into `os.environ` after
+the settings object had already been built, so it could never change anything.
+Its GPU/CPU "optimized defaults" were unreachable for the same reason. It was
+deleted rather than fixed, because a second place to declare `WORKERS` and
+`DB_POOL_SIZE` is a second place for them to disagree.
 
 ## Monitoring
 
@@ -158,7 +176,7 @@ The system automatically detects GPU and applies optimizations via:
 
 ### High Memory Usage
 - Reduce `FACE_TRACKING_MAX_ENTRIES`
-- Reduce `CACHE_LOCAL_SIZE`
+- Reduce `REDIS_MAX_CONNECTIONS` (`CACHE_LOCAL_SIZE` is not read by anything)
 - Reduce `BATCH_WRITE_SIZE`
 
 ### GPU Not Being Used

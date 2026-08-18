@@ -1,4 +1,13 @@
 # Chapter 9: API Documentation
+
+> **⚠ Superseded in part (2026-08-17).** The sections below that describe a
+> server-side Folium/Leaflet map renderer document code that has been REMOVED.
+> `GET /api/identities/{id}/map`, `/map/geojson` and `/api/map/stats` return 404;
+> `folium` is not a dependency of this project and must not be installed. Maps
+> are drawn in the browser by MapLibre GL JS over a local Martin tile server —
+> see [`46_MAP_SERVICE_GUIDE.md`](46_MAP_SERVICE_GUIDE.md). Everything else in
+> this document still applies.
+
 ## Complete API Reference
 
 **Version:** 6.0.0  
@@ -43,6 +52,11 @@ curl -X POST "http://localhost:8000/api/auth/login" \
 curl -X GET "http://localhost:8000/api/identities" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
+
+> **The webhook ingest endpoints are the one exception.** They authenticate with
+> a separate, non-JWT machine credential — a JWT will not work there, and the
+> ingest token will not work on any other endpoint. See
+> [Webhook Ingest API](#webhook-ingest-api).
 
 ---
 
@@ -137,9 +151,20 @@ List endpoints support a paginated envelope. Passing `page` switches modes
 {"items": [...], "total": 25000, "page": 1, "page_size": 25, "total_pages": 1000}
 ```
 
+Bounds come from the `API_DEFAULT_PAGE_SIZE` (25) and `API_MAX_PAGE_SIZE` (100)
+settings, applied through `backend/utils/pagination.py`. Omit `page_size` to get
+the configured default; exceed the cap and the request is **rejected with 422**,
+never silently clamped — a clamp tells the caller nothing, so a UI asking for 500
+rows and rendering 100 looks like missing data rather than a bound to paginate
+around.
+
 Applies to `/api/admin/identities`, `/api/watchlists`,
-`/api/watchlists/{id}/entries`, and the SQL Agent history. `page_size` is
-capped server-side (100 for most endpoints).
+`/api/watchlists/{id}/entries`, the SQL Agent history, and — newly bounded —
+`GET /api/admin/unknown`, `GET /api/detections`,
+`GET /api/detections/{pipeline_id}`, `GET /conversations`,
+`GET /conversations/{id}/messages` and `POST /api/cache/warm/{pipeline_id}`,
+which previously accepted any page size at all. A few export endpoints declare a
+deliberately higher bound explicitly.
 
 ### Timestamps
 
@@ -152,6 +177,99 @@ time.
 Operational/status endpoints return `Cache-Control: no-store`. Personalized
 sensitive content (generated maps) returns `Cache-Control: private, no-store`
 plus a sandboxing CSP.
+
+---
+
+## Webhook Ingest API
+
+The entry point for camera pipelines and third-party systems submitting frames.
+Frames accepted here become identities, embeddings and stored face images.
+
+### Authentication — required, and not a JWT
+
+Present the ingest credential in **one** of two forms:
+
+```
+Authorization: Bearer YOUR_WEBHOOK_TOKEN     # external systems
+X-Webhook-Key: YOUR_WEBHOOK_TOKEN            # fixed-header camera firmware
+```
+
+The custom header's name is configurable via `WEBHOOK_AUTH_HEADER` for firmware
+that can emit only one fixed header; `Authorization: Bearer` is accepted
+regardless of that setting. **A query parameter is never accepted** — the request
+line is recorded by nginx, gunicorn and the access log.
+
+### Where the credential comes from
+
+There are two kinds, and both are accepted on the same wire format.
+
+**Issued credentials — the normal path.** An administrator mints one per external
+system at **Admin → Ingest Credentials**. The token is displayed **once** and only
+its SHA-256 is stored, so it cannot be recovered — if it is lost, revoke and
+issue a new one. Revoking is a row deletion, so one sender can be cut off without
+touching anyone else.
+
+| Method | Path | Result |
+|---|---|---|
+| `POST` | `/api/admin/webhook-credentials` | `201` + the token, once. `Cache-Control: no-store` |
+| `GET` | `/api/admin/webhook-credentials` | `200` — names, fingerprints, last-used. Never a token |
+| `DELETE` | `/api/admin/webhook-credentials/{id}` | `200` — revoked |
+
+All three are admin-only. Revocation takes effect on every worker within
+`WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS` (default 30); a frame presented inside
+that window may still be accepted.
+
+**Environment credentials — break-glass.** `WEBHOOK_AUTH_TOKEN` (single token) or
+`WEBHOOK_API_KEYS` (comma-separated set, which is how rotation works: append the
+new key, roll the fleet, drop the old). Both are restart-only and cannot be
+changed from the Settings page. Production requires at least one, so startup and
+ingest never depend on the credentials table being reachable.
+
+A `401` is identical whether the credential is missing, malformed, wrong, or
+revoked — a revoked token cannot be told apart from one that was never valid.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/webhook/{pipeline_id}` | Submit frames |
+| `POST` | `/api/webhook/{pipeline_id}` | Identical; both paths exist |
+| `GET` | `/webhook/test`, `/api/webhook/test` | Credential self-check |
+
+`pipeline_id` in the URL is the permanent identity of the source. A
+`location_name` in the payload is display-only.
+
+### Request
+
+`Content-Type: application/json`. Images are base64 strings (a `data:` URL prefix
+is stripped) under any of: `image`, `result_image`, `image_data`, `images[]`,
+`frames[].image`, `cropped_detections[].cropped_image`.
+
+```bash
+curl -i -X POST "http://localhost/api/webhook/north-gate" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_WEBHOOK_TOKEN" \
+  -d '{"images":["data:image/jpeg;base64,..."]}'
+```
+
+### Responses
+
+| Status | Body | Meaning |
+|---|---|---|
+| `202` | `{"status":"queued","job_id":…,"queued":1,"dropped":0}` | Accepted — the success case |
+| `200` | `{"status":"ok","message":"No images"}` | Authenticated, but no recognizable image in the payload |
+| `200` | duplicate | Same frame within `WEBHOOK_DEDUP_TTL_SECONDS` |
+| `401` | `{"detail":{"error":{"code":"WEBHOOK_AUTH_REQUIRED",…}}}` | Credential missing, malformed or wrong |
+| `413` | — | Body exceeded `WEBHOOK_MAX_BODY_MB` |
+| `503` + `Retry-After` | — | Ingest queue full — back off and retry |
+
+The `401` body is **byte-identical** for missing, malformed and wrong
+credentials, so it cannot be used to confirm a guessed token. The response
+carries `WWW-Authenticate: Bearer, WebhookKey`. A rejection is always a `401`,
+never a redirect to `/signin`.
+
+Full operational detail: `71_IMAGE_INGESTION_WORKFLOW.md`. Troubleshooting:
+`21_WEBHOOK_TROUBLESHOOTING.md`.
 
 ---
 
@@ -1433,11 +1551,28 @@ MAP_MAX_COORDINATES=10000
 MAP_GENERATION_TIMEOUT=30
 MAP_MAX_TRACKS=100
 MAP_DEFAULT_STYLE=dark
-MAP_ENABLE_SECURITY_FEATURES=true
-MAP_DETECT_PATTERNS=true
-MAP_SHOW_RISK_HEATMAP=true
-MAP_SHOW_TIMELINE=false
+# MAP_ENABLE_SECURITY_FEATURES=true   # NOT A SETTING - query parameter, see note below
+# MAP_DETECT_PATTERNS=true   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_RISK_HEATMAP=true   # NOT A SETTING - query parameter, see note below
+# MAP_SHOW_TIMELINE=false   # NOT A SETTING - query parameter, see note below
 ```
+
+> **These four are query parameters, not settings.** `enable_security_features`,
+> `detect_patterns`, `show_risk_heatmap` and `show_timeline` are passed per
+> request to `GET /api/identities/{identity_id}/map`, each defaulting to
+> `false`. There is no `MAP_ENABLE_SECURITY_FEATURES` / `MAP_DETECT_PATTERNS` /
+> `MAP_SHOW_RISK_HEATMAP` / `MAP_SHOW_TIMELINE` environment variable — setting
+> one in `.env` does nothing at all. The real `MAP_*` settings are listed in
+> [`36_CONFIGURATION_GUIDE.md`](36_CONFIGURATION_GUIDE.md).
+>
+> ```bash
+> curl -G "http://localhost/api/identities/$ID/map" \
+>   -H "Authorization: Bearer $TOKEN" \
+>   -d days_back=7 -d map_style=light \
+>   -d enable_security_features=true -d detect_patterns=true \
+>   -d show_risk_heatmap=true -d show_timeline=false
+> ```
+
 > Note: the per-request API parameters `enable_security_features`,
 > `detect_patterns` and `show_risk_heatmap` default to **false** regardless of
 > these server settings — a caller must opt in explicitly.
@@ -1484,13 +1619,36 @@ lifecycle) · `SEC-` (SQL Agent security audit).
 > SQL fragments, filesystem paths or dependency-install instructions. **Branch
 > on `detail.error_code`, never on message text.**
 
+### Feature Flags → 403
+
+Eight settings gate an endpoint. When one is `false` the endpoint returns **403**
+with a message naming the flag, so the cause is never ambiguous. All are
+runtime-editable and apply immediately.
+
+| Flag | Gated endpoint(s) |
+|---|---|
+| `RELATED_IDENTITIES_ENABLED` | `GET /api/identities/{id}/related` |
+| `TEMPORAL_PATTERNS_ENABLED` | `GET /api/identities/{id}/temporal-patterns` |
+| `CROSS_CAMERA_TRACKING_ENABLED` | `GET /api/identities/{id}/cross-camera` |
+| `TRAJECTORY_PREDICTION_ENABLED` | `GET /api/intelligence/trajectory/predict` |
+| `BATCH_SEARCH_ENABLED` | `POST /api/search/batch` |
+| `EXPORT_RESULTS_ENABLED` | `POST /api/search/export`, `/api/search/batch/export` |
+| `NEGATIVE_SEARCH_ENABLED` | exclusion params on `POST /api/search/advanced` |
+| `PIPELINE_AWARE_CLUSTERING_ENABLED` | `POST /api/admin/merge-suggestions/generate-pipeline-aware` |
+
+`LIVE_ALERTS_ENABLED` predates these and returns **503**, not 403.
+
+Every one of these previously gated nothing at all: the flag was declared,
+described as enabling the feature, rendered as a switch on the Settings page, and
+read by no code.
+
 **Common Status Codes**:
 - `400 Bad Request`: Invalid parameters, or a structured precondition failure (`DATASET_NOT_READY`, `CONFIRMATION_REQUIRED`)
 - `401 Unauthorized`: Authentication required
-- `403 Forbidden`: Insufficient permissions **or missing CSRF header** on a cookie-authenticated mutation
+- `403 Forbidden`: Insufficient permissions, a missing CSRF header on a cookie-authenticated mutation, **or a disabled feature flag** (`"{FLAG} is disabled"` — see Feature Flags below)
 - `404 Not Found`: Resource not found **or malformed ID** (identical response for both — IDs cannot be probed)
 - `409 Conflict`: `*_ALREADY_RUNNING`, `NAME_CONFLICT`, `VERSION_CONFLICT`, `QUALITY_GATES_FAILED`, `INVALID_STATUS`
-- `422 Unprocessable Entity`: Validation failure (bad color/icon/alert level, `page_size` above cap, `max_nodes` above ceiling)
+- `422 Unprocessable Entity`: Validation failure (bad color/icon/alert level, `page_size`/`limit` above `API_MAX_PAGE_SIZE`, `top_k` above `SEARCH_MAX_TOP_K`, `max_nodes` above ceiling)
 - `500 Internal Server Error`: Server error (safe message + reference ID)
 - `503 Service Unavailable`: Dependency unavailable — check `GET /api/security/capabilities`
 
@@ -1501,7 +1659,9 @@ lifecycle) · `SEC-` (SQL Agent security audit).
 Rate limiting can be configured via `config.py`:
 ```bash
 RATE_LIMIT_ENABLED=false
-RATE_LIMIT_INTERVAL=1.0
+# RATE_LIMIT_INTERVAL is not a setting. Login throttling uses
+# AUTH_RATE_LIMIT_ACCOUNT_MAX / _WINDOW, _IP_MAX / _WINDOW and
+# _GLOBAL_MAX / _WINDOW; edge limits live in nginx.conf.
 ```
 
 ---
@@ -1644,12 +1804,11 @@ Map endpoints use Redis caching:
 
 - **In-app tutorial**: Admin → Tutorial → *"Platform Hardening: What Changed"* (live, always matches the running build)
 - **Chapter 8.1**: Map Service Guide (`46_MAP_SERVICE_GUIDE.md`)
-- **Chapter 8.2**: Map Service Data Flow (`47_MAP_SERVICE_DATA_FLOW.md`)
 - **Chapter 8.3**: Security Intelligence Map Features (`48_SECURITY_INTELLIGENCE_MAP_FEATURES.md`)
 - **Chapter 7.4**: Security Intelligence Guide (`45_SECURITY_INTELLIGENCE_GUIDE.md`)
 - **Chapter 12.1**: API Authentication Guide (`25_API_AUTHENTICATION_GUIDE.md`)
 - **Chapter 6**: Configuration Guide (`36_CONFIGURATION_GUIDE.md`)
-- **Background Tasks**: `BACKGROUND_TASKS.md`
+- **Background Tasks**: `79_BACKGROUND_TASKS.md`
 
 ---
 

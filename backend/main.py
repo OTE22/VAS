@@ -24,22 +24,114 @@ from backend.lifespan import lifespan
 import time
 
 # Setup logging - unified to logs/app.log
-from utils.logging import setup_logging
+from utils.logging import set_request_id, setup_logging
 setup_logging(log_to_file=True)  # Enable file logging to logs/app.log
 logger = logging.getLogger(__name__)
 
 # Interactive docs publish the entire API surface, including every admin route,
 # to anyone who can reach the port. Production serves none of them; the guard
 # refuses to start if ENABLE_API_DOCS is left on there.
-_docs_enabled = bool(getattr(settings, "ENABLE_API_DOCS", True)) and not settings.is_production
-_docs_url = "/docs" if _docs_enabled else None
-_redoc_url = "/redoc" if _docs_enabled else None
+_docs_enabled = bool(settings.ENABLE_API_DOCS) and not settings.is_production
+# docs_url/redoc_url are None even when docs ARE enabled: FastAPI's built-in
+# pages load Swagger/ReDoc from cdn.jsdelivr.net and emit their bootstrap as
+# an INLINE <script>. This deployment is offline and sends
+# `script-src 'self'` without 'unsafe-inline', so both were blocked and the
+# page rendered blank. Custom routes below serve the same UIs from vendored,
+# same-origin assets, bootstrapped by a separate LOCAL script file
+# (/frontend/js/docs-init.js) instead of an inline <script> — "external" only
+# in the HTML sense of src=, never an internet host. openapi_url stays built-in.
+_docs_url = None
+_redoc_url = None
 _openapi_url = "/openapi.json" if _docs_enabled else None
+
+# Tag descriptions for the docs sidebar. A tag listed here but unused is
+# harmless; an operation whose tag is missing here still renders, just without
+# a description. Keep the names identical to the `tags=` on each router.
+OPENAPI_TAGS = [
+    {"name": "Authentication",
+     "description": "Log in, inspect the current session, log out. Start here: "
+                    "every other bearer-token endpoint needs a token from "
+                    "`POST /api/auth/login`."},
+    {"name": "Health",
+     "description": "Liveness, readiness and per-component detail. "
+                    "`/health/live` does no I/O. `/health/ready` returns 503 "
+                    "**only** when the database or the models are unavailable "
+                    "— a degraded cache or a stalled background service "
+                    "deliberately does not take the API out of a load "
+                    "balancer. `/health/detailed` is the one to read when "
+                    "something is wrong."},
+    {"name": "Ingest (Webhook)",
+     "description": "Where cameras send frames. Authenticated with an **ingest "
+                    "key**, not a bearer token: `X-Webhook-Key: <key>`. "
+                    "Returns 202 when queued, 503 only when every image in the "
+                    "request was rejected because the queue is full."},
+    {"name": "Identity Management",
+     "description": "The core domain: unknown faces, promotion to a known "
+                    "person, merging duplicates, enrolment images, and "
+                    "per-identity detail."},
+    {"name": "Detections", "description": "Raw detection records, by pipeline or across all of them."},
+    {"name": "Search",
+     "description": "Search by image and advanced multi-face search, including "
+                    "quality pre-checks and batch submission."},
+    {"name": "Watchlists", "description": "Watchlists and their entries. Deletion is a reversible soft delete."},
+    {"name": "Live Alerts",
+     "description": "Rules that fire when a tracked person is seen, and the "
+                    "trigger history they produce."},
+    {"name": "Watchlist Alerts", "description": "Alerts raised by watchlist membership."},
+    {"name": "Intelligence",
+     "description": "Cross-camera tracking, related identities, temporal "
+                    "patterns and movement timelines. `GET "
+                    "/api/identities/{id}/cross-camera` returns **one track "
+                    "per calendar day**, not one flat list."},
+    {"name": "Intelligence - Advanced Features",
+     "description": "Social-network analysis and the heavier derived analytics."},
+    {"name": "Security Intelligence",
+     "description": "Risk assessment, suspicious-pattern detection and "
+                    "behavioural anomalies."},
+    {"name": "Map Service",
+     "description": "Server-rendered offline maps and GeoJSON. Tiles are "
+                    "served locally (z10-16, Lebanon); a camera with no "
+                    "coordinates is reported as `coordinates: null` and never "
+                    "plotted at 0,0."},
+    {"name": "ML Operations",
+     "description": "The model lifecycle: features, labels, datasets, training "
+                    "jobs, candidates, drift and audit. Training produces a "
+                    "reviewable *candidate* rather than replacing the live "
+                    "model."},
+    {"name": "SQL Agent", "description": "Natural-language querying, executed under a read-only database role."},
+    {"name": "Conversations", "description": "Chatbot conversation history, branching and feedback."},
+    {"name": "Users", "description": "User accounts, roles, pipeline access and password resets. Admin only."},
+    {"name": "Settings Management",
+     "description": "Runtime settings. Security-critical keys cannot be "
+                    "changed here — they are fixed at startup by the "
+                    "configuration guard."},
+    {"name": "Pipelines", "description": "Cameras: naming and geographic coordinates."},
+    {"name": "Ingest Credentials", "description": "Issue and revoke per-camera ingest keys."},
+    {"name": "Upload & Enrollment", "description": "Enrolling a person from images, and managing their photos."},
+    {"name": "Enrollment Review", "description": "Reviewing and confirming pending enrolments."},
+    {"name": "Background Tasks",
+     "description": "Long-running jobs. Expensive operations return `202 + "
+                    "job_id`; poll the job rather than blocking."},
+    {"name": "Export", "description": "Batch export of search results and identity data."},
+    {"name": "Retention", "description": "Data-retention policy and the jobs that enforce it."},
+    {"name": "Audit", "description": "Audit trail, including chatbot query history."},
+    {"name": "Logs", "description": "Reading and cleaning the application log. Admin only."},
+    {"name": "Statistics", "description": "Aggregate counts and dashboard summaries."},
+    {"name": "Cache", "description": "Cache inspection, warming and clearing. Admin only."},
+    {"name": "System Management", "description": "Cleanup, face-tracker reset and circuit-breaker state. Admin only."},
+    {"name": "Metrics", "description": "Prometheus exposition. IP-restricted at nginx."},
+    {"name": "WebSocket", "description": "Live dashboard updates."},
+    {"name": "Admin Tutorial", "description": "The in-app tutorial content, which always matches the running build."},
+    {"name": "Admin Pages",
+     "description": "Server-rendered HTML pages for the admin console. These "
+                    "return pages, not JSON, and are listed here only for "
+                    "completeness."},
+]
 
 # Create FastAPI app
 app = FastAPI(
-    title=getattr(settings, 'APP_NAME', 'Face Recognition Service'),
-    version=getattr(settings, 'VERSION', 'V1.0.0'),
+    title=settings.APP_NAME,
+    version=settings.VERSION,
     lifespan=lifespan,
     docs_url=_docs_url,
     redoc_url=_redoc_url,
@@ -108,11 +200,19 @@ app = FastAPI(
     - Returns pipeline access, identity management permissions, and access flags
     - Used by frontend to customize UI and control feature access
     
-    **Public Endpoints (no authentication):**
-    - Health check (`/health`)
-    - Metrics (`/metrics`)
-    - API Documentation (`/docs`)
+    **Endpoints that need no bearer token:**
+    - Health checks (`/health/live`, `/health/ready`, `/health`, `/health/detailed`)
     - Login (`/api/auth/login`)
+    - Metrics (`/metrics`) — *unauthenticated at the application, but nginx
+      restricts it by source IP, so it is not reachable from the internet*
+    - This documentation (`/docs`, `/redoc`, `/openapi.json`) — *development
+      deployments only; it is disabled in production because it publishes
+      every admin route*
+
+    **Camera ingest is authenticated separately**, with an ingest key rather
+    than a bearer token: send `X-Webhook-Key: <key>` (or
+    `Authorization: Bearer <key>`) to `POST /webhook/{pipeline_id}`. Use
+    `GET /webhook/test` to check a key: 200 means it works, 401 means fix it.
     """,
     terms_of_service="https://example.com/terms/",
     contact={
@@ -122,6 +222,12 @@ app = FastAPI(
     license_info={
         "name": "Proprietary",
     },
+    # Swagger UI groups operations by tag and renders these descriptions above
+    # each group. Without them every group is a bare name, and an operation
+    # with no tag at all lands in "default" — 119 of 254 operations used to.
+    # Order here is the order shown in the sidebar: the things an operator
+    # reaches for first, then the analytical surface, then internals.
+    openapi_tags=OPENAPI_TAGS,
 )
 
 # SQL Agent router (if available)
@@ -157,6 +263,9 @@ async def log_requests(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or _uuid.uuid4().hex[:12]
     # Make the id available to route handlers (e.g. auth logging)
     request.state.request_id = request_id
+    # ...and to the LOGGER, so every record emitted while serving this request
+    # carries req=<id> without each call site having to pass it along.
+    set_request_id(request_id)
 
     try:
         response = await call_next(request)
@@ -193,6 +302,21 @@ async def log_requests(request: Request, call_next):
             "[REQUEST] request_id=%s %s %s -> %s in %.3fs",
             request_id, request.method, request.url.path, response.status_code, duration,
         )
+
+    # HTML pages: revalidate on every use. FileResponse sends ETag and
+    # Last-Modified but NO Cache-Control, and without one browsers apply
+    # HEURISTIC caching (roughly 10% of the file's age) — on plain
+    # navigations they reuse the cached page WITHOUT revalidating. In
+    # practice: a user clicking through the navbar kept getting week-old
+    # copies of pages whose links had moved ("Add Person" still pointing at
+    # the pre-split /dashboard). `no-cache` means cache-but-revalidate; the
+    # ETag turns that into a cheap 304 on every hit, so this costs nothing.
+    # Versioned static assets (?v=...) are unaffected — nginx serves those
+    # with immutable caching, which is correct for them.
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("text/html") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-cache"
+
     return response
 
 # CORS. Credentials are dropped automatically when a wildcard origin is
@@ -212,10 +336,74 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Failed to mount static files: {e}")
 
+
+# =====================================================
+# API documentation — offline and CSP-compliant
+# =====================================================
+# FastAPI's stock /docs and /redoc were unusable here for two independent
+# reasons, either of which alone produces a blank page:
+#   1. they load Swagger UI / ReDoc from cdn.jsdelivr.net (and Google Fonts),
+#      which does not exist in an offline deployment;
+#   2. the page's bootstrap is an INLINE <script>, and this deployment sends
+#      `script-src 'self'` with no 'unsafe-inline'.
+# These routes serve the same two UIs from vendored same-origin assets under
+# /frontend/vendor/swagger/, with the bootstrap in /frontend/js/docs-init.js.
+# Disabled together with the rest of the docs surface in production.
+if _docs_enabled:
+    from fastapi.responses import HTMLResponse as _DocsHTMLResponse
+
+    _DOCS_ASSETS = "/frontend/vendor/swagger"
+
+    @app.get("/docs", include_in_schema=False)
+    async def swagger_ui_offline():
+        """Swagger UI, served entirely from local assets."""
+        return _DocsHTMLResponse(f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{settings.APP_NAME} - API Docs</title>
+  <link rel="stylesheet" href="{_DOCS_ASSETS}/swagger-ui.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="{_DOCS_ASSETS}/swagger-ui-bundle.js"></script>
+  <script src="{_DOCS_ASSETS}/swagger-ui-standalone-preset.js"></script>
+  <script src="/frontend/js/docs-init.js"
+          data-mode="swagger" data-openapi-url="{_openapi_url}"></script>
+</body>
+</html>""")
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc_offline():
+        """ReDoc, served entirely from local assets (no Google Fonts)."""
+        return _DocsHTMLResponse(f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{settings.APP_NAME} - API Reference</title>
+  <link rel="icon" href="data:,">
+  <style>body {{ margin: 0; padding: 0; }}</style>
+</head>
+<body>
+  <redoc id="redoc-container" spec-url="{_openapi_url}"></redoc>
+  <script src="{_DOCS_ASSETS}/redoc.standalone.js"></script>
+  <script src="/frontend/js/docs-init.js"
+          data-mode="redoc" data-openapi-url="{_openapi_url}"></script>
+</body>
+</html>""")
+
+    @app.get("/docs/oauth2-redirect", include_in_schema=False)
+    async def swagger_oauth2_redirect():
+        from fastapi.openapi.docs import get_swagger_ui_oauth2_redirect_html
+        return get_swagger_ui_oauth2_redirect_html()
+
 # Storage (face images) - served through an AUTHENTICATED route, not a public
 # static mount. Surveillance face crops must never be world-readable; auth comes
 # from the HttpOnly cookie (browser <img> tags) or a Bearer token (API clients).
-_STORAGE_DIR = os.path.realpath(getattr(settings, 'STORAGE_DIR', './storage'))
+_STORAGE_DIR = os.path.realpath(settings.STORAGE_DIR)
 
 @app.get("/storage/{file_path:path}", include_in_schema=False)
 async def serve_storage_image(file_path: str, current_user=Depends(_get_current_user_dep)):
@@ -229,23 +417,11 @@ async def serve_storage_image(file_path: str, current_user=Depends(_get_current_
 
 logger.info(f"✅ Storage images served with authentication at /storage from {_STORAGE_DIR}")
 
-# Static files for offline map tiles (if enabled)
-try:
-    tiles_path = getattr(settings, 'MAP_OFFLINE_TILES_PATH', None)
-    tiles_enabled = getattr(settings, 'MAP_OFFLINE_TILES_ENABLED', False)
-    if tiles_enabled and tiles_path and os.path.exists(tiles_path) and os.path.isdir(tiles_path):
-        app.mount("/tiles", StaticFiles(directory=tiles_path), name="tiles")
-        logger.info(f"✅ Offline map tiles mounted at /tiles from {tiles_path}")
-        logger.info(f"   Tiles will be served from: /tiles/{{z}}/{{x}}/{{y}}.png")
-    elif tiles_enabled and tiles_path:
-        logger.warning(f"⚠️ Offline tiles enabled but path not found: {tiles_path}")
-        logger.info("   Download tiles to this directory with structure: {z}/{x}/{y}.png")
-except Exception as e:
-    logger.warning(f"⚠️ Failed to mount tiles directory: {e}")
 
 # Import and register all routes from backend/routes/
 from backend.routes import (
     webhook_router, detections_router, stats_router, upload_router,
+    enrollment_review_router,
     health_router, metrics_router, websocket_router, dashboard_router,
     cache_router, management_router, auth_router, users_router, audit_router
 )
@@ -281,6 +457,14 @@ try:
 except ImportError as e:
     retention_router = None
     logger.warning(f"⚠️ Retention router not available: {e}")
+
+# Import ingest-credential router (issue/list/revoke webhook credentials)
+try:
+    from backend.routes.webhook_credentials import router as webhook_credentials_router
+    logger.info("✅ Ingest credential router imported successfully")
+except ImportError as e:
+    webhook_credentials_router = None
+    logger.warning(f"⚠️ Ingest credential router not available: {e}")
 
 # Import logs router
 try:
@@ -334,6 +518,24 @@ except Exception as e:
     logger.error(f"❌ Intelligence router import FAILED: {e}")
     logger.error(f"   Traceback: {traceback.format_exc()}")
 
+# Import risk-assessment router (persisted unified risk engine)
+try:
+    from backend.routes.risk_assessments import router as risk_assessments_router
+    logger.info("✅ Risk assessments router imported successfully")
+except Exception as e:
+    risk_assessments_router = None
+    logger.error(f"❌ Risk assessments router import FAILED: {e}")
+    logger.error(f"   Traceback: {traceback.format_exc()}")
+
+# Import ML operations router (first-release ML pipeline; rules stay default)
+try:
+    from backend.routes.ml_ops import router as ml_ops_router
+    logger.info("✅ ML operations router imported successfully")
+except Exception as e:
+    ml_ops_router = None
+    logger.error(f"❌ ML operations router import FAILED: {e}")
+    logger.error(f"   Traceback: {traceback.format_exc()}")
+
 # Import batch search & export router
 try:
     from backend.routes.batch_export import router as batch_export_router
@@ -374,7 +576,9 @@ if settings_router:
     logger.info("✅ Settings router registered")
 if retention_router:
     app.include_router(retention_router)  # Retention status + dry-run (admin only)
-    logger.info("✅ Retention router registered")
+if webhook_credentials_router:
+    app.include_router(webhook_credentials_router)  # Issue/revoke ingest credentials (admin only)
+    logger.info("✅ Webhook credentials router registered")
 if logs_router:
     app.include_router(logs_router)  # Error logs viewer (admin only)
     logger.info("✅ Logs router registered")
@@ -398,6 +602,8 @@ app.include_router(webhook_router)
 app.include_router(detections_router)
 app.include_router(stats_router)
 app.include_router(upload_router)
+# Phase two of a name-based upload: the administrator's identity decision.
+app.include_router(enrollment_review_router)
 app.include_router(health_router)
 app.include_router(metrics_router)
 app.include_router(websocket_router)  # WebSocket route is included via router
@@ -424,13 +630,24 @@ if live_alerts_router:
 if intelligence_router:
     app.include_router(intelligence_router)
     logger.info("✅ Intelligence router registered")
-    # Log available routes for debugging
-    for route in intelligence_router.routes:
+if risk_assessments_router:
+    app.include_router(risk_assessments_router)
+    logger.info("✅ Risk assessments router registered")
+if ml_ops_router:
+    app.include_router(ml_ops_router)
+    logger.info("✅ ML operations router registered")
+    # Log available routes for debugging.
+    # This iterated intelligence_router.routes — a copy-paste from the block
+    # above. If ml_ops imported but intelligence did NOT, intelligence_router
+    # is None and this raised AttributeError at import time, taking the whole
+    # application down during startup. The `else` branch named the wrong
+    # router too, so the log accused intelligence when ML Ops was missing.
+    for route in ml_ops_router.routes:
         if hasattr(route, 'methods') and hasattr(route, 'path'):
             methods = ', '.join(route.methods) if route.methods else 'N/A'
             logger.info(f"   📍 {methods} {route.path}")
 else:
-    logger.error("❌ Intelligence router NOT registered - intelligence endpoints will return 404")
+    logger.error("❌ ML operations router NOT registered - /api/ml/* endpoints will return 404")
 if batch_export_router:
     app.include_router(batch_export_router)
     logger.info("✅ Batch export router registered")
@@ -441,20 +658,23 @@ if task_history_router:
 else:
     logger.warning("⚠️ Task history router not registered - task history endpoints unavailable")
 
-# IMPORTANT: Also register webhook endpoint directly on app (like app_production.py)
-# This ensures compatibility with pipelines that were working with the old implementation
-from backend.routes.webhook import webhook_handler, parse_webhook_request
-from fastapi import BackgroundTasks, Request
-import json
-
-@app.post("/webhook/{pipeline_id}")
-async def webhook_direct(pipeline_id: str, request: Request, background_tasks: BackgroundTasks):
-    """Webhook endpoint - Direct registration on app (for compatibility with app_production.py)"""
-    payload = await parse_webhook_request(request)
-    return await webhook_handler(pipeline_id, payload, background_tasks)
+# The webhook used to be registered a SECOND time here, directly on the app, for
+# compatibility with an older entry point. It was already unreachable: the router
+# is included above, Starlette matches routes in registration order and takes the
+# first full match, so POST /webhook/{pipeline_id} always resolved to the router's
+# route. Dead — but a trap, because it carried no authentication dependency and
+# would have become a live bypass the moment anyone moved the include_router call
+# below it. Deleted rather than duplicating the guard onto it; a route-inventory
+# test now fails if any webhook path+method pair is ever registered twice.
 
 logger.info("✅ All routes registered from backend/routes/")
-logger.info("✅ Webhook endpoint registered both via router and directly on app")
+try:
+    from backend.security import webhook_auth as _webhook_auth
+    logger.info("✅ Webhook ingest auth: mode=%s keys=%d",
+                _webhook_auth.auth_mode(settings),
+                len(_webhook_auth.parse_keys(settings.WEBHOOK_API_KEYS)))
+except Exception as _wh_exc:  # pragma: no cover - never block startup on a log line
+    logger.warning("Could not report webhook auth mode: %s", _wh_exc)
 
 # Exception handler for 401/403 - redirect HTML requests to signin/dashboard, return JSON for API requests
 @app.exception_handler(HTTPException)
@@ -464,9 +684,17 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     - For HTML page requests: Redirect to signin (401) or dashboard (403)
     - For API requests: Return JSON error response
     """
+    # Machine-to-machine endpoints never get a redirect. `/webhook/...` does not
+    # start with `/api/`, so the catch-all below classified it as a browser page
+    # and answered an unauthenticated camera with `302 -> /signin`. A client that
+    # follows redirects then receives 200 and an HTML login page, and reads that
+    # as a successful ingest — a rejection that looks like success.
+    path = request.url.path
+    is_machine_endpoint = path.startswith("/webhook/") or path == "/webhook"
+
     # Check if this is an HTML page request
     accept_header = request.headers.get("accept", "").lower()
-    is_html_request = (
+    is_html_request = (not is_machine_endpoint) and (
         "text/html" in accept_header or
         request.url.path.startswith("/admin/") or
         request.url.path.startswith("/dashboard") or
@@ -475,7 +703,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         request.url.path.endswith(".html") or
         (not request.url.path.startswith("/api/") and not request.url.path.startswith("/docs") and not request.url.path.startswith("/openapi.json"))
     )
-    
+
     # For 401 (Unauthorized) errors on HTML pages, redirect to signin
     if exc.status_code == status.HTTP_401_UNAUTHORIZED and is_html_request:
         logger.warning(f"[AUTH] HTML page request to {request.url.path} returned 401, redirecting to /signin")
@@ -487,9 +715,18 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         return RedirectResponse(url="/dashboard", status_code=302)
     
     # For API requests or other errors, return JSON
+    #
+    # `headers=exc.headers` is not optional decoration. This handler REPLACES
+    # Starlette's, so every header a raise site attached was silently dropped:
+    # `WWW-Authenticate` on 401s (the webhook challenge and the auth service's
+    # Bearer challenges alike) and `Retry-After` on 503/429. The raise sites all
+    # set them and none of them ever arrived, which is invisible from the status
+    # code alone — a client is simply never told how to authenticate or when to
+    # retry.
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail, "status_code": exc.status_code}
+        content={"detail": exc.detail, "status_code": exc.status_code},
+        headers=getattr(exc, "headers", None),
     )
 
 # if __name__ == "__main__":

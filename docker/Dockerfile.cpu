@@ -38,8 +38,34 @@ WORKDIR /app
 # =====================================================
 # Python dependencies (CPU version)
 # =====================================================
-COPY requirements-cpu.txt requirements.txt
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+# requirements-base.txt is REQUIRED here: requirements-cpu.txt starts with
+# `-r requirements-base.txt`, and pip resolves that relative to the file, so
+# the build fails immediately if the base file is not copied alongside it.
+COPY requirements-base.txt requirements-cpu.txt requirements-dev.txt ./
+# BuildKit cache mount: downloaded wheels persist across builds and across a
+# KILLED build, so an interrupted build does not start from zero.
+# PIP_NO_CACHE_DIR is set globally above, so it is re-enabled for this RUN
+# only; the cache lives outside the image, so image content is unchanged.
+#
+# This layer used to pull ~4.5 GB because torch resolved to the CUDA wheel.
+# requirements-cpu.txt now points torch at the CPU index, so the NVIDIA wheel
+# set is gone from this image entirely — see the comment in that file.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    PIP_NO_CACHE_DIR=0 pip install --upgrade pip && \
+    PIP_NO_CACHE_DIR=0 pip install -r requirements-cpu.txt
+
+# Test dependencies — development / CI image only.
+#
+# The suite runs INSIDE this container, so without this any `docker compose up`
+# that recreates the container silently loses pytest, and the next test run
+# fails for reasons that have nothing to do with the code. Production images
+# still ship no test runner: the default is false and only the development
+# compose file overrides it.
+ARG INSTALL_DEV=false
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$INSTALL_DEV" = "true" ]; then \
+        PIP_NO_CACHE_DIR=0 pip install -r requirements-dev.txt; \
+    fi
 
 # =====================================================
 # Application code
@@ -53,9 +79,11 @@ RUN mkdir -p \
     /tmp \
     /app/storage \
     /app/weights \
-    /app/assets/faces \
-    /app/database/face_database \
-    /app/chromadb_data \
+    /app/storage/faces \
+    /app/storage/faces/.incoming \
+    /app/storage/pending \
+    /app/storage/debug/webhook_images \
+    /app/storage/debug/cropped \
     /var/log/face-recognition \
     /app/logs \
     && chmod 1777 /tmp
@@ -63,8 +91,22 @@ RUN mkdir -p \
 # =====================================================
 # Non-root user (security)
 # =====================================================
+# The model-cache tree is created HERE, while this stage is still root.
+#
+# docker-compose pins `user: "1000:1000"`, so the entrypoint runs unprivileged
+# and cannot chown anything. And when a volume is mounted at
+# /home/appuser/.cache/chroma, Docker creates the MISSING parent
+# /home/appuser/.cache itself, as root, before the entrypoint runs — leaving
+# appuser unable to create /home/appuser/.cache/huggingface. SentenceTransformer
+# then raised PermissionError and the chatbot's semantic query-history search
+# was silently disabled. Creating the parent in the image means Docker finds it
+# already present and leaves its ownership alone.
 RUN useradd -m -u 1000 -s /bin/bash appuser \
-    && chown -R appuser:appuser /app /var/log/face-recognition
+    && chown -R appuser:appuser /app /var/log/face-recognition \
+    && mkdir -p /home/appuser/.cache/huggingface \
+                /home/appuser/.cache/chroma/onnx_models \
+    && chown -R appuser:appuser /home/appuser/.cache \
+    && chmod -R 775 /home/appuser/.cache
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/

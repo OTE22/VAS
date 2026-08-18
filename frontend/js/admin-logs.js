@@ -4,20 +4,79 @@
  * Supports all log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
  */
 
-// Global state
+// Global state.
+//
+// Nothing here is a hard-coded bound. Page sizes, the level vocabulary and the
+// ceiling all come from GET /api/logs/config, which reads them from settings —
+// so changing LOG_API_DEFAULT_PAGE_SIZE or LOG_API_MAX_PAGE_SIZE changes this
+// page with no JavaScript edit. `currentPageSize` stays null until the config
+// lands; the request then simply omits page_size and the server applies its own
+// default, which is the same value.
 let currentPage = 1;
-let currentPageSize = 50;
+let currentPageSize = null;
 let currentDateFrom = null;
 let currentDateTo = null;
 let currentLevel = 'all';
+let logConfig = null;
 
 // Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     checkAuth();
+    await loadConfig();      // before the first query, so bounds are known
     loadStats();
     loadLogs();
     setupEventListeners();
 });
+
+/**
+ * Pull viewer bounds and vocabulary from the backend.
+ * Failure is not fatal: the server still applies its own defaults, and the
+ * controls simply keep whatever the markup shipped with.
+ */
+async function loadConfig() {
+    try {
+        const response = await fetch('/api/logs/config', { credentials: 'include' });
+        if (!response.ok) return;
+        logConfig = await response.json();
+
+        if (Number.isFinite(logConfig.default_page_size)) {
+            currentPageSize = logConfig.default_page_size;
+        }
+        if (logConfig.default_level) {
+            currentLevel = logConfig.default_level;
+        }
+
+        const sizeSelect = document.getElementById('page-size');
+        if (sizeSelect && Array.isArray(logConfig.page_size_options)) {
+            sizeSelect.innerHTML = '';
+            logConfig.page_size_options.forEach(size => {
+                const option = document.createElement('option');
+                option.value = String(size);
+                option.textContent = `${size} per page`;
+                if (size === currentPageSize) option.selected = true;
+                sizeSelect.appendChild(option);
+            });
+        }
+
+        const levelSelect = document.getElementById('level-filter');
+        if (levelSelect && Array.isArray(logConfig.levels)) {
+            levelSelect.innerHTML = '';
+            const all = document.createElement('option');
+            all.value = 'all';
+            all.textContent = 'All Levels';
+            levelSelect.appendChild(all);
+            logConfig.levels.forEach(level => {
+                const option = document.createElement('option');
+                option.value = level;
+                option.textContent = level;
+                levelSelect.appendChild(option);
+            });
+            levelSelect.value = currentLevel;
+        }
+    } catch (err) {
+        console.warn('[LOGS] Viewer config unavailable, using server defaults:', err);
+    }
+}
 
 /**
  * Load user info for UI - BACKEND HANDLES ALL AUTHENTICATION
@@ -76,10 +135,12 @@ async function loadLogs() {
 
     try {
         // Build query string (backend handles all filtering)
-        const params = new URLSearchParams({
-            page: currentPage.toString(),
-            page_size: currentPageSize.toString()
-        });
+        const params = new URLSearchParams({ page: currentPage.toString() });
+        // Omit page_size when the config has not loaded: the server then uses
+        // LOG_API_DEFAULT_PAGE_SIZE rather than a number invented here.
+        if (currentPageSize) {
+            params.append('page_size', currentPageSize.toString());
+        }
 
         if (currentDateFrom) {
             params.append('date_from', currentDateFrom);
@@ -199,12 +260,17 @@ function setupEventListeners() {
     document.getElementById('clear-filters-btn').addEventListener('click', () => {
         document.getElementById('date-from').value = '';
         document.getElementById('date-to').value = '';
-        document.getElementById('level-filter').value = 'all';
-        document.getElementById('page-size').value = '50';
+        // Reset to the SERVER's defaults, not to numbers written here.
+        const defaultLevel = (logConfig && logConfig.default_level) || 'all';
+        const defaultSize = logConfig && logConfig.default_page_size;
+        document.getElementById('level-filter').value = defaultLevel;
+        if (defaultSize) {
+            document.getElementById('page-size').value = String(defaultSize);
+        }
         currentDateFrom = null;
         currentDateTo = null;
-        currentLevel = 'all';
-        currentPageSize = 50;
+        currentLevel = defaultLevel;
+        currentPageSize = defaultSize || null;
         currentPage = 1;
         loadLogs();
     });

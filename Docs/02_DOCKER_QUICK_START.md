@@ -24,7 +24,8 @@ chmod +x docker/auto-start.sh
 ## 📦 What Docker Files Are Available?
 
 ### **Docker Compose Files:**
-1. **`docker-compose.gpu.yml`** - For systems with NVIDIA GPU
+1. **`docker-compose.gpu.yml`** - GPU **override**, layered on the CPU
+   stack (`-f cpu.yml -f gpu.yml`). Not a standalone stack.
 2. **`docker-compose.cpu.yml`** - For systems without GPU
 
 ### **Dockerfiles:**
@@ -32,8 +33,12 @@ chmod +x docker/auto-start.sh
 2. **`Dockerfile.cpu`** - CPU-only image
 
 ### **Auto-Start Scripts:**
-1. **`auto-start.sh`** / **`auto-start.bat`** - Full detection (recommended)
-2. **`start.sh`** / **`start.bat`** - Simple detection
+**`auto-start.sh`** / **`auto-start.bat`** — detects the GPU and the NVIDIA
+container runtime, then starts the CPU stack, layering the GPU override when
+both are present.
+
+(`start.sh` / `start.bat` were a second, less capable implementation of the
+same job and have been removed. Two launchers drifted apart; one is enough.)
 
 ---
 
@@ -45,7 +50,7 @@ chmod +x docker/auto-start.sh
 ./docker/auto-start.sh
 
 # Or manually
-docker-compose -f docker/docker-compose.gpu.yml up --build    # GPU
+docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml up -d --build    # GPU
 docker-compose -f docker/docker-compose.cpu.yml up --build   # CPU
 ```
 
@@ -58,13 +63,13 @@ docker-compose -f docker/docker-compose.cpu.yml up --build   # CPU
 ```bash
 # Press Ctrl+C if running in foreground
 # Or:
-docker-compose -f docker/docker-compose.gpu.yml down    # GPU
+docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml down    # GPU
 docker-compose -f docker/docker-compose.cpu.yml down    # CPU
 ```
 
 ### **View Logs:**
 ```bash
-docker-compose -f docker/docker-compose.gpu.yml logs -f
+docker compose -f docker/docker-compose.cpu.yml -f docker/docker-compose.gpu.yml logs -f
 ```
 
 ---

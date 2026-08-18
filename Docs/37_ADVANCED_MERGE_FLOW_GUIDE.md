@@ -1,5 +1,11 @@
 # Advanced Multi-Pipeline Identity Merge Flow - Complete Guide
 
+> **Vector backend note.** Where this document says *FAISS*, the live
+> system uses **PostgreSQL + pgvector**. PostgreSQL is authoritative and
+> the index is a disposable acceleration layer — see
+> [`70_VECTOR_INDEX_CONTRACT.md`](70_VECTOR_INDEX_CONTRACT.md). The
+> surrounding explanation of *what* the index does is still accurate.
+
 ## Table of Contents
 1. [Overview](#overview)
 2. [Quick Start - How to Use](#quick-start---how-to-use)

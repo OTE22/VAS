@@ -22,8 +22,18 @@ from db_models import (
     Identity, IdentityAppearance, IdentityEmbedding, Face,
     IdentityType, IdentityStatus
 )
-from sqlalchemy import select, func, and_, delete as sql_delete
-from backend.core.identity_index import identity_index
+from sqlalchemy import select, func, and_, delete as sql_delete, text
+from backend.core.vector_index.access import remove_embedding_keys
+
+# A camera-origin embedding (pipeline_id IS NOT NULL) is written and committed
+# BEFORE its detection is persisted (identity resolution precedes the realtime
+# broadcast; persistence happens on the batch flush). If the worker dies in
+# between, no detection ever links it. Rows older than this grace with no
+# detection_id are therefore unexplained camera evidence and are removed.
+# 10 minutes: the batch flush has a 150 s timeout plus queue backlog; a
+# 2-minute boundary would race legitimate in-flight frames. One constant —
+# imported by the data-quality query and the tests — not an operator setting.
+STALE_CAMERA_EMBEDDING_GRACE = timedelta(minutes=10)
 
 logger = logging.getLogger(__name__)
 
@@ -57,23 +67,23 @@ class IdentityRetentionManager:
 
     @property
     def snapshot_retention_days(self) -> int:
-        return self._snapshot_retention_days_override or int(getattr(settings, 'SNAPSHOT_RETENTION_DAYS', 90))
+        return self._snapshot_retention_days_override or int(settings.SNAPSHOT_RETENTION_DAYS)
 
     @property
     def embedding_retention_months(self) -> int:
-        return self._embedding_retention_months_override or int(getattr(settings, 'EMBEDDING_RETENTION_MONTHS', 12))
+        return self._embedding_retention_months_override or int(settings.EMBEDDING_RETENTION_MONTHS)
 
     @property
     def inactive_threshold_days(self) -> int:
-        return self._inactive_threshold_days_override or int(getattr(settings, 'INACTIVE_THRESHOLD_DAYS', 180))
+        return self._inactive_threshold_days_override or int(settings.INACTIVE_THRESHOLD_DAYS)
 
     @property
     def cleanup_interval_hours(self) -> int:
-        return self._cleanup_interval_hours_override or int(getattr(settings, 'IDENTITY_CLEANUP_INTERVAL_HOURS', 24))
+        return self._cleanup_interval_hours_override or int(settings.IDENTITY_CLEANUP_INTERVAL_HOURS)
 
     @property
     def max_embeddings_per_identity(self) -> int:
-        return self._max_embeddings_per_identity_override or int(getattr(settings, 'MAX_EMBEDDINGS_PER_IDENTITY', 10))
+        return self._max_embeddings_per_identity_override or int(settings.MAX_EMBEDDINGS_PER_IDENTITY)
     
     async def start(self):
         """Start periodic cleanup"""
@@ -141,8 +151,12 @@ class IdentityRetentionManager:
             
             # 3. Clean up excess embeddings
             cleaned_embeddings = await self._cleanup_excess_embeddings()
-            
-            # 4. Clean up merged identities (optional - keep for audit)
+
+            # 4. Crash-safe provenance: remove stale camera embeddings whose
+            #    originating detection was never persisted.
+            stale = await self.reconcile_orphan_camera_embeddings()
+
+            # 5. Clean up merged identities (optional - keep for audit)
             # We'll keep merged identities for audit trail
             
             duration = (datetime.utcnow() - start_time).total_seconds()
@@ -150,7 +164,8 @@ class IdentityRetentionManager:
                 f"✅ Identity cleanup completed: "
                 f"{deleted_snapshots} snapshots deleted, "
                 f"{marked_inactive} identities marked inactive, "
-                f"{cleaned_embeddings} excess embeddings removed "
+                f"{cleaned_embeddings} excess embeddings removed, "
+                f"{stale.get('embeddings', 0)} stale camera embeddings reconciled "
                 f"in {duration:.2f}s"
             )
             
@@ -165,7 +180,8 @@ class IdentityRetentionManager:
                     details={
                         "deleted_snapshots": deleted_snapshots,
                         "marked_inactive": marked_inactive,
-                        "cleaned_embeddings": cleaned_embeddings
+                        "cleaned_embeddings": cleaned_embeddings,
+                        "stale_camera_embeddings": stale.get("embeddings", 0),
                     },
                     notify_all_users=True  # Notify all users since this affects unknown faces they can see
                 )
@@ -174,6 +190,66 @@ class IdentityRetentionManager:
         except Exception as e:
             logger.error(f"Identity cleanup failed: {e}", exc_info=True)
     
+    async def reconcile_orphan_camera_embeddings(self, grace: Optional[timedelta] = None) -> dict:
+        """The ONE canonical stale-embedding reconciliation.
+
+        Invariant: a camera-origin embedding (pipeline_id IS NOT NULL) either
+        ends with an exact detection_id or is removed. Controlled failures are
+        compensated inline by detection_evidence; this covers the crash case
+        (worker died between the embedding commit and persist_detection).
+
+        Candidates: pipeline_id IS NOT NULL AND detection_id IS NULL AND
+        created_at < now - grace. Removal uses the canonical path — vector-index
+        keys first (remove_embedding_keys), then the rows — so FAISS/pgvector
+        state and the table stay consistent. Then an UNKNOWN identity that this
+        left with zero embeddings, images, appearances and faces (i.e. it existed
+        only because of the lost frame) is removed; anything referenced by
+        history stays. Idempotent: a second run finds nothing.
+
+        Runs at startup (after the vector index is up) and on every retention
+        cycle. Never touches enrollment/preload rows (pipeline_id IS NULL) or
+        rows younger than the grace.
+        """
+        grace = grace or STALE_CAMERA_EMBEDDING_GRACE
+        boundary = datetime.utcnow() - grace
+        removed = {"embeddings": 0, "identities": 0, "boundary": boundary.isoformat() + "Z"}
+        try:
+            async with db_manager.get_session() as db:
+                rows = (await db.execute(
+                    select(IdentityEmbedding.id, IdentityEmbedding.identity_id).where(
+                        IdentityEmbedding.pipeline_id.isnot(None),
+                        IdentityEmbedding.detection_id.is_(None),
+                        IdentityEmbedding.created_at < boundary,
+                    ).order_by(IdentityEmbedding.id)
+                )).all()
+                if not rows:
+                    return removed
+                ids = [int(r[0]) for r in rows]
+                identity_ids = sorted({str(r[1]) for r in rows})
+                await remove_embedding_keys(db, ids)
+                res = await db.execute(text(
+                    "DELETE FROM identity_embeddings WHERE id = ANY(CAST(:ids AS int[])) "
+                    "AND detection_id IS NULL"), {"ids": ids})
+                removed["embeddings"] = res.rowcount or 0
+                for iid in identity_ids:
+                    res = await db.execute(text("""
+                        DELETE FROM identities i WHERE i.id = CAST(:iid AS uuid)
+                          AND i.type::text = 'UNKNOWN'
+                          AND NOT EXISTS (SELECT 1 FROM identity_embeddings e WHERE e.identity_id = i.id)
+                          AND NOT EXISTS (SELECT 1 FROM identity_appearances a WHERE a.identity_id = i.id)
+                          AND NOT EXISTS (SELECT 1 FROM faces f WHERE f.identity_id = i.id)
+                          AND NOT EXISTS (SELECT 1 FROM identity_images g WHERE g.identity_id = i.id)
+                    """), {"iid": iid})
+                    removed["identities"] += res.rowcount or 0
+                await db.commit()
+            logger.warning(
+                "[IDENTITY_RETENTION] reconciled %s stale camera embedding(s) older than %s "
+                "(no persisted detection) and %s evidence-free identity(ies)",
+                removed["embeddings"], grace, removed["identities"])
+        except Exception as e:
+            logger.error(f"[IDENTITY_RETENTION] stale camera embedding reconciliation failed: {e}", exc_info=True)
+        return removed
+
     async def _cleanup_old_snapshots(self) -> int:
         """Delete snapshots older than retention policy"""
         cutoff_date = datetime.utcnow() - timedelta(days=self.snapshot_retention_days)
@@ -193,7 +269,9 @@ class IdentityRetentionManager:
                 # for KNOWN identities can point at their enrollment photos, and
                 # deleting them silently emptied the gallery.
                 from config import settings as _settings
-                _faces_dir = os.path.realpath(getattr(_settings, 'FACES_DIR', './storage/faces'))
+                # No fallback: a relative default here would silently mis-scope
+                # the "never sweep enrollment photos" guard below.
+                _faces_dir = os.path.realpath(_settings.FACES_DIR)
 
                 def _is_enrollment_photo(path: str) -> bool:
                     try:
@@ -266,7 +344,11 @@ class IdentityRetentionManager:
                 for identity in inactive_identities:
                     identity.status = IdentityStatus.INACTIVE
                     marked_count += 1
-                
+                if inactive_identities:
+                    from backend.core.identity_service import invalidate_merge_suggestions
+                    await invalidate_merge_suggestions(
+                        db, [i.id for i in inactive_identities], "identity retired to INACTIVE by retention")
+
                 await db.commit()
         
         except Exception as e:
@@ -307,26 +389,24 @@ class IdentityRetentionManager:
                         # Keep top-K, remove the rest
                         to_remove = embeddings[self.max_embeddings_per_identity:]
                         
+                        # Drop exactly the keys being deleted. The old code
+                        # passed the IDENTITY id to remove_from_known/unknown,
+                        # so trimming one surplus embedding evicted every
+                        # vector that person had — including the ones it was
+                        # deliberately keeping.
+                        await remove_embedding_keys(db, [e.id for e in to_remove])
+
                         for emb in to_remove:
-                            # Remove from FAISS index if possible
-                            if emb.faiss_id is not None and identity_index:
-                                try:
-                                    if emb.faiss_index_type == 'known':
-                                        identity_index.remove_from_known(str(identity.id))
-                                    else:
-                                        identity_index.remove_from_unknown(str(identity.id))
-                                except Exception as e:
-                                    logger.warning(f"Failed to remove from FAISS: {e}")
-                            
-                            # Delete from database
                             await db.delete(emb)
                             removed_count += 1
                 
                 await db.commit()
                 
-                # Save FAISS index after cleanup
-                if identity_index:
-                    identity_index.save()
+                # No explicit snapshot here: the index is derived state and the
+                # manager's autosave owns snapshot timing. Forcing a save on
+                # every retention pass is what produced hundreds of redundant
+                # writes, and a missed one costs nothing — reconciliation
+                # re-derives the index from PostgreSQL.
         
         except Exception as e:
             logger.error(f"Error cleaning up excess embeddings: {e}", exc_info=True)
