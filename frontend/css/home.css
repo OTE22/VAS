@@ -18,7 +18,11 @@
   --hp-surface:         rgba(255, 255, 255, .035);   /* cards, panels */
   --hp-surface-2:       rgba(255, 255, 255, .060);   /* hover, panel head */
   --hp-surface-3:       rgba(255, 255, 255, .090);   /* meter track, skeleton */
-  --hp-surface-solid:   #0e1620;                     /* boot gate; skeleton math */
+  /* The one OPAQUE surface. Needed wherever the page is not the thing doing
+     the painting — the boot gate, skeleton maths, and native <select> popups,
+     which the OS draws in its own layer where a translucent colour would
+     composite onto the system's white instead of onto --hp-bg. */
+  --hp-surface-solid:   #0e1620;
   --hp-skel-hi:         #1a2634;                     /* shimmer highlight */
   --hp-glass:           blur(10px);                  /* matches navbar backdrop */
 
@@ -816,6 +820,11 @@ body.hp[data-freshness="stale"] .hp-hero__updated { color: var(--hp-warning); }
      in several browsers against a dark control. */
   appearance: none;
   -webkit-appearance: none;
+  /* The popup list is drawn by the OS, not by the page. Without this it uses
+     the light system palette, and the rule below is left compositing a 6%
+     white onto white. Telling the browser this control is dark makes the
+     popup's own chrome — background, scrollbar, highlight — dark too. */
+  color-scheme: dark;
   width: 100%;
   min-height: var(--hp-tap);
   padding: var(--hp-space-2) calc(var(--hp-space-6) + var(--hp-space-2))
@@ -845,8 +854,17 @@ body.hp[data-freshness="stale"] .hp-hero__updated { color: var(--hp-warning); }
 .hp-select:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* The dropdown list itself is painted by the OS; force readable colors so the
-   options are not white-on-white when the page theme is dark. */
-.hp-select option { background: var(--hp-surface-2); color: var(--hp-text); }
+   options are not white-on-white when the page theme is dark.
+   The colour MUST be opaque. This used to say `var(--hp-surface-2)`, which is
+   rgba(255,255,255,.060) — it looks dark only because it sits on --hp-bg, and
+   the popup is a separate OS layer with a light background underneath. The
+   result was 6%-white over white, carrying --hp-text (#e8f1ec) on top: the
+   pipeline names were invisible. --hp-surface-solid is the opaque token that
+   already exists for exactly this — surfaces the page does not paint. */
+.hp-select option {
+  background-color: var(--hp-surface-solid);
+  color: var(--hp-text);
+}
 
 .hp-select__chevron {
   position: absolute;

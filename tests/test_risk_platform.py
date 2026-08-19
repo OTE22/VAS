@@ -337,8 +337,9 @@ def test_migration_applied_and_indexed():
     #        -> e7f8a9b0c1d2 (webhook ingest credentials)
     #        -> f8a9b0c1d2e3 (merge provenance)
     #        -> a9b0c1d2e3f4 (identity person_code)
-    #        -> b0c1d2e3f4a5 -> c2d3e4f5a6b7 -> d4e5f6a7b8c9 -> f6a7b8c9d0e1 (current head).
-    assert version == "f6a7b8c9d0e1"
+    #        -> b0c1d2e3f4a5 -> c2d3e4f5a6b7 -> d4e5f6a7b8c9 -> f6a7b8c9d0e1
+    #        -> 7d3f91a2c4e6 (current head: JSON null literals -> SQL NULL).
+    assert version == "7d3f91a2c4e6"
     for t in ("threat_assessments", "risk_signal_results", "risk_model_versions", "learned_thresholds"):
         assert t in tables, f"missing table {t}"
     for idx in ("uq_assessment_idempotency", "idx_assessment_person_created",

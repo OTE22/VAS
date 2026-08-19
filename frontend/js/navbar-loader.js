@@ -219,6 +219,7 @@
             initializeConnectionStatus(); // starts the /health check immediately
             loadUserInfo();
             initializeNavbar();
+            ensureUploadModal();
             await customizeNavbarForUser();
 
         } catch (error) {
@@ -665,6 +666,26 @@
 
     // Load navbar when DOM is ready
     // Use a small delay to ensure redirects complete first
+    // The navbar renders ADD PERSON, so the navbar owns its dependency.
+    //
+    // That item is `<a href="#" data-action="openUploadModal">`, and the
+    // handler lives in the upload-modal component. Thirteen pages injected the
+    // navbar without ever loading that component — intelligence, settings,
+    // logs, pipelines, watchlists, audit and the rest — so the menu entry
+    // rendered, the click found no handler, and the bare `#` href navigated:
+    // pressing ADD PERSON just put a `#` on the URL and did nothing.
+    //
+    // Loading it from here fixes every one of them at once, and cannot regress
+    // the eight pages that already carry the script tag: this checks for it
+    // first, and the loader itself is idempotent.
+    function ensureUploadModal() {
+        if (document.querySelector('script[src*="upload-modal-loader.js"]')) return;
+        if (document.getElementById('uploadModal')) return;
+        const script = document.createElement('script');
+        script.src = '/frontend/js/upload-modal-loader.js';
+        document.body.appendChild(script);
+    }
+
     function initNavbarLoader() {
         // Check if we're on a page that should have a navbar
         const placeholder = document.getElementById('navbar-placeholder');

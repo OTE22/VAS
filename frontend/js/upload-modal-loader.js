@@ -14,6 +14,13 @@
 
     // Load upload modal component
     async function loadUploadModal() {
+        // Idempotent: navbar-loader.js also asks for this component on pages
+        // that carry no script tag for it, so both routes can fire on a page
+        // that has one. A second #uploadModal in the DOM would give every
+        // getElementById a stale first match.
+        if (document.getElementById('uploadModal')) {
+            return;
+        }
         try {
             const response = await fetch('/frontend/components/upload-modal.html');
             if (!response.ok) {

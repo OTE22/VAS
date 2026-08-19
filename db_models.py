@@ -7,7 +7,7 @@ from typing import Optional, List
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, Boolean, Enum as SQLEnum, text, CheckConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import backref, relationship
-from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
+from sqlalchemy.dialects.postgresql import JSONB as _PostgresJSONB, UUID, ARRAY
 import uuid
 import enum
 import logging
@@ -21,6 +21,36 @@ except ImportError:
     Vector = None  # Placeholder
 
 logger = logging.getLogger(__name__)
+
+class JSONB(_PostgresJSONB):
+    """JSONB where a Python ``None`` is stored as SQL NULL.
+
+    SQLAlchemy's default for a JSON/JSONB column writes the JSON *literal*
+    ``null`` instead, and the two are not interchangeable in the database:
+
+        SELECT count(*) FROM t WHERE col IS NULL      -- misses JSON null
+        SELECT count(*) FROM t WHERE col IS NOT NULL  -- COUNTS JSON null
+
+    So a column meaning "nothing here" reads back as a present value to every
+    aggregate, filter and dashboard that asks in SQL. It had already happened
+    474 times across ten columns. The clearest evidence it was accidental:
+    ``ml_predictions.missing_features`` held 241 SQL NULLs while its sibling
+    ``ml_shadow_comparisons.missing_features`` held 241 JSON nulls — same
+    subsystem, same rows, same intent, written two different ways. The
+    inference writer dodged it by omitting the key entirely and left a comment
+    warning about the literal; the shadow writer said
+    ``missing_features=result.missing_features or None`` and got the trap.
+
+    Applying it on the type rather than at each of the ~70 column declarations
+    means a new column, or a new writer passing None, cannot reintroduce it.
+    Code that genuinely wants a stored JSON null can still ask for it
+    explicitly with ``sqlalchemy.JSON.NULL``; nothing in this schema does.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("none_as_null", True)
+        super().__init__(*args, **kwargs)
+
 
 Base = declarative_base()
 

@@ -136,7 +136,7 @@ def test_page_chrome_follows_the_house_rules():
     assert 'class="intelligence-content"' in html, "the page must scroll inside its content region"
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
-    nav_at = html.find("js/navbar-loader.js?v=nav-6")
+    nav_at = html.find("js/navbar-loader.js?v=nav-7")
     page_at = html.find("js/admin-ml-ops.js?v=mlops-2")
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
