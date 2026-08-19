@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, 
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 
 from db_connection import get_db
 from backend.auth.auth_service import get_current_user, require_admin
@@ -329,6 +329,36 @@ async def get_search_history(
         }
         for h in history
     ]
+
+
+@router.delete(
+    "/api/search/history",
+    summary="Clear Search History",
+    description="Delete the calling user's own search history."
+)
+async def clear_search_history(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_search_csrf)
+):
+    """Clear the caller's search history.
+
+    Scoped to `user_id == current_user['id']`, exactly like the GET above: the
+    page lists your own searches, so CLEAR removes your own searches and never
+    another investigator's.
+
+    The Clear button on /admin/search-history existed with no endpoint behind
+    it — it popped a confirmation and then showed "Clear history feature
+    requires backend endpoint", so the history stayed.
+    """
+    result = await db.execute(
+        delete(SearchHistory).where(SearchHistory.user_id == current_user['id'])
+    )
+    await db.commit()
+    deleted = result.rowcount or 0
+    logger.info(f"[SEARCH_HISTORY] user={current_user['id']} cleared {deleted} row(s)")
+    return {"deleted": deleted, "message": f"Cleared {deleted} search history entr"
+                                           f"{'y' if deleted == 1 else 'ies'}"}
 
 
 @router.get(

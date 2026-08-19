@@ -50,6 +50,16 @@ async function apiFetch(url, options = {}) {
         credentials: 'include',
         cache: 'no-store',
         ...options,
+        headers: {
+            // require_settings_csrf (backend/routes/settings.py) rejects any
+            // cookie-authenticated write without this. It was added to the
+            // settings writer without this side of it, so every Save Changes
+            // returned "CSRF check failed: X-Requested-With header required".
+            // Bearer-token callers are exempt, which is why the test suite
+            // never saw it. Sent from the one place this page reaches the API.
+            'X-Requested-With': 'XMLHttpRequest',
+            ...(options.headers || {}),
+        },
     });
     const contentType = response.headers.get('content-type') || '';
     let body = null;

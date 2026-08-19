@@ -393,7 +393,7 @@ def test_unknown_window_source_contract():
     assert "show-all-toggle-btn" in html
     # unknown-8: centralized modal stack (ModalStack) replaces per-modal
     # display toggles and the z-index 99999 face-alert special case
-    assert "?v=unknown-8" in html
+    assert "?v=unknown-9" in html
 
 
 def test_js_ordered_initialization():

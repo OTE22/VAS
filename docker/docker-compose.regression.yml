@@ -127,6 +127,19 @@ services:
       MAP_DATA_DIR: /app/map-data-test
       # regression-only marker read by the isolation assertions
       REGRESSION_ISOLATION_ID: ${REGRESSION_ID}
+    # The inherited dev healthcheck allows 60s + 3x30s before declaring the
+    # container unhealthy. That is ample for a machine running ONE stack, but
+    # this one starts while the developer's stack is still up, and two API
+    # containers loading their models on the same CPUs push first boot past it
+    # — nginx's `condition: service_healthy` then aborts the whole run with
+    # "dependency failed to start" and no test executes. Measured here: ~150s
+    # to healthy under that contention. Same probe, more patience at boot.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 300s
     volumes: !override
       - ../weights:/app/weights:ro
       - ../assets:/app/assets:ro

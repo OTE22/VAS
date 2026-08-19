@@ -297,9 +297,40 @@
     }
 
     async function clearHistory() {
-        // Note: This would require a DELETE endpoint
-        // For now, just show a message
-        showNotification('Clear history feature requires backend endpoint', 'info');
+        // This used to pop the confirmation and then announce that the feature
+        // "requires backend endpoint", leaving the history exactly where it
+        // was — the button looked live and did nothing.
+        try {
+            const response = await fetch('/api/search/history', {
+                method: 'DELETE',
+                credentials: 'include',
+                headers: {
+                    // require_search_csrf rejects a cookie-authenticated write
+                    // without this.
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+
+            if (!response.ok) {
+                let detail = `HTTP ${response.status}`;
+                try {
+                    const body = await response.json();
+                    detail = body.detail || detail;
+                } catch (e) { /* non-JSON error body */ }
+                throw new Error(detail);
+            }
+
+            const body = await response.json();
+            showNotification(body.message || 'Search history cleared', 'success');
+
+            // Re-read from the server rather than blanking the table locally,
+            // so what is on screen is what is actually stored.
+            state.currentOffset = 0;
+            state.history = [];
+            loadHistory();
+        } catch (error) {
+            showNotification(`Failed to clear history: ${error.message}`, 'error');
+        }
     }
 
     function rerunSearch(searchId) {

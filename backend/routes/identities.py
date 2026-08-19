@@ -9,7 +9,7 @@ import sys
 import logging
 import uuid
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request, Query, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +31,12 @@ from db_models import (
 from backend.auth.auth_service import get_current_user, require_role
 from backend.core import model_manager
 from backend.core.merge_compatibility import MergeCompatibilityBlocked
+# The ONE definition of effective pipeline membership; see the module.
+from backend.core.identity_pipelines import (
+    effective_pipelines,
+    pipeline_scope_predicate,
+    pipelines_for,
+)
 from backend.utils.identity_audit import IdentityAuditLogger, get_client_info
 from fastapi import Request
 from config import settings
@@ -749,6 +755,30 @@ async def verify_indexes(
 # Unknown Identities List
 # =====================================================
 
+
+def _parse_filter_bound(value: str, *, end: bool = False) -> datetime:
+    """A filter bound as NAIVE UTC, which is what the columns store.
+
+    Three input shapes, deliberately distinguished:
+
+    ``2026-08-18``                 date-only. As ``date_to`` it means the WHOLE
+                                   day, so it becomes 2026-08-19T00:00:00 and
+                                   the comparison is exclusive.
+    ``2026-08-18T21:00:00Z``       an instant. Used as given; no day is added.
+    ``2026-08-18T21:00:00+03:00``  an instant. CONVERTED to UTC (18:00), then
+                                   made naive. Stripping the offset instead
+                                   would silently move the bound three hours.
+    """
+    raw = value.strip()
+    date_only = len(raw) == 10 and raw.count("-") == 2
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    if date_only and end:
+        parsed = parsed + timedelta(days=1)
+    return parsed
+
+
 @router.get("/admin/unknown", response_model=dict, summary="List Unknown Identities", description="Get paginated list of unknown identities with filters (Admin or users with pipeline access)")
 async def list_unknown_identities(
     page: int = None,
@@ -789,9 +819,29 @@ async def list_unknown_identities(
         window_active = (not show_all) and (not date_from) and display_window_hours > 0
         window_cutoff = (datetime.utcnow() - timedelta(hours=display_window_hours)) if window_active else None
 
+        # Authorization scope is resolved BEFORE the cache key, because it is
+        # part of the answer: keying on user_id alone meant revoking a user's
+        # camera left their cached page readable for the rest of a 30-hour TTL.
+        user_pipelines = None
+        if current_user.role != "admin":
+            from backend.auth.auth_service import AuthService
+            user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
+
+        # Canonicalized so equivalent scopes share a key and different ones
+        # cannot. user_id stays in the key regardless — two users with equal
+        # access today are still two users.
+        scope_key = sorted(set(user_pipelines)) if user_pipelines is not None else None
+
         # Build filters dict for cache key (window params MUST be part of the
         # key — the cache TTL is ~30h, far longer than the display window)
         filters = {
+            # Bumped whenever the shape or the meaning of the response changes,
+            # so entries written by the previous layout are unreachable rather
+            # than wrong. v2: SQL-side pipeline filtering, exclusive date_to,
+            # deterministic order, authorization in the key.
+            "schema": "v2",
+            "role": current_user.role,
+            "scope": scope_key,
             "date_from": date_from,
             "date_to": date_to,
             "pipeline_id": pipeline_id,
@@ -803,7 +853,7 @@ async def list_unknown_identities(
             # defeat caching entirely while stale entries still age out fast
             "window_bucket": int(window_cutoff.timestamp() // 300) if window_cutoff else None,
         }
-        
+
         # Generate cache key
         cache_key = await redis_cache_service.get_unknown_cache_key(
             user_id=current_user.id,
@@ -811,173 +861,115 @@ async def list_unknown_identities(
             page_size=page_size,
             filters=filters
         )
-        
+
         # Try to get from cache
         cached_result = await redis_cache_service.get(cache_key)
         if cached_result:
             logger.info(f"[UNKNOWN_API] [CACHE] ✅ Cache HIT - returning cached data (key: {cache_key})")
             return cached_result
-        
-        logger.info(f"[UNKNOWN_API] [CACHE] ❌ Cache MISS - querying database (key: {cache_key})")
-        
-        # Check if identity tables exist (migration may not have run)
-        # This endpoint should work even if identity_service is not initialized
-        
-        # Get user's accessible pipelines (if not admin)
-        user_pipelines = None
-        if current_user.role != "admin":
-            from backend.auth.auth_service import AuthService
-            user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
-            if not user_pipelines:
-                # User has no pipeline access - return empty result
-                empty_result = {
-                    "identities": [],
-                    "total": 0,
-                    "page": page,
-                    "page_size": page_size,
-                    "total_pages": 1,
-                    "stats": {
-                        "total_unknown": 0,
-                        "total_appearances": 0,
-                        "active_cameras": 0
-                    }
-                }
-                # Cache empty result too (use unknown faces TTL)
-                cache_ttl = settings.CACHE_TTL_UNKNOWN  # Default 30 hours
-                await redis_cache_service.set(cache_key, empty_result, ttl=cache_ttl)
-                return empty_result
-        
-        # Build query
-        query = select(Identity).where(Identity.type == IdentityType.UNKNOWN)
 
-        # Apply filters
+        logger.info(f"[UNKNOWN_API] [CACHE] ❌ Cache MISS - querying database (key: {cache_key})")
+
+        if user_pipelines is not None and not user_pipelines:
+            # No pipeline access. _pipeline_scope_predicate would return
+            # false() and produce exactly this, but answering here avoids
+            # three round trips to prove an empty set is empty.
+            empty_result = {
+                "identities": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": 1,
+                "display_window_hours": display_window_hours if window_active else None,
+                "show_all": show_all,
+                "stats": {
+                    "total_unknown": 0,
+                    "total_appearances": 0,
+                    "active_cameras": 0
+                }
+            }
+            # Cache empty result too (use unknown faces TTL)
+            cache_ttl = settings.CACHE_TTL_UNKNOWN  # Default 30 hours
+            await redis_cache_service.set(cache_key, empty_result, ttl=cache_ttl)
+            return empty_result
+
+        # ---- Every condition, in SQL, BEFORE the count and before pagination.
+        # The previous version selected a page and then dropped rows from it in
+        # Python, so filtering by a camera whose faces were not among the newest
+        # page_size identities returned an empty page while `total` claimed
+        # hundreds.
+        conditions = [Identity.type == IdentityType.UNKNOWN]
+
         if status_filter:
-            query = query.where(Identity.status == IdentityStatus(status_filter))
+            conditions.append(Identity.status == IdentityStatus(status_filter))
         else:
-            query = query.where(Identity.status == IdentityStatus.ACTIVE)
+            conditions.append(Identity.status == IdentityStatus.ACTIVE)
 
         if date_from:
-            date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-            query = query.where(Identity.last_seen_at >= date_from_dt)
+            conditions.append(Identity.last_seen_at >= _parse_filter_bound(date_from))
         elif window_cutoff is not None:
             # UNKNOWN_FACE_DISPLAY_HOURS display window (Show-all toggle bypasses)
-            query = query.where(Identity.last_seen_at >= window_cutoff)
+            conditions.append(Identity.last_seen_at >= window_cutoff)
 
         if date_to:
-            date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-            query = query.where(Identity.last_seen_at <= date_to_dt)
+            # EXCLUSIVE. A date-only bound was widened to cover its own day by
+            # _parse_filter_bound; `<=` on a bare date meant midnight, so
+            # From = To = today matched nothing at all.
+            conditions.append(Identity.last_seen_at < _parse_filter_bound(date_to, end=True))
 
         if min_appearances:
-            query = query.where(Identity.appearances_count >= min_appearances)
-        
-        # Calculate statistics efficiently using SQL aggregations
-        # Get all identities matching filters (for stats calculation)
-        stats_query = select(Identity).where(Identity.type == IdentityType.UNKNOWN)
-        
-        if status_filter:
-            stats_query = stats_query.where(Identity.status == IdentityStatus(status_filter))
-        else:
-            stats_query = stats_query.where(Identity.status == IdentityStatus.ACTIVE)
-        
-        if date_from:
-            date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-            stats_query = stats_query.where(Identity.last_seen_at >= date_from_dt)
-        elif window_cutoff is not None:
-            stats_query = stats_query.where(Identity.last_seen_at >= window_cutoff)
+            conditions.append(Identity.appearances_count >= min_appearances)
 
-        if date_to:
-            date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-            stats_query = stats_query.where(Identity.last_seen_at <= date_to_dt)
-        
-        if min_appearances:
-            stats_query = stats_query.where(Identity.appearances_count >= min_appearances)
-        
-        # Get all matching identities for stats (only on first page to avoid performance issues)
-        stats_identities = []
-        if page == 1:
-            stats_result = await db.execute(stats_query)
-            stats_identities = stats_result.scalars().all()
-        
-        # Apply pagination
+        # Membership + authorization, from the one effective-pipeline relation.
+        conditions.append(pipeline_scope_predicate(pipeline_id, user_pipelines))
+
+        base_ids = select(Identity.id).where(*conditions).subquery()
+
+        # Aggregates are independent queries over their own row sources. Doing
+        # them in one join would multiply each identity by its camera count and
+        # inflate total_appearances.
+        total = (await db.execute(select(func.count()).select_from(base_ids))).scalar() or 0
+        total_appearances = (await db.execute(
+            select(func.coalesce(func.sum(Identity.appearances_count), 0))
+            .where(Identity.id.in_(select(base_ids.c.id)))
+        )).scalar() or 0
+        cameras_relation = effective_pipelines(select(base_ids.c.id)).subquery()
+        active_cameras = (await db.execute(
+            select(func.count(func.distinct(cameras_relation.c.pipeline_id)))
+        )).scalar() or 0
+
+        # ORDER BY carries a tiebreak: last_seen_at ties are ordinary (bulk
+        # ingest, one transaction touching many rows), and without the PK an
+        # identity can appear on two pages or on none.
         offset = (page - 1) * page_size
-        query = query.order_by(Identity.last_seen_at.desc()).offset(offset).limit(page_size)
-        
-        # Execute query
-        result = await db.execute(query)
+        result = await db.execute(
+            select(Identity).where(*conditions)
+            .order_by(Identity.last_seen_at.desc(), Identity.id.desc())
+            .offset(offset).limit(page_size)
+        )
         identities = result.scalars().all()
-        
+
+        # One lookup for the whole page, from the same relation that decided
+        # the filter — so what a card shows and what filtering by it returns
+        # cannot disagree.
+        pipelines_by_identity = await pipelines_for(
+            db, [identity.id for identity in identities])
+
         # Get camera counts and pipeline IDs for each identity
         identity_list = []
-        total_appearances = 0
-        unique_pipelines = set()
-        total_with_pipelines = 0
-        
-        # Process identities for current page
+
+        # Process identities for current page. Every filter — membership,
+        # explicit camera, authorization — was already applied in SQL, so this
+        # loop no longer drops anything: what was selected is what is returned.
         for identity in identities:
             # CRITICAL: Double-check that identity is UNKNOWN (safety check)
             # This should never happen if query is correct, but protects against data corruption
             if identity.type != IdentityType.UNKNOWN:
                 logger.warning(f"[SECURITY] Filtered out KNOWN identity {identity.id} from unknown list (type: {identity.type})")
                 continue
-            
-            # Get unique pipeline IDs from multiple sources
-            pipeline_ids_set = set()
-            
-            # 1. From IdentityAppearance
-            appearance_result = await db.execute(
-                select(IdentityAppearance.pipeline_id).where(
-                    IdentityAppearance.identity_id == identity.id
-                ).distinct()
-            )
-            for row in appearance_result:
-                if row[0]:
-                    pipeline_ids_set.add(row[0])
-            
-            # 2. From IdentityEmbedding (fallback if no appearances)
-            if not pipeline_ids_set:
-                embedding_result = await db.execute(
-                    select(IdentityEmbedding.pipeline_id).where(
-                        IdentityEmbedding.identity_id == identity.id
-                    ).distinct()
-                )
-                for row in embedding_result:
-                    if row[0]:
-                        pipeline_ids_set.add(row[0])
-            
-            # 3. From Face->Detection (fallback if no embeddings)
-            if not pipeline_ids_set:
-                face_result = await db.execute(
-                    select(Detection.pipeline_id).join(
-                        Face, Face.detection_id == Detection.id
-                    ).where(
-                        Face.identity_id == identity.id
-                    ).distinct()
-                )
-                for row in face_result:
-                    if row[0]:
-                        pipeline_ids_set.add(row[0])
-            
-            pipeline_ids = sorted(list(pipeline_ids_set))
-            cameras_count = len(pipeline_ids)
-            
-            # Skip identities with no pipeline IDs (completely remove them)
-            if len(pipeline_ids) == 0:
-                continue
-            
-            # Filter by pipeline_id if specified
-            if pipeline_id:
-                if pipeline_id not in pipeline_ids:
-                    continue
-            
-            # For non-admin users: filter by accessible pipelines
-            if current_user.role != "admin":
-                if not (pipeline_ids_set & set(user_pipelines)):
-                    continue
-            
-            # Accumulate statistics for current page
-            total_appearances += identity.appearances_count
-            unique_pipelines.update(pipeline_ids)
-            
+
+            pipeline_ids = sorted(pipelines_by_identity.get(identity.id, ()))
+
             # Verify best_snapshot_path exists on disk and convert to relative path for serving
             best_snapshot_path = identity.best_snapshot_path
             logger.debug(f"[IDENTITIES] 📸 Retrieving image for identity {identity.id} ({identity.display_name})")
@@ -1093,78 +1085,11 @@ async def list_unknown_identities(
                 "pipeline_ids": pipeline_ids  # List of pipeline IDs where this identity was seen
             })
         
-        # Calculate accurate statistics (only on first page for performance)
-        if page == 1 and stats_identities:
-            # Count identities that have pipeline IDs
-            total_with_pipelines = 0
-            total_appearances_all = 0
-            unique_pipelines_all = set()
-            
-            for identity in stats_identities:
-                # CRITICAL: Double-check that identity is UNKNOWN (safety check)
-                if identity.type != IdentityType.UNKNOWN:
-                    logger.warning(f"[SECURITY] Filtered out KNOWN identity {identity.id} from unknown stats (type: {identity.type})")
-                    continue
-                
-                pipeline_ids_set_all = set()
-                
-                # Check IdentityAppearance
-                appearance_result = await db.execute(
-                    select(IdentityAppearance.pipeline_id).where(
-                        IdentityAppearance.identity_id == identity.id
-                    ).distinct()
-                )
-                for row in appearance_result:
-                    if row[0]:
-                        pipeline_ids_set_all.add(row[0])
-                
-                # Check IdentityEmbedding
-                if not pipeline_ids_set_all:
-                    embedding_result = await db.execute(
-                        select(IdentityEmbedding.pipeline_id).where(
-                            IdentityEmbedding.identity_id == identity.id
-                        ).distinct()
-                    )
-                    for row in embedding_result:
-                        if row[0]:
-                            pipeline_ids_set_all.add(row[0])
-                
-                # Check Face->Detection
-                if not pipeline_ids_set_all:
-                    face_result = await db.execute(
-                        select(Detection.pipeline_id).join(
-                            Face, Face.detection_id == Detection.id
-                        ).where(
-                            Face.identity_id == identity.id
-                        ).distinct()
-                    )
-                    for row in face_result:
-                        if row[0]:
-                            pipeline_ids_set_all.add(row[0])
-                
-                # Only count if has pipeline IDs
-                if len(pipeline_ids_set_all) > 0:
-                    # Apply pipeline_id filter if specified
-                    if pipeline_id and pipeline_id not in pipeline_ids_set_all:
-                        continue
-                    
-                    # For non-admin users: filter by accessible pipelines
-                    if current_user.role != "admin":
-                        if not (pipeline_ids_set_all & set(user_pipelines)):
-                            continue
-                    
-                    total_with_pipelines += 1
-                    total_appearances_all += identity.appearances_count
-                    unique_pipelines_all.update(pipeline_ids_set_all)
-            
-            total = total_with_pipelines
-            total_appearances = total_appearances_all
-            unique_pipelines = unique_pipelines_all
-        else:
-            # For other pages, approximate from current page data
-            # Note: This is approximate - for exact stats, always use page 1
-            total = len(identity_list)  # Approximate - will be corrected when user goes to page 1
         
+        # `total` is a COUNT over the same conditions, so it is right on EVERY
+        # page. It used to be rebuilt by an N+1 loop on page 1 and set to
+        # len(current page) everywhere else, which collapsed total_pages to 1
+        # and made page 2 the last page whatever the data said.
         result = {
             "identities": identity_list,
             "total": total,
@@ -1177,7 +1102,7 @@ async def list_unknown_identities(
             "stats": {
                 "total_unknown": total,
                 "total_appearances": total_appearances,
-                "active_cameras": len(unique_pipelines)
+                "active_cameras": active_cameras
             }
         }
         
@@ -1260,44 +1185,14 @@ async def get_identity_details(
         )
         faces_count = faces_result.scalar() or 0
         
-        # Get unique pipeline IDs from multiple sources
-        pipeline_ids_set = set()
-        
-        # 1. From IdentityAppearance
-        appearance_result = await db.execute(
-            select(IdentityAppearance.pipeline_id).where(
-                IdentityAppearance.identity_id == identity_uuid
-            ).distinct()
-        )
-        for row in appearance_result:
-            if row[0]:
-                pipeline_ids_set.add(row[0])
-        
-        # 2. From IdentityEmbedding (fallback if no appearances)
-        if not pipeline_ids_set:
-            embedding_result = await db.execute(
-                select(IdentityEmbedding.pipeline_id).where(
-                    IdentityEmbedding.identity_id == identity_uuid
-                ).distinct()
-            )
-            for row in embedding_result:
-                if row[0]:
-                    pipeline_ids_set.add(row[0])
-        
-        # 3. From Face->Detection (fallback if no embeddings)
-        if not pipeline_ids_set:
-            face_result = await db.execute(
-                select(Detection.pipeline_id).join(
-                    Face, Face.detection_id == Detection.id
-                ).where(
-                    Face.identity_id == identity_uuid
-                ).distinct()
-            )
-            for row in face_result:
-                if row[0]:
-                    pipeline_ids_set.add(row[0])
-        
-        pipeline_ids = sorted(list(pipeline_ids_set))
+        # Effective camera membership, from the ONE shared definition. This
+        # detail view and check_identity_access (which decides whether the
+        # caller may open it at all) both used to hand-roll the same priority;
+        # if they drifted, a user could be granted access to an identity whose
+        # cameras the page then listed differently. Three queries became one.
+        resolved = await pipelines_for(db, [identity_uuid])
+        pipeline_ids_set = set().union(*resolved.values()) if resolved else set()
+        pipeline_ids = sorted(pipeline_ids_set)
         cameras_count = len(pipeline_ids)
         
         # Get image - prioritize database paths, then search storage
@@ -2972,23 +2867,17 @@ async def preview_merge(
         pipeline_distribution = {}
         all_pipelines = set()
         
+        # This gathered cameras per identity with its own copy of the rule that
+        # stopped after embeddings — no Face->Detection tier — so an identity
+        # known only from a detected face looked camera-less here while the
+        # listing the operator arrived from showed its camera. It also ran one
+        # or two queries PER identity. One query, and the same priority as
+        # everywhere else.
+        resolved = await pipelines_for(db, [i.id for i in identities.values()])
+
         for identity in identities.values():
-            pipeline_result = await db.execute(
-                select(IdentityAppearance.pipeline_id)
-                .where(IdentityAppearance.identity_id == identity.id)
-                .distinct()
-            )
-            pipelines = [row[0] for row in pipeline_result if row[0]]
-            
-            # Fallback to embeddings
-            if not pipelines:
-                emb_result = await db.execute(
-                    select(IdentityEmbedding.pipeline_id)
-                    .where(IdentityEmbedding.identity_id == identity.id)
-                    .distinct()
-                )
-                pipelines = [row[0] for row in emb_result if row[0]]
-            
+            pipelines = sorted(resolved.get(identity.id, set()))
+
             pipeline_distribution[str(identity.id)] = {
                 "pipelines": pipelines,
                 "count": len(pipelines),

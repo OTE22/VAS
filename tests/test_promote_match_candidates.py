@@ -663,7 +663,7 @@ def test_the_promote_modal_markup_is_extended_not_replaced():
     assert 'id="promote-candidates-warning"' in html
     assert 'id="promote-name"' in html, "the create-new path must remain"
     # The page's cache-buster is pinned by test_dashboard_system.py.
-    assert "?v=unknown-8" in html
+    assert "?v=unknown-9" in html
 
 
 # ---------------------------------------------------------------------------

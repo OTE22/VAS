@@ -393,7 +393,7 @@ def test_stale_quality_response_cannot_blank_the_results_panel():
 def test_search_routes_require_the_csrf_header():
     """Frontend and backend must land together or the page breaks."""
     for path, count in (("backend/routes/advanced_search.py", 2),
-                        ("backend/routes/batch_export.py", 3)):
+                        ("backend/routes/batch_export.py", 4)):
         source = read(f"/app/{path}")
         found = source.count("Depends(require_search_csrf)")
         assert found == count, f"{path}: {found} routes guarded, expected {count}"

@@ -434,59 +434,31 @@ async def check_identity_access(
     Returns True if user has access, False otherwise.
     Admin always has access.
     """
-    from db_models import Identity, IdentityAppearance, IdentityEmbedding, Face, Detection
-    from sqlalchemy import select
-    
+    # Imported here, not at module scope: backend.routes.identities imports
+    # this module, so a top-level import of anything importing it back would
+    # cycle. identity_pipelines itself depends only on db_models.
+    from backend.core.identity_pipelines import pipelines_for
+
     # Admin has access to all identities
     if current_user.role == "admin":
         return True
-    
+
     # Get user's accessible pipelines
     user_pipelines = await AuthService.get_user_pipelines(current_user.id, db)
     if not user_pipelines:
         return False
-    
-    # NOTE: We use identity_id as a string directly - SQLAlchemy handles UUID conversion automatically
-    # PostgreSQL UUID columns accept string comparisons - no need to convert to UUID object
-    # This avoids import dependencies and is simpler
-    
-    # Get identity's pipeline IDs from multiple sources
-    pipeline_ids_set = set()
-    
-    # 1. From IdentityAppearance
-    appearance_result = await db.execute(
-        select(IdentityAppearance.pipeline_id).where(
-            IdentityAppearance.identity_id == identity_id
-        ).distinct()
-    )
-    for row in appearance_result:
-        if row[0]:
-            pipeline_ids_set.add(row[0])
-    
-    # 2. From IdentityEmbedding (fallback if no appearances)
-    if not pipeline_ids_set:
-        embedding_result = await db.execute(
-            select(IdentityEmbedding.pipeline_id).where(
-                IdentityEmbedding.identity_id == identity_id
-            ).distinct()
-        )
-        for row in embedding_result:
-            if row[0]:
-                pipeline_ids_set.add(row[0])
-    
-    # 3. From Face->Detection (fallback if no embeddings)
-    if not pipeline_ids_set:
-        face_result = await db.execute(
-            select(Detection.pipeline_id).join(
-                Face, Face.detection_id == Detection.id
-            ).where(
-                Face.identity_id == identity_id
-            ).distinct()
-        )
-        for row in face_result:
-            if row[0]:
-                pipeline_ids_set.add(row[0])
-    
+
+    # Effective membership — appearances, else embeddings, else Face->Detection
+    # — comes from the ONE definition shared with the unknown-faces listing.
+    # This used to be a fourth hand-written copy of that priority; if it drifted
+    # from the listing's, an identity could be listed to a user and then refused
+    # on open, or the reverse. One query, not three.
+    #
+    # identity_id stays a string: PostgreSQL UUID columns compare against it
+    # directly, which is what every caller already passes.
+    resolved = await pipelines_for(db, [identity_id])
+    pipeline_ids_set = set().union(*resolved.values()) if resolved else set()
+
     # Check if any of the identity's pipelines are in user's accessible pipelines
     return bool(pipeline_ids_set & set(user_pipelines))
 

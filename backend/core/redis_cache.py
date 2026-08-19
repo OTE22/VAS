@@ -41,9 +41,18 @@ class RedisCacheService:
     - Unknown faces initial data
     - User-specific pipeline data
     
-    Cache keys format:
-    - dashboard:initial:{user_id}:{pipeline_hash}:{display_hours}
-    - unknown:initial:{user_id}:{pipeline_hash}:{page}:{page_size}:{filters_hash}
+    Cache key format — ONE shape, built by `_generate_cache_key`:
+
+        cache:{cache_type}:{user_part}:{params_hash}
+
+    where `user_part` is `user_{id}` or `all`, and `params_hash` is the first
+    12 hex of an md5 over every keyword argument. Every parameter that changes
+    the answer must be passed in, because nothing else distinguishes entries.
+
+    This docstring previously described a different, richer layout
+    (`dashboard:initial:{user_id}:{pipeline_hash}:{display_hours}`) that no
+    code produced. The per-user invalidation globs were written against that
+    fiction and therefore matched nothing — see `_user_scoped_pattern`.
     """
     
     def __init__(self):
@@ -151,21 +160,30 @@ class RedisCacheService:
             logger.warning(f"[REDIS_CACHE] Error deleting cache pattern {pattern}: {e}")
             return 0
     
+    def _user_scoped_pattern(self, cache_type: str, user_id: Optional[int]) -> str:
+        """Glob for one user's entries of a cache type, or all of them.
+
+        Must track `_generate_cache_key` exactly. Both per-user invalidations
+        used to ask for `cache:{type}:*:user_{id}:*`, which has one segment too
+        many: real keys are `cache:{type}:user_{id}:{hash}`, so the glob matched
+        NOTHING and a targeted invalidation silently cleared nothing at all. It
+        went unnoticed because every caller passes user_id=None and takes the
+        global path.
+
+        `is not None`, not truthiness: user_id=0 would otherwise fall through
+        and wipe every user's entries instead of that one's.
+        """
+        if user_id is not None:
+            return f"cache:{cache_type}:user_{user_id}:*"
+        return f"cache:{cache_type}:*"
+
     async def invalidate_dashboard_cache(self, user_id: Optional[int] = None) -> int:
         """Invalidate all dashboard cache entries for a user (or all users if None)"""
-        if user_id:
-            pattern = f"cache:dashboard:*:user_{user_id}:*"
-        else:
-            pattern = "cache:dashboard:*"
-        return await self.delete(pattern)
-    
+        return await self.delete(self._user_scoped_pattern("dashboard", user_id))
+
     async def invalidate_unknown_cache(self, user_id: Optional[int] = None) -> int:
         """Invalidate all unknown faces cache entries for a user (or all users if None)"""
-        if user_id:
-            pattern = f"cache:unknown:*:user_{user_id}:*"
-        else:
-            pattern = "cache:unknown:*"
-        return await self.delete(pattern)
+        return await self.delete(self._user_scoped_pattern("unknown", user_id))
     
     async def invalidate_all(self) -> int:
         """Invalidate all cache entries"""

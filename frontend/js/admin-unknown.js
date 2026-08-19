@@ -22,8 +22,10 @@ let showAllUnknowns = false;
 let currentIdentityId = null;
 let multiSelectMode = false;
 let selectedIdentities = new Set();
-let pipelineGroupsPerPage = 12; // Number of pipeline groups per page
-let allPipelineGroups = []; // Store all pipeline groups for pagination
+// (pipelineGroupsPerPage removed: it drove a SECOND pagination layer over the
+// server's, sharing currentPage with it. Paging is the server's alone.)
+let allPipelineGroups = []; // Pipeline groups built from the current server page
+let pageClampRetried = false; // bounds the re-fetch when the result set shrinks
 
 // WebSocket connection for real-time unknown face updates
 let ws = null;
@@ -329,8 +331,7 @@ function setupEventListeners() {
 
     // Filters
     document.getElementById('apply-filters-btn').addEventListener('click', () => {
-        currentPage = 1;
-        applyFilters();
+        applyFilters(); // resets pagination itself
     });
 
     document.getElementById('clear-filters-btn').addEventListener('click', () => {
@@ -343,32 +344,26 @@ function setupEventListeners() {
         showAllBtn.addEventListener('click', () => {
             showAllUnknowns = !showAllUnknowns;
             showAllBtn.setAttribute('aria-pressed', showAllUnknowns ? 'true' : 'false');
-            currentPage = 1;
-            allPipelineGroups = [];
+            resetPagination(); // the display window changed → a different result set
             loadUnknownFaces();
         });
     }
 
-    // Pagination - if we have stored pipeline groups, just re-render, otherwise reload
+    // Pagination is the SERVER's. It used to re-slice the pipeline groups
+    // already in memory whenever any existed — which, after the first load,
+    // was always — so Next never fetched and nothing past backend page 1 was
+    // reachable. Both buttons now always go back to the API.
     document.getElementById('prev-page-btn').addEventListener('click', () => {
         if (currentPage > 1) {
             currentPage--;
-            if (allPipelineGroups.length > 0) {
-                renderPipelineGroupsPage();
-            } else {
-                loadUnknownFaces();
-            }
+            loadUnknownFaces();
         }
     });
 
     document.getElementById('next-page-btn').addEventListener('click', () => {
         if (currentPage < totalPages) {
             currentPage++;
-            if (allPipelineGroups.length > 0) {
-                renderPipelineGroupsPage();
-            } else {
-                loadUnknownFaces();
-            }
+            loadUnknownFaces();
         }
     });
 
@@ -615,7 +610,7 @@ async function loadUnknownFaces() {
                     let path = identity.best_snapshot_path;
                     if (path.startsWith('storage/')) {
                         identity.snapshot_url = `/${path}`;
-                    } else if (!path.startswith('/')) {
+                    } else if (!path.startsWith('/')) {
                         identity.snapshot_url = `/storage/${path}`;
                     } else {
                         identity.snapshot_url = path;
@@ -623,9 +618,20 @@ async function loadUnknownFaces() {
                 }
             });
         }
-        
-        // Note: Pagination will be calculated after grouping by pipeline
-        // This is just a placeholder - will be updated after pipeline grouping
+
+        // Pagination is the server's answer, taken verbatim.
+        totalPages = Math.max(1, data.total_pages || 1);
+        if (currentPage > totalPages) {
+            // The result set shrank between requests (a deletion, a promotion).
+            // Land on the last real page instead of an empty one. Guarded so a
+            // set shrinking on every poll cannot spin.
+            currentPage = totalPages;
+            if (!pageClampRetried) {
+                pageClampRetried = true;
+                return loadUnknownFaces();
+            }
+        }
+        pageClampRetried = false;
 
         // Update stats from backend (accurate calculations)
         if (data.stats) {
@@ -668,9 +674,16 @@ async function loadUnknownFaces() {
 
         // Group identities by pipeline (skip identities with no pipeline IDs)
         const groupedByPipeline = {};
-        
+        // When a camera is selected, group under THAT camera only. A person
+        // seen on three cameras carries all three in pipeline_ids, so grouping
+        // by each of them drew groups for cameras the operator had filtered
+        // out — the backend was returning the right people, and the page still
+        // looked like the filter had been ignored.
+        const only = currentFilters.pipeline_id || null;
+
         unknownIdentities.forEach(identity => {
-            const pipelineIds = identity.pipeline_ids || [];
+            const pipelineIds = (identity.pipeline_ids || [])
+                .filter(pipelineId => !only || pipelineId === only);
             // Only process identities that have at least one pipeline ID
             if (pipelineIds.length > 0) {
                 pipelineIds.forEach(pipelineId => {
@@ -957,11 +970,13 @@ function findIdentityInPipelineGroups(identityId, pipelineId) {
     return null;
 }
 
-// Helper to get currently visible pipeline groups
+// Helper to get currently visible pipeline groups.
+// Every group in memory was built from the page the server just returned, so
+// all of them are on screen. This used to slice by currentPage against a
+// client-side page size, which after the paging change would have called every
+// group invisible from page 2 on and silently dropped live WebSocket updates.
 function getCurrentPageGroups() {
-    const startIndex = (currentPage - 1) * pipelineGroupsPerPage;
-    const endIndex = startIndex + pipelineGroupsPerPage;
-    return allPipelineGroups.slice(startIndex, endIndex);
+    return allPipelineGroups;
 }
 
 // Update a single identity card in place (without reloading page)
@@ -1285,42 +1300,24 @@ window.addEventListener('beforeunload', () => {
 });
 
 // Render current page of pipeline groups
+// Renders the groups built from the page the SERVER returned. Grouping by
+// pipeline is presentation only: it must never become a second pagination
+// layer, which is what it had quietly turned into — the backend paged
+// identities, this paged groups, and both drove off the same `currentPage`.
 function renderPipelineGroupsPage() {
     const grid = document.getElementById('unknown-grid');
     grid.innerHTML = ''; // Clear existing content
-    
+
     // Set grid style for pipeline groups
     grid.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 0.75rem; margin: 0.15rem 0 0 0;';
-    
-    if (allPipelineGroups.length === 0) {
-        return;
-    }
-    
-    // Calculate pagination for pipeline groups
-    const totalPipelineGroups = allPipelineGroups.length;
-    totalPages = Math.max(1, Math.ceil(totalPipelineGroups / pipelineGroupsPerPage));
-    
-    // Ensure current page is valid
-    if (currentPage > totalPages) {
-        currentPage = totalPages;
-    }
-    if (currentPage < 1) {
-        currentPage = 1;
-    }
-    
-    // Update pagination controls
+
+    // Pagination controls reflect the server's answer, not the group count.
     document.getElementById('current-page').textContent = currentPage;
     document.getElementById('total-pages').textContent = totalPages;
-    document.getElementById('prev-page-btn').disabled = currentPage === 1;
+    document.getElementById('prev-page-btn').disabled = currentPage <= 1;
     document.getElementById('next-page-btn').disabled = currentPage >= totalPages;
-    
-    // Get current page of pipeline groups
-    const startIndex = (currentPage - 1) * pipelineGroupsPerPage;
-    const endIndex = startIndex + pipelineGroupsPerPage;
-    const currentPageGroups = allPipelineGroups.slice(startIndex, endIndex);
-    
-    // Render only current page pipeline groups
-    currentPageGroups.forEach(group => {
+
+    allPipelineGroups.forEach(group => {
         const groupSection = createPipelineGroup(group.id, group.identities);
         grid.appendChild(groupSection);
     });
@@ -1517,22 +1514,36 @@ function createIdentityCard(identity) {
     return card;
 }
 
+// A `<input type="date">` value is the operator's LOCAL calendar day, and
+// last_seen_at is stored as UTC. Sending the bare "YYYY-MM-DD" compared a local
+// day against UTC instants and misplaced everything within the browser's offset
+// of midnight. Convert here, where the offset is actually known — the same fix
+// admin-ml-ops.js makes for its datetime-local input.
+//
+// NOTE `new Date("2026-08-18")` is parsed as UTC midnight by spec; only the
+// component form is local. `dayOffset` rolls month and year over on its own.
+function localDayToUtcInstant(value, dayOffset = 0) {
+    const [year, month, day] = value.split('-').map(Number);
+    return new Date(year, month - 1, day + dayOffset).toISOString();
+}
+
 // Apply filters
 function applyFilters() {
     currentFilters = {};
-    
+
     const dateFrom = document.getElementById('date-from').value;
     const dateTo = document.getElementById('date-to').value;
     const pipeline = document.getElementById('pipeline-filter').value;
     const minAppearances = document.getElementById('min-appearances').value;
 
-    if (dateFrom) currentFilters.date_from = dateFrom;
-    if (dateTo) currentFilters.date_to = dateTo;
+    if (dateFrom) currentFilters.date_from = localDayToUtcInstant(dateFrom);
+    // date_to is EXCLUSIVE server-side, so "to 18 Aug" is sent as the local
+    // start of 19 Aug and the whole of the 18th is included.
+    if (dateTo) currentFilters.date_to = localDayToUtcInstant(dateTo, 1);
     if (pipeline) currentFilters.pipeline_id = pipeline;
     if (minAppearances) currentFilters.min_appearances = parseInt(minAppearances);
 
-    currentPage = 1; // Reset to first page when filters change
-    allPipelineGroups = []; // Clear stored groups
+    resetPagination(); // the result set changed; page N of the old one is meaningless
     loadUnknownFaces();
 }
 
@@ -1543,9 +1554,15 @@ function clearFilters() {
     document.getElementById('pipeline-filter').value = '';
     document.getElementById('min-appearances').value = '1';
     currentFilters = {};
-    currentPage = 1; // Reset to first page
-    allPipelineGroups = []; // Clear stored groups
+    resetPagination();
     loadUnknownFaces();
+}
+
+// Any change to WHAT is being listed returns to page 1. Staying on page 5 of a
+// result set that no longer exists is how a filtered view looks empty.
+function resetPagination() {
+    currentPage = 1;
+    allPipelineGroups = [];
 }
 
 // Render advanced timeline visualization

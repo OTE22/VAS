@@ -151,6 +151,40 @@ docker exec "$API" curl -s -m 3 http://localhost:8000/health/detailed 2>/dev/nul
   || { echo "regression API never became healthy:"; docker logs "$API" 2>&1 | tail -40; exit 1; }
 docker logs "$API" 2>&1 | grep -E "schema verified at Alembic head|feature definitions verified" | tail -2
 
+# ---- 2c. seed the Chroma embedding model from the dev cache.
+#
+# The SQL-agent knowledge base embeds with all-MiniLM-L6-v2, which chromadb
+# downloads (~80 MB) from chroma-onnx-models.s3.amazonaws.com on first use.
+# This stack gets a FRESH fr_regression_chroma volume every run (down -v), so
+# it re-downloaded it every time — and on a slow link that does not finish:
+# `[KB] Scoped search failed (The read operation timed out in query.)`, and
+# tests/test_kb_isolation.py fails with no examples. A suite that reaches the
+# public internet mid-run is neither hermetic nor reproducible.
+#
+# Best effort by design: no dev container, no cached model, or a failed copy
+# just falls back to the download. Never fails the run.
+CHROMA_CACHE="/home/appuser/.cache/chroma/onnx_models"
+if ! docker exec "$API" test -d "$CHROMA_CACHE/all-MiniLM-L6-v2/onnx" 2>/dev/null; then
+  if dev_running "$DEV_API_CONTAINER" && \
+     docker exec "$DEV_API_CONTAINER" test -d "$CHROMA_CACHE/all-MiniLM-L6-v2/onnx" 2>/dev/null; then
+    echo "== seeding the Chroma embedding model from $DEV_API_CONTAINER (offline)"
+    # Streamed container-to-container, never through a host path. `docker cp`
+    # via a temp directory cannot work here: mktemp yields a git-bash path
+    # (/tmp/...) and the native Windows docker binary reads that literally as
+    # C:\tmp\... — "invalid output path: directory C:\tmp does not exist".
+    if docker exec "$DEV_API_CONTAINER" tar -C /home/appuser/.cache/chroma -cf - onnx_models 2>>"$RUN_LOG" \
+       | docker exec -i -u root "$API" tar -C /home/appuser/.cache/chroma -xf - 2>>"$RUN_LOG"; then
+      docker exec -u root "$API" chown -R appuser:appuser /home/appuser/.cache/chroma >>"$RUN_LOG" 2>&1 || true
+      echo "   embedding model in place: no download needed"
+    else
+      echo "   seeding failed; the KB will download the model (see $RUN_LOG)"
+    fi
+  else
+    echo "== no cached Chroma model to seed from; the KB will download it"
+    echo "   (slow link => tests/test_kb_isolation.py may time out)"
+  fi
+fi
+
 # ---- 3. isolation assertions (abort before pytest)
 echo "== isolation assertions"
 docker exec -w /app "$API" python scripts/regression_isolation_check.py \
