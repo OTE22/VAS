@@ -84,20 +84,44 @@
         try { target.focus(); } catch (ignored) { /* detached mid-flight */ }
     }
 
+    /** What an element looked like BEFORE we suppressed it, so close() can put
+     *  it back exactly. Blindly removing aria-hidden / clearing inert on close
+     *  would EXPOSE an element that the page had deliberately hidden before any
+     *  modal opened — a real risk now this module runs on every page rather
+     *  than only Unknown Faces. */
+    var priorSuppression = new WeakMap();
+
     /** Non-interactive but visible: the "there is a modal above you" state.
      *  Never applied while a descendant still owns focus — open() moves focus
      *  into the new modal FIRST, because aria-hidden on a focused subtree is
      *  both an a11y violation and a screen-reader trap. */
     function suppress(el) {
+        if (!priorSuppression.has(el)) {
+            priorSuppression.set(el, {
+                ariaHidden: el.getAttribute('aria-hidden'),          // null when absent
+                inert: ('inert' in el) ? el.inert : null,
+                hadClass: el.classList.contains('is-stack-under')
+            });
+        }
         el.classList.add('is-stack-under');
         el.setAttribute('aria-hidden', 'true');
         if ('inert' in el) { el.inert = true; }
     }
 
+    /** Restore the captured state verbatim. Idempotent: an element we never
+     *  suppressed is left untouched rather than being "cleaned". */
     function unsuppress(el) {
-        el.classList.remove('is-stack-under');
-        el.removeAttribute('aria-hidden');
-        if ('inert' in el) { el.inert = false; }
+        var prior = priorSuppression.get(el);
+        if (!prior) { return; }
+        priorSuppression.delete(el);
+
+        if (!prior.hadClass) { el.classList.remove('is-stack-under'); }
+        if (prior.ariaHidden === null) {
+            el.removeAttribute('aria-hidden');
+        } else {
+            el.setAttribute('aria-hidden', prior.ariaHidden);
+        }
+        if ('inert' in el && prior.inert !== null) { el.inert = prior.inert; }
     }
 
     /** Everything that makes an entry's element "closed", EXCEPT focus
@@ -108,9 +132,11 @@
         el.style.display = 'none';
         el.style.zIndex = '';
         el.classList.remove('is-stack-nested');
-        el.classList.remove('is-stack-under');
-        el.removeAttribute('aria-hidden');
-        if ('inert' in el) { el.inert = false; }
+        // Same rule as unsuppress(): restore what was there before, never
+        // blanket-clear. A modal that was itself suppressed (something opened
+        // on top of it) must not come back with the page's original
+        // aria-hidden/inert stripped off.
+        unsuppress(el);
         // The callback runs AFTER the entry has left the stack, so a legacy
         // close function that calls ModalStack.close() again hits the
         // idempotent no-op path instead of recursing.
@@ -118,6 +144,145 @@
             try { entry.onClose(el, reason); } catch (err) {
                 console.error('[ModalStack] onClose failed for #' + (el.id || '?'), err);
             }
+        }
+    }
+
+    // ---- page scroll lock -------------------------------------------------
+    //
+    // Two scrolling models exist in this app and the lock must handle both:
+    //
+    //   app shell   admin.css sets html/body { overflow: hidden; height: 100vh }
+    //               and each page designates an inner overflow-y:auto scroller.
+    //               window.scrollY is always 0; freezing the inner element is
+    //               what actually stops the background moving.
+    //   document    signin.html (no admin.css) scrolls normally.
+    //
+    // The previous lock was a CSS rule scoped to ONE page's scroller
+    // (`body.modal-stack-locked .intelligence-content`), so it did nothing
+    // anywhere else — which mattered the moment this module started loading on
+    // every page.
+    //
+    // Captured state is restored verbatim on final close: whatever inline
+    // styles the page had before are put back, not cleared.
+
+    var pageLock = null;   // non-null only while at least one modal is open
+
+    function verticalScrollers(exclude) {
+        // Every element that is actually scrolling right now.
+        //
+        // This was a depth-limited walk (4 levels) on the assumption that a
+        // page's scroller sits near the top of the tree. It does on
+        // /admin/intelligence (depth 2) and it does NOT on /admin/settings,
+        // where #settings-container and .table-container are at depth 5 — so
+        // the lock silently missed them and the background still scrolled
+        // behind an open modal. Measured, not assumed: the probe scrolls the
+        // background while the modal is open and fails if it moves.
+        //
+        // Runs once per modal open, not per frame, so a single full query is
+        // cheap. Capped so a pathological DOM cannot stall the open.
+        //
+        // `exclude` is the modal being opened, and skipping its subtree is
+        // load-bearing rather than an optimisation. lockPage() runs AFTER the
+        // dialog is displayed, so a tall dialog is already scrolling by then
+        // and was collected like any other scroller — then frozen with
+        // overflow:hidden. The dialog could no longer scroll itself, and since
+        // the page behind it is locked too, everything past the fold became
+        // unreachable: the bottom of a form, its buttons, everything.
+        //
+        // Freeze the BACKGROUND. Never freeze the dialog.
+        var found = [];
+        var all = document.body.querySelectorAll('*');
+        var limit = Math.min(all.length, 4000);
+        for (var i = 0; i < limit; i++) {
+            var el = all[i];
+            if (exclude && (el === exclude || exclude.contains(el))) { continue; }
+            if (el.scrollHeight > el.clientHeight + 1) {
+                var overflowY = getComputedStyle(el).overflowY;
+                if (overflowY === 'auto' || overflowY === 'scroll') { found.push(el); }
+            }
+        }
+        return found;
+    }
+
+    function lockPage(exclude) {
+        if (pageLock) { return; }   // already locked by an outer modal
+        var body = document.body;
+        var docEl = document.documentElement;
+
+        // Does the DOCUMENT scroll, or does an inner element?
+        var documentScrolls = docEl.scrollHeight > docEl.clientHeight + 1;
+        var scrollY = window.scrollY || window.pageYOffset || 0;
+
+        // Only compensate when a scrollbar is really there to disappear;
+        // padding the body unconditionally is itself a horizontal jump.
+        var scrollbarWidth = window.innerWidth - docEl.clientWidth;
+
+        pageLock = {
+            scrollY: scrollY,
+            documentScrolls: documentScrolls,
+            body: {
+                overflow: body.style.overflow,
+                position: body.style.position,
+                top: body.style.top,
+                left: body.style.left,
+                right: body.style.right,
+                width: body.style.width,
+                paddingRight: body.style.paddingRight
+            },
+            scrollers: verticalScrollers(exclude).map(function (el) {
+                return { el: el, overflow: el.style.overflow, scrollTop: el.scrollTop };
+            })
+        };
+
+        if (documentScrolls) {
+            // position:fixed is the only technique that also stops iOS rubber
+            // banding; the negative top keeps the page visually still.
+            body.style.position = 'fixed';
+            body.style.top = (-scrollY) + 'px';
+            body.style.left = '0';
+            body.style.right = '0';
+            body.style.width = '100%';
+        }
+        body.style.overflow = 'hidden';
+        if (scrollbarWidth > 0) {
+            var current = parseInt(getComputedStyle(body).paddingRight, 10) || 0;
+            body.style.paddingRight = (current + scrollbarWidth) + 'px';
+        }
+
+        // Freezing an element's overflow preserves its scrollTop, so the
+        // background stays exactly where the user left it.
+        pageLock.scrollers.forEach(function (saved) {
+            saved.el.style.overflow = 'hidden';
+        });
+
+        body.classList.add('modal-stack-locked');
+    }
+
+    function unlockPage() {
+        if (!pageLock) { return; }
+        var body = document.body;
+        var saved = pageLock;
+        pageLock = null;
+
+        // Restore the captured inline styles EXACTLY — including back to ''
+        // where the page had none, so we never leave our own values behind.
+        body.style.overflow = saved.body.overflow;
+        body.style.position = saved.body.position;
+        body.style.top = saved.body.top;
+        body.style.left = saved.body.left;
+        body.style.right = saved.body.right;
+        body.style.width = saved.body.width;
+        body.style.paddingRight = saved.body.paddingRight;
+
+        saved.scrollers.forEach(function (entry) {
+            entry.el.style.overflow = entry.overflow;
+            entry.el.scrollTop = entry.scrollTop;
+        });
+
+        body.classList.remove('modal-stack-locked');
+
+        if (saved.documentScrolls) {
+            window.scrollTo(0, saved.scrollY);
         }
     }
 
@@ -129,7 +294,8 @@
             unsuppress(top.el);
             if (stack.length === 1) { top.el.classList.remove('is-stack-nested'); }
         } else {
-            document.body.classList.remove('modal-stack-locked');
+            // Last modal gone: restore the page exactly as it was.
+            unlockPage();
         }
 
         // A trigger is only worth restoring if it still exists, is visible,
@@ -161,6 +327,12 @@
             el: el,
             backdropClose: !!opts.backdropClose,
             onClose: opts.onClose || null,
+            // Optional veto. Some dialogs must refuse to close at certain
+            // moments — the watchlist editor guards `state.saving` so a save
+            // in flight cannot be abandoned by an accidental Escape or
+            // backdrop click. Without this hook, adopting the shared stack
+            // would have silently removed that protection.
+            canClose: typeof opts.canClose === 'function' ? opts.canClose : null,
             trigger: document.activeElement && document.activeElement !== document.body
                 ? document.activeElement : null
         };
@@ -178,7 +350,9 @@
         focusInto(el);
 
         if (previous) { suppress(previous.el); }
-        if (stack.length === 1) { document.body.classList.add('modal-stack-locked'); }
+        // Pass the dialog so the lock freezes the background around it and
+        // not the dialog's own scroller.
+        if (stack.length === 1) { lockPage(el); }
     }
 
     /** Close el. If other modals sit above it, they cascade-close first,
@@ -190,6 +364,19 @@
         var index = entryFor(el);
         if (index === -1) { return; }
         reason = reason || 'api';
+
+        // A dialog may refuse. The veto applies to user-driven dismissal
+        // (Escape, backdrop) — an explicit programmatic close with
+        // reason 'force' always wins, so a page can still tear its own modal
+        // down when its work finishes.
+        if (reason !== 'force') {
+            for (var v = stack.length - 1; v >= index; v--) {
+                var candidate = stack[v];
+                if (candidate.canClose && candidate.canClose(candidate.el, reason) === false) {
+                    return;
+                }
+            }
+        }
 
         // The focus target for the whole operation is the trigger recorded
         // by the LOWEST modal being closed — that element lives in whatever

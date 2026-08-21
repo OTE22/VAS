@@ -815,6 +815,9 @@ class Settings(BaseSettings):
     EMBEDDING_RETENTION_MONTHS: int = Field(default=12)
     INACTIVE_THRESHOLD_DAYS: int = Field(default=180)
     IDENTITY_CLEANUP_INTERVAL_HOURS: int = Field(default=24)
+    # Camera-derived vectors only. Enrollment embeddings (one per gallery
+    # photo) are never pruned by retention — they are bounded by the image
+    # cap and by the administrator who added them.
     MAX_EMBEDDINGS_PER_IDENTITY: int = Field(default=10)
 
     # =====================================================

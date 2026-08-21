@@ -226,8 +226,14 @@ function openCoordinatesModal(pipelineId) {
     document.getElementById('latitude-input').value = pipeline?.latitude ?? '';
     document.getElementById('longitude-input').value = pipeline?.longitude ?? '';
     
-    // Show modal
-    document.getElementById('coordinates-modal').style.display = 'flex';
+    // Show modal via the shared lifecycle. Escape and backdrop now close it
+    // too — and both route through closeCoordinatesModal(), so the WebGL map
+    // is disposed however the dialog is dismissed. Before, only the explicit
+    // close button released it.
+    window.ModalStack.open(document.getElementById('coordinates-modal'), {
+        backdropClose: true,
+        onClose: () => closeCoordinatesModal()
+    });
     
     // Initialize map (will be recreated each time to ensure clean state)
     setTimeout(() => {
@@ -241,9 +247,20 @@ function openCoordinatesModal(pipelineId) {
 }
 
 function closeCoordinatesModal() {
-    document.getElementById('coordinates-modal').style.display = 'none';
+    const modal = document.getElementById('coordinates-modal');
+    if (!modal) return;
+    if (window.ModalStack.isOpen(modal)) {
+        // Re-enters here through onClose once the entry has left the stack,
+        // so the disposal below runs exactly once per close.
+        window.ModalStack.close(modal);
+        return;
+    }
+    modal.style.display = 'none';
     currentEditingPipelineId = null;
     // Dispose the WebGL map; it is rebuilt on next open with fresh inputs.
+    // Leaking a MapLibre context per open is a real resource leak, so this
+    // cleanup is preserved exactly and is now reached from Escape and
+    // backdrop dismissal as well.
     if (coordinatesMarker) { coordinatesMarker.remove(); coordinatesMarker = null; }
     if (coordinatesMap) { coordinatesMap.remove(); coordinatesMap = null; }
 }

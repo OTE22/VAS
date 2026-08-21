@@ -14,7 +14,6 @@ const API_BASE = '/api/admin/webhook-credentials';
 
 let cacheTtlSeconds = 30;
 let pendingRevoke = null;     // { id, name }
-let lastFocused = null;       // restored when a modal closes
 
 /* -------------------------------------------------------------------------
    helpers
@@ -271,22 +270,32 @@ function showToken(name, token) {
     const field = byId('token-value');
     if (!modal || !field) return;
 
-    lastFocused = document.activeElement;
     setText('token-modal-name', name);
     setText('copy-status', '');
     field.value = token;
+    // This page hides dialogs with the `hidden` attribute rather than
+    // `display`. Both are kept in sync: `hidden` carries the semantics,
+    // ModalStack owns layering, Escape, backdrop, focus and the scroll lock.
+    // Focus restore is the stack's too, so lastFocused is not tracked here.
     modal.hidden = false;
+    window.ModalStack.open(modal, { backdropClose: true, onClose: () => dismissToken() });
     field.focus();
     field.select();
 }
 
 function dismissToken() {
     const modal = byId('token-modal');
+    if (modal && window.ModalStack.isOpen(modal)) {
+        window.ModalStack.close(modal);   // re-enters here via onClose
+        return;
+    }
     const field = byId('token-value');
-    if (field) field.value = '';        // the only copy in the DOM, cleared
+    // Security cleanup, preserved and now reached from Escape and backdrop
+    // dismissal as well as the button: this is the only copy of the one-time
+    // token in the DOM.
+    if (field) field.value = '';
     if (modal) modal.hidden = true;
     setText('copy-status', '');
-    restoreFocus();
 }
 
 async function copyToken() {
@@ -321,7 +330,6 @@ function openRevokeModal(id, name) {
     const confirmBtn = byId('confirm-revoke-btn');
     if (!modal || !confirmInput || !confirmBtn) return;
 
-    lastFocused = document.activeElement;
     setText('revoke-modal-name', name);
     setText('revoke-warning',
         `${name} will stop being accepted, and the token cannot be restored — issuing a `
@@ -331,14 +339,20 @@ function openRevokeModal(id, name) {
     confirmInput.value = '';
     confirmBtn.disabled = true;
     modal.hidden = false;
+    window.ModalStack.open(modal, { backdropClose: true, onClose: () => closeRevokeModal() });
     confirmInput.focus();
 }
 
 function closeRevokeModal() {
     const modal = byId('revoke-modal');
+    if (modal && window.ModalStack.isOpen(modal)) {
+        window.ModalStack.close(modal);
+        return;
+    }
     if (modal) modal.hidden = true;
+    // Business cleanup, preserved: a stale pendingRevoke would revoke the
+    // wrong credential on the next confirm.
     pendingRevoke = null;
-    restoreFocus();
 }
 
 async function confirmRevoke() {
@@ -362,12 +376,6 @@ async function confirmRevoke() {
     }
 }
 
-function restoreFocus() {
-    if (lastFocused && typeof lastFocused.focus === 'function') {
-        lastFocused.focus();
-    }
-    lastFocused = null;
-}
 
 /* -------------------------------------------------------------------------
    wiring

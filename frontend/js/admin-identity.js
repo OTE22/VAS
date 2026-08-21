@@ -438,9 +438,23 @@
     // interpolated the watchlist NAME into innerHTML unescaped)
     // ============================================
 
+    /** Close an identity-page modal through the shared stack, falling back to
+     *  a plain hide if it was never opened through it. */
+    function closeIdentityPageModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
+        modal.style.display = 'none';
+    }
+
     async function openWatchlistModal() {
         const modal = document.getElementById('add-to-watchlist-modal');
-        modal.style.display = 'flex';
+        // Shared lifecycle: layering, Escape, backdrop, focus containment and
+        // the page scroll lock.
+        window.ModalStack.open(modal, {
+            backdropClose: true,
+            onClose: () => closeIdentityPageModal('add-to-watchlist-modal')
+        });
         document.getElementById('watchlist-identity-name').textContent = 'Loading...';
 
         const select = document.getElementById('watchlist-select');
@@ -521,7 +535,7 @@
             }
 
             showNotification('Identity added to watchlist', 'success');
-            document.getElementById('add-to-watchlist-modal').style.display = 'none';
+            closeIdentityPageModal('add-to-watchlist-modal');
             // Refresh the membership section so the page reflects the change.
             renderWatchlists(await loadWatchlists());
 
@@ -541,7 +555,10 @@
 
     async function openLiveAlertModal() {
         const modal = document.getElementById('create-live-alert-modal');
-        modal.style.display = 'flex';
+        window.ModalStack.open(modal, {
+            backdropClose: true,
+            onClose: () => closeIdentityPageModal('create-live-alert-modal')
+        });
         document.getElementById('live-alert-identity-name').textContent = 'Loading...';
         document.getElementById('live-alert-identity-id').textContent = state.identityId;
 
@@ -643,7 +660,7 @@
             // and let the user decide.
             showNotification(
                 `Live alert "${name}" created — see it on the Live Alerts page`, 'success');
-            document.getElementById('create-live-alert-modal').style.display = 'none';
+            closeIdentityPageModal('create-live-alert-modal');
 
         } catch (error) {
             console.error('Error creating live alert:', error);
@@ -676,7 +693,7 @@
             const button = document.getElementById(buttonId);
             if (button) {
                 button.addEventListener('click', () => {
-                    document.getElementById(modalId).style.display = 'none';
+                    closeIdentityPageModal(modalId);
                 });
             }
         });

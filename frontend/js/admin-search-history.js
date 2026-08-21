@@ -57,6 +57,11 @@
         elements.loadMoreBtn.addEventListener('click', loadMore);
 
         elements.exportHistoryBtn.addEventListener('click', () => {
+            // Shared lifecycle; .active is kept because the page's CSS binds
+            // .modal.active for its transition.
+            window.ModalStack.open(elements.exportModal, {
+                backdropClose: true, onClose: () => closeExportModal()
+            });
             elements.exportModal.classList.add('active');
         });
 
@@ -70,12 +75,8 @@
             }
         });
 
-        // Close modal on outside click
-        elements.exportModal.addEventListener('click', (e) => {
-            if (e.target === elements.exportModal) {
-                closeExportModal();
-            }
-        });
+        // Backdrop clicks are ModalStack's (opted in at open time); a second
+        // listener here would close twice.
     }
 
     async function loadHistory() {
@@ -293,7 +294,10 @@
     }
 
     function closeExportModal() {
-        elements.exportModal.classList.remove('active');
+        const modal = elements.exportModal;
+        if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
+        modal.classList.remove('active');
     }
 
     async function clearHistory() {
@@ -455,14 +459,17 @@
         `;
         
         // Show modal
+        window.ModalStack.open(modal, {
+            backdropClose: true, onClose: () => closeDetailsModal()
+        });
         modal.classList.add('active');
     }
 
     function closeDetailsModal() {
         const modal = document.getElementById('search-details-modal');
-        if (modal) {
-            modal.classList.remove('active');
-        }
+        if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
+        modal.classList.remove('active');
     }
 
     function showNotification(message, type = 'info') {

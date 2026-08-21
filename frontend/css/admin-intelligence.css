@@ -81,7 +81,7 @@
     margin-bottom: 2rem;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     position: relative;
-    z-index: 10002;
+    z-index: var(--z-page-popover, 900);
 }
 
 .identity-selector-label {
@@ -164,7 +164,7 @@
     border: 2px solid rgba(0, 255, 150, 0.3);
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-    z-index: 1000;
+    z-index: var(--z-page-popover, 900);
     display: none;
     max-height: 500px;
     overflow: hidden;
@@ -376,7 +376,7 @@
     position: relative;
     width: 100%;
     margin-bottom: 1rem;
-    z-index: 10001;
+    z-index: var(--z-page-popover, 900);
 }
 
 .identity-selector-trigger {
@@ -430,9 +430,15 @@
     border: 2px solid rgba(0, 255, 150, 0.3);
     border-radius: 12px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-    z-index: 10000;
-    max-height: 500px;
-    min-width: 600px;
+    z-index: var(--z-page-popover, 900);
+    /* Taller so more faces are on screen at once; vh-relative so it still
+       fits a short laptop viewport rather than running off the bottom. */
+    max-height: min(72vh, 680px);   /* JS narrows this to the real space on open */
+    /* Wider: the list shows a face thumbnail, name, type and last-seen per
+       row, and 600px left the name column cramped. 90vw still caps it. */
+    /* min-width beats max-width in the cascade, so a literal 760px
+       overflowed narrow viewports no matter what max-width said. */
+    min-width: min(760px, 92vw);
     width: max-content;
     max-width: 90vw;
     display: flex;
@@ -477,8 +483,31 @@
     min-width: 80px;
 }
 
+/* The panel owns its own controls.
+   This page renders the identity selector INSIDE <div class="form-group">, and
+   admin.css carries a generic `.form-group input, .form-group select { width:
+   100% }`. That rule reached through the wrapper into the panel's filter row:
+   the Type <select> was forced to 100% (508px measured at 1366px wide) and the
+   search box was squeezed to 44px — too narrow to type in, which is exactly
+   the reported symptom. /admin/security-intelligence renders the same
+   component outside a .form-group, so it was unaffected and its search box
+   measured 474px. Resetting here keeps the component identical wherever it is
+   mounted instead of depending on its container. */
+.identity-selector-panel input,
+.identity-selector-panel select {
+    width: auto;
+    padding: 0.6rem 1rem;
+    border-width: 1px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 400;
+}
+
 .filter-search {
     flex: 1;
+    /* Without this the input's intrinsic min-width lets a greedy sibling
+       squeeze it; it must stay usable at any panel width. */
+    min-width: 260px;
     padding: 0.6rem 1rem;
     background: rgba(0, 0, 0, 0.5);
     border: 1px solid rgba(0, 255, 150, 0.3);
@@ -520,7 +549,7 @@
 .identity-selector-results {
     flex: 1;
     overflow-y: auto;
-    max-height: 400px;
+    max-height: min(52vh, 500px);
     padding: 0.5rem;
     min-width: 550px;
 }
@@ -1455,4 +1484,78 @@
     width: 22px; height: 22px; border-radius: 50%;
     background: #ff5252; border: 3px solid #fff;
     box-shadow: 0 0 0 4px rgba(255,82,82,0.35), 0 2px 8px rgba(0,0,0,0.5);
+}
+
+/* =====================================================
+   Identity picker: visible IDs + find-by-photo
+   ===================================================== */
+
+/* Compact copyable ID chip on every picker row. A native <button> so Enter/
+   Space activate it natively; the click handler stops propagation so copying
+   never selects the row. Full uuid lives in title/aria-label and is what gets
+   copied — the visible text is only the 8-char prefix. */
+.identity-item-id {
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(0, 255, 150, 0.25);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    cursor: copy;
+    line-height: 1.2;
+}
+
+.identity-item-id code {
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.68rem;
+    color: rgba(0, 255, 150, 0.85);
+}
+
+.identity-item-id:hover {
+    border-color: rgba(0, 255, 150, 0.6);
+    background: rgba(0, 255, 150, 0.12);
+}
+
+.identity-item-id:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 1px;
+}
+
+/* Similarity badge on photo-search results. */
+.identity-item-similarity {
+    color: #ffd166;
+    font-size: 0.7rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+/* Find-by-photo controls in the picker's filter row. */
+.filter-photo-btn,
+.filter-photo-clear {
+    flex: 0 0 auto;
+    background: rgba(0, 255, 150, 0.08);
+    border: 1px solid rgba(0, 255, 150, 0.35);
+    border-radius: 6px;
+    color: #00ff96;
+    padding: 0.45rem 0.7rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.filter-photo-btn:hover,
+.filter-photo-clear:hover {
+    background: rgba(0, 255, 150, 0.18);
+    border-color: rgba(0, 255, 150, 0.7);
+}
+
+.filter-photo-btn:focus-visible,
+.filter-photo-clear:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 1px;
+}
+
+/* A full UUID after selection must never widen the layout. */
+#identity-id,
+.identity-selected-id {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }

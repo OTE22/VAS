@@ -1177,6 +1177,8 @@ async def get_social_network(
 async def get_suspicious_patterns(
     days_back: int = Query(default=30, ge=1, le=90, description="Days to analyze"),
     min_group_size: int = Query(default=3, ge=2, le=20, description="Minimum group size for detection"),
+    pipeline_id: Optional[str] = Query(default=None, max_length=255,
+                                       description="Restrict the scan to one camera/pipeline"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_admin())
 ,
@@ -1184,12 +1186,19 @@ async def get_suspicious_patterns(
     """Detect suspicious patterns — enveloped so truncation is visible."""
     started = time.monotonic()
     try:
+        pipeline_id = (pipeline_id or "").strip() or None
+        if pipeline_id:
+            exists = (await db.execute(
+                select(Pipeline.pipeline_id).where(Pipeline.pipeline_id == pipeline_id))).scalar()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Unknown pipeline")
         report = await _bounded_intel_call(
             "patterns",
             security_intelligence_service.detect_suspicious_patterns(
                 db=db,
                 days_back=days_back,
-                min_group_size=min_group_size
+                min_group_size=min_group_size,
+                pipeline_id=pipeline_id,
             ))
 
         items = [
@@ -1223,6 +1232,8 @@ async def get_suspicious_patterns(
                 "end": _iso_z(report.window_end),
                 "days_back": days_back,
             },
+            "pipeline_id": report.pipeline_id,
+            "scope_note": report.scope_note,
             "algorithm_version": report.algorithm_version,
         }
 

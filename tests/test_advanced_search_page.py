@@ -651,10 +651,28 @@ def test_identity_panel_request_is_cancellable():
 
 
 def test_identity_panel_can_be_closed_and_restores_focus():
+    """The panel must close by Escape and hand focus back to whatever opened it.
+
+    Both are now ModalStack's job, not this page's. It used to keep a private
+    `identityModalOpener` and its own Escape handler; the shared component
+    records the trigger at open, restores it in settle(), contains Tab inside
+    the dialog and owns the Escape key document-wide. The old assertions named
+    those private details, so they would fail on a page that had adopted the
+    shared behaviour correctly — the requirement is the behaviour, not the
+    variable.
+
+    Runtime proof that focus really lands inside and comes back:
+    scripts/dev/modal_sweep_probe.js exercises this dialog through three full
+    open/close cycles.
+    """
     source = code_only(read(JS))
     assert "function closeIdentityModal(" in source
-    assert "'Escape'" in source, "Escape does not close the panel"
-    assert "identityModalOpener" in source, "focus is not returned to the opener"
+    assert "window.ModalStack.open(modal" in source, (
+        "the identity panel no longer opens through the shared modal stack, "
+        "which is what supplies Escape and focus restoration")
+    assert "window.ModalStack.close(modal)" in source, (
+        "closing must unwind the stack, or focus and the scroll lock are never "
+        "restored")
 
 
 def test_identity_detail_contract_holds(token):

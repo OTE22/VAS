@@ -136,6 +136,52 @@
     margin: 1.25rem 0;
 }
 
+/* admin.css styles .intelligence-admin-btn as a BOX only (border, glow,
+   background) and expects an inner .btn-content to carry padding and text
+   styling. These action buttons have bare icon+text children, so they
+   inherited UA defaults instead: BLACK button text on a 40%-black background
+   (~1.1:1 — invisible) and default LINK BLUE on the anchors, with zero
+   padding and 25px height. Measured on the live page before this fix. */
+/* display:inline-flex below outranks the UA's [hidden]{display:none}, which
+   would resurrect the unknown-only "Manage in Unknown Faces Center" link on
+   KNOWN profiles. Restate the hidden contract explicitly. */
+.profile-actions .intelligence-admin-btn[hidden] {
+    display: none;
+}
+
+.profile-actions .intelligence-admin-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.65rem 1.1rem;
+    color: #00ff96;
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    background: rgba(0, 255, 150, 0.08);
+}
+
+.profile-actions .intelligence-admin-btn i {
+    font-size: 1rem;
+}
+
+.profile-actions .intelligence-admin-btn:hover {
+    color: #ffffff;
+    background: rgba(0, 255, 150, 0.18);
+    border-color: rgba(0, 255, 150, 0.9);
+    box-shadow:
+        0 0 25px rgba(0, 255, 150, 0.45),
+        inset 0 0 30px rgba(0, 255, 150, 0.08);
+}
+
+.profile-actions .intelligence-admin-btn:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 2px;
+}
+
 /* Sections */
 .profile-section {
     background: rgba(0, 0, 0, 0.3);

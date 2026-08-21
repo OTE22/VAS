@@ -5,6 +5,86 @@
  */
 
 // Global functions for upload modal
+// Deferred work owned by this modal (auto-close after success, duplicate
+// notice). Tracked so closing cancels it: an unowned timer from a previous
+// submit used to fire into a freshly reopened dialog and blank the name field
+// or close it outright.
+let uploadTimers = [];
+
+function scheduleUploadTimer(callback, delayMs) {
+    const id = setTimeout(callback, delayMs);
+    uploadTimers.push(id);
+    return id;
+}
+
+function clearUploadTimers() {
+    uploadTimers.forEach(clearTimeout);
+    uploadTimers = [];
+}
+
+/**
+ * Put the form back to its shipped state — everything a fresh dialog shows.
+ *
+ * form.reset() alone is not enough: it restores value attributes but does not
+ * re-disable the submit button, does not clear the preview <img> src, and does
+ * not clear text written into the caption node.
+ */
+function resetUploadForm() {
+    clearUploadTimers();
+
+    const modal = document.getElementById('uploadModal');
+    if (!modal) return;
+
+    const form = modal.querySelector('.upload-form');
+    if (form) form.reset();
+
+    const preview = document.getElementById('globalFilePreview');
+    if (preview) preview.classList.remove('show');
+
+    const previewImage = document.getElementById('globalPreviewImage');
+    if (previewImage) previewImage.removeAttribute('src');
+
+    const fileInfo = document.getElementById('globalFileInfo');
+    if (fileInfo) fileInfo.textContent = '';
+
+    const uploadArea = document.getElementById('globalFileUploadArea');
+    if (uploadArea) uploadArea.classList.remove('active', 'dragging');
+
+    const successMsg = document.getElementById('uploadSuccessMessage');
+    if (successMsg) successMsg.style.display = 'none';
+
+    // Nothing is selected yet, so submitting is not possible. handleGlobalFileSelect
+    // re-enables this once a real file has been read.
+    const submitBtn = document.getElementById('globalUploadSubmitBtn');
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-upload"></i> Upload Person';
+    }
+}
+
+/**
+ * A sentence the operator can act on, for failures that arrive without the
+ * application's own {error, message} envelope.
+ *
+ * Previously any such response rendered as the literal string
+ * "HTTP error! status: 422", which says nothing about what to change.
+ */
+function describeUploadFailure(status, data) {
+    // FastAPI's own validation envelope: {"detail": [{"msg": ..., "loc": ...}]}
+    if (Array.isArray(data && data.detail) && data.detail.length) {
+        const first = data.detail[0];
+        const field = Array.isArray(first.loc) ? first.loc[first.loc.length - 1] : null;
+        return field ? `${field}: ${first.msg}` : first.msg;
+    }
+    if (typeof (data && data.detail) === 'string') return data.detail;
+
+    if (status === 403) return 'You do not have permission to add a person.';
+    if (status === 413) return 'That photo is too large for the server to accept.';
+    if (status === 429) return 'Too many uploads at once. Wait a moment and try again.';
+    if (status >= 500) return 'The server could not complete the upload. Please try again.';
+    return 'The upload could not be completed. Please try again.';
+}
+
 function openUploadModal() {
     // Backend handles authentication - just check if user is admin
     fetch('/api/auth/me', {
@@ -21,17 +101,25 @@ function openUploadModal() {
         }
         const modal = document.getElementById('uploadModal');
         if (modal) {
-            if (window.ModalStack) {
-                // Pages with the modal stack (Unknown Faces): the stack owns
-                // layering, Escape and backdrop, so an error alert raised
-                // during upload lands ABOVE this dialog instead of under it.
-                window.ModalStack.open(modal, {
-                    backdropClose: true,
-                    onClose: () => closeUploadModal()
-                });
-            } else {
-                modal.style.display = 'flex';
-            }
+            // Reset on OPEN, not only on close. form.reset() cannot restore the
+            // submit button's `disabled` attribute or clear elements set
+            // imperatively, so a reopened dialog used to show the previous
+            // person's filename caption, keep their photo in the preview <img>,
+            // and offer an enabled "Upload Person" button with no file chosen.
+            resetUploadForm();
+            initUploadDragAndDrop();
+            updateUploadHint();
+            // ONE open path. The stack owns layering, Escape, backdrop,
+            // focus containment, background suppression and the page scroll
+            // lock; closeUploadModal() keeps the business cleanup (releasing
+            // a pending upload's claim ticket, resetting the form) via
+            // onClose. The old `else { modal.style.display = 'flex' }`
+            // fallback ran on 21 of 22 pages and had NONE of that, which is
+            // why page elements painted over Add Person.
+            window.ModalStack.open(modal, {
+                backdropClose: true,
+                onClose: () => closeUploadModal()
+            });
             modal.classList.add('active');
         }
     })
@@ -227,6 +315,21 @@ async function loadUploadLimits() {
         // The server enforces the real limit; a failed pre-check is not fatal.
         console.warn('[UPLOAD] Could not load upload limits, deferring to server:', err);
     }
+    updateUploadHint();
+}
+
+// Tell the user the limit the SERVER actually enforces. The markup carries no
+// number of its own, so when this cannot run the hint simply lists the formats
+// rather than promising a figure that might be wrong.
+function updateUploadHint() {
+    const hint = document.getElementById('globalUploadHint');
+    if (!hint) return;
+    const formats = uploadLimits.allowedExtensions
+        ? uploadLimits.allowedExtensions.map(ext => ext.toUpperCase()).join(', ')
+        : 'PNG, JPG or WEBP';
+    hint.textContent = uploadLimits.maxFileSizeBytes
+        ? `${formats} up to ${formatMegabytes(uploadLimits.maxFileSizeBytes)}`
+        : formats;
 }
 
 if (typeof document !== 'undefined') {
@@ -331,14 +434,33 @@ function handleGlobalUpload(event) {
     formData.append('photo', file);
     formData.append('is_face_image', isFaceImage.toString());
 
-    // Send to server - backend authenticates via cookies
+    // Send to server - backend authenticates via cookies.
+    // X-Requested-With is required by require_upload_csrf: this request creates
+    // a person using nothing but the session cookie, so without it a form on
+    // any other site could enrol someone into this system while an admin is
+    // logged in. Content-Type is deliberately NOT set — the browser must add
+    // the multipart boundary itself.
     fetch('/api/upload-person', {
         method: 'POST',
         credentials: 'include', // Include HttpOnly cookies
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
         body: formData
     })
     .then(async response => {
-        const data = await response.json();
+        // Not every failure answers in JSON: an expired session, a proxy-level
+        // rejection or a gateway error can return HTML or nothing at all.
+        // Parsing unconditionally threw, and the throw landed in .catch(),
+        // which showed the user a raw JSON parse error instead of what went
+        // wrong.
+        const data = await response.json().catch(() => ({}));
+
+        if (response.status === 401) {
+            showUploadAlert(
+                'Session Expired',
+                'Your session has expired. Sign in again, then re-open Add Person.',
+                'error');
+            return;
+        }
 
         // The server recognised this face as somebody already on file and is
         // asking who it is, rather than quietly creating a second record for
@@ -352,7 +474,8 @@ function handleGlobalUpload(event) {
         if (!response.ok || !data.success) {
             // Handle different error types with specific alerts
             let errorTitle = 'Upload Failed';
-            let errorMessage = data.message || data.details || `HTTP error! status: ${response.status}`;
+            let errorMessage = data.message || data.details
+                || describeUploadFailure(response.status, data);
             
             if (response.status === 403) {
                 if (errorMessage.includes('blocked') || errorMessage.includes('forbidden')) {
@@ -408,7 +531,7 @@ function handleGlobalUpload(event) {
                     + ' Nothing was added. Upload a different photo of them to add '
                     + 'another image.',
                     'info');
-                setTimeout(closeUploadModal, 500);
+                scheduleUploadTimer(closeUploadModal, 500);
                 return;
             }
             // Show success message
@@ -418,7 +541,7 @@ function handleGlobalUpload(event) {
             }
 
             // Reset form after short delay
-            setTimeout(() => {
+            scheduleUploadTimer(() => {
                 if (personNameInput) personNameInput.value = '';
                 if (fileInput) fileInput.value = '';
                 const preview = document.getElementById('globalFilePreview');
@@ -459,11 +582,7 @@ if (typeof window.showFaceDetectionAlert !== 'function') {
 
         if (modal && messageElement) {
             messageElement.textContent = message;
-            if (window.ModalStack) {
-                window.ModalStack.open(modal, { backdropClose: true });
-            } else {
-                modal.style.display = 'flex';
-            }
+            window.ModalStack.open(modal, { backdropClose: true });
 
             // Add pulse animation
             const icon = modal.querySelector('.fa-user-slash');
@@ -481,11 +600,7 @@ if (typeof window.closeFaceDetectionAlert !== 'function') {
     window.closeFaceDetectionAlert = function () {
         const modal = document.getElementById('face-detection-alert-modal');
         if (modal) {
-            if (window.ModalStack) {
-                window.ModalStack.close(modal);
-            } else {
-                modal.style.display = 'none';
-            }
+            window.ModalStack.close(modal);
         }
     };
 }
@@ -528,6 +643,54 @@ function initFaceDetectionAlertModal() {
             });
         }
     }
+}
+
+/**
+ * Make the upload area accept a dropped file.
+ *
+ * The box has always said "Click to upload or drag and drop", but nothing
+ * listened for a drop: dropping a photo made the browser navigate away from
+ * the page and open the file instead, losing whatever was typed. The drop is
+ * routed through the hidden <input> so it goes down exactly the same
+ * validation, preview and submit-enabling path as clicking — one code path,
+ * not two that can drift.
+ */
+function initUploadDragAndDrop() {
+    const area = document.getElementById('globalFileUploadArea');
+    const input = document.getElementById('globalFileInput');
+    if (!area || !input || area.dataset.dndReady === 'true') return;
+    area.dataset.dndReady = 'true';
+
+    // dragover MUST be prevented, or the browser never fires drop.
+    ['dragenter', 'dragover'].forEach(name => {
+        area.addEventListener(name, event => {
+            event.preventDefault();
+            event.stopPropagation();
+            area.classList.add('dragging');
+        });
+    });
+
+    ['dragleave', 'drop'].forEach(name => {
+        area.addEventListener(name, event => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (name === 'dragleave' && area.contains(event.relatedTarget)) return;
+            area.classList.remove('dragging');
+        });
+    });
+
+    area.addEventListener('drop', event => {
+        const dropped = event.dataTransfer && event.dataTransfer.files;
+        if (!dropped || !dropped.length) return;
+        try {
+            const transfer = new DataTransfer();
+            transfer.items.add(dropped[0]);   // one photo per submit
+            input.files = transfer.files;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (err) {
+            console.warn('[UPLOAD] Could not accept dropped file:', err);
+        }
+    });
 }
 
 // Initialize on DOM ready
@@ -732,7 +895,9 @@ function submitDecision(payload) {
         body: JSON.stringify(payload)
     })
     .then(async response => {
-        const data = await response.json();
+        // Same guard as the upload path: a decision can also fail with a
+        // non-JSON body (expired session, gateway error).
+        const data = await response.json().catch(() => ({}));
 
         // A strong match needs the "different person" answer twice. The second
         // press carries confirm_create_new, so this asks once and only once.
@@ -773,7 +938,7 @@ function submitDecision(payload) {
                 + ' Nothing was added. Upload a different photo of them to add '
                 + 'another image.',
                 'info');
-            setTimeout(closeUploadModal, 500);
+            scheduleUploadTimer(closeUploadModal, 500);
             return;
         }
 
@@ -783,7 +948,7 @@ function submitDecision(payload) {
             successText.textContent = `✅ ${data.message}`;
             successMsg.style.display = 'block';
         }
-        setTimeout(closeUploadModal, 1500);
+        scheduleUploadTimer(closeUploadModal, 1500);
     })
     .catch(error => {
         console.error('Enrollment decision error:', error);

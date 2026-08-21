@@ -226,7 +226,13 @@ async function viewDetails(logId) {
             </div>
         `;
         
-        document.getElementById('details-modal').style.display = 'flex';
+        // Shared lifecycle: layering, Escape, backdrop, focus containment,
+        // background suppression and the page scroll lock all come from
+        // ModalStack. This page previously had NO Escape handling at all.
+        window.ModalStack.open(document.getElementById('details-modal'), {
+            backdropClose: true,
+            onClose: () => closeDetailsModal()
+        });
     } catch (error) {
         alert('Error loading details: ' + error.message);
     }
@@ -239,7 +245,15 @@ function escapeHtml(text) {
 }
 
 function closeDetailsModal() {
-    document.getElementById('details-modal').style.display = 'none';
+    const modal = document.getElementById('details-modal');
+    if (!modal) return;
+    if (window.ModalStack.isOpen(modal)) {
+        // The stack's onClose re-enters here once the entry has left it, so
+        // the hide below runs exactly once.
+        window.ModalStack.close(modal);
+        return;
+    }
+    modal.style.display = 'none';
 }
 
 function applyFilters() {
@@ -328,10 +342,6 @@ function changeLimit() {
     loadAuditLogs();
 }
 
-// Close modal when clicking outside
-document.getElementById('details-modal')?.addEventListener('click', (e) => {
-    if (e.target.id === 'details-modal') {
-        closeDetailsModal();
-    }
-});
+// Backdrop clicks are ModalStack's (opted in via backdropClose at open time);
+// a second listener here would double-close.
 

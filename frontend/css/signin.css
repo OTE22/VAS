@@ -45,7 +45,7 @@ body::before {
 .skip-to-main {
     position: absolute;
     left: -9999px;
-    z-index: 9999;
+    z-index: var(--z-toast, 9999);
     padding: 1rem;
     background-color: #000;
     color: white;

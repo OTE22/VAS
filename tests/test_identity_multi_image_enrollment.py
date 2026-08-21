@@ -364,14 +364,15 @@ def test_relative_storage_path_refuses_paths_outside_storage():
 
 
 def test_generated_filenames_are_server_controlled():
-    from backend.core.enrollment_service import next_image_filename
+    from backend.core.enrollment_service import reserve_image_filename
 
     folder = f"/tmp/qa_names_{uuid_module.uuid4().hex}"
     os.makedirs(folder, exist_ok=True)
     try:
-        assert next_image_filename(folder, ".jpg") == "image_001.jpg"
-        open(os.path.join(folder, "image_001.jpg"), "wb").close()
-        assert next_image_filename(folder, ".jpg") == "image_002.jpg"
+        # The name is claimed by creating it, so the second call must move on
+        # to image_002 without the test having to create anything itself.
+        assert reserve_image_filename(folder, ".jpg") == "image_001.jpg"
+        assert reserve_image_filename(folder, ".jpg") == "image_002.jpg"
     finally:
         for entry in os.listdir(folder):
             os.remove(os.path.join(folder, entry))

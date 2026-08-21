@@ -1901,6 +1901,54 @@ class IdentityService:
             )
         ).scalar() or 0
 
+        # ---- consolidate the sighting window + vector labels ---------------
+        #
+        # merge_multiple_identities has done both of these for as long as it
+        # has existed; this pairwise path did neither, so the SAME user action
+        # ("merge these people") produced different data depending on whether
+        # two or three identities were selected. Found by the lifecycle audit:
+        # after a pairwise merge the winner still claimed its own, older
+        # last_seen_at even when the loser had been seen days later, and an
+        # absorbed unknown's vectors kept their 'unknown' label.
+        #
+        # Both identities' timestamps are real sighting history, so the merged
+        # person's window is the union of the two. The winner's prior values
+        # go into provenance first so unmerge can put them back exactly.
+        provenance["winner_first_seen_before"] = (
+            to_identity.first_seen_at.isoformat()
+            if to_identity.first_seen_at else None)
+        provenance["winner_last_seen_before"] = (
+            to_identity.last_seen_at.isoformat()
+            if to_identity.last_seen_at else None)
+        seen_first = [t for t in (to_identity.first_seen_at,
+                                  from_identity.first_seen_at) if t]
+        seen_last = [t for t in (to_identity.last_seen_at,
+                                 from_identity.last_seen_at) if t]
+        if seen_first:
+            to_identity.first_seen_at = min(seen_first)
+        if seen_last:
+            to_identity.last_seen_at = max(seen_last)
+
+        # Vectors absorbed by a KNOWN/PROMOTED person must carry the 'known'
+        # label — same rule as promote, and as the multi-merge. The label is
+        # cosmetic under pgvector (search resolves type from identities.type)
+        # but decides WHICH index a vector loads into under FAISS, so a stale
+        # 'unknown' would silently drop these vectors from known-search after
+        # a restart. Only the repointed rows are touched, and their ids are
+        # recorded so unmerge can flip them back.
+        provenance["relabelled_embedding_ids"] = []
+        if to_identity.type != IdentityType.UNKNOWN and provenance.get("embedding_ids"):
+            relabelled = (await db.execute(
+                update(IdentityEmbedding)
+                .where(IdentityEmbedding.id.in_(provenance["embedding_ids"]),
+                       IdentityEmbedding.faiss_index_type == 'unknown')
+                .values(faiss_index_type='known')
+                .returning(IdentityEmbedding.id))).scalars().all()
+            provenance["relabelled_embedding_ids"] = [int(i) for i in relabelled]
+            if relabelled:
+                logger.info("[IDENTITY] [MERGE] relabelled %d absorbed vector(s) "
+                            "unknown -> known", len(relabelled))
+
         # Create merge audit record
         from db_models import IdentityMerge
         merge_record = IdentityMerge(
@@ -2240,6 +2288,28 @@ class IdentityService:
         loser.status = restore_status
         loser.merged_into_id = None
         loser.updated_at = datetime.utcnow()
+
+        # ---- reverse the merge-time consolidation ---------------------------
+        # The merge widened the winner's sighting window to the union of both
+        # and relabelled absorbed 'unknown' vectors 'known'. Both were recorded
+        # in provenance precisely so this can put them back; merge rows written
+        # before those keys existed simply skip the restore (guarded .get).
+        for key, attr in (("winner_first_seen_before", "first_seen_at"),
+                          ("winner_last_seen_before", "last_seen_at")):
+            recorded_ts = provenance.get(key)
+            if recorded_ts:
+                try:
+                    setattr(winner, attr, datetime.fromisoformat(recorded_ts))
+                except ValueError:
+                    logger.warning("[IDENTITY] [UNMERGE] unparseable %s %r; "
+                                   "leaving winner.%s as merged", key, recorded_ts, attr)
+
+        relabelled_ids = provenance.get("relabelled_embedding_ids") or []
+        if relabelled_ids:
+            await db.execute(
+                update(IdentityEmbedding)
+                .where(IdentityEmbedding.id.in_(relabelled_ids))
+                .values(faiss_index_type='unknown'))
 
         await db.flush()
 

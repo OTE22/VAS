@@ -291,10 +291,17 @@ async def make_image_primary(
              summary="DEPRECATED — use POST /api/identities/{identity_id}/images")
 async def upload_person(
     request: Request,
-    person_name: str = Form(...),
+    # Form("") rather than Form(...): a missing or blank name is a name
+    # problem, and validate_person_name below already answers it as
+    # 400 {"error": "invalid_name", "message": "Person name is required."}.
+    # Letting FastAPI reject it first produced a 422 whose {"detail": [...]}
+    # envelope carries neither `error` nor `message`, so the upload modal —
+    # which renders those two fields — could only show the status number.
+    person_name: str = Form(""),
     photo: UploadFile = File(...),
     is_face_image: bool = Form(False),
     current_user: User = Depends(require_role(["admin"])),
+    _csrf: None = Depends(require_upload_csrf),
     db: AsyncSession = Depends(get_db),
 ):
     """Enroll a person by NAME, creating them when they do not exist yet.
@@ -304,10 +311,13 @@ async def upload_person(
     When several active people share a normalized name this returns 409 with
     the candidates rather than guessing.
 
-    No CSRF dependency here on purpose: the shipped upload modal posts a
-    multipart form with cookies and no X-Requested-With header, and silently
-    breaking it would be worse than the status quo. The new endpoints above
-    require the header.
+    This route was previously CSRF-exempt so as not to break the shipped upload
+    modal, which posted cookies with no X-Requested-With header. That left the
+    ONE endpoint able to mint an identity as the one endpoint a cross-site form
+    could drive: an authenticated POST with no custom header is exactly what an
+    attacker's page can send. The modal now sends the header
+    (frontend/js/upload-modal.js), so the exemption is gone. Bearer-token
+    clients are unaffected — require_upload_csrf exempts them.
     """
     # See add_identity_image: capture the actor before the service call, because
     # a rollback inside it expires current_user and a later attribute read would
@@ -364,6 +374,14 @@ async def upload_person(
         logger.warning("[UPLOAD] refused (%s) for '%s' by %s",
                        exc.code, person_name, actor_name)
         return _error_response(exc)
+
+    if result.identity_created:
+        from backend.utils.identity_audit import log_person_created
+        await log_person_created(db, request, actor_id, actor_name,
+                                 identity_id=result.identity_id,
+                                 display_name=result.display_name,
+                                 image_id=result.image_id,
+                                 source="upload-person")
 
     # Legacy response fields the shipped frontend reads (message/filename/
     # total_faces/total_identities/backend) are preserved alongside the new ones.

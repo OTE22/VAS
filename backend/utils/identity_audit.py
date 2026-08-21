@@ -440,3 +440,46 @@ def get_client_info(request) -> tuple[Optional[str], Optional[str]]:
     except Exception:
         return None, None
 
+
+
+async def log_person_created(db, request, user_id: int, username: str,
+                             identity_id, display_name: Optional[str],
+                             image_id=None, source: str = "upload") -> None:
+    """Audit the creation of a person by enrollment. Never raises.
+
+    Merging, promoting and un-merging a person were all audited; CREATING one
+    from a photo was not — so in a system whose purpose is tracking people, the
+    act of adding someone to be tracked was the one identity operation with no
+    record of who did it.
+
+    Commits on the caller's behalf because every enrollment route calls this
+    AFTER enroll_image has committed, so there is no open transaction to join.
+    A failure here is logged and swallowed: the person is already enrolled, and
+    losing the audit row must not turn a successful enrollment into an error.
+    """
+    try:
+        ip_address, user_agent = get_client_info(request)
+        await IdentityAuditLogger.log_action(
+            db=db,
+            user_id=user_id,
+            username=username,
+            action_type="create",
+            identity_id=identity_id,
+            # identity_id repeated as text: the FK is ON DELETE SET NULL, so
+            # this is what still names the person once they are deleted.
+            action_details={"source": source, "display_name": display_name,
+                            "identity_id": str(identity_id), "image_id": image_id},
+            after_state={"display_name": display_name, "type": "KNOWN",
+                         "status": "ACTIVE"},
+            ip_address=ip_address,
+            user_agent=user_agent,
+            notes=f"Person created by {source}",
+        )
+        await db.commit()
+    except Exception as audit_error:                            # noqa: BLE001
+        logger.warning("Failed to audit person creation for %s: %s",
+                       identity_id, audit_error)
+        try:
+            await db.rollback()
+        except Exception:                                       # noqa: BLE001
+            pass

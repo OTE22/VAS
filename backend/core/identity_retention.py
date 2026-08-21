@@ -357,12 +357,49 @@ class IdentityRetentionManager:
         return marked_count
     
     async def _cleanup_excess_embeddings(self) -> int:
-        """
-        Keep only top-K best embeddings per identity.
-        Removes lower quality embeddings beyond the limit.
+        """Cap the CAMERA-derived embeddings per identity. Never the gallery.
+
+        An identity accumulates vectors from two very different sources:
+
+          * enrollment — one per identity_images row, deliberately chosen by an
+            administrator, bounded already at MAX_IMAGES_PER_IDENTITY (1000);
+          * camera     — created on their own, at whatever rate the cameras
+            happen to see that person.
+
+        This used to trim both together against one limit of 10, which meant a
+        busy camera evicted the photos somebody had deliberately enrolled. The
+        quality ordering did not protect them: enrollment rows carried
+        `quality = NULL`, and `NULLS LAST` sorts nulls to exactly the end of
+        the keep-order that the deletions are taken from — so the curated
+        gallery was pruned FIRST, and a sharp camera frame legitimately
+        outscores a deliberately enrolled profile angle even now that
+        enrollment records a real score.
+
+        Worse, it left the identity_images row in place. The photo stayed
+        visible in the gallery while contributing nothing to recognition, with
+        nothing to indicate that. This module already refuses to delete
+        enrollment FILES (`_is_enrollment_photo` below); deleting their vectors
+        contradicted that in the least visible way possible.
+
+        WHAT COUNTS AS CAMERA-DERIVED
+        `pipeline_id` is the schema's own marker: db_models.IdentityEmbedding
+        documents "NULL = not from a camera (enrolled photo -> image_id, or
+        preloaded gallery)", and scripts/backfill_identity_images.py selects
+        enrollment rows with `pipeline_id IS NULL` for the same reason.
+
+        image_id alone is NOT sufficient and must not be used on its own: a
+        preloaded gallery vector, and any enrollment predating the
+        identity_images table, legitimately has image_id NULL with pipeline_id
+        NULL. Trimming on image_id alone would treat those as camera traffic
+        and delete exactly the vectors the backfill script exists to rescue.
+
+        So a row is pruned only when it is unambiguously camera-derived —
+        pipeline_id present AND no gallery image. Anything else, including a
+        malformed row carrying both, is left alone: for a cap, failing toward
+        "keep" is the only safe direction.
         """
         removed_count = 0
-        
+
         try:
             async with db_manager.get_session() as db:
                 # Get all active identities
@@ -372,12 +409,14 @@ class IdentityRetentionManager:
                     )
                 )
                 identities = result.scalars().all()
-                
+
                 for identity in identities:
-                    # Get embeddings ordered by quality (best first)
+                    # Unambiguously camera-derived only — see the docstring.
                     emb_result = await db.execute(
                         select(IdentityEmbedding).where(
-                            IdentityEmbedding.identity_id == identity.id
+                            IdentityEmbedding.identity_id == identity.id,
+                            IdentityEmbedding.pipeline_id.isnot(None),
+                            IdentityEmbedding.image_id.is_(None),
                         ).order_by(
                             IdentityEmbedding.quality.desc().nulls_last(),
                             IdentityEmbedding.created_at.desc()
@@ -394,7 +433,23 @@ class IdentityRetentionManager:
                         # so trimming one surplus embedding evicted every
                         # vector that person had — including the ones it was
                         # deliberately keeping.
-                        await remove_embedding_keys(db, [e.id for e in to_remove])
+                        #
+                        # strict=True, and the DELETE only follows a successful
+                        # removal: swallowing an index failure here would delete
+                        # the rows while the in-process index kept their keys,
+                        # and a later search would resolve a key to nothing.
+                        # Leaving the rows in place instead keeps the two
+                        # consistent and lets the next cycle retry.
+                        try:
+                            await remove_embedding_keys(
+                                db, [e.id for e in to_remove], strict=True)
+                        except Exception as index_error:        # noqa: BLE001
+                            logger.warning(
+                                "[IDENTITY_RETENTION] index removal failed for "
+                                "identity %s; keeping %d vector(s) so the "
+                                "database and the index cannot diverge: %s",
+                                identity.id, len(to_remove), index_error)
+                            continue
 
                         for emb in to_remove:
                             await db.delete(emb)

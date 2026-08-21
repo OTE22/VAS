@@ -497,6 +497,8 @@ async def sync_settings_from_config(db: AsyncSession):
                 
                 # Get custom description for specific settings
                 custom_descriptions = {
+                    "MAX_EMBEDDINGS_PER_IDENTITY": "How many CAMERA-OBSERVED face vectors to keep per person; the lowest-quality ones beyond this are pruned by the daily identity-retention job. Photos added through Add Person are never pruned — their vectors are kept for as long as the photo is in the gallery. Default: 10",
+                    "MAX_PHOTOS_PER_PERSON": "CAMERA CAPTURES ONLY. How many face crops a camera pipeline keeps on disk per known person, per pipeline. Unknown faces are exempt and are always saved. This does NOT limit photos added through Add Person — an uploaded gallery is capped at 1000 images per person and is not configurable. Default: 1",
                     "ENROLL_STRONG_MATCH_MIN": "Similarity (0-1) at or above which an uploaded photo is treated as an already-enrolled person, and adding it to that person is the recommended action. Must not be below ENROLL_CANDIDATE_MIN — startup refuses an inverted pair. Default: 0.75",
                     "ENROLL_CANDIDATE_MIN": "Similarity (0-1) below which no candidate is offered and the upload enrolls directly as a new person. Between this and ENROLL_STRONG_MATCH_MIN the administrator is asked to choose. Default: 0.45",
                     "ENROLL_CANDIDATE_POOL": "How many nearest face embeddings to retrieve before collapsing them to one row per person. Must exceed ENROLL_MAX_CANDIDATES, because one person with many photos would otherwise fill the pool and hide the others. Default: 25",

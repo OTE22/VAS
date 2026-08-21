@@ -351,7 +351,7 @@ def patterns_body(token, seeded):
 def test_patterns_envelope_shape(patterns_body):
     for key in ("items", "total", "truncated", "scanned_rows", "analysis_window", "algorithm_version"):
         assert key in patterns_body, f"patterns envelope missing {key}"
-    assert patterns_body["algorithm_version"] == "patterns-v2"
+    assert patterns_body["algorithm_version"] == "patterns-v3"
     assert patterns_body["truncated"] is False
     assert patterns_body["scanned_rows"] >= 1
     assert patterns_body["analysis_window"]["days_back"] == 7
@@ -677,7 +677,7 @@ def test_capabilities_report_algorithm_versions(token):
     assert status == 200, body
     caps = body["capabilities"]
     assert caps["anomaly_detection"]["algorithm_version"] == "anomaly-context-v3"
-    assert caps["pattern_detection"]["algorithm_version"] == "patterns-v2"
+    assert caps["pattern_detection"]["algorithm_version"] == "patterns-v3"
     assert caps["threat_assessment"]["algorithm_version"] == "risk-engine-v1"
     assert caps["network_analysis"]["risk_score_version"]
     assert caps["trajectory_prediction"]["model_version"] == "trajectory-v2"

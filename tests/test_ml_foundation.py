@@ -149,6 +149,7 @@ def test_migration_head_and_seeds():
             return head, policies, ta_cols
     head, policies, ta_cols = run_async(_run())
     # Head pin, updated deliberately when a migration is added.
+    # d8f2b6c1e4a7 = identity_audit_log survives identity deletion, which revises
     # 7d3f91a2c4e6 = JSON null literals -> SQL NULL, which revises
     # f6a7b8c9d0e1 = create_all residue alignment (after c2d3e4f5a6b7 → d4e5f6a7b8c9), which revises
     # a9b0c1d2e3f4 (identity person_code), which revises
@@ -160,7 +161,7 @@ def test_migration_head_and_seeds():
     # e1f2a3b4c5d6 -> d0e1f2a3b4c5 -> b8c9d0e1f2a3 (this ML-pipeline
     # migration) — so asserting the newest head still proves the ML lineage
     # is applied.
-    assert head == "7d3f91a2c4e6"
+    assert head == "d8f2b6c1e4a7"
     assert [p[0] for p in policies] == [
         "behavior_anomaly_model", "coappearance_anomaly_model",
         "social_graph_anomaly_model", "threat_ranking_model"]

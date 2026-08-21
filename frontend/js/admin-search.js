@@ -1332,7 +1332,6 @@
     // ============================================
 
     /** What to return focus to when the panel closes. */
-    let identityModalOpener = null;
 
     /** Most recent sightings to draw. The API returns ALL appearance rows. */
     const MAX_SIGHTINGS_SHOWN = 20;
@@ -1596,20 +1595,23 @@
         if (!modal) return;
         // Remember what to focus when the panel closes, so a keyboard user is
         // not dropped at the top of the document.
-        identityModalOpener = document.activeElement;
+        // Focus handling is ModalStack's: it records the trigger at open and
+        // restores it on close, and contains Tab inside the dialog. The local
+        // identityModalOpener bookkeeping did the same job less completely
+        // (no Tab containment, no restore when the opener had been re-rendered)
+        // and is removed as duplicated lifecycle.
+        window.ModalStack.open(modal, {
+            backdropClose: true,
+            onClose: () => closeIdentityModal()
+        });
         modal.classList.add('active');
-        const close = document.getElementById('close-identity-modal');
-        if (close) close.focus();
     }
 
     function closeIdentityModal() {
         const modal = document.getElementById('identity-modal');
         if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
         modal.classList.remove('active');
-        if (identityModalOpener && document.contains(identityModalOpener)) {
-            identityModalOpener.focus();
-        }
-        identityModalOpener = null;
     }
 
     // Scoped, not window.viewIdentity: dispatch goes through the Actions
@@ -1813,6 +1815,9 @@
                     return;
                 }
                 syncExportOptions();
+                window.ModalStack.open(elements.exportModal, {
+                    backdropClose: true, onClose: () => closeExportModal()
+                });
                 elements.exportModal.classList.add('active');
             });
         }
@@ -1869,9 +1874,10 @@
     }
 
     function closeExportModal() {
-        if (elements.exportModal) {
-            elements.exportModal.classList.remove('active');
-        }
+        const modal = elements.exportModal;
+        if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
+        modal.classList.remove('active');
     }
 
     /**

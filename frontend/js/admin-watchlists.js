@@ -615,16 +615,22 @@
         const overlay = document.getElementById('modal-overlay');
         const content = overlay && overlay.querySelector('.modal-content');
         if (!overlay) return;
+        // Shared lifecycle, with the page's own rule preserved as a veto:
+        // a save in flight must not be abandoned by Escape or a backdrop
+        // click. That guard used to live inside this page's private keydown
+        // handler; handing the key to ModalStack without canClose would have
+        // silently dropped it.
+        window.ModalStack.open(overlay, {
+            backdropClose: true,
+            canClose: () => !state.saving,
+            onClose: () => closeModal()
+        });
         overlay.classList.add('active');
         if (content) {
             content.setAttribute('role', 'dialog');
             content.setAttribute('aria-modal', 'true');
             content.setAttribute('aria-labelledby', 'modal-title');
         }
-        modalKeyHandler = function (e) {
-            if (e.key === 'Escape' && !state.saving) { e.preventDefault(); closeModal(); }
-        };
-        document.addEventListener('keydown', modalKeyHandler);
         const nameInput = document.getElementById('watchlist-name');
         if (nameInput) nameInput.focus();
     }
@@ -632,8 +638,15 @@
     function closeModal() {
         if (state.saving) return; // never close silently while saving
         const overlay = document.getElementById('modal-overlay');
-        if (overlay) overlay.classList.remove('active');
+        if (!overlay) return;
+        if (window.ModalStack.isOpen(overlay)) {
+            window.ModalStack.close(overlay);   // re-enters here via onClose
+            return;
+        }
+        overlay.classList.remove('active');
         if (modalKeyHandler) { document.removeEventListener('keydown', modalKeyHandler); modalKeyHandler = null; }
+        // Business cleanup, preserved: stale field errors must not greet the
+        // next open.
         clearAllFieldErrors();
     }
 
@@ -1086,13 +1099,8 @@
             form.dataset.listenerAttached = 'true';
         }
 
-        const modalOverlay = document.getElementById('modal-overlay');
-        if (modalOverlay && !modalOverlay.dataset.listenerAttached) {
-            modalOverlay.addEventListener('click', function (e) {
-                if (e.target === modalOverlay) closeModal();
-            });
-            modalOverlay.dataset.listenerAttached = 'true';
-        }
+        // Backdrop clicks are ModalStack's (opted in at open time, and subject
+        // to the same canClose veto), so no listener is registered here.
     }
 
     function destroy() {

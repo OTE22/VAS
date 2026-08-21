@@ -23,7 +23,10 @@
     const DEBUG = false;
     const SEARCH_DEBOUNCE_MS = 300;
     const MAP_DEBOUNCE_MS = 400;
-    const PAGE_SIZE = 25;
+    // 50, not 25: the picker lists 159 identities here and the point of it
+    // is to find a face. Half the 'Load more' clicks for one request, and
+    // well inside API_MAX_PAGE_SIZE (100), which the endpoint enforces.
+    const PAGE_SIZE = 50;
     const API_TIMEOUT_MS = 30000;
     const MAP_TIMEOUT_MS = 60000;
     const MAX_IMAGE_URL_LENGTH = 2048;
@@ -76,6 +79,53 @@
     function shortId(id) {
         const s = normalizeId(id);
         return s ? s.slice(0, 8) : '?';
+    }
+
+    /** best_snapshot_path -> a safe same-origin URL, or '' for the placeholder.
+     *  Mirrors the canonical fallback in admin-search.js:1030-1045 — paths may
+     *  arrive 'storage/'-prefixed, bare, already '/'-prefixed, or null, and a
+     *  cross-origin or traversal value must never reach an img src. */
+    function snapshotUrlFromPath(path) {
+        if (typeof path !== 'string' || !path) return '';
+        // Anchor on the 'storage/' segment: paths arrive relative
+        // ('storage/faces/...'), bare, or ABSOLUTE ('/app/storage/...') —
+        // the absolute form passed straight through became /app/storage/...
+        // in the browser and 404'd every camera snapshot.
+        const idx = path.indexOf('storage/');
+        const url = (idx >= 0 ? '/' + path.slice(idx) : '/storage/' + path.replace(/^\/+/, '')).trim();
+        if (url.startsWith('//') || url.includes('..')) return '';
+        return url;
+    }
+
+    /** Compact copyable ID chip: shows the first 8 chars, copies the FULL
+     *  uuid. A native <button>, so Enter/Space fire click natively — one
+     *  handler, no duplicate keyboard logic. stopPropagation so copying never
+     *  selects the row it sits in. */
+    function buildIdChip(id) {
+        const full = normalizeId(id);
+        const codeEl = el('code', { text: shortId(full) + '…' });
+        const btn = el('button', {
+            className: 'identity-item-id',
+            attrs: {
+                type: 'button',
+                title: full,
+                'aria-label': 'Copy identity ID ' + full
+            }
+        }, [codeEl]);
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            e.preventDefault();
+            const restore = codeEl.textContent;
+            const done = function (ok) {
+                codeEl.textContent = ok ? 'copied ✓' : 'copy failed';
+                window.setTimeout(function () { codeEl.textContent = restore; }, 1200);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(full).then(function () { done(true); },
+                                                         function () { done(false); });
+            } else { done(false); }
+        });
+        return btn;
     }
 
     // Strict timestamp parsing. Naive legacy values are UTC. Invalid
@@ -197,7 +247,11 @@
         const headers = { 'Accept': options.expect === 'html' ? 'text/html' : 'application/json' };
         if (method !== 'GET' && method !== 'HEAD') {
             headers['X-Requested-With'] = 'XMLHttpRequest'; // CSRF token header
-            if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+            // FormData must NOT get a Content-Type: the browser writes the
+            // multipart boundary itself, and a manual header breaks parsing.
+            if (options.body !== undefined && !(options.body instanceof FormData)) {
+                headers['Content-Type'] = 'application/json';
+            }
         }
 
         let response;
@@ -207,7 +261,8 @@
                 credentials: 'include',
                 cache: 'no-store',
                 headers: headers,
-                body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+                body: options.body === undefined ? undefined
+                    : (options.body instanceof FormData ? options.body : JSON.stringify(options.body)),
                 signal: signal
             });
         } catch (err) {
@@ -404,8 +459,21 @@
             el('option', { text: 'Last 90 Days', attrs: { value: '90' } })
         ]);
 
+        // --- find by photo -------------------------------------------------
+        const photoInput = el('input', { className: 'filter-photo-input', attrs: { type: 'file', accept: 'image/*' } });
+        photoInput.style.display = 'none';
+        const photoBtn = el('button', {
+            className: 'filter-photo-btn',
+            attrs: { type: 'button', title: 'Find by photo', 'aria-label': 'Find identity by photo' }
+        }, [faIcon('fas fa-camera')]);
+        const photoClearBtn = el('button', {
+            className: 'filter-photo-clear',
+            attrs: { type: 'button', title: 'Clear photo search', 'aria-label': 'Clear photo search' }
+        }, [faIcon('fas fa-times'), el('span', { text: ' photo' })]);
+        photoClearBtn.style.display = 'none';
+
         const filtersSection = el('div', { className: 'identity-selector-filters' }, [
-            el('div', { className: 'filter-row' }, [searchInput, typeSelect]),
+            el('div', { className: 'filter-row' }, [searchInput, typeSelect, photoBtn, photoClearBtn, photoInput]),
             el('div', { className: 'filter-row' }, [
                 el('label', { text: 'Pipeline:' }), pipelineSelect,
                 el('label', { text: 'Last Seen:' }), lastSeenSelect
@@ -424,19 +492,102 @@
         wrapper.append(trigger, panel);
         originalSelect.parentNode.insertBefore(wrapper, originalSelect.nextSibling);
 
+
+        /** Size the panel to the space actually available, and flip it above
+         *  the trigger when there is more room there.
+         *
+         *  A fixed max-height cannot fit: the trigger sits partway down the
+         *  page, so the panel opened at y=365 and ran to y=865 in a 768px
+         *  viewport — the last faces, the Load-more button and the pager were
+         *  all below the fold and unreachable. Measured, not assumed: the probe
+         *  asserts the panel's bottom edge is on screen.
+         */
+        function fitPanelToViewport() {
+            const GAP = 12;                     // breathing room at the edge
+            const MIN = 260;                    // below this the list is useless
+            const rect = trigger.getBoundingClientRect();
+            const below = window.innerHeight - rect.bottom - GAP;
+            const above = rect.top - GAP;
+            // Use whichever side has more room; only prefer flipping up when
+            // below is genuinely too small to be useful.
+            const openUp = below < MIN && above > below;
+
+            panel.style.top = openUp ? 'auto' : '100%';
+            panel.style.bottom = openUp ? '100%' : 'auto';
+
+            // Measure the panel's OWN top rather than assuming it sits just
+            // under the trigger: `top: 100%` is relative to the wrapper, which
+            // also holds the selected-identity tags, so the real offset was
+            // 24px where the trigger implied 8 — and the panel overhung the
+            // viewport by exactly that difference.
+            const panelTop = panel.getBoundingClientRect().top;
+            // Clamp to what exists. Forcing a MIN taller than the available
+            // space is how the panel overhung the fold at 1024x768: the floor
+            // is a preference, not a licence to leave the viewport.
+            const available = Math.floor(openUp ? above : window.innerHeight - panelTop - GAP);
+            const space = Math.max(120, Math.min(available, Math.max(MIN, available)));
+
+            panel.style.maxHeight = space + 'px';
+
+            // Horizontal clamp. The panel is positioned against its wrapper,
+            // so on a narrow viewport a wrapper sitting right of centre pushes
+            // it off-screen even at 92vw. Nudge it back by however much it
+            // overhangs, and never let it start left of the edge.
+            panel.style.left = '0';
+            panel.style.right = 'auto';
+            const box = panel.getBoundingClientRect();
+            const overhangRight = box.right - (window.innerWidth - GAP);
+            if (overhangRight > 0) {
+                panel.style.left = (-overhangRight) + 'px';
+            }
+            const shifted = panel.getBoundingClientRect();
+            if (shifted.left < GAP) {
+                panel.style.left = (parseFloat(panel.style.left || '0') + (GAP - shifted.left)) + 'px';
+            }
+
+            if (openUp) {
+                panel.style.top = 'auto';
+                panel.style.bottom = '100%';
+                panel.style.marginTop = '0';
+                panel.style.marginBottom = '0.5rem';
+            } else {
+                panel.style.top = '100%';
+                panel.style.bottom = 'auto';
+                panel.style.marginTop = '0.5rem';
+                panel.style.marginBottom = '0';
+            }
+        }
+
         function setExpanded(open) {
             panel.style.display = open ? 'block' : 'none';
+            if (open) fitPanelToViewport();
             trigger.classList.toggle('active', open);
             trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
         }
 
+        const refit = function () {
+            if (panel.style.display !== 'none') fitPanelToViewport();
+        };
+        window.addEventListener('resize', refit);
+        picker.cleanups.push(function () { window.removeEventListener('resize', refit); });
+
         function openPanel() {
             setExpanded(true);
             runSearch(true);
-            window.setTimeout(function () { searchInput.focus(); }, 50);
+            // preventScroll: see the matching comment in
+            // admin-security-intelligence.js. Focusing normally scrolls the
+            // page scroller to reveal the search box, which moves the wrapper
+            // the panel is positioned against and undoes the fit just computed.
+            window.setTimeout(function () { searchInput.focus({ preventScroll: true }); }, 50);
         }
         function closePanel(restoreFocus) {
             setExpanded(false);
+            // Nothing may keep running behind a closed picker, and reopening
+            // must start clean rather than resuming a stale photo search.
+            if (requests.controllers.identitySearch) {
+                try { requests.controllers.identitySearch.abort(); } catch (_) { /* noop */ }
+            }
+            if (picker.photoMode) exitPhotoMode(false);
             if (restoreFocus) trigger.focus();
         }
 
@@ -486,11 +637,17 @@
                         el('div', { className: 'identity-item-name', text: displayName }),
                         el('div', { className: 'identity-item-meta' }, [
                             el('span', { className: 'identity-item-type ' + typeClass(identity.type), text: safeText(identity.type, 'unknown') }),
+                            buildIdChip(id),
                             el('span', {
                                 className: 'identity-item-date',
                                 text: 'Last seen: ' + (identity.last_seen_at ? fmtDate(identity.last_seen_at) : 'Never')
                             })
-                        ])
+                        ].concat(typeof identity.similarity === 'number' ? [
+                            el('span', {
+                                className: 'identity-item-similarity',
+                                text: Math.round(identity.similarity * 100) + '% match'
+                            })
+                        ] : []))
                     ]),
                     el('div', { className: 'identity-item-check' }, faIcon('fas fa-check'))
                 ]);
@@ -539,7 +696,114 @@
 
         function scheduleSearch() {
             if (picker.searchTimer) window.clearTimeout(picker.searchTimer);
+            // Typing leaves photo mode: the text flow re-runs the paged list,
+            // and beginRequest() aborts any in-flight photo request.
+            if (picker.photoMode) exitPhotoMode(false);
             picker.searchTimer = window.setTimeout(function () { runSearch(true); }, SEARCH_DEBOUNCE_MS);
+        }
+
+        // --- find by photo -------------------------------------------------
+        //
+        // Same request key as the text search, so the two flows can never
+        // race: beginRequest aborts the previous controller and creates a
+        // fresh one per request (an aborted controller is never reused), and
+        // isCurrent() drops any stale response that slips past the abort.
+
+        let uploadLimitsPromise = null;
+        function loadUploadLimits() {
+            if (!uploadLimitsPromise) {
+                uploadLimitsPromise = api('/api/dashboard/config')
+                    .then(function (payload) {
+                        const cfg = (payload && payload.config) || {};
+                        return {
+                            maxBytes: Number.isFinite(cfg.max_file_size_bytes) ? cfg.max_file_size_bytes : null,
+                            extensions: Array.isArray(cfg.allowed_extensions) && cfg.allowed_extensions.length
+                                ? cfg.allowed_extensions.map(function (x) { return String(x).replace(/^\./, '').toLowerCase(); })
+                                : null
+                        };
+                    })
+                    .catch(function () { return { maxBytes: null, extensions: null }; });
+            }
+            return uploadLimitsPromise;
+        }
+
+        function exitPhotoMode(rerun) {
+            picker.photoMode = false;
+            photoClearBtn.style.display = 'none';
+            photoInput.value = '';
+            if (rerun) runSearch(true);
+        }
+
+        async function runPhotoSearch(file) {
+            if (!file) return;
+            // Client pre-checks mirror the server's published limits; the
+            // server stays authoritative (no invented frontend limit).
+            const limits = await loadUploadLimits();
+            const ext = (file.name.split('.').pop() || '').toLowerCase();
+            if (limits.extensions && ext && limits.extensions.indexOf(ext) === -1) {
+                statusLine.textContent = 'Unsupported image type. Allowed: ' + limits.extensions.join(', ');
+                photoInput.value = '';
+                return;
+            }
+            if (!limits.extensions && file.type && file.type.indexOf('image/') !== 0) {
+                statusLine.textContent = 'Please choose an image file.';
+                photoInput.value = '';
+                return;
+            }
+            if (limits.maxBytes && file.size > limits.maxBytes) {
+                statusLine.textContent = 'Photo is too large (limit ' +
+                    Math.round(limits.maxBytes / 1048576) + 'MB).';
+                photoInput.value = '';
+                return;
+            }
+
+            const req = beginRequest('identitySearch');
+            picker.photoMode = true;
+            statusLine.textContent = 'Searching by photo\u2026';
+            loadMoreBtn.style.display = 'none';
+            loadMoreBtn.disabled = true;
+            try {
+                const formData = new FormData();
+                formData.append('image', file);
+                formData.append('scope', 'both');
+                formData.append('top_k', '20');
+                const matches = await api('/api/search/by-image', {
+                    method: 'POST', body: formData, signal: req.signal, timeout: 60000
+                });
+                if (!req.isCurrent() || !picker.photoMode) return;
+                // Normalise into the EXACT shape the text flow renders, then
+                // reuse the same renderer -- one card path, never two. The
+                // backend type is preserved verbatim (unknown stays unknown).
+                const items = (Array.isArray(matches) ? matches : []).map(function (m) {
+                    return {
+                        id: m.identity_id,
+                        display_name: m.display_name,
+                        type: m.type,
+                        last_seen_at: m.last_seen_at,
+                        snapshot_url: snapshotUrlFromPath(m.best_snapshot_path),
+                        similarity: (typeof m.similarity === 'number') ? m.similarity : null
+                    };
+                });
+                renderResults(items, false);
+                statusLine.textContent = items.length === 0
+                    ? 'No matching identities for that photo'
+                    : items.length + ' match(es) by photo \u2014 best first';
+                photoClearBtn.style.display = '';
+                setActive(-1);
+            } catch (err) {
+                if (err.aborted || !req.isCurrent()) return;   // intentional abort: silence
+                if (err.status === 400) {
+                    statusLine.textContent = 'No face detected in that photo.';
+                } else if (err.status === 401 || err.status === 403) {
+                    statusLine.textContent = 'Not permitted \u2014 sign in again.';
+                } else {
+                    statusLine.textContent = 'Photo search failed. Please try again.';
+                }
+                photoClearBtn.style.display = '';
+            } finally {
+                // Always reset, so choosing the SAME image again re-fires change.
+                photoInput.value = '';
+            }
         }
 
         // --- listeners (all registered with cleanups) ---
@@ -553,6 +817,9 @@
             if (panel.style.display === 'none') openPanel(); else closePanel(false);
         });
         on(searchInput, 'input', scheduleSearch);
+        on(photoBtn, 'click', function (e) { e.stopPropagation(); photoInput.click(); });
+        on(photoClearBtn, 'click', function (e) { e.stopPropagation(); exitPhotoMode(true); });
+        on(photoInput, 'change', function () { runPhotoSearch(photoInput.files && photoInput.files[0]); });
         on(typeSelect, 'change', function () { runSearch(true); });
         on(pipelineSelect, 'change', function () { runSearch(true); });
         on(lastSeenSelect, 'change', function () { runSearch(true); });
@@ -621,7 +888,14 @@
         const id = normalizeId(identity && identity.id) || state.selectedIdentityId;
         elements.identityName.textContent = identity.display_name ? safeText(identity.display_name) : 'Unknown #' + shortId(id);
         elements.identityType.textContent = 'Type: ' + safeText(identity.type, 'unknown');
-        elements.identityId.textContent = 'ID: ' + shortId(id) + '...';
+        // Full UUID with copy -- a truncated id cannot be related back to
+        // anything. buildIdChip copies the FULL id; here the visible text is
+        // the full uuid too (the info card has room; CSS wraps it safely).
+        elements.identityId.replaceChildren(el('span', { text: 'ID: ' }), (function () {
+            const chip = buildIdChip(id);
+            chip.querySelector('code').textContent = id;
+            return chip;
+        })());
 
         const securityBtn = document.getElementById('analyze-security-btn');
         if (securityBtn) securityBtn.style.display = 'block';

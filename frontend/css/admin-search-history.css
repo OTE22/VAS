@@ -319,7 +319,7 @@
     width: 100%;
     height: 100%;
     background: rgba(0, 0, 0, 0.7);
-    z-index: 10000;
+    z-index: var(--z-modal-base, 10000);
     align-items: center;
     justify-content: center;
 }

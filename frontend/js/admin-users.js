@@ -329,7 +329,9 @@ function editUser(userId) {
         // Show the modal
         const modal = document.getElementById('user-modal');
         if (modal) {
-            modal.style.display = 'flex';
+            // Shared lifecycle (Escape, backdrop, focus, scroll lock). This
+            // page had none of it.
+            window.ModalStack.open(modal, { backdropClose: true, onClose: () => closeModal() });
             console.log(`[EDIT_USER] Modal displayed for user: ${user.username}`);
         } else {
             console.error('[EDIT_USER] Modal element not found!');
@@ -395,7 +397,7 @@ function openCreateModal() {
         // Show the modal
         const modal = document.getElementById('user-modal');
         if (modal) {
-            modal.style.display = 'flex';
+            window.ModalStack.open(modal, { backdropClose: true, onClose: () => closeModal() });
             console.log('[CREATE_MODAL] Modal displayed successfully');
         } else {
             console.error('[CREATE_MODAL] Modal element not found!');
@@ -410,7 +412,9 @@ function openCreateModal() {
 function resetPassword(userId) {
     document.getElementById('password-user-id').value = userId;
     document.getElementById('password-form').reset();
-    document.getElementById('password-modal').style.display = 'flex';
+    window.ModalStack.open(document.getElementById('password-modal'), {
+        backdropClose: true, onClose: () => closePasswordModal()
+    });
 }
 
 let pendingDeleteUserId = null;
@@ -430,7 +434,7 @@ function showDeleteModal(userId) {
     
     // Show the modal
     const modal = document.getElementById('delete-user-modal');
-    modal.style.display = 'flex';
+    window.ModalStack.open(modal, { backdropClose: true, onClose: () => closeDeleteModal() });
     
     // Add event listener to confirm button if not already added
     const confirmBtn = document.getElementById('confirm-delete-btn');
@@ -441,7 +445,14 @@ function showDeleteModal(userId) {
 
 function closeDeleteModal() {
     const modal = document.getElementById('delete-user-modal');
+    if (!modal) return;
+    if (window.ModalStack.isOpen(modal)) {
+        window.ModalStack.close(modal);   // re-enters here via onClose
+        return;
+    }
     modal.style.display = 'none';
+    // Business cleanup, preserved: a stale id here would delete the wrong
+    // user on the next confirm.
     pendingDeleteUserId = null;
     console.log('[DELETE_USER] Delete modal closed');
 }
@@ -542,6 +553,14 @@ function renderPipelineCheckboxes(selectedPipelines = []) {
 
 async function handleUserSubmit(e) {
     e.preventDefault();
+    // Double-submit guard: this form creates and updates users, and a second
+    // click while the first request is in flight sends the whole payload
+    // again (a duplicate POST creates a second account).
+    const submitButton = e.target.querySelector('button[type="submit"], input[type="submit"]');
+    if (submitButton) {
+        if (submitButton.disabled) return;
+        submitButton.disabled = true;
+    }
     
     const userId = document.getElementById('user-id').value;
     const passwordValue = document.getElementById('modal-password').value.trim();
@@ -623,11 +642,20 @@ async function handleUserSubmit(e) {
     } catch (error) {
         console.error('[USER_FORM] Error:', error);
         alert('Error saving user: ' + error.message);
+    } finally {
+        // Re-enable however it ended. Without this the button stays dead after
+        // a failed save and the admin has to reopen the dialog.
+        if (submitButton) submitButton.disabled = false;
     }
 }
 
 async function handlePasswordReset(e) {
     e.preventDefault();
+    const submitButton = e.target.querySelector('button[type="submit"], input[type="submit"]');
+    if (submitButton) {
+        if (submitButton.disabled) return;
+        submitButton.disabled = true;
+    }
     
     const userId = document.getElementById('password-user-id').value;
     const newPassword = document.getElementById('new-password').value;
@@ -654,15 +682,23 @@ async function handlePasswordReset(e) {
         alert('Password reset successfully');
     } catch (error) {
         alert('Error resetting password: ' + error.message);
+    } finally {
+        if (submitButton) submitButton.disabled = false;
     }
 }
 
 function closeModal() {
-    document.getElementById('user-modal').style.display = 'none';
+    const modal = document.getElementById('user-modal');
+    if (!modal) return;
+    if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
+    modal.style.display = 'none';
 }
 
 function closePasswordModal() {
-    document.getElementById('password-modal').style.display = 'none';
+    const modal = document.getElementById('password-modal');
+    if (!modal) return;
+    if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
+    modal.style.display = 'none';
 }
 
 async function unblockUser(userId) {

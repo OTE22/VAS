@@ -395,7 +395,6 @@
     // ------------------------------------------------------------------
     // Task details modal (accessible — no window.alert)
     // ------------------------------------------------------------------
-    let modalOpener = null;
 
     async function openTaskDetails(taskId) {
         // Always re-fetch: the row cache may be stale for running jobs
@@ -504,19 +503,18 @@
         }
         if (actions.childElementCount) body.appendChild(actions);
 
-        modalOpener = document.activeElement;
-        modal.style.display = 'flex';
-        modal.setAttribute('aria-hidden', 'false');
+        // Opener tracking, aria-hidden and focus restore are ModalStack's
+        // (it records the trigger at open, restores it in settle(), and
+        // contains Tab). Removed here as duplicated lifecycle.
+        window.ModalStack.open(modal, { backdropClose: true, onClose: () => closeTaskModal() });
         document.getElementById('task-modal-close').focus();
     }
 
     function closeTaskModal() {
         const modal = document.getElementById('task-modal');
         if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
         modal.style.display = 'none';
-        modal.setAttribute('aria-hidden', 'true');
-        if (modalOpener && typeof modalOpener.focus === 'function') modalOpener.focus();
-        modalOpener = null;
     }
 
     async function taskAction(taskId, action, btn) {
@@ -785,19 +783,17 @@
         if (!modal || !input || !btn) return;
         input.value = '';
         btn.disabled = true;
-        modalOpener = document.activeElement;
-        modal.style.display = 'flex';
-        modal.setAttribute('aria-hidden', 'false');
+        window.ModalStack.open(modal, {
+            backdropClose: true, onClose: () => closeRetentionConfirm()
+        });
         input.focus();
     }
 
     function closeRetentionConfirm() {
         const modal = document.getElementById('retention-confirm-modal');
         if (!modal) return;
+        if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
         modal.style.display = 'none';
-        modal.setAttribute('aria-hidden', 'true');
-        if (modalOpener && typeof modalOpener.focus === 'function') modalOpener.focus();
-        modalOpener = null;
     }
 
     // ------------------------------------------------------------------
@@ -884,9 +880,7 @@
 
         // Task modal close
         document.getElementById('task-modal-close').addEventListener('click', closeTaskModal);
-        document.getElementById('task-modal').addEventListener('click', (e) => {
-            if (e.target === e.currentTarget) closeTaskModal();
-        });
+        // Backdrop clicks are ModalStack's (opted in at open time).
 
         // Alerts opt-in
         document.getElementById('enable-alerts-btn').addEventListener('click', toggleAlerts);

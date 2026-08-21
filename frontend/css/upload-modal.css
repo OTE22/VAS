@@ -9,7 +9,7 @@
     height: 100%;
     background: rgba(0, 0, 0, 0.85);
     backdrop-filter: blur(5px);
-    z-index: 10000;
+    z-index: var(--z-modal-base, 10000);
     align-items: center;
     justify-content: center;
     animation: fadeIn 0.3s ease;
@@ -451,4 +451,11 @@
 .enrollment-candidate--duplicate .enrollment-candidate__choose:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.12);
     box-shadow: none;
+}
+
+/* Active drop target. The box has always advertised "drag and drop"; now that
+   a drop actually works, it needs to look like it will accept one. */
+.file-upload-area.dragging {
+    border-color: rgba(0, 255, 150, 0.9);
+    background: rgba(0, 255, 150, 0.14);
 }

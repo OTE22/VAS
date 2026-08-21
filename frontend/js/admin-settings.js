@@ -420,12 +420,26 @@ function editSetting(key) {
     }
 
     const modal = document.getElementById('setting-modal');
-    if (modal) modal.style.display = 'block';
+    // Shared lifecycle. This page had no Escape handling; the stack supplies
+    // it, plus focus containment and the background scroll lock.
+    if (modal) {
+        window.ModalStack.open(modal, {
+            backdropClose: true,
+            onClose: () => closeSettingModal()
+        });
+    }
 }
 
 function closeSettingModal() {
     const modal = document.getElementById('setting-modal');
-    if (modal) modal.style.display = 'none';
+    if (!modal) return;
+    if (window.ModalStack.isOpen(modal)) {
+        window.ModalStack.close(modal);   // re-enters here via onClose
+        return;
+    }
+    modal.style.display = 'none';
+    // Business cleanup, preserved: a reopened dialog must not show the
+    // previous setting's edits.
     const form = document.getElementById('setting-form');
     if (form) form.reset();
 }
@@ -522,11 +536,7 @@ function bindRetentionTools() {
     });
 }
 
-// Close modal on outside click
-window.addEventListener('click', (e) => {
-    const modal = document.getElementById('setting-modal');
-    if (e.target === modal) closeSettingModal();
-});
+// Backdrop clicks belong to ModalStack (opted in at open time).
 
 // Keep global exports for the modal close button in HTML
 window.filterByCategory = filterByCategory;

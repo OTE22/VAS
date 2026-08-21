@@ -1,5 +1,5 @@
 <!-- Face Detection Error Alert Modal - Global Component -->
-<div id="face-detection-alert-modal" class="security-modal" style="display: none; z-index: 99999;">
+<div id="face-detection-alert-modal" class="security-modal" style="display: none;">
     <div class="modal-content" style="max-width: 500px;">
         <div class="modal-header" style="background: linear-gradient(135deg, rgba(255, 68, 68, 0.2) 0%, rgba(255, 100, 100, 0.1) 100%); border-bottom-color: rgba(255, 68, 68, 0.4);">
             <h2 style="color: #ff6b6b; text-shadow: 0 0 10px rgba(255, 107, 107, 0.5);">
@@ -121,9 +121,13 @@
                     <div class="file-upload-icon">
                         <i class="fas fa-cloud-upload-alt"></i>
                     </div>
+                    <!-- The size is filled in from /api/dashboard/config once
+                         it loads. It used to be hard-coded as "5MB" while the
+                         server enforced 10MB, so the modal understated the
+                         real limit by half. -->
                     <div class="file-upload-text">
                         Click to upload or <strong>drag and drop</strong><br />
-                        PNG, JPG, WEBP up to 5MB
+                        <span id="globalUploadHint">PNG, JPG or WEBP</span>
                     </div>
                 </div>
                 <input

@@ -46,7 +46,11 @@ logger = logging.getLogger(__name__)
 # version string.
 THREAT_ALGORITHM_VERSION = "risk-engine-v1"
 NETWORK_RISK_VERSION = "risk-engine-v1"
-PATTERN_ALGORITHM_VERSION = "patterns-v2"
+PATTERN_ALGORITHM_VERSION = "patterns-v3"
+# "Together" for group detection: sightings within this many minutes of each
+# other on one camera. A SLIDING window anchored on each sighting (v3);
+# v2 snapped to fixed clock buckets and missed groups straddling a boundary.
+GROUP_WINDOW_MINUTES = 5
 ANOMALY_ALGORITHM_VERSION = "anomaly-context-v3"
 
 
@@ -169,6 +173,8 @@ class PatternReport:
     window_start: datetime
     window_end: datetime
     algorithm_version: str = PATTERN_ALGORITHM_VERSION
+    pipeline_id: Optional[str] = None      # None = every camera
+    scope_note: Optional[str] = None       # what a scoped scan cannot see
 
 
 @dataclass
@@ -509,7 +515,8 @@ class SecurityIntelligenceService:
         self,
         db: AsyncSession,
         days_back: int = 30,
-        min_group_size: int = 3
+        min_group_size: int = 3,
+        pipeline_id: Optional[str] = None,
     ) -> PatternReport:
         """
         Detect suspicious patterns in identity behaviour.
@@ -523,17 +530,25 @@ class SecurityIntelligenceService:
         - Unusual timing (repeated activity in the configured off-hours window)
         - Rapid movement (camera-to-camera transition faster than plausible)
         """
-        logger.info(f"[SECURITY_INTEL] Detecting suspicious patterns (days_back={days_back})")
+        logger.info(f"[SECURITY_INTEL] Detecting suspicious patterns "
+                    f"(days_back={days_back}, pipeline={pipeline_id or 'all'})")
 
         window_end = datetime.utcnow()
         cutoff_date = window_end - timedelta(days=days_back)
         scan_limit = int(settings.PATTERN_SCAN_LIMIT)
 
+        # Optional camera scope. Applied in SQL so the scan cap budgets the
+        # chosen camera alone — filtering after the cap would silently drop a
+        # quiet camera's history behind a busy one's. Group activity and
+        # unusual timing are per-camera by nature; rapid movement compares
+        # TWO cameras, so scoping to one camera cannot produce it and the
+        # caller is told so (see `scope_note`).
+        query = (select(IdentityAppearance)
+                 .where(IdentityAppearance.start_time >= cutoff_date))
+        if pipeline_id:
+            query = query.where(IdentityAppearance.pipeline_id == pipeline_id)
         result = await db.execute(
-            select(IdentityAppearance)
-            .where(IdentityAppearance.start_time >= cutoff_date)
-            .order_by(IdentityAppearance.start_time.desc())
-            .limit(scan_limit)
+            query.order_by(IdentityAppearance.start_time.desc()).limit(scan_limit)
         )
         appearances = list(result.scalars().all())
         truncated = len(appearances) >= scan_limit
@@ -589,6 +604,9 @@ class SecurityIntelligenceService:
             scanned_rows=len(appearances),
             window_start=cutoff_date,
             window_end=window_end,
+            pipeline_id=pipeline_id,
+            scope_note=("Scoped to one camera: rapid movement between cameras is not "
+                        "evaluated in this view." if pipeline_id else None),
         )
 
     def _detect_group_activity(
@@ -596,56 +614,86 @@ class SecurityIntelligenceService:
         appearances: List[IdentityAppearance],
         min_size: int
     ) -> List[SuspiciousPattern]:
-        """Multiple identities in the same 5-minute bucket on one camera.
+        """Multiple identities within one GROUP_WINDOW of each other on a camera.
+
+        SLIDING window, not fixed buckets. The previous version snapped every
+        sighting to a 5-minute wall (14:10:00, 14:15:00, ...), so three people
+        seen at 14:09:50 / 14:10:10 / 14:10:20 — together by any reasonable
+        reading — were split 1+2 across two buckets and never reported. Here
+        a window is anchored on each sighting and extends GROUP_WINDOW
+        forward, so "within five minutes of each other" means exactly that,
+        wherever the clock happens to be.
+
+        One pattern per OCCURRENCE, not per window: consecutive anchors whose
+        member set is the same, or a subset, of the occurrence already being
+        built are folded into it (the subset rule stops {A,B,C,D} at 14:10
+        being followed by a spurious {B,C,D} at 14:11 once A has left).
 
         Confidence derivation: how far the group exceeds the operator's
-        threshold, plus a recurrence bonus when the SAME group co-occurs in
-        more than one bucket (a recurring group is stronger evidence than a
-        one-off crowd).
+        threshold, plus a recurrence bonus when the SAME group occurs again
+        later (a recurring group is stronger evidence than a one-off crowd).
         """
-        patterns: List[SuspiciousPattern] = []
+        window = timedelta(minutes=GROUP_WINDOW_MINUTES)
 
-        time_windows: Dict[Tuple[datetime, str], List[IdentityAppearance]] = defaultdict(list)
+        per_camera: Dict[str, List[IdentityAppearance]] = defaultdict(list)
         for app in appearances:
-            window_start = app.start_time.replace(
-                minute=(app.start_time.minute // 5) * 5, second=0, microsecond=0)
-            time_windows[(window_start, app.pipeline_id)].append(app)
+            per_camera[app.pipeline_id].append(app)
 
-        # First pass: how many buckets does each exact group recur in?
-        group_recurrence: Counter = Counter()
-        bucket_groups: Dict[Tuple[datetime, str], Tuple[str, ...]] = {}
-        for key, apps in time_windows.items():
-            unique = tuple(sorted(set(str(a.identity_id) for a in apps)))
-            if len(unique) >= min_size:
-                bucket_groups[key] = unique
-                group_recurrence[unique] += 1
+        # occurrence = (pipeline_id, start, end, frozenset(identity ids))
+        occurrences: List[Tuple[str, datetime, datetime, frozenset]] = []
+        for pipeline_id, rows in per_camera.items():
+            rows.sort(key=lambda a: a.start_time)
+            n = len(rows)
+            right = 0
+            current: Optional[List[Any]] = None   # [start, end, frozenset]
+            for left in range(n):
+                anchor = rows[left].start_time
+                while right < n and rows[right].start_time < anchor + window:
+                    right += 1
+                members = frozenset(str(a.identity_id) for a in rows[left:right])
+                if len(members) < min_size:
+                    continue
+                last_in_window = rows[right - 1].start_time
+                if current is not None and members <= current[2] and anchor <= current[1]:
+                    # same group (or the tail of it) still together: extend
+                    current[1] = max(current[1], last_in_window)
+                    continue
+                if current is not None:
+                    occurrences.append((pipeline_id, current[0], current[1], current[2]))
+                current = [anchor, last_in_window, members]
+            if current is not None:
+                occurrences.append((pipeline_id, current[0], current[1], current[2]))
 
-        for (window_time, pipeline_id), group_key in sorted(bucket_groups.items()):
-            group_size = len(group_key)
-            recurrence = group_recurrence[group_key]
+        # Recurrence: how many separate occurrences does each exact group have?
+        group_recurrence: Counter = Counter(occ[3] for occ in occurrences)
+
+        patterns: List[SuspiciousPattern] = []
+        for pipeline_id, start, end, members in sorted(occurrences, key=lambda o: o[1]):
+            group_size = len(members)
+            recurrence = group_recurrence[members]
             # size term: at threshold -> 0.5, saturating at 2x threshold.
             size_term = min(1.0, group_size / (2.0 * min_size))
-            # recurrence bonus: same group in 2+ buckets.
+            # recurrence bonus: same group seen together on 2+ occasions.
             recurrence_bonus = 0.25 if recurrence >= 2 else 0.0
             confidence = round(min(1.0, 0.25 + size_term / 2.0 + recurrence_bonus), 2)
-
             patterns.append(SuspiciousPattern(
                 pattern_type="group_activity",
                 description=f"{group_size} identities appeared together at {pipeline_id}",
-                identities_involved=list(group_key),
+                identities_involved=sorted(members),
                 severity="high" if group_size >= 5 else "medium",
                 confidence=confidence,
-                first_detected=window_time,
+                first_detected=start,
                 evidence={
                     "pipeline_id": pipeline_id,
                     "group_size": group_size,
-                    "window_time": window_time.isoformat(),
+                    "window_start": start.isoformat(),
+                    "window_end": end.isoformat(),
+                    "window_minutes": GROUP_WINDOW_MINUTES,
                     "group_recurrence": recurrence,
                 },
                 locations=[pipeline_id],
-                time_range=(window_time, window_time + timedelta(minutes=5))
+                time_range=(start, max(end, start + window))
             ))
-
         return patterns
 
     def _detect_unusual_timing(

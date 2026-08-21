@@ -21,7 +21,10 @@
 
     const DEBUG = false;
     const SEARCH_DEBOUNCE_MS = 300;
-    const PAGE_SIZE = 25;
+    // 50, not 25: the picker lists 159 identities here and the point of it
+    // is to find a face. Half the 'Load more' clicks for one request, and
+    // well inside API_MAX_PAGE_SIZE (100), which the endpoint enforces.
+    const PAGE_SIZE = 50;
     const API_TIMEOUT_MS = 30000;
     const LONG_TIMEOUT_MS = 90000;
     const MAX_IMAGE_URL_LENGTH = 2048;
@@ -58,6 +61,46 @@
             return fallback !== undefined ? fallback : '';
         }
         return String(value);
+    }
+
+    /** best_snapshot_path -> a safe same-origin URL, or '' for the placeholder.
+     *  Mirrors the canonical fallback in admin-search.js:1030-1045. */
+    function snapshotUrlFromPath(path) {
+        if (typeof path !== 'string' || !path) return '';
+        // Anchor on the 'storage/' segment: paths arrive relative
+        // ('storage/faces/...'), bare, or ABSOLUTE ('/app/storage/...') —
+        // the absolute form passed straight through became /app/storage/...
+        // in the browser and 404'd every camera snapshot.
+        const idx = path.indexOf('storage/');
+        const url = (idx >= 0 ? '/' + path.slice(idx) : '/storage/' + path.replace(/^\/+/, '')).trim();
+        if (url.startsWith('//') || url.includes('..')) return '';
+        return url;
+    }
+
+    /** Compact copyable ID chip: shows the first 8 chars, copies the FULL
+     *  uuid. Native <button> => Enter/Space fire click natively; ONE handler,
+     *  stopPropagation so copying never selects/toggles the row. */
+    function buildIdChip(id) {
+        const full = normalizeId(id);
+        const codeEl = el('code', { text: (full ? full.slice(0, 8) : '?') + '\u2026' });
+        const btn = el('button', {
+            className: 'identity-item-id',
+            attrs: { type: 'button', title: full, 'aria-label': 'Copy identity ID ' + full }
+        }, [codeEl]);
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            e.preventDefault();
+            const restore = codeEl.textContent;
+            const done = function (ok) {
+                codeEl.textContent = ok ? 'copied \u2713' : 'copy failed';
+                window.setTimeout(function () { codeEl.textContent = restore; }, 1200);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(full).then(function () { done(true); },
+                                                         function () { done(false); });
+            } else { done(false); }
+        });
+        return btn;
     }
 
     function shortId(id) {
@@ -240,7 +283,11 @@
         const headers = { 'Accept': options.expect === 'html' ? 'text/html' : 'application/json' };
         if (method !== 'GET' && method !== 'HEAD') {
             headers['X-Requested-With'] = 'XMLHttpRequest'; // CSRF header
-            if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+            // FormData must NOT get a Content-Type: the browser writes the
+            // multipart boundary itself, and a manual header breaks parsing.
+            if (options.body !== undefined && !(options.body instanceof FormData)) {
+                headers['Content-Type'] = 'application/json';
+            }
         }
 
         let response;
@@ -250,7 +297,8 @@
                 credentials: 'include',
                 cache: 'no-store',
                 headers: headers,
-                body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+                body: options.body === undefined ? undefined
+                    : (options.body instanceof FormData ? options.body : JSON.stringify(options.body)),
                 signal: signal
             });
         } catch (err) {
@@ -347,6 +395,7 @@
             const data = await api('/api/pipelines');
             const list = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
             state.pipelines = list.map(normalizePipeline).filter(Boolean);
+            populatePatternPipelineFilter();
             state.pipelineNames.clear();
             for (const p of state.pipelines) state.pipelineNames.set(p.id, p.displayName);
         } catch (err) {
@@ -434,6 +483,23 @@
         });
 
         const filterRows = [el('div', { className: 'filter-row' }, [searchInput])];
+
+        // --- find by photo (identity pickers only) -------------------------
+        let photoInput = null, photoBtn = null, photoClearBtn = null;
+        if (config.mode === 'identity') {
+            photoInput = el('input', { className: 'filter-photo-input', attrs: { type: 'file', accept: 'image/*' } });
+            photoInput.style.display = 'none';
+            photoBtn = el('button', {
+                className: 'filter-photo-btn',
+                attrs: { type: 'button', title: 'Find by photo', 'aria-label': 'Find identity by photo' }
+            }, [faIcon('fas fa-camera')]);
+            photoClearBtn = el('button', {
+                className: 'filter-photo-clear',
+                attrs: { type: 'button', title: 'Clear photo search', 'aria-label': 'Clear photo search' }
+            }, [faIcon('fas fa-times'), el('span', { text: ' photo' })]);
+            photoClearBtn.style.display = 'none';
+            filterRows[0].append(photoBtn, photoClearBtn, photoInput);
+        }
         let typeSelect = null, pipelineSelect = null, lastSeenSelect = null;
         if (config.mode === 'identity') {
             typeSelect = el('select', { className: 'filter-type', attrs: { 'aria-label': 'Filter by type' } }, [
@@ -566,10 +632,17 @@
                 const metaChildren = [];
                 if (config.mode === 'identity') {
                     metaChildren.push(el('span', { className: 'identity-item-type ' + item.type, text: item.type }));
+                    metaChildren.push(buildIdChip(item.id));
                     metaChildren.push(el('span', {
                         className: 'identity-item-date',
                         text: 'Last seen: ' + (item.lastSeenAt ? fmtDate(item.lastSeenAt) : 'Never')
                     }));
+                    if (typeof item.similarity === 'number') {
+                        metaChildren.push(el('span', {
+                            className: 'identity-item-similarity',
+                            text: Math.round(item.similarity * 100) + '% match'
+                        }));
+                    }
                 } else {
                     metaChildren.push(el('span', { className: 'identity-item-type', text: item.id }));
                     metaChildren.push(el('span', { className: 'identity-item-date', text: 'Detections: ' + item.totalDetections.toLocaleString() }));
@@ -632,6 +705,109 @@
             }
         }
 
+        // --- find by photo -------------------------------------------------
+        // Same request key as the text search: beginRequest aborts the
+        // previous controller and creates a FRESH one per request (an aborted
+        // controller is never reused); isCurrent() independently drops any
+        // stale response that slips past the abort.
+
+        let uploadLimitsPromise = null;
+        function loadUploadLimits() {
+            if (!uploadLimitsPromise) {
+                uploadLimitsPromise = api('/api/dashboard/config')
+                    .then(function (payload) {
+                        const cfg = (payload && payload.config) || {};
+                        return {
+                            maxBytes: Number.isFinite(cfg.max_file_size_bytes) ? cfg.max_file_size_bytes : null,
+                            extensions: Array.isArray(cfg.allowed_extensions) && cfg.allowed_extensions.length
+                                ? cfg.allowed_extensions.map(function (x) { return String(x).replace(/^\./, '').toLowerCase(); })
+                                : null
+                        };
+                    })
+                    .catch(function () { return { maxBytes: null, extensions: null }; });
+            }
+            return uploadLimitsPromise;
+        }
+
+        function exitPhotoMode(rerun) {
+            component.photoMode = false;
+            if (photoClearBtn) photoClearBtn.style.display = 'none';
+            if (photoInput) photoInput.value = '';
+            if (rerun) refresh(true);
+        }
+
+        async function runPhotoSearch(file) {
+            if (!file) return;
+            // Client pre-checks mirror the server's published limits; the
+            // server stays authoritative (no invented frontend limit).
+            const limits = await loadUploadLimits();
+            const ext = (file.name.split('.').pop() || '').toLowerCase();
+            if (limits.extensions && ext && limits.extensions.indexOf(ext) === -1) {
+                statusLine.textContent = 'Unsupported image type. Allowed: ' + limits.extensions.join(', ');
+                photoInput.value = '';
+                return;
+            }
+            if (!limits.extensions && file.type && file.type.indexOf('image/') !== 0) {
+                statusLine.textContent = 'Please choose an image file.';
+                photoInput.value = '';
+                return;
+            }
+            if (limits.maxBytes && file.size > limits.maxBytes) {
+                statusLine.textContent = 'Photo is too large (limit ' +
+                    Math.round(limits.maxBytes / 1048576) + 'MB).';
+                photoInput.value = '';
+                return;
+            }
+
+            const req = beginRequest('selector:' + originalSelect.id);
+            component.photoMode = true;
+            statusLine.textContent = 'Searching by photo\u2026';
+            loadMoreBtn.style.display = 'none';
+            loadMoreBtn.disabled = true;
+            try {
+                const formData = new FormData();
+                formData.append('image', file);
+                formData.append('scope', 'both');
+                formData.append('top_k', '20');
+                const matches = await api('/api/search/by-image', {
+                    method: 'POST', body: formData, signal: req.signal, timeout: 60000
+                });
+                if (!req.isCurrent() || !component.photoMode) return;
+                // Normalise through the SAME normalizeIdentity the text flow
+                // uses (one shape, one renderer); backend type preserved.
+                const items = (Array.isArray(matches) ? matches : []).map(function (m) {
+                    const norm = normalizeIdentity({
+                        identity_id: m.identity_id,
+                        display_name: m.display_name,
+                        type: m.type,
+                        last_seen_at: m.last_seen_at,
+                        snapshot_url: snapshotUrlFromPath(m.best_snapshot_path)
+                    });
+                    if (norm && typeof m.similarity === 'number') norm.similarity = m.similarity;
+                    return norm;
+                }).filter(Boolean);
+                renderItems(items, false);
+                statusLine.textContent = items.length === 0
+                    ? 'No matching identities for that photo'
+                    : items.length + ' match(es) by photo \u2014 best first';
+                photoClearBtn.style.display = '';
+                setActive(-1);
+            } catch (err) {
+                if (err.aborted || !req.isCurrent()) return;   // intentional abort: silence
+                if (err.status === 400) {
+                    statusLine.textContent = 'No face detected in that photo.';
+                } else if (err.status === 401 || err.status === 403) {
+                    statusLine.textContent = 'Not permitted \u2014 sign in again.';
+                } else {
+                    statusLine.textContent = 'Photo search failed. Please try again.';
+                }
+                photoClearBtn.style.display = '';
+            } finally {
+                // Always reset, so choosing the SAME image again re-fires change.
+                photoInput.value = '';
+            }
+        }
+
         function runPipelineFilter() {
             const term = searchInput.value.trim().toLowerCase();
             const filtered = state.pipelines.filter(function (p) {
@@ -648,14 +824,94 @@
 
         component.open = function () {
             panel.style.display = 'block';
+            fitPanelToViewport();
             trigger.classList.add('active');
             trigger.setAttribute('aria-expanded', 'true');
             openSelectorPanels.add(component);
             refresh(true);
-            window.setTimeout(function () { searchInput.focus(); }, 50);
+            // preventScroll matters: fitPanelToViewport() has just placed the
+            // panel against the CURRENT scroll position, but the panel is
+            // absolutely positioned against this wrapper. A plain focus() makes
+            // the browser scroll .security-content to reveal the search box,
+            // which moves the wrapper — and the panel with it — leaving the
+            // freshly computed fit stale and the panel hanging below the fold.
+            window.setTimeout(function () { searchInput.focus({ preventScroll: true }); }, 50);
         };
 
+
+        /** Size the panel to the space actually available, and flip it above
+         *  the trigger when there is more room there.
+         *
+         *  A fixed max-height cannot fit: the trigger sits partway down the
+         *  page, so the panel opened at y=365 and ran to y=865 in a 768px
+         *  viewport — the last faces, the Load-more button and the pager were
+         *  all below the fold and unreachable. Measured, not assumed: the probe
+         *  asserts the panel's bottom edge is on screen.
+         */
+        function fitPanelToViewport() {
+            const GAP = 12;                     // breathing room at the edge
+            const MIN = 260;                    // below this the list is useless
+            const rect = trigger.getBoundingClientRect();
+            const below = window.innerHeight - rect.bottom - GAP;
+            const above = rect.top - GAP;
+            // Use whichever side has more room; only prefer flipping up when
+            // below is genuinely too small to be useful.
+            const openUp = below < MIN && above > below;
+
+            panel.style.top = openUp ? 'auto' : '100%';
+            panel.style.bottom = openUp ? '100%' : 'auto';
+
+            // Measure the panel's OWN top rather than assuming it sits just
+            // under the trigger: `top: 100%` is relative to the wrapper, which
+            // also holds the selected-identity tags, so the real offset was
+            // 24px where the trigger implied 8 — and the panel overhung the
+            // viewport by exactly that difference.
+            const panelTop = panel.getBoundingClientRect().top;
+            // Clamp to what exists. Forcing a MIN taller than the available
+            // space is how the panel overhung the fold at 1024x768: the floor
+            // is a preference, not a licence to leave the viewport.
+            const available = Math.floor(openUp ? above : window.innerHeight - panelTop - GAP);
+            const space = Math.max(120, Math.min(available, Math.max(MIN, available)));
+
+            panel.style.maxHeight = space + 'px';
+
+            // Horizontal clamp. The panel is positioned against its wrapper,
+            // so on a narrow viewport a wrapper sitting right of centre pushes
+            // it off-screen even at 92vw. Nudge it back by however much it
+            // overhangs, and never let it start left of the edge.
+            panel.style.left = '0';
+            panel.style.right = 'auto';
+            const box = panel.getBoundingClientRect();
+            const overhangRight = box.right - (window.innerWidth - GAP);
+            if (overhangRight > 0) {
+                panel.style.left = (-overhangRight) + 'px';
+            }
+            const shifted = panel.getBoundingClientRect();
+            if (shifted.left < GAP) {
+                panel.style.left = (parseFloat(panel.style.left || '0') + (GAP - shifted.left)) + 'px';
+            }
+
+            if (openUp) {
+                panel.style.top = 'auto';
+                panel.style.bottom = '100%';
+                panel.style.marginTop = '0';
+                panel.style.marginBottom = '0.5rem';
+            } else {
+                panel.style.top = '100%';
+                panel.style.bottom = 'auto';
+                panel.style.marginTop = '0.5rem';
+                panel.style.marginBottom = '0';
+            }
+        }
+
         component.close = function (restoreFocus) {
+            // Nothing may keep running behind a closed picker; reopening must
+            // start clean rather than resuming a stale photo search.
+            const previous = requestControllers.get('selector:' + originalSelect.id);
+            if (previous) {
+                try { previous.abort(); } catch (_) { /* noop */ }
+            }
+            if (component.photoMode) exitPhotoMode(false);
             panel.style.display = 'none';
             trigger.classList.remove('active');
             trigger.setAttribute('aria-expanded', 'false');
@@ -723,8 +979,16 @@
         });
         on(searchInput, 'input', function () {
             if (component.searchTimer) window.clearTimeout(component.searchTimer);
+            // Typing leaves photo mode; refresh() begins a new request, which
+            // aborts any in-flight photo search.
+            if (component.photoMode) exitPhotoMode(false);
             component.searchTimer = window.setTimeout(function () { refresh(true); }, SEARCH_DEBOUNCE_MS);
         });
+        if (photoBtn) {
+            on(photoBtn, 'click', function (e) { e.stopPropagation(); photoInput.click(); });
+            on(photoClearBtn, 'click', function (e) { e.stopPropagation(); exitPhotoMode(true); });
+            on(photoInput, 'change', function () { runPhotoSearch(photoInput.files && photoInput.files[0]); });
+        }
         if (typeSelect) on(typeSelect, 'change', function () { refresh(true); });
         if (pipelineSelect) on(pipelineSelect, 'change', function () { refresh(true); });
         if (lastSeenSelect) on(lastSeenSelect, 'change', function () { refresh(true); });
@@ -1080,7 +1344,8 @@
         try {
             const data = await api('/api/security/patterns', {
                 signal: req.signal, timeout: LONG_TIMEOUT_MS,
-                params: { days_back: daysBack, min_group_size: minGroup }
+                params: { days_back: daysBack, min_group_size: minGroup,
+                          pipeline_id: (document.getElementById('patterns-pipeline-id') || {}).value || undefined }
             });
             if (!req.isCurrent()) return;
             // patterns-v2 envelope: {items, truncated, total, analysis_window}
@@ -1132,7 +1397,11 @@
                     el('span', { className: 'pattern-detail-value', text: value })
                 ]);
             }
-            return el('div', { className: 'pattern-card' }, [
+            const card = el('div', {
+                className: 'pattern-card pattern-card-clickable',
+                attrs: { role: 'button', tabindex: '0',
+                         title: 'Click for details: who, where and the evidence' }
+            }, [
                 el('div', { className: 'pattern-header' }, [
                     el('div', { className: 'pattern-type' }, [
                         faIcon(PATTERN_ICONS[patternType] || 'fas fa-exclamation-triangle'),
@@ -1146,13 +1415,231 @@
                     detail('Identities Involved', String((Array.isArray(pattern.identities_involved) ? pattern.identities_involved : []).length)),
                     detail('Locations', locations),
                     detail('First Detected', fmtDateTime(pattern.first_detected))
+                ]),
+                el('div', { className: 'pattern-open-hint' }, [
+                    faIcon('fas fa-up-right-from-square'),
+                    document.createTextNode(' View details')
                 ])
             ]);
+            // The pattern object rides on the node; the container's single
+            // delegated listener (installed once, below) opens the popup.
+            card.__pattern = pattern;
+            return card;
         }).filter(Boolean);
         if (truncated) {
             cards.unshift(buildTruncationNote());
         }
         container.replaceChildren.apply(container, cards);
+    }
+
+    // ============================================
+    // Pattern detail popup
+    // ============================================
+    //
+    // Cards summarise; the popup answers "who exactly, where exactly, and
+    // why did the detector fire". Every field comes from the pattern object
+    // already on the client; the only extra request resolves the involved
+    // identity ids to names and thumbnails (one light list query per id,
+    // matched on the full id), so the popup opens immediately and fills in.
+
+    const PATTERN_EVIDENCE_LABELS = {
+        group_size: 'People together',
+        window_start: 'Window start',
+        window_end: 'Window end',
+        window_minutes: 'Window (minutes)',
+        group_recurrence: 'Times this exact group was seen together',
+        window_time: 'Window',
+        off_hour_appearances: 'Off-hours sightings',
+        total_appearances: 'All sightings in range',
+        off_hours_share: 'Share of activity that is off-hours',
+        time_range: 'Off-hours window (local time)',
+        timezones: 'Timezone used',
+        from_location: 'From camera',
+        to_location: 'To camera',
+        time_seconds: 'Seconds between cameras',
+        implied_speed_kmh: 'Implied speed (km/h)',
+        distance_meters: 'Distance (m)',
+        pipeline_id: 'Camera'
+    };
+
+    function formatEvidenceValue(key, value) {
+        if (value === null || value === undefined || value === '') return '-';
+        if (key === 'from_location' || key === 'to_location' || key === 'pipeline_id') {
+            return pipelineDisplayName(String(value));
+        }
+        if (key === 'window_start' || key === 'window_end' || key === 'window_time') {
+            return fmtDateTime(value);
+        }
+        if (key === 'off_hours_share') return Math.round(Number(value) * 100) + '%';
+        if (key === 'implied_speed_kmh' || key === 'distance_meters') {
+            return String(Math.round(Number(value) * 10) / 10);
+        }
+        if (Array.isArray(value)) return value.map(function (v) { return safeText(v); }).join(', ');
+        if (typeof value === 'object') return JSON.stringify(value);
+        return safeText(value);
+    }
+
+    async function resolveIdentityRow(identityId) {
+        // /api/admin/identities matches the uuid as a prefix; asking with the
+        // full id and filtering on exact id keeps this precise and cheap.
+        try {
+            const data = await api('/api/admin/identities', {
+                params: { q: identityId, page: 1, page_size: 5 }
+            });
+            const rows = ((data && data.items) || []).map(normalizeIdentity).filter(Boolean);
+            return rows.find(function (r) { return r.id === normalizeId(identityId); }) || null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function buildIdentityTile(identityId, row) {
+        const id = normalizeId(identityId);
+        const name = row ? row.displayName : ('Unknown #' + shortId(id));
+        const link = el('a', {
+            className: 'pattern-identity-link',
+            attrs: { href: '/admin/identity/' + encodeURIComponent(id),
+                     title: 'Open profile' }
+        }, [faIcon('fas fa-user'), document.createTextNode(' Profile')]);
+        return el('div', { className: 'pattern-identity-tile' }, [
+            el('div', { className: 'identity-item-thumbnail' },
+                row && row.snapshotUrl ? safeImg(row.snapshotUrl, name) : faIcon('fas fa-user')),
+            el('div', { className: 'pattern-identity-info' }, [
+                el('div', { className: 'identity-item-name', text: name }),
+                el('div', { className: 'identity-item-meta' }, [
+                    el('span', { className: 'identity-item-type ' + (row ? row.type : 'unknown'),
+                                 text: row ? row.type : 'unknown' }),
+                    buildIdChip(id),
+                    link
+                ])
+            ])
+        ]);
+    }
+
+    function openPatternDetail(pattern) {
+        const modal = document.getElementById('pattern-detail-modal');
+        const body = document.getElementById('pattern-detail-body');
+        const title = document.getElementById('pattern-detail-title');
+        if (!modal || !body || !pattern) return;
+
+        const patternType = safeText(pattern.pattern_type, 'unknown');
+        const severity = SEVERITY_CLASSES.has(String(pattern.severity || '').toLowerCase())
+            ? String(pattern.severity).toLowerCase() : 'low';
+        title.replaceChildren(
+            faIcon(PATTERN_ICONS[patternType] || 'fas fa-exclamation-triangle'),
+            document.createTextNode(' ' + patternType.replace(/_/g, ' ').toUpperCase()));
+
+        const ids = (Array.isArray(pattern.identities_involved) ? pattern.identities_involved : [])
+            .map(normalizeId).filter(Boolean);
+        const range = Array.isArray(pattern.time_range) ? pattern.time_range : [];
+        const locations = (Array.isArray(pattern.locations) ? pattern.locations : []);
+
+        function fact(label, value) {
+            return el('div', { className: 'pattern-detail-item' }, [
+                el('span', { className: 'pattern-detail-label', text: label }),
+                el('span', { className: 'pattern-detail-value', text: value })
+            ]);
+        }
+
+        const summary = el('div', { className: 'pattern-detail-summary' }, [
+            el('span', { className: 'pattern-severity ' + severity, text: severity }),
+            el('p', { className: 'pattern-description', text: safeText(pattern.description) }),
+            el('div', { className: 'pattern-details' }, [
+                fact('Confidence', formatPercent01(pattern.confidence)),
+                fact('Where', locations.map(function (l) { return pipelineDisplayName(l); }).join(', ') || 'Unknown'),
+                fact('From', range[0] ? fmtDateTime(range[0]) : fmtDateTime(pattern.first_detected)),
+                fact('To', range[1] ? fmtDateTime(range[1]) : '-')
+            ])
+        ]);
+
+        const evidence = pattern.evidence && typeof pattern.evidence === 'object' ? pattern.evidence : {};
+        const evidenceRows = Object.keys(evidence).map(function (key) {
+            return el('div', { className: 'pattern-evidence-row' }, [
+                el('span', { className: 'pattern-detail-label',
+                             text: PATTERN_EVIDENCE_LABELS[key] || key.replace(/_/g, ' ') }),
+                el('span', { className: 'pattern-detail-value',
+                             text: formatEvidenceValue(key, evidence[key]) })
+            ]);
+        });
+        const evidenceSection = el('section', { className: 'pattern-detail-section' }, [
+            el('h3', { text: 'Why this was flagged' }),
+            el('div', { className: 'pattern-evidence' },
+                evidenceRows.length ? evidenceRows : [el('p', { text: 'No additional evidence recorded.' })])
+        ]);
+
+        const grid = el('div', { className: 'pattern-identity-grid' },
+            ids.map(function (id) { return buildIdentityTile(id, null); }));
+        const peopleSection = el('section', { className: 'pattern-detail-section' }, [
+            el('h3', { text: ids.length === 1 ? 'Person involved' : ids.length + ' people involved' }),
+            grid
+        ]);
+
+        body.replaceChildren(summary, evidenceSection, peopleSection);
+
+        if (window.ModalStack) {
+            window.ModalStack.open(modal, { backdropClose: true });
+        } else {
+            modal.style.display = 'flex';
+        }
+
+        // Fill names and thumbnails in place; a stale fill (user opened a
+        // different pattern meanwhile) is dropped by the generation check.
+        const gen = (openPatternDetail._gen = (openPatternDetail._gen || 0) + 1);
+        ids.forEach(function (id, index) {
+            resolveIdentityRow(id).then(function (row) {
+                if (openPatternDetail._gen !== gen || !row) return;
+                const tile = grid.children[index];
+                if (tile) grid.replaceChild(buildIdentityTile(id, row), tile);
+            });
+        });
+    }
+
+    function closePatternDetail() {
+        const modal = document.getElementById('pattern-detail-modal');
+        if (!modal) return;
+        if (window.ModalStack && window.ModalStack.isOpen(modal)) window.ModalStack.close(modal);
+        else modal.style.display = 'none';
+    }
+
+    /** The Detect Patterns camera dropdown: every pipeline the page knows,
+     *  by display name, with "All cameras" first. Keeps the current choice
+     *  across reloads of the pipeline list. */
+    function populatePatternPipelineFilter() {
+        const select = document.getElementById('patterns-pipeline-id');
+        if (!select) return;
+        const current = select.value;
+        const options = [el('option', { text: 'All cameras', attrs: { value: '' } })];
+        state.pipelines
+            .slice()
+            .sort(function (a, b) { return a.displayName.localeCompare(b.displayName); })
+            .forEach(function (p) {
+                options.push(el('option', { text: p.displayName, attrs: { value: p.id } }));
+            });
+        select.replaceChildren.apply(select, options);
+        if (current && state.pipelines.some(function (p) { return p.id === current; })) {
+            select.value = current;
+        }
+    }
+
+    function installPatternDetailHandlers() {
+        const container = document.getElementById('patterns-container');
+        const closeBtn = document.getElementById('close-pattern-detail-modal');
+        if (container && !container.__patternDetailWired) {
+            container.__patternDetailWired = true;
+            container.addEventListener('click', function (e) {
+                const card = e.target.closest('.pattern-card-clickable');
+                if (card && card.__pattern) openPatternDetail(card.__pattern);
+            });
+            container.addEventListener('keydown', function (e) {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                const card = e.target.closest('.pattern-card-clickable');
+                if (card && card.__pattern) { e.preventDefault(); openPatternDetail(card.__pattern); }
+            });
+        }
+        if (closeBtn && !closeBtn.__wired) {
+            closeBtn.__wired = true;
+            closeBtn.addEventListener('click', closePatternDetail);
+        }
     }
 
     // ============================================
@@ -1477,7 +1964,14 @@
         resultsDiv.replaceChildren(el('div', { className: 'success-message' }, [
             faIcon('fas fa-route'),
             el('h4', { text: 'Trajectory Predictions' }),
-            el('p', { text: 'Identity: ' + shortId(identityId) + '... — current camera: ' + pipelineDisplayName(currentCamera) }),
+            el('p', { className: 'identity-selected-id' }, [
+                el('span', { text: 'Identity: ' }), (function () {
+                    const chip = buildIdChip(identityId);
+                    chip.querySelector('code').textContent = normalizeId(identityId);
+                    return chip;
+                })(),
+                el('span', { text: ' \u2014 current camera: ' + pipelineDisplayName(currentCamera) })
+            ]),
             el('p', { className: 'prediction-note', text: safeText(data.note, 'Estimated times are statistical projections, not certainties.') }),
             el('div', { className: 'predictions-list' }, items),
             el('p', { className: 'prediction-model', text: 'Model: ' + safeText(data.model_version, 'unknown') })
@@ -1710,6 +2204,7 @@
     // ============================================
 
     function initializeSelectors() {
+        installPatternDetailHandlers();
         createSelector(document.getElementById('network-identity-ids'), { mode: 'identity', multi: true, label: 'Select Identities' });
         createSelector(document.getElementById('anomaly-identity-id'), { mode: 'identity', multi: false, label: 'Select Identity' });
         createSelector(document.getElementById('threat-identity-id'), { mode: 'identity', multi: false, label: 'Select Identity' });

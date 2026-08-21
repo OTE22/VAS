@@ -354,6 +354,14 @@ async def confirm_enrollment(
     # Enrolled. The parked copy has served its purpose.
     _safe_unlink_pending(storage_path)
 
+    if result.identity_created:
+        from backend.utils.identity_audit import log_person_created
+        await log_person_created(db, request, actor_id, actor_name,
+                                 identity_id=result.identity_id,
+                                 display_name=result.display_name,
+                                 image_id=result.image_id,
+                                 source="enrollment-review")
+
     if result.duplicate:
         message = "This image is already registered for the selected person."
     elif result.identity_created:

@@ -4,368 +4,456 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Security Intelligence - Admin Panel | Face Recognition Service</title>
-    
+
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/vendor/vis-network/vis-network.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
-    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-1">
-    <link rel="stylesheet" href="/frontend/css/admin-security-intelligence.css">
+    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-2">
+    <link rel="stylesheet" href="/frontend/css/admin-security-intelligence.css?v=sec-ui-3">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
 
+    <!-- LAYOUT CONTRACT
+         .security-intelligence-main is the page's single scroller (html/body are
+         fixed at 100vh by admin.css). Every tab lays its controls out on ONE
+         responsive grid, .sec-controls, which wraps instead of overflowing —
+         the previous markup had three different header shapes (tab-header,
+         anomalies-tab-header, threat-tab-header) and inline widths, so each tab
+         broke at a different viewport.
+
+         The JS contract is unchanged: every element id, .sec-tab / .sec-tab-content,
+         data-tab and the id="tab-<name>" pairing are exactly as before, because
+         admin-security-intelligence.js addresses this page entirely by id. -->
     <main class="security-intelligence-main">
-        <header class="page-header">
-            <div class="header-content">
-                <div class="header-icon-wrapper">
-                    <i class="fas fa-shield-alt"></i>
-                </div>
-                <div class="header-text">
-                    <h1>Security Intelligence</h1>
-                    <p>Advanced analysis for security agencies</p>
-                </div>
+        <header class="sec-masthead">
+            <div class="sec-masthead__icon"><i class="fas fa-shield-alt" aria-hidden="true"></i></div>
+            <div class="sec-masthead__text">
+                <h1>Security Intelligence</h1>
+                <p>Network, behaviour and movement analysis across the estate</p>
             </div>
         </header>
 
-        <!-- Tabs -->
         <!-- Tab clicks are wired in admin-security-intelligence.js — no inline handlers -->
-        <div class="security-tabs" id="security-tabs" role="tablist">
+        <div class="security-tabs" id="security-tabs" role="tablist" aria-label="Security intelligence sections">
             <button class="sec-tab active" data-tab="network" type="button" role="tab" aria-selected="true">
-                <i class="fas fa-project-diagram"></i> Social Network
+                <i class="fas fa-project-diagram" aria-hidden="true"></i><span>Social Network</span>
             </button>
             <button class="sec-tab" data-tab="patterns" type="button" role="tab" aria-selected="false">
-                <i class="fas fa-search"></i> Suspicious Patterns
+                <i class="fas fa-search" aria-hidden="true"></i><span>Suspicious Patterns</span>
             </button>
             <button class="sec-tab" data-tab="anomalies" type="button" role="tab" aria-selected="false">
-                <i class="fas fa-exclamation-triangle"></i> Anomalies
+                <i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>Anomalies</span>
             </button>
             <button class="sec-tab" data-tab="threats" type="button" role="tab" aria-selected="false">
-                <i class="fas fa-skull"></i> Threat Assessment
+                <i class="fas fa-skull-crossbones" aria-hidden="true"></i><span>Threat Assessment</span>
             </button>
             <button class="sec-tab" data-tab="advanced" type="button" role="tab" aria-selected="false">
-                <i class="fas fa-magic"></i> Advanced Features
+                <i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i><span>Advanced Features</span>
             </button>
             <button class="sec-tab" data-tab="map" type="button" role="tab" aria-selected="false">
-                <i class="fas fa-map"></i> Map View
+                <i class="fas fa-map-location-dot" aria-hidden="true"></i><span>Map View</span>
             </button>
         </div>
 
-        <!-- Tab Content -->
         <div class="security-content">
-            <!-- Social Network Tab -->
-            <div class="sec-tab-content active" id="tab-network">
-                <div class="tab-header">
-                    <h2>🔗 Social Network Analysis</h2>
-                    <div class="tab-filters">
-                        <label class="identity-selector-label">Select Identities (hold Ctrl/Cmd for multiple, empty = all): 
-                            <select id="network-identity-ids" class="form-control" multiple style="min-height: 100px;">
+            <!-- ============================ Social Network -->
+            <section class="sec-tab-content active" id="tab-network" role="tabpanel" aria-label="Social network analysis">
+                <div class="sec-panel">
+                    <header class="sec-panel__head">
+                        <i class="fas fa-project-diagram sec-panel__icon" aria-hidden="true"></i>
+                        <div>
+                            <h2>Social Network Analysis</h2>
+                            <p>Who appears with whom, and which identities sit at the centre of the graph</p>
+                        </div>
+                    </header>
+
+                    <div class="sec-controls">
+                        <div class="sec-field sec-field--wide">
+                            <label for="network-identity-ids">Identities</label>
+                            <select id="network-identity-ids" class="form-control" multiple>
                                 <option value="">-- Select Identities (optional) --</option>
                             </select>
-                            <small style="opacity: 0.7; font-size: 0.8rem;">Leave empty to analyze all identities</small>
-                        </label>
-                        <label>Min Connections: 
+                            <small>Leave empty to analyse every identity. Hold Ctrl/Cmd to pick several.</small>
+                        </div>
+                        <div class="sec-field">
+                            <label for="network-min-connections">Min connections</label>
                             <input type="number" id="network-min-connections" value="1" min="0" class="form-control">
-                        </label>
-                        <label>Days Back: 
+                        </div>
+                        <div class="sec-field">
+                            <label for="network-days-back">Days back</label>
                             <input type="number" id="network-days-back" value="90" min="1" max="365" class="form-control">
-                        </label>
-                        <button class="btn-primary" id="network-analyze-btn" type="button">
-                            <i class="fas fa-sync"></i> Analyze Network
-                        </button>
-                    </div>
-                </div>
-                <div class="network-container">
-                    <div id="network-graph" class="network-graph"></div>
-                    <div class="network-stats" id="network-stats">
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-nodes">-</div>
-                            <div class="stat-label">Nodes</div>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-edges">-</div>
-                            <div class="stat-label">Connections</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-clusters">-</div>
-                            <div class="stat-label">Clusters</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-central">-</div>
-                            <div class="stat-label">Central Nodes</div>
-                        </div>
-                    </div>
-                    <div class="network-details">
-                        <div class="details-section">
-                            <h3>Central Nodes (Most Connected)</h3>
-                            <div id="central-nodes-list" class="nodes-list"></div>
-                        </div>
-                        <div class="details-section">
-                            <h3>Clusters</h3>
-                            <div id="clusters-list" class="clusters-list"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Suspicious Patterns Tab -->
-            <div class="sec-tab-content" id="tab-patterns">
-                <div class="tab-header">
-                    <h2>🚨 Suspicious Pattern Detection</h2>
-                    <div class="tab-filters">
-                        <label>Days Back: 
-                            <input type="number" id="patterns-days-back" value="30" min="1" max="90" class="form-control">
-                        </label>
-                        <label>Min Group Size: 
-                            <input type="number" id="patterns-min-group" value="3" min="2" max="20" class="form-control">
-                        </label>
-                        <button class="btn-primary" id="patterns-detect-btn" type="button">
-                            <i class="fas fa-sync"></i> Detect Patterns
-                        </button>
-                    </div>
-                </div>
-                <div class="patterns-container" id="patterns-container">
-                    <div class="loading-state">
-                        <i class="fas fa-spinner fa-spin"></i>
-                        <p>Loading patterns...</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Anomalies Tab -->
-            <div class="sec-tab-content" id="tab-anomalies">
-                <div class="tab-header anomalies-tab-header">
-                    <div class="tab-header-left">
-                        <h2>⚠️ Behavioral Anomaly Detection</h2>
-                        <label class="identity-selector-label identity-selector-left">Select Identity: 
-                            <select id="anomaly-identity-id" class="form-control">
-                                <option value="">-- Select Identity --</option>
-                            </select>
-                        </label>
-                    </div>
-                    <div class="tab-filters tab-filters-right">
-                        <label>Days Back: 
-                            <input type="number" id="anomaly-days-back" value="90" min="1" max="365" class="form-control">
-                        </label>
-                        <button class="btn-primary" id="anomalies-detect-btn" type="button">
-                            <i class="fas fa-sync"></i> Detect Anomalies
-                        </button>
-                    </div>
-                </div>
-                <div class="anomalies-container" id="anomalies-container">
-                    <div class="info-message">
-                        <i class="fas fa-info-circle"></i>
-                        <p>Enter an identity ID to detect behavioral anomalies</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Threat Assessment Tab -->
-            <div class="sec-tab-content" id="tab-threats">
-                <div class="tab-header threat-tab-header">
-                    <div class="threat-header-top">
-                        <label class="identity-selector-label identity-selector-threat">Select Identity: 
-                            <select id="threat-identity-id" class="form-control">
-                                <option value="">-- Select Identity --</option>
-                            </select>
-                        </label>
-                    </div>
-                    <div class="threat-header-bottom">
-                        <h2>🎯 Threat Assessment</h2>
-                        <div class="tab-filters tab-filters-right">
-                            <button class="btn-primary" id="threat-assess-btn" type="button">
-                                <i class="fas fa-sync"></i> Assess Threat
+                        <div class="sec-field sec-field--action">
+                            <button class="btn-primary" id="network-analyze-btn" type="button">
+                                <i class="fas fa-sync" aria-hidden="true"></i> Analyze Network
                             </button>
                         </div>
                     </div>
-                </div>
-                <div class="threat-container" id="threat-container">
-                    <div class="info-message">
-                        <i class="fas fa-info-circle"></i>
-                        <p>Enter an identity ID to perform threat assessment</p>
-                    </div>
-                </div>
-            </div>
 
-            <!-- Advanced Features Tab -->
-            <div class="sec-tab-content" id="tab-advanced">
-                <div class="tab-header">
-                    <h2>✨ Advanced SNA Features</h2>
-                    <p class="tab-description">Enhanced social network analysis with machine learning capabilities</p>
-                </div>
-
-                <!-- Threshold Learning Section -->
-                <div class="feature-section">
-                    <div class="feature-header">
-                        <h3><i class="fas fa-brain"></i> Automatic Threshold Learning</h3>
-                        <p>Learn optimal distance and time thresholds for each camera pair based on historical data</p>
-                    </div>
-                    <div class="feature-controls">
-                        <div class="control-group">
-                            <label>Select Pipelines (empty = all):</label>
-                            <select id="threshold-pipeline-ids" class="form-control" multiple style="display: none;">
-                                <option value="">-- All Pipelines --</option>
-                            </select>
-                            <small style="opacity: 0.7; font-size: 0.8rem; display: block; margin-top: 0.25rem;">Leave empty to learn for all camera pairs</small>
+                    <div class="network-container">
+                        <div id="network-graph" class="network-graph"></div>
+                        <div class="network-stats" id="network-stats">
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-nodes">-</div>
+                                <div class="stat-label">Nodes</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-edges">-</div>
+                                <div class="stat-label">Connections</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-clusters">-</div>
+                                <div class="stat-label">Clusters</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="stat-central">-</div>
+                                <div class="stat-label">Central Nodes</div>
+                            </div>
                         </div>
-                        <button class="btn-primary" id="threshold-learn-btn" type="button">
-                            <i class="fas fa-brain"></i> Learn Thresholds
-                        </button>
+                        <div class="network-details">
+                            <div class="details-section">
+                                <h3>Central nodes (most connected)</h3>
+                                <div id="central-nodes-list" class="nodes-list"></div>
+                            </div>
+                            <div class="details-section">
+                                <h3>Clusters</h3>
+                                <div id="clusters-list" class="clusters-list"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================ Suspicious Patterns -->
+            <section class="sec-tab-content" id="tab-patterns" role="tabpanel" aria-label="Suspicious pattern detection">
+                <div class="sec-panel">
+                    <header class="sec-panel__head">
+                        <i class="fas fa-search sec-panel__icon" aria-hidden="true"></i>
+                        <div>
+                            <h2>Suspicious Pattern Detection</h2>
+                            <p>Groups moving together, repeated loitering and unusual co-appearance</p>
+                        </div>
+                    </header>
+
+                    <div class="sec-controls">
+                        <div class="sec-field sec-field--wide">
+                            <label for="patterns-pipeline-id">Camera</label>
+                            <select id="patterns-pipeline-id" class="form-control">
+                                <option value="">All cameras</option>
+                            </select>
+                            <small>Rapid movement compares two cameras, so it only appears in the all-cameras view.</small>
+                        </div>
+                        <div class="sec-field">
+                            <label for="patterns-days-back">Days back</label>
+                            <input type="number" id="patterns-days-back" value="30" min="1" max="90" class="form-control">
+                        </div>
+                        <div class="sec-field">
+                            <label for="patterns-min-group">Min group size</label>
+                            <input type="number" id="patterns-min-group" value="3" min="2" max="20" class="form-control">
+                        </div>
+                        <div class="sec-field sec-field--action">
+                            <button class="btn-primary" id="patterns-detect-btn" type="button">
+                                <i class="fas fa-sync" aria-hidden="true"></i> Detect Patterns
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="patterns-container sec-results" id="patterns-container">
+                        <div class="loading-state">
+                            <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                            <p>Loading patterns...</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================ Anomalies -->
+            <section class="sec-tab-content" id="tab-anomalies" role="tabpanel" aria-label="Behavioural anomaly detection">
+                <div class="sec-panel">
+                    <header class="sec-panel__head">
+                        <i class="fas fa-exclamation-triangle sec-panel__icon" aria-hidden="true"></i>
+                        <div>
+                            <h2>Behavioural Anomaly Detection</h2>
+                            <p>Departures from an identity's own established routine</p>
+                        </div>
+                    </header>
+
+                    <div class="sec-controls">
+                        <div class="sec-field sec-field--wide">
+                            <label for="anomaly-identity-id">Identity</label>
+                            <select id="anomaly-identity-id" class="form-control">
+                                <option value="">-- Select Identity --</option>
+                            </select>
+                        </div>
+                        <div class="sec-field">
+                            <label for="anomaly-days-back">Days back</label>
+                            <input type="number" id="anomaly-days-back" value="90" min="1" max="365" class="form-control">
+                        </div>
+                        <div class="sec-field sec-field--action">
+                            <button class="btn-primary" id="anomalies-detect-btn" type="button">
+                                <i class="fas fa-sync" aria-hidden="true"></i> Detect Anomalies
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="anomalies-container sec-results" id="anomalies-container">
+                        <div class="info-message">
+                            <i class="fas fa-info-circle" aria-hidden="true"></i>
+                            <p>Choose an identity to detect behavioural anomalies</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================ Threat Assessment -->
+            <section class="sec-tab-content" id="tab-threats" role="tabpanel" aria-label="Threat assessment">
+                <div class="sec-panel">
+                    <header class="sec-panel__head">
+                        <i class="fas fa-skull-crossbones sec-panel__icon" aria-hidden="true"></i>
+                        <div>
+                            <h2>Threat Assessment</h2>
+                            <p>Scored assessment combining watchlist status, behaviour and network position</p>
+                        </div>
+                    </header>
+
+                    <div class="sec-controls">
+                        <div class="sec-field sec-field--wide">
+                            <label for="threat-identity-id">Identity</label>
+                            <select id="threat-identity-id" class="form-control">
+                                <option value="">-- Select Identity --</option>
+                            </select>
+                        </div>
+                        <div class="sec-field sec-field--action">
+                            <button class="btn-primary" id="threat-assess-btn" type="button">
+                                <i class="fas fa-sync" aria-hidden="true"></i> Assess Threat
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="threat-container sec-results" id="threat-container">
+                        <div class="info-message">
+                            <i class="fas fa-info-circle" aria-hidden="true"></i>
+                            <p>Choose an identity to perform a threat assessment</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================ Advanced Features -->
+            <section class="sec-tab-content" id="tab-advanced" role="tabpanel" aria-label="Advanced features">
+                <div class="sec-panel">
+                    <header class="sec-panel__head">
+                        <i class="fas fa-wand-magic-sparkles sec-panel__icon" aria-hidden="true"></i>
+                        <div>
+                            <h2>Advanced SNA Features</h2>
+                            <p>Learned thresholds, trajectory prediction and activity correlation</p>
+                        </div>
+                    </header>
+
+                    <div class="feature-section">
+                        <div class="feature-header">
+                            <h3><i class="fas fa-brain" aria-hidden="true"></i> Automatic threshold learning</h3>
+                            <p>Learn distance and time thresholds per camera pair from historical movement</p>
+                        </div>
+                        <div class="sec-controls">
+                            <div class="sec-field sec-field--wide">
+                                <label for="threshold-pipeline-ids">Pipelines</label>
+                                <select id="threshold-pipeline-ids" class="form-control" multiple>
+                                    <option value="">-- All Pipelines --</option>
+                                </select>
+                                <small>Leave empty to learn for every camera pair</small>
+                            </div>
+                            <div class="sec-field sec-field--action">
+                                <button class="btn-primary" id="threshold-learn-btn" type="button">
+                                    <i class="fas fa-brain" aria-hidden="true"></i> Learn Thresholds
+                                </button>
+                            </div>
+                        </div>
                         <div id="threshold-results" class="feature-results"></div>
                     </div>
-                </div>
 
-                <!-- Trajectory Prediction Section -->
-                <div class="feature-section">
-                    <div class="feature-header">
-                        <h3><i class="fas fa-route"></i> Trajectory Prediction</h3>
-                        <p>Predict where a person will appear next based on historical movement patterns</p>
-                    </div>
-                    <div class="feature-controls">
-                        <div class="control-row">
-                            <div class="control-group identity-selector-group">
-                                <label>Select Identity:</label>
+                    <div class="feature-section">
+                        <div class="feature-header">
+                            <h3><i class="fas fa-route" aria-hidden="true"></i> Trajectory prediction</h3>
+                            <p>Where a person is likely to appear next, from their own movement history</p>
+                        </div>
+                        <div class="sec-controls">
+                            <div class="sec-field sec-field--wide">
+                                <label for="trajectory-identity-id">Identity</label>
                                 <select id="trajectory-identity-id" class="form-control">
                                     <option value="">-- Select Identity --</option>
                                 </select>
                             </div>
-                            <div class="control-group">
-                                <label>Current Camera:</label>
+                            <div class="sec-field">
+                                <label for="trajectory-current-camera">Current camera</label>
                                 <select id="trajectory-current-camera" class="form-control advanced-dropdown">
                                     <option value="">-- Select Camera --</option>
                                 </select>
                             </div>
-                            <div class="control-group">
-                                <label>Top K Predictions:</label>
+                            <div class="sec-field">
+                                <label for="trajectory-top-k">Top K predictions</label>
                                 <input type="number" id="trajectory-top-k" class="form-control" value="3" min="1" max="10">
                             </div>
+                            <div class="sec-field sec-field--action">
+                                <button class="btn-primary" id="trajectory-predict-btn" type="button">
+                                    <i class="fas fa-route" aria-hidden="true"></i> Predict Trajectory
+                                </button>
+                            </div>
                         </div>
-                        <button class="btn-primary" id="trajectory-predict-btn" type="button">
-                            <i class="fas fa-route"></i> Predict Trajectory
-                        </button>
                         <div id="trajectory-results" class="feature-results"></div>
                     </div>
-                </div>
 
-                <!-- Activity Correlation Section -->
-                <div class="feature-section">
-                    <div class="feature-header">
-                        <h3><i class="fas fa-link"></i> Activity Correlation Analysis</h3>
-                        <p>Measures temporal and spatial association between two identities. Correlation does not prove causation.</p>
-                    </div>
-                    <div class="feature-controls">
-                        <div class="control-row">
-                            <div class="control-group identity-selector-group">
-                                <label>Select Identity A:</label>
+                    <div class="feature-section">
+                        <div class="feature-header">
+                            <h3><i class="fas fa-link" aria-hidden="true"></i> Activity correlation</h3>
+                            <p>Temporal and spatial association between two identities. Correlation does not prove causation.</p>
+                        </div>
+                        <div class="sec-controls">
+                            <div class="sec-field sec-field--wide">
+                                <label for="correlation-identity-a">Identity A</label>
                                 <select id="correlation-identity-a" class="form-control">
                                     <option value="">-- Select Identity A --</option>
                                 </select>
                             </div>
-                            <div class="control-group identity-selector-group">
-                                <label>Select Identity B:</label>
+                            <div class="sec-field sec-field--wide">
+                                <label for="correlation-identity-b">Identity B</label>
                                 <select id="correlation-identity-b" class="form-control">
                                     <option value="">-- Select Identity B --</option>
                                 </select>
                             </div>
-                            <div class="control-group">
-                                <label>Days Back:</label>
+                            <div class="sec-field">
+                                <label for="correlation-days-back">Days back</label>
                                 <input type="number" id="correlation-days-back" class="form-control" value="90" min="1" max="365">
                             </div>
+                            <div class="sec-field sec-field--action">
+                                <button class="btn-primary" id="correlation-calc-btn" type="button">
+                                    <i class="fas fa-link" aria-hidden="true"></i> Calculate Correlation
+                                </button>
+                            </div>
                         </div>
-                        <button class="btn-primary" id="correlation-calc-btn" type="button">
-                            <i class="fas fa-link"></i> Calculate Correlation
-                        </button>
                         <div id="correlation-results" class="feature-results"></div>
                     </div>
-                </div>
 
-                <!-- Quick Actions Section -->
-                <div class="feature-section">
-                    <div class="feature-header">
-                        <h3><i class="fas fa-bolt"></i> Quick Actions</h3>
-                        <p>Common operations for advanced features</p>
-                    </div>
-                    <div class="quick-actions">
-                        <button class="btn-secondary" id="learn-all-thresholds-btn" type="button">
-                            <i class="fas fa-brain"></i> Learn All Camera Thresholds
-                        </button>
-                        <button class="btn-secondary" id="feature-status-btn" type="button">
-                            <i class="fas fa-info-circle"></i> Check Feature Status
-                        </button>
-                        <button class="btn-secondary" id="feature-help-btn" type="button">
-                            <i class="fas fa-question-circle"></i> View Help
-                        </button>
+                    <div class="feature-section">
+                        <div class="feature-header">
+                            <h3><i class="fas fa-bolt" aria-hidden="true"></i> Quick actions</h3>
+                            <p>Common operations for the features above</p>
+                        </div>
+                        <div class="quick-actions">
+                            <button class="btn-secondary" id="learn-all-thresholds-btn" type="button">
+                                <i class="fas fa-brain" aria-hidden="true"></i> Learn All Camera Thresholds
+                            </button>
+                            <button class="btn-secondary" id="feature-status-btn" type="button">
+                                <i class="fas fa-info-circle" aria-hidden="true"></i> Check Feature Status
+                            </button>
+                            <button class="btn-secondary" id="feature-help-btn" type="button">
+                                <i class="fas fa-question-circle" aria-hidden="true"></i> View Help
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </div>
+            </section>
 
-            <!-- Map View Tab -->
-            <div class="sec-tab-content" id="tab-map">
-                <div class="tab-header">
-                    <h2>🗺️ Interactive Map View</h2>
-                    <p>Visualize identity movement patterns on an interactive map with offline tile support</p>
-                </div>
-                <div class="map-controls">
-                    <div class="control-row">
-                        <div class="control-group identity-selector-group">
-                            <label>Select Identity:</label>
-                            <select id="map-identity-id" class="form-control">
-                                <option value="">-- Select Identity --</option>
-                            </select>
+            <!-- ============================ Map View -->
+            <section class="sec-tab-content" id="tab-map" role="tabpanel" aria-label="Map view">
+                <div class="sec-panel">
+                    <header class="sec-panel__head">
+                        <i class="fas fa-map-location-dot sec-panel__icon" aria-hidden="true"></i>
+                        <div>
+                            <h2>Interactive Map View</h2>
+                            <p>Movement on offline tiles — no map data leaves this deployment</p>
                         </div>
-                        <div class="control-group">
-                            <label>Date (optional):</label>
-                            <input type="date" id="map-date" class="form-control">
+                    </header>
+
+                    <div class="map-controls">
+                        <div class="sec-controls">
+                            <div class="sec-field sec-field--wide">
+                                <label for="map-identity-id">Identity</label>
+                                <select id="map-identity-id" class="form-control">
+                                    <option value="">-- Select Identity --</option>
+                                </select>
+                            </div>
+                            <div class="sec-field">
+                                <label for="map-date">Date (optional)</label>
+                                <input type="date" id="map-date" class="form-control">
+                            </div>
+                            <div class="sec-field">
+                                <label for="map-days-back">Days back</label>
+                                <input type="number" id="map-days-back" class="form-control" value="7" min="1" max="30">
+                            </div>
+                            <div class="sec-field">
+                                <label for="map-style-select">Map style</label>
+                                <select id="map-style-select" class="form-control">
+                                    <option value="light">Light</option>
+                                    <option value="dark">Dark</option>
+                                    <option value="satellite">Satellite</option>
+                                    <option value="terrain">Terrain</option>
+                                </select>
+                            </div>
+                            <div class="sec-field sec-field--action">
+                                <button class="btn-primary" id="map-load-btn" type="button">
+                                    <i class="fas fa-map" aria-hidden="true"></i> Load Map
+                                </button>
+                            </div>
                         </div>
-                        <div class="control-group">
-                            <label>Days Back:</label>
-                            <input type="number" id="map-days-back" class="form-control" value="7" min="1" max="30">
-                        </div>
-                        <div class="control-group">
-                            <label>Map Style:</label>
-                            <select id="map-style-select" class="form-control">
-                                <option value="light">Light</option>
-                                <option value="dark">Dark</option>
-                                <option value="satellite">Satellite</option>
-                                <option value="terrain">Terrain</option>
-                            </select>
-                        </div>
-                        <button class="btn-primary" id="map-load-btn" type="button">
-                            <i class="fas fa-map"></i> Load Map
-                        </button>
+
+                        <fieldset class="map-options">
+                            <legend>Overlays</legend>
+                            <label><input type="checkbox" id="map-show-routes" checked> Show routes</label>
+                            <label><input type="checkbox" id="map-cluster-markers" checked> Cluster markers</label>
+                            <label><input type="checkbox" id="map-include-popups" checked> Include popups</label>
+                            <!-- Security-analysis overlays are opt-in (expensive + sensitive) -->
+                            <label><input type="checkbox" id="map-enable-security"> Security features</label>
+                            <label><input type="checkbox" id="map-detect-patterns"> Detect patterns</label>
+                            <label><input type="checkbox" id="map-show-heatmap"> Show heatmap</label>
+                        </fieldset>
                     </div>
-                    <div class="map-options">
-                        <label><input type="checkbox" id="map-show-routes" checked> Show Routes</label>
-                        <label><input type="checkbox" id="map-cluster-markers" checked> Cluster Markers</label>
-                        <label><input type="checkbox" id="map-include-popups" checked> Include Popups</label>
-                        <!-- Security-analysis overlays are opt-in (expensive + sensitive) -->
-                        <label><input type="checkbox" id="map-enable-security"> Security Features</label>
-                        <label><input type="checkbox" id="map-detect-patterns"> Detect Patterns</label>
-                        <label><input type="checkbox" id="map-show-heatmap"> Show Heatmap</label>
-                    </div>
-                </div>
-                <div class="map-container">
-                    <div id="security-map" style="width: 100%; height: 600px; background: linear-gradient(135deg, #0a1929 0%, #1a1a2e 50%, #16213e 100%); position: relative; border-radius: 8px; border: 2px solid rgba(0, 255, 150, 0.3);">
-                        <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #8e8ea0;">
-                            <div style="text-align: center;">
-                                <i class="fas fa-map" style="font-size: 3rem; margin-bottom: 1rem; opacity: 0.5;"></i>
-                                <p>Select an identity and click "Load Map" to view tracking data</p>
-                                <small style="opacity: 0.7;">Offline tiles will be used automatically if configured</small>
+
+                    <div class="map-container">
+                        <!-- Height is set in CSS, not inline: a fixed 600px did not fit a
+                             768px-tall viewport once the navbar, masthead, tabs and
+                             controls were above it. -->
+                        <div id="security-map" class="security-map">
+                            <div class="security-map__placeholder">
+                                <i class="fas fa-map" aria-hidden="true"></i>
+                                <p>Select an identity and choose <strong>Load Map</strong> to view tracking data</p>
+                                <small>Offline tiles are used automatically when configured</small>
                             </div>
                         </div>
                     </div>
                 </div>
-            </div>
+            </section>
         </div>
     </main>
 
+    <!-- Pattern detail popup: opened by clicking a suspicious-pattern card.
+         Same .security-modal shell as the Unknown Faces dialogs (admin.css
+         owns its layout; ModalStack owns layering, focus and scroll lock).
+         Body content is built by admin-security-intelligence.js with el()
+         and textContent only - no innerHTML, no inline handlers. -->
+    <div id="pattern-detail-modal" class="security-modal" style="display: none;"
+         role="dialog" aria-modal="true" aria-labelledby="pattern-detail-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="pattern-detail-title"><i class="fas fa-search" aria-hidden="true"></i> Pattern details</h2>
+                <button type="button" class="modal-close" id="close-pattern-detail-modal"
+                        aria-label="Close pattern details">
+                    <i class="fas fa-times" aria-hidden="true"></i>
+                </button>
+            </div>
+            <div class="modal-body" id="pattern-detail-body"></div>
+        </div>
+    </div>
+
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
+    <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/vendor/vis-network/vis-network.min.js"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
-    <script src="/frontend/js/admin-security-intelligence.js?v=sec-7"></script>
+    <script src="/frontend/js/admin-security-intelligence.js?v=sec-9"></script>
 </body>
 </html>
-

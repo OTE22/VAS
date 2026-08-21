@@ -36,11 +36,22 @@ def get_vector_index_manager():
 
 
 def get_vector_index():
-    """The active VectorIndex implementation, or None if none is configured.
+    """The VectorIndex published by lifespan, or None in a process without one.
 
-    Returning None is a legitimate answer, not an error: with
-    VECTOR_BACKEND=pgvector there is no in-process index to hold, and callers
-    are expected to fall back to the database rather than fail.
+    None does NOT mean "the backend has no index". Both backends build one —
+    `factory.build_backend` returns a PgVectorIndex for pgvector and a FAISS
+    index for faiss — and `lifespan` publishes the manager for either. None
+    means no lifespan has run in THIS process, which is the normal case for a
+    script, a management command or a test; such callers fall back to querying
+    PostgreSQL rather than failing.
+
+    What actually differs between the backends is where the searchable vectors
+    live. Under pgvector they live in `identity_embeddings`, so deleting the
+    row removes the searchable entry and `PgVectorIndex.remove()` has nothing
+    of its own to drop; there is no independently persisted index state that
+    can drift from the table. Under FAISS the index is separate state, which is
+    why callers deleting rows must confirm the removal (see
+    `remove_embedding_keys(..., strict=True)`).
     """
     manager = get_vector_index_manager()
     if manager is not None:
@@ -195,8 +206,17 @@ def index_stats() -> Optional[Dict[str, Any]]:
         return {"error": str(exc)}
 
 
-async def remove_embedding_keys(session, embedding_ids: Iterable[int]) -> int:
-    """Drop specific embedding keys from the index."""
+async def remove_embedding_keys(session, embedding_ids: Iterable[int],
+                                *, strict: bool = False) -> int:
+    """Drop specific embedding keys from the index.
+
+    `strict=True` re-raises instead of swallowing. Callers that are about to
+    DELETE the corresponding rows need it: with the failure swallowed, the rows
+    disappear while the in-process index keeps their keys, and a later search
+    returns a key that resolves to nothing. Under VECTOR_BACKEND=pgvector there
+    is no in-process index, so this returns 0 without raising and the caller's
+    DELETE is itself the removal.
+    """
     index = get_vector_index()
     keys = [int(k) for k in embedding_ids if k is not None]
     if index is None or not keys:
@@ -205,4 +225,6 @@ async def remove_embedding_keys(session, embedding_ids: Iterable[int]) -> int:
         return int(index.remove(keys))
     except Exception as exc:
         logger.warning("[VECTOR_INDEX] removal failed for keys %s: %s", keys, exc)
+        if strict:
+            raise
         return 0

@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
-    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-1">
+    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-2">
     <style>
         /* Backend Map Container - Uses Folium-generated maps from server (no frontend Leaflet needed) */
         .offline-map-container {
@@ -266,13 +266,14 @@
     <!-- Scripts -->
     <!-- Note: Leaflet removed - using backend map service (Folium) instead -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
+    <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/vendor/chartjs/chart.umd.min.js"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <!-- The map renderer is an ES module (MapLibre GL JS is ESM-only). It
          bridges onto window.IdentityMap; the classic page script awaits
          window.IdentityMap.ready before drawing. -->
     <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
-    <script src="/frontend/js/admin-intelligence.js?v=intel-4"></script>
+    <script src="/frontend/js/admin-intelligence.js?v=intel-5"></script>
 </body>
 </html>
 

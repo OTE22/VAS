@@ -467,7 +467,19 @@ class Identity(Base):
 
     # Timestamps (last_seen_at index provided by idx_identity_last_seen)
     first_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # Deliberately NO onupdate. This column means "when a camera last saw this
+    # person", so it is set explicitly by the recognition path
+    # (IdentityService._update_identity_seen) and by merge consolidation, and
+    # by nothing else.
+    #
+    # With onupdate=utcnow it was restamped by ANY write to the row — adding an
+    # enrollment photo, changing best_snapshot_path, a status change, a rename
+    # — so a person last seen a week ago read as "seen just now" while
+    # appearances_count still showed the old total. Every consumer of
+    # last_seen_at (dashboard recency, the enrollment review card, and the
+    # inactivity sweep in identity_retention) was reading administrative
+    # activity as surveillance evidence.
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
@@ -914,8 +926,11 @@ class IdentityAuditLog(Base):
                                 comment="users.id at write/deletion time; survives account deletion")
     username = Column(String(100), nullable=False, index=True)  # Denormalized for easier querying
     action_type = Column(String(50), nullable=False, index=True)  # promote, merge, search, view, approve, reject, etc.
-    identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id'), nullable=True, index=True)  # Target identity
-    related_identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id'), nullable=True)  # For merges, related identity
+    # SET NULL, like user_id above: an audit row must outlive both the operator
+    # and the subject. action_details keeps the id as text, so a deleted
+    # identity stays traceable after the pointer is cleared.
+    identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id', ondelete='SET NULL'), nullable=True, index=True)  # Target identity
+    related_identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id', ondelete='SET NULL'), nullable=True)  # For merges, related identity
     action_details = Column(JSONB, nullable=True)  # JSON field for flexible metadata
     before_state = Column(JSONB, nullable=True)  # State before action (for changes)
     after_state = Column(JSONB, nullable=True)  # State after action (for changes)

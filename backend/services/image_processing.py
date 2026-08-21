@@ -710,8 +710,15 @@ async def process_image_async(
                     # Threshold only controls whether to save the file to disk (NOT database)
                     # For unknown faces, always save (no threshold)
                     if apply_threshold and len(existing_images) >= max_photos_per_person:
-                        logger.info(f"[PROCESS] Threshold reached for {name} ({len(existing_images)}/{max_photos_per_person}). Path saved to DB: {face_filename}, but file NOT saved to disk.")
-                        # Don't save invalid paths - set to None if file won't be saved
+                        # The log used to say "Path saved to DB: <path>" on the
+                        # line above `face_filename = None`, so it advertised a
+                        # stored path while the column received NULL — anyone
+                        # debugging from logs went looking for a row that says
+                        # something it does not say.
+                        logger.info(
+                            "[PROCESS] MAX_PHOTOS_PER_PERSON reached for %s "
+                            "(%d/%d): no file written and no path stored.",
+                            name, len(existing_images), max_photos_per_person)
                         face_filename = None
                     else:
                         # Save the aligned face image to disk (off-loop: JPEG encode + disk write)

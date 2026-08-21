@@ -5,18 +5,50 @@
 }
 
 /* ============================================
-   LAYER TOKENS — the one place z-order is decided
-   page content (3) < nav < dropdowns < modal stack < toasts.
-   Modal level n paints at calc(base + n * step); levels are assigned
-   at runtime by ModalStack (frontend/js/modal-stack.js), never hard-coded
-   per element. Toasts sit above the deepest realistic stack (3 levels
-   = 10020) so a success/error fired from inside a modal flow is visible.
+   LAYER TOKENS — the one place z-order is decided.
+
+       content overlay  <  nav  <  nav dropdown / page popover
+                        <  modal (its own element is the backdrop)
+                        <  modal-owned popover  <  toast
+
+   Modal level n paints at calc(base + n * step); levels are assigned at
+   runtime by ModalStack (frontend/js/modal-stack.js), never hard-coded per
+   element. Toasts sit above the deepest realistic stack (3 levels = 10020)
+   so a success/error fired from inside a modal flow is visible — that is a
+   deliberate exception to "the modal is on top", and the layering probe
+   allows it BY NAME rather than by accident.
+
+   Every value in the global range belongs here. Twenty-two declarations used
+   to sit outside it, and the result was the reported bug: `.modal` carried
+   FOUR different values across stylesheets (2000 in admin.css and
+   admin-search.css, 10000 in admin-search-history.css and upload-modal.css)
+   while dashboard furniture sat at 14997-15000, so page elements painted
+   over Add Person. tests/test_frontend_layering.py now fails the build if a
+   new raw value re-enters this range.
    ============================================ */
 :root {
+    /* Detection boxes, face/AI annotation layers drawn over video/canvas.
+       Above their own media, below every piece of chrome. */
+    --z-content-overlay: 10;
+    /* Page-level popovers: identity selectors, slide-in panels, page menus.
+       MUST stay below --z-nav. The navbar is `position: relative` with
+       --z-nav, which makes it a stacking context, so its dropdown is painted
+       inside it — a page popover at or above --z-nav therefore covers the
+       navbar dropdown no matter what z-index the dropdown itself is given.
+       Six page elements sat at 1000-10002 and did exactly that. */
+    --z-page-popover: 900;
     --z-nav: 1000;
+    /* The navbar's own menu. Lives INSIDE the nav stacking context, so this
+       value only orders it against its siblings there. */
     --z-dropdown: 1001;
     --z-modal-base: 10000;
     --z-modal-step: 10;
+    /* A popover owned by an open modal. Above any realistic modal depth
+       (base + 3 steps = 10030), below toasts. A modal-owned menu that is a
+       DOM child of the modal does not need this — it inherits the modal's
+       stacking context; this is for menus that must escape a clipping
+       ancestor and are positioned against the viewport instead. */
+    --z-modal-popover: 11000;
     --z-toast: 12000;
 }
 
@@ -85,7 +117,7 @@ body::before {
         rgba(16, 42, 28, 0.97) 100%);
     border-bottom: 1px solid rgba(0, 255, 150, 0.25);
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
-    z-index: 1000;
+    z-index: var(--z-nav, 1000);
     flex-shrink: 0;
     display: flex;
     align-items: center;
@@ -216,7 +248,7 @@ body::before {
         border-radius: 4px;
         font-size: 0.7rem;
         white-space: nowrap;
-        z-index: 1002;
+        z-index: calc(var(--z-dropdown, 1001) + 1);
         border: 1px solid rgba(0, 255, 150, 0.3);
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
         pointer-events: none;
@@ -274,7 +306,17 @@ body::before {
     visibility: hidden;
     transform: translateY(-6px);
     transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
-    z-index: 1001;
+    z-index: var(--z-dropdown, 1001);
+    /* Never taller than the space below the navbar: the System menu has 10
+       items, which overflows the fold at 1024x768 and on short laptop
+       viewports, leaving the last entries unreachable. Scrolls internally
+       instead of extending past the viewport.
+       overscroll-behavior stops the wheel chaining to the page scroller once
+       the menu hits its end — the menu still closes normally, so this cannot
+       leave document scrolling blocked. */
+    max-height: calc(100vh - 5rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .nav-dropdown[data-open="true"] .dropdown-menu {
@@ -344,7 +386,7 @@ body::before {
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 1000;
+    z-index: var(--z-nav, 1000);
     background: transparent;
     display: none;
 }
@@ -1309,7 +1351,7 @@ body::before {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: var(--z-modal-base, 10000);
     animation: fadeIn 0.3s ease;
 }
 
@@ -2971,7 +3013,7 @@ body::before {
     bottom: 0;
     background: rgba(0, 0, 0, 0.85);
     backdrop-filter: blur(5px);
-    z-index: 2000;
+    z-index: var(--z-modal-base, 10000);
     justify-content: center;
     align-items: center;
     animation: fadeIn 0.3s ease;
@@ -3078,9 +3120,12 @@ body::before {
     animation: none !important;
 }
 
-/* The page's only scroller is .intelligence-content (html/body are already
-   overflow:hidden). Freezing it preserves scrollTop, so no save/restore
-   dance is needed when the last modal closes. */
+/* Belt-and-braces for this page's scroller. ModalStack now freezes whichever
+   elements are actually scrolling (and restores their inline overflow and
+   scrollTop on the final close), because this rule only ever named ONE page's
+   scroller — it did nothing on the other 21 pages, which is precisely what
+   broke once the module started loading everywhere. Kept so the lock still
+   holds if scripting is mid-load. */
 body.modal-stack-locked .intelligence-content {
     overflow: hidden;
 }
@@ -5755,7 +5800,7 @@ body.modal-stack-locked .intelligence-content {
     position: fixed;
     top: 100px;
     right: 20px;
-    z-index: 10000;
+    z-index: var(--z-toast, 12000);
     display: flex;
     flex-direction: column;
     gap: 1rem;
