@@ -251,14 +251,28 @@ class InferenceService:
                 latency_ms=(time.monotonic() - started) * 1000.0)
 
         payload = cached.payload
+        # Feature-set contract: online snapshots are computed under the
+        # CURRENT feature set; a model trained under another set must not
+        # score them (same names, different semantics) - honest fallback.
+        if payload.get("feature_set_version") != snapshot.get("feature_set_version"):
+            logger.warning("[ML_OPS] model %s feature set %s != snapshot %s - not scoring",
+                           version_label, payload.get("feature_set_version"),
+                           snapshot.get("feature_set_version"))
+            return MLPredictionResult(
+                ok=False, failure_reason=FallbackReason.FEATURE_SCHEMA_MISMATCH.value,
+                model_id=cached.row_id, model_version_label=version_label,
+                snapshot_id=snapshot["snapshot_id"],
+                features_checksum=snapshot["features_checksum"],
+                unavailable_features=snapshot["unavailable_features"],
+                as_of_timestamp=snapshot["as_of_timestamp"],
+                latency_ms=(time.monotonic() - started) * 1000.0)
         features = snapshot["features"]
-        vector, missing = [], []
-        for name in payload["feature_names"]:
-            if name in features:
-                vector.append(float(features[name]))
-            else:
-                missing.append(name)
-                vector.append(float(payload["imputation_medians"].get(name, 0.0)))
+        # Same preprocessing contract as training (trainer._assemble_matrix):
+        # a missing feature takes the ARTIFACT's training median for that
+        # feature. validate_artifact guarantees every scored feature has one,
+        # so there is no default here — a gap is a contract violation.
+        from backend.ml.registry_service import preprocess_feature_vector
+        vector, missing = preprocess_feature_vector(payload, features)
         if len(missing) == len(payload["feature_names"]):
             return MLPredictionResult(
                 ok=False, failure_reason=FallbackReason.MISSING_REQUIRED_FEATURES.value,
@@ -444,6 +458,12 @@ class InferenceService:
             key = values["idempotency_key"]
 
         if inserted:
+            try:   # observability only — never on the decision path
+                from backend.ml import metrics as ml_metrics
+                ml_metrics.observe_prediction(result.ml_anomaly_band if result.ok else None,
+                                              None if result.ok else (fallback_reason or result.failure_reason))
+            except Exception:
+                pass
             return str(row_id)
         existing = (await db.execute(
             select(MLPrediction.id).where(MLPrediction.idempotency_key == key)

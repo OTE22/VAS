@@ -2,7 +2,7 @@
 
 **Generated from the running application's OpenAPI document — do not edit by hand.** Regenerate with `scripts/generate_api_reference.py` after any route change; a stale copy is worse than none.
 
-- **256 operations** across **233 paths**
+- **263 operations** across **239 paths**
 - Service: `Face Recognition Service` v`5.0.0`
 
 ## How to read this
@@ -31,7 +31,7 @@
 - [Live Alerts](#live-alerts) — 14 operations
 - [Intelligence](#intelligence) — 21 operations
 - [Security Intelligence](#security-intelligence) — 10 operations
-- [ML Operations](#ml-operations) — 27 operations
+- [ML Operations](#ml-operations) — 33 operations
 - [SQL Agent](#sql-agent) — 20 operations
 - [Conversations](#conversations) — 9 operations
 - [Users](#users) — 12 operations
@@ -40,7 +40,7 @@
 - [Upload & Enrollment](#upload-&-enrollment) — 4 operations
 - [Enrollment Review](#enrollment-review) — 2 operations
 - [Background Tasks](#background-tasks) — 8 operations
-- [Export](#export) — 5 operations
+- [Export](#export) — 6 operations
 - [Retention](#retention) — 2 operations
 - [Audit](#audit) — 3 operations
 - [Logs](#logs) — 4 operations
@@ -213,7 +213,7 @@ Cross-camera tracking, related identities, temporal patterns and movement timeli
 | `GET` | `/api/security/anomalies/{identity_id}` | Detect Behavioral Anomalies | `identity_id` | `days_back` | — | 200, 422 |
 | `GET` | `/api/security/capabilities` | Get Security Feature Capabilities | — | — | — | 200 |
 | `GET` | `/api/security/network` | Social Network Analysis | — | `identity_ids`, `min_connections`, `days_back`, `max_nodes` | — | 200, 422 |
-| `GET` | `/api/security/patterns` | Detect Suspicious Patterns | — | `days_back`, `min_group_size` | — | 200, 422 |
+| `GET` | `/api/security/patterns` | Detect Suspicious Patterns | — | `days_back`, `min_group_size`, `pipeline_id` | — | 200, 422 |
 | `GET` | `/api/security/threat/{identity_id}` | Threat Assessment | `identity_id` | — | — | 200, 422 |
 
 ## Security Intelligence
@@ -240,12 +240,17 @@ The model lifecycle: features, labels, datasets, training jobs, candidates, drif
 | Method | Path | Summary | Path params | Query | Body | Returns |
 |---|---|---|---|---|---|---|
 | `GET` | `/api/ml/audit` | ML Audit Log | — | `page`, `page_size` | — | 200, 422 |
+| `GET` | `/api/ml/calls` | ML-Ops Call Log | — | `limit`, `errors_only`, `path_contains` | — | 200, 422 |
 | `PUT` | `/api/ml/config/mode` | Change Decision Mode | — | — | yes | 200, 422 |
 | `GET` | `/api/ml/datasets` | List Datasets | — | `page`, `page_size` | — | 200, 422 |
 | `POST` | `/api/ml/datasets` | Build Dataset | — | — | yes | 201, 422 |
+| `POST` | `/api/ml/datasets/backfill-hashes` | Verify legacy datasets and record their file hashes | — | — | — | 200 |
+| `GET` | `/api/ml/datasets/definitions` | Dataset Definitions | — | — | — | 200 |
+| `GET` | `/api/ml/datasets/{dataset_id}` | Dataset Detail | `dataset_id` | — | — | 200, 422 |
+| `POST` | `/api/ml/datasets/{dataset_id}/archive` | Archive an unreferenced dataset (explicit, never automatic) | `dataset_id` | — | yes | 200, 422 |
 | `GET` | `/api/ml/drift/reports` | Drift Reports | — | `page`, `page_size`, `model_id` | — | 200, 422 |
 | `POST` | `/api/ml/drift/run` | Run Drift Check Now | — | — | — | 200 |
-| `POST` | `/api/ml/features/compute` | Run Feature Collection | — | — | — | 202 |
+| `POST` | `/api/ml/features/compute` | Run Feature Collection | — | `full_rebuild` | — | 202, 422 |
 | `GET` | `/api/ml/features/definitions` | Feature Definitions | — | — | — | 200 |
 | `GET` | `/api/ml/labels` | List Labels | — | `label`, `label_kind`, `review_status`, `subject_id`, `page`, `page_size` | — | 200, 422 |
 | `POST` | `/api/ml/labels` | Create Label | — | — | yes | 201, 422 |
@@ -261,6 +266,7 @@ The model lifecycle: features, labels, datasets, training jobs, candidates, drif
 | `GET` | `/api/ml/predictions` | List Predictions | — | `subject_id`, `fallback_only`, `page`, `page_size` | — | 200, 422 |
 | `GET` | `/api/ml/retraining-policy/{model_type}` | Retraining Policy | `model_type` | — | — | 200, 422 |
 | `PUT` | `/api/ml/retraining-policy/{model_type}` | Update Retraining Policy | `model_type` | — | yes | 200, 422 |
+| `GET` | `/api/ml/shadow/evidence` | Shadow evidence for offline mapping review | — | `days`, `model_id` | — | 200, 422 |
 | `POST` | `/api/ml/shadow/stop` | Stop Shadow (rollback) | — | — | yes | 200, 422 |
 | `GET` | `/api/ml/shadow/summary` | Shadow Summary | — | `days` | — | 200, 422 |
 | `POST` | `/api/ml/training-jobs` | Start Training Job | — | — | yes | 202, 422 |
@@ -396,6 +402,7 @@ Batch export of search results and identity data.
 | `POST` | `/api/search/batch` | Batch Face Search | — | — | yes | 200, 422 |
 | `POST` | `/api/search/batch/export` | Export Batch Results | — | `format` | yes | 200, 422 |
 | `POST` | `/api/search/export` | Export Search Results | — | `format`, `include_images` | yes | 200, 422 |
+| `DELETE` | `/api/search/history` | Clear Search History | — | — | — | 200 |
 | `GET` | `/api/search/history` | Get Search History | — | `days_back`, `search_type`, `limit`, `offset` | — | 200, 422 |
 | `GET` | `/api/search/history/export` | Export Search History | — | `format`, `days_back` | — | 200, 422 |
 

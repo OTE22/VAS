@@ -57,6 +57,34 @@ def build_idempotency_key(subject_type: str, subject_id: str,
     return f"{subject_type}:{subject_id}:{model_version}:{bucket}"
 
 
+FINAL_SCORING_ENGINE = "risk-engine-v1"
+
+
+def provenance_of(record) -> Dict[str, Any]:
+    """Per-assessment provenance from the PERSISTED row. Rows written before
+    revision c3e8a1f5d7b2 carry only decision_mode; their unknown fields are
+    reported as "not_recorded", never back-filled from the current mode."""
+    executed = getattr(record, "decision_mode", None) or "rules"
+    requested = getattr(record, "requested_mode", None)
+    source = getattr(record, "anomaly_signal_source", None)
+    fallback_reason = getattr(record, "fallback_reason", None)
+    recorded = requested is not None
+    return {
+        "requested_mode": requested if recorded else "not_recorded",
+        "executed_mode": executed,
+        "anomaly_signal_source": source if source else ("rules" if recorded else "not_recorded"),
+        "ml_role": ("anomaly_signal" if source == "ml"
+                    else "observational" if executed == "shadow" else "none"),
+        "signal_mapping_version": getattr(record, "signal_mapping_version", None),
+        "final_scoring_engine": getattr(record, "model_version", None) or FINAL_SCORING_ENGINE,
+        "fallback": bool(fallback_reason),
+        "fallback_reason": fallback_reason,
+        "ml_prediction_id": (str(record.ml_prediction_id)
+                             if getattr(record, "ml_prediction_id", None) else None),
+        "recorded": recorded,
+    }
+
+
 def serialize_assessment(record: ThreatAssessmentRecord) -> Dict[str, Any]:
     def iso(dt):
         return iso_utc(dt) if dt else None
@@ -90,6 +118,8 @@ def serialize_assessment(record: ThreatAssessmentRecord) -> Dict[str, Any]:
         "decision_mode": getattr(record, "decision_mode", None),
         "ml_prediction_id": (str(record.ml_prediction_id)
                              if getattr(record, "ml_prediction_id", None) else None),
+        # What happened for THIS assessment (persisted; never today's config)
+        "decision_provenance": provenance_of(record),
         # Honesty labelling on every read, mirroring the engine contract.
         "score_type": "heuristic",
         "is_probability": False,
@@ -105,6 +135,7 @@ class AssessmentService:
         threshold_version: Optional[str] = None,
         event_id: Optional[str] = None,
         decision_mode: Optional[str] = None,
+        provenance=None,
     ) -> Dict[str, Any]:
         """Persist a ThreatAssessment (unified engine output) idempotently.
 
@@ -165,9 +196,13 @@ class AssessmentService:
             idempotency_key=key,
             created_at=now,
             updated_at=now,
-            # NULL = legacy/rules; only 'rules'|'shadow' occur this release.
-            # The live decision is ALWAYS the rules result either way.
+            # Executed mode + the router's provenance (what happened for THIS
+            # assessment). The final score is ALWAYS the rules engine's.
             decision_mode=decision_mode,
+            requested_mode=getattr(provenance, "requested_mode", None),
+            anomaly_signal_source=getattr(provenance, "anomaly_signal_source", None),
+            signal_mapping_version=getattr(provenance, "signal_mapping_version", None),
+            fallback_reason=getattr(provenance, "fallback_reason", None),
         ).on_conflict_do_nothing(index_elements=["idempotency_key"])
 
         try:

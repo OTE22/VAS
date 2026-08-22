@@ -1901,7 +1901,13 @@ class ThreatAssessmentRecord(Base):
     # ML first release (additive): NULL means legacy/rules and serializes
     # exactly as before. Only rules|shadow occur this release.
     decision_mode = Column(String(16), nullable=True,
-                           comment="NULL = legacy/rules; rules | shadow (hybrid/ml reserved)")
+                           comment="EXECUTED mode: NULL = legacy/rules; rules | shadow | ml")
+    # Decision provenance (revision c3e8a1f5d7b2) — what happened for THIS
+    # assessment; NULL on rows persisted before it = not recorded.
+    requested_mode = Column(String(16), nullable=True, comment="configured mode at the time")
+    anomaly_signal_source = Column(String(8), nullable=True, comment="rules | ml")
+    signal_mapping_version = Column(String(64), nullable=True, comment="validated ML->risk policy used")
+    fallback_reason = Column(String(64), nullable=True, comment="FallbackReason when ML could not serve")
     ml_prediction_id = Column(UUID(as_uuid=True),
                               ForeignKey('ml_predictions.id', ondelete='SET NULL',
                                          use_alter=True,
@@ -2124,6 +2130,9 @@ class MLLabel(Base):
                            comment="unreviewed | reviewed | disputed")
     reviewed_by = Column(String(255), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)
+    # How this review was SELECTED (revision d5f9b2c7e3a1): {method, band,
+    # sampling_probability, reason, selected_at}. NULL = no explicit metadata.
+    selection = Column(JSONB, nullable=True)
     supersedes_id = Column(UUID(as_uuid=True), ForeignKey('ml_labels.id'), nullable=True)
     notes = Column(Text, nullable=True)
     idempotency_key = Column(String(255), nullable=False, unique=True)
@@ -2173,6 +2182,16 @@ class MLDataset(Base):
     created_by = Column(Integer, nullable=True)
     lineage_summary = Column(JSONB, nullable=True,
                              comment="{snapshot_count, snapshot_id_min, snapshot_id_max, label_count} of the Parquet rows")
+    # Extraction lineage (revision a9c4e2d7f1b3). NULL on rows built before
+    # it: those used the legacy silent oldest-first cap and are reported so.
+    definition_name = Column(String(128), nullable=True,
+                             comment="typed DatasetDefinition that built this version")
+    definition_version = Column(String(64), nullable=True)
+    extraction = Column(JSONB, nullable=True,
+                        comment="{policy_version, candidate_rows, selected_rows, excluded_rows, cap, sampling_policy, ordering, time_range}")
+    parquet_sha256 = Column(String(64), nullable=True,
+                            comment="sha256 of the Parquet FILE bytes; `checksum` is the canonical-row fingerprint")
+    manifest_path = Column(Text, nullable=True, comment="server-only sidecar manifest; never serialized")
 
     __table_args__ = (
         Index('uq_ml_dataset_name_version', 'name', 'version', unique=True),
@@ -2218,6 +2237,9 @@ class MLModel(Base):
     training_job_id = Column(String(64), nullable=True)
     seed = Column(Integer, nullable=True)
     hyperparameters = Column(JSONB, nullable=True)
+    training_config = Column(JSONB, nullable=True,
+                             comment="complete configuration actually used: algorithm, seed, every hyperparameter, dataset id")
+    code_version = Column(String(64), nullable=True, comment="git revision of the trainer")
     metrics = Column(JSONB, nullable=True, comment="ONLY what was truthfully measured")
     quality_gates = Column(JSONB, nullable=True)
     evaluation_report = Column(JSONB, nullable=True)

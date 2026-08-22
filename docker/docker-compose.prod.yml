@@ -286,6 +286,12 @@ services:
       # operator reads it back.
       - logs_data:/var/log/face-recognition
       - face_database_data:/app/database
+      # ML model registry artifacts, Parquet dataset snapshots and their
+      # manifests (ML_ARTIFACT_DIR = /app/models/ml). The database registry
+      # references these files by hash; without a persistent mount a
+      # container recreate would leave every registered model/dataset row
+      # pointing at a file that no longer exists.
+      - ml_artifacts_data:/app/models/ml
       - chromadb_cache:/home/appuser/.cache/chroma
       # Read-only, purely so the operational metrics can report backup age and
       # certificate expiry. Without these the corresponding gauges stay unset
@@ -522,6 +528,7 @@ volumes:
   storage_data: { driver: local }
   logs_data: { driver: local }
   face_database_data: { driver: local }
+  ml_artifacts_data: { driver: local }
   chromadb_cache: { driver: local }
   ollama_models: { driver: local }
   backup_data: { driver: local }

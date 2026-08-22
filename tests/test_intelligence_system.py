@@ -408,4 +408,4 @@ def test_html_no_inline_handlers():
     src = _read(HTML_PATH)
     for banned in ("onclick=", "onerror=", "onmouseover=", "onmouseout=", "onload="):
         assert banned not in src, f"inline handler {banned} must be removed"
-    assert "admin-intelligence.js?v=intel-5" in src, "cache-bust must force the rewritten script"
+    assert "admin-intelligence.js?v=intel-6" in src, "cache-bust must force the rewritten script"

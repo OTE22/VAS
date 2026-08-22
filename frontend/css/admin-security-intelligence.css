@@ -1625,3 +1625,33 @@
 .pattern-identity-link:hover {
     text-decoration: underline;
 }
+
+
+/* Engine provenance (sec-ui-4): page pill (the system NOW) and per-result badges (what produced THIS result) */
+.engine-pill { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.5rem; padding: 0.3rem 0.7rem; border-radius: 999px; border: 1px solid rgba(0, 212, 255, 0.35); background: rgba(0, 212, 255, 0.08); color: #cfe9ff; font-size: 0.78rem; text-decoration: none; }
+.engine-pill:hover { border-color: rgba(0, 212, 255, 0.7); }
+.engine-pill strong { color: #9fe8ff; letter-spacing: 0.04em; }
+.engine-pill .engine-pill__gate { color: #ffd699; }
+.engine-badge { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0 0 0.6rem; padding: 0.25rem 0.6rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); font-size: 0.76rem; color: #b9c8dc; }
+.engine-badge strong { color: #e4eefb; }
+.engine-badge.engine-badge--ml strong { color: #9fe8ff; }
+.engine-badge.engine-badge--missing { color: #ffd699; border-color: rgba(255, 173, 51, 0.4); }
+.decision-block { margin: 0.75rem 0; padding: 0.75rem 0.9rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); display: grid; gap: 0.35rem; font-size: 0.85rem; }
+.decision-block h4 { margin: 0 0 0.2rem; font-size: 0.85rem; color: #9fe8ff; }
+.decision-block .decision-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.decision-block .decision-row span:first-child { min-width: 9.5rem; opacity: 0.75; }
+.decision-block .decision-fallback { color: #ffd699; }
+.ml-observation { margin: 0.75rem 0; padding: 0.75rem 0.9rem; border-radius: 8px; border: 1px dashed rgba(0, 212, 255, 0.4); background: rgba(0, 212, 255, 0.05); font-size: 0.85rem; display: grid; gap: 0.35rem; }
+.ml-observation h4 { margin: 0 0 0.2rem; font-size: 0.85rem; color: #9fe8ff; }
+.ml-observation .ml-observation__note { opacity: 0.8; font-size: 0.78rem; }
+.ml-observation .band-chip { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid rgba(0, 212, 255, 0.5); font-size: 0.75rem; }
+.ml-observation.ml-observation--failed { border-color: rgba(255, 173, 51, 0.5); background: rgba(255, 173, 51, 0.05); }
+.threat-history { margin-top: 1rem; }
+.threat-history h3 { font-size: 0.95rem; margin: 0 0 0.5rem; }
+.threat-history-row { display: grid; grid-template-columns: 10rem 5rem 7rem minmax(14rem, 1fr); gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.8rem; align-items: center; }
+.threat-history-row .history-prov { opacity: 0.9; }
+.threat-history-row .history-ml { font-size: 0.75rem; opacity: 0.8; grid-column: 1 / -1; padding-left: 0.5rem; }
+@media (max-width: 900px) { .threat-history-row { grid-template-columns: 1fr 1fr; } }
+
+.ml-observation-reveal { margin: 0.4rem 0; font-size: 0.8rem; }
+.ml-observation[hidden] { display: none; }

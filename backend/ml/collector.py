@@ -18,7 +18,12 @@ import uuid as uuid_mod
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from sqlalchemy import select, and_
+# Rows fetched per keyset batch. A run keeps fetching batches until the
+# candidate window is exhausted (or cancelled) — a backlog larger than one
+# batch is never silently left behind.
+BATCH_ROWS = 20000
+
+from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.ml.feature_store import feature_store
@@ -60,27 +65,59 @@ async def run_collection(db: AsyncSession, *, run_id: Optional[str] = None,
     else:
         window_start = checkpoint.watermark_event_time - grace
 
-    query = select(IdentityAppearance.id, IdentityAppearance.identity_id,
-                   IdentityAppearance.start_time, IdentityAppearance.created_at)
+    base = select(IdentityAppearance.id, IdentityAppearance.identity_id,
+                  IdentityAppearance.start_time, IdentityAppearance.created_at)
     if window_start is not None:
-        query = query.where(IdentityAppearance.created_at > window_start)
-    query = query.order_by(IdentityAppearance.created_at, IdentityAppearance.id).limit(20000)
-    rows = list((await db.execute(query)).all())
+        base = base.where(IdentityAppearance.created_at > window_start)
+    # Honest progress needs the candidate count up front (a backlog can be
+    # far larger than one batch).
+    total_candidates = int((await db.execute(
+        select(func.count()).select_from(base.subquery()))).scalar() or 0)
 
     snapshots_written = 0
     snapshots_deduplicated = 0
     affected_identities = set()
-    for index, (row_id, identity_id, start_time, created_at) in enumerate(rows):
-        if cancel_check and cancel_check():
-            logger.info("[ML_OPS] collection cancelled run_id=%s at row %d", run_id, index)
+    rows_scanned = 0
+    batches = 0
+    cancelled = False
+    cursor = None  # keyset (created_at, id) of the last processed row
+    while not cancelled:
+        query = base
+        if cursor is not None:
+            query = query.where(or_(
+                IdentityAppearance.created_at > cursor[0],
+                and_(IdentityAppearance.created_at == cursor[0], IdentityAppearance.id > cursor[1])))
+        query = query.order_by(IdentityAppearance.created_at, IdentityAppearance.id).limit(BATCH_ROWS)
+        rows = list((await db.execute(query)).all())
+        if not rows:
             break
-        result = await feature_store.compute_person_snapshot(
-            db, str(identity_id), start_time, run_id=run_id, event_ts=start_time)
-        snapshots_deduplicated += int(result["deduplicated"])
-        snapshots_written += int(not result["deduplicated"])
-        affected_identities.add(str(identity_id))
-        if progress_cb and index % 50 == 0 and rows:
-            await progress_cb(int(80 * index / len(rows)))
+        batches += 1
+        processed_in_batch = 0
+        for row_id, identity_id, start_time, created_at in rows:
+            if cancel_check and cancel_check():
+                logger.info("[ML_OPS] collection cancelled run_id=%s at row %d", run_id, rows_scanned)
+                cancelled = True
+                break
+            result = await feature_store.compute_person_snapshot(
+                db, str(identity_id), start_time, run_id=run_id, event_ts=start_time)
+            snapshots_deduplicated += int(result["deduplicated"])
+            snapshots_written += int(not result["deduplicated"])
+            affected_identities.add(str(identity_id))
+            rows_scanned += 1
+            processed_in_batch += 1
+            cursor = (created_at, row_id)
+            if progress_cb and rows_scanned % 50 == 0 and total_candidates:
+                await progress_cb(int(80 * rows_scanned / total_candidates))
+        # The watermark advances per batch and is committed, so a crash or a
+        # cancellation keeps what was processed; the late-grace re-scan plus
+        # snapshot uniqueness make any reprocessing idempotent.
+        if processed_in_batch:
+            checkpoint.watermark_event_time = cursor[0]  # created_at (processing time)
+            checkpoint.watermark_id = cursor[1]
+            checkpoint.rows_processed_total = (checkpoint.rows_processed_total or 0) + processed_in_batch
+            await db.commit()
+        if len(rows) < BATCH_ROWS:
+            break
 
     # One "current state" snapshot per affected identity (minute-rounded so
     # repeated runs dedup) — this is what drift and inspection read.
@@ -91,22 +128,24 @@ async def run_collection(db: AsyncSession, *, run_id: Optional[str] = None,
         snapshots_deduplicated += int(result["deduplicated"])
         snapshots_written += int(not result["deduplicated"])
 
-    if rows:
-        last = rows[-1]
-        checkpoint.watermark_event_time = last[3]  # created_at (processing time)
-        checkpoint.watermark_id = last[0]
     checkpoint.last_run_id = run_id
     checkpoint.last_run_at = datetime.utcnow()
-    checkpoint.rows_processed_total = (checkpoint.rows_processed_total or 0) + len(rows)
     checkpoint.extras = {
         "last_window_start": window_start.isoformat() + "Z" if window_start else None,
-        "last_rows": len(rows),
+        "last_rows": rows_scanned,
+        "last_candidates": total_candidates,
+        "last_batches": batches,
+        "last_cancelled": cancelled,
     }
     await db.commit()
 
     stats = {
         "run_id": run_id,
-        "rows_scanned": len(rows),
+        "rows_scanned": rows_scanned,
+        "candidate_rows": total_candidates,
+        "batches": batches,
+        "batch_rows": BATCH_ROWS,
+        "cancelled": cancelled,
         "identities_affected": len(affected_identities),
         "snapshots_written": snapshots_written,
         "snapshots_deduplicated": snapshots_deduplicated,

@@ -146,6 +146,11 @@ class RiskResult:
     is_probability: bool = False
     calibration_status: str = "uncalibrated"
     computed_at: datetime = field(default_factory=datetime.utcnow)
+    # Where the behavioral-anomaly INPUT came from: "rules" (statistical
+    # detector) or "ml" (the anomaly model through a validated mapping). The
+    # engine computing the score is this one either way.
+    anomaly_signal_source: str = "rules"
+    signal_mapping_version: Optional[str] = None
 
     @property
     def legacy_severity(self) -> str:
@@ -159,6 +164,8 @@ class RiskResult:
             "calibration_status": self.calibration_status,
             "model_version": self.model_version,
             "limitations": list(self.limitations),
+            "anomaly_signal_source": self.anomaly_signal_source,
+            "signal_mapping_version": self.signal_mapping_version,
         }
 
     def as_payload(self) -> Dict[str, Any]:
@@ -261,7 +268,13 @@ class RiskEngine:
         baseline_samples: int,
         real_appearance_count: int,
         threshold_version: Optional[str] = None,
+        anomaly_signal=None,
     ) -> RiskResult:
+        """anomaly_signal: an MLAnomalySignal (backend.ml.signal_mapping_service)
+        when the decision router has a VALIDATED mapping and a healthy
+        prediction — it replaces ONLY the behavioral-anomaly input; every
+        other signal, cap, band and the score semantics are untouched and
+        this engine still computes the score."""
         config, version = await self.get_model(db, "identity_threat")
         w, t = config["weights"], config["thresholds"]
         signals: List[Signal] = []
@@ -288,7 +301,18 @@ class RiskEngine:
                             f"({connections_source})"))
 
         limitations: List[str] = []
-        if anomaly_count is not None and anomaly_count > 0:
+        anomaly_cap = w.get("anomaly_cap", 30.0)
+        if anomaly_signal is not None:
+            points = max(0.0, min(float(anomaly_signal.points), anomaly_cap))
+            signals.append(Signal(
+                "behavioral_anomalies", points, anomaly_cap,
+                raw_value={"band": anomaly_signal.band, "score": anomaly_signal.score,
+                           "model": anomaly_signal.model_version_label,
+                           "mapping": anomaly_signal.mapping_version},
+                explanation=(f"ML behavioral-anomaly band {anomaly_signal.band} "
+                             f"(model {anomaly_signal.model_version_label}) mapped by "
+                             f"{anomaly_signal.mapping_version}; scored by {version}")))
+        elif anomaly_count is not None and anomaly_count > 0:
             anomaly_score = min(anomaly_count * w.get("anomaly_per_item", 10.0),
                                 w.get("anomaly_cap", 30.0))
             signals.append(Signal(
@@ -319,10 +343,14 @@ class RiskEngine:
         explanation = (
             "Weighted heuristic over identity type, network connections, "
             "behavioral anomalies and activity level.")
-        return self.build_result(
+        result = self.build_result(
             "identity_threat", signals, model_version=version, weights=w,
             confidence=confidence, explanation=explanation,
             limitations=limitations, threshold_version=threshold_version)
+        if anomaly_signal is not None:
+            result.anomaly_signal_source = "ml"
+            result.signal_mapping_version = anomaly_signal.mapping_version
+        return result
 
     # ------------------------------------------------------------------
     # Profile: network_node (batch node scoring — no anomaly evaluation)

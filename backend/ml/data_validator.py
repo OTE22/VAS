@@ -109,6 +109,34 @@ def validate_rows(rows: List[Dict[str, Any]], *, kind: str,
                     out_of_range += 1
     checks["ratio_ranges"] = _check(out_of_range, 0, out_of_range == 0)
 
+    # Numeric sanity: every feature value must be a finite number. A NaN/Inf
+    # or a non-numeric value would silently poison medians and scores.
+    import math
+    non_numeric = 0
+    non_finite = 0
+    for row in rows:
+        for name, value in (row.get("features") or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                non_numeric += 1
+                continue
+            if not math.isfinite(float(value)):
+                non_finite += 1
+    checks["feature_dtype_numeric"] = _check(
+        non_numeric, 0, non_numeric == 0, detail="feature values that are not int/float")
+    checks["no_nan_inf"] = _check(
+        non_finite, 0, non_finite == 0, detail="feature values that are NaN or infinite")
+
+    # Timestamps must be real datetimes (as_of always; label_event_time when present)
+    bad_timestamps = sum(
+        1 for row in rows
+        if not isinstance(row.get("as_of"), datetime)
+        or (row.get("label_event_time") is not None
+            and not isinstance(row.get("label_event_time"), datetime)))
+    checks["timestamp_parseable"] = _check(
+        bad_timestamps, 0, bad_timestamps == 0, detail="rows whose as_of/label_event_time is not a datetime")
+
     # LEAKAGE (hard failures)
     target_adjacent = sorted({
         d["name"] for d in definitions if d.get("leakage_class") != "safe"})

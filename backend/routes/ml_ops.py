@@ -37,7 +37,73 @@ from backend.ml.constants import (
 from backend.utils.time_utils import iso_utc
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+from fastapi.routing import APIRoute
+from backend.ml import call_log
+from backend.ml.system_state import ml_system_state
+
+
+class LoggedMLRoute(APIRoute):
+    """Every ML-Ops call leaves one structured record (backend/ml/call_log):
+    request id, actor, method, route + path, query, sanitised body summary,
+    status, error code, duration, produced ids. Refusals (HTTPException)
+    are recorded with their stable code and re-raised unchanged; unexpected
+    exceptions are recorded as 500 and re-raised for the global handler."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+        template = self.path
+
+        async def logged(request: Request):
+            timer = call_log.CallTimer()
+            body_summary = None
+            if request.method in ("POST", "PUT", "PATCH"):
+                try:
+                    raw = await request.body()
+                    if raw:
+                        import json as _json
+                        body_summary = call_log.sanitize_body(_json.loads(raw))
+                except Exception:
+                    body_summary = "<unparsed>"
+            entry = {
+                "method": request.method, "route": template,
+                "path": request.url.path,
+                "query": dict(request.query_params) or None,
+                "body": body_summary,
+                "client": request.client.host if request.client else None,
+            }
+            try:
+                response = await original(request)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                entry.update({"status": exc.status_code, "ms": timer.ms,
+                              "error_code": detail.get("error_code") or (
+                                  exc.detail if isinstance(exc.detail, str) else None),
+                              "actor": getattr(request.state, "ml_actor", None)})
+                call_log.record(entry)
+                raise
+            except Exception as exc:
+                entry.update({"status": 500, "ms": timer.ms,
+                              "error_code": type(exc).__name__,
+                              "actor": getattr(request.state, "ml_actor", None)})
+                call_log.record(entry)
+                raise
+            produced = {}
+            try:
+                body = getattr(response, "body", None)
+                if body and len(body) < 200_000:
+                    import json as _json
+                    produced = call_log.extract_ids(_json.loads(body))
+            except Exception:
+                produced = {}
+            entry.update({"status": response.status_code, "ms": timer.ms,
+                          "actor": getattr(request.state, "ml_actor", None),
+                          "produced": produced or None})
+            call_log.record(entry)
+            return response
+        return logged
+
+
+router = APIRouter(route_class=LoggedMLRoute)
 
 
 def _reference_id() -> str:
@@ -79,7 +145,14 @@ def _actor_id(user) -> Optional[int]:
     return getattr(user, "id", None)
 
 
-ML_MANAGE = require_capability(Capability.ML_MANAGE)
+_ML_MANAGE_CAPABILITY = require_capability(Capability.ML_MANAGE)
+
+
+async def ML_MANAGE(request: Request, current_user=Depends(_ML_MANAGE_CAPABILITY)):
+    """The registry gate, plus the actor for the call log (request.state)."""
+    request.state.ml_actor = _actor(current_user)
+    request.state.ml_actor_id = _actor_id(current_user)
+    return current_user
 
 
 class ModeChangeRequest(BaseModel):
@@ -103,6 +176,38 @@ class RejectRequest(BaseModel):
 class TrainingRequest(BaseModel):
     model_type: str = Field(default=MODEL_TYPE_BEHAVIOR_ANOMALY)
     algorithm: str = Field(default="isolation_forest", max_length=64)
+    # Experiment knobs. dataset_id trains from an EXISTING built dataset
+    # (verified by logical checksum + Parquet file hash) instead of building
+    # a new one — one immutable dataset, many experiments.
+    dataset_id: Optional[str] = Field(default=None, max_length=64)
+    seed: Optional[int] = Field(default=None, ge=0, le=2**31 - 1)
+    hyperparameters: Optional[Dict[str, Any]] = None
+    sampling_policy: Optional[str] = Field(default=None, pattern="^(refuse|newest_first|oldest_first)$")
+
+
+_SELECTION_METHODS = ("natural", "stratified_by_band", "top_scores", "random", "manual")
+
+
+def _selection_metadata(raw):
+    """Bounded, typed selection metadata: {method, band, sampling_probability, reason, selected_at}."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise _error(422, "INVALID_SELECTION", "selection must be an object")
+    method = str(raw.get("method") or "natural")
+    if method not in _SELECTION_METHODS:
+        raise _error(422, "INVALID_SELECTION", f"selection.method must be one of {_SELECTION_METHODS}")
+    prob = raw.get("sampling_probability")
+    if prob is not None:
+        try:
+            prob = float(prob)
+        except (TypeError, ValueError):
+            raise _error(422, "INVALID_SELECTION", "sampling_probability must be a number")
+        if not 0.0 < prob <= 1.0:
+            raise _error(422, "INVALID_SELECTION", "sampling_probability must be in (0, 1]")
+    return {"method": method, "band": (str(raw.get("band"))[:32] if raw.get("band") else None),
+            "sampling_probability": prob, "reason": (str(raw.get("reason"))[:200] if raw.get("reason") else None),
+            "selected_at": iso_utc(datetime.utcnow())}
 
 
 class LabelCreateRequest(BaseModel):
@@ -114,6 +219,9 @@ class LabelCreateRequest(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     assessment_id: Optional[str] = None
     notes: Optional[str] = Field(default=None, max_length=2000)
+    # How this review was selected (stratified validation reviews): keeps a
+    # deliberately over-sampled band from being read as natural prevalence.
+    selection: Optional[Dict[str, Any]] = None
 
 
 class LabelReviewRequest(BaseModel):
@@ -129,6 +237,20 @@ class LabelSupersedeRequest(BaseModel):
 class DatasetBuildRequest(BaseModel):
     name: str = Field(default="behavior_anomaly_model-train", max_length=128)
     kind: str = Field(default="unsupervised", pattern="^(unsupervised|supervised)$")
+    # Typed extraction definition (defaults to the definition of `kind`),
+    # explicit [start, end) range and what to do above the cap. Without a
+    # policy the build REFUSES when the population exceeds the cap — nothing
+    # is ever discarded silently.
+    definition: Optional[str] = Field(default=None, max_length=128)
+    definition_version: Optional[str] = Field(default=None, max_length=16)
+    time_range_start: Optional[datetime] = None
+    time_range_end: Optional[datetime] = None
+    sampling_policy: Optional[str] = Field(default=None, pattern="^(refuse|newest_first|oldest_first)$")
+    # Declared split strategy (overrides the definition's; recorded on the
+    # dataset). 'temporal' lets entities recur across splits and records the
+    # measured overlap — for long histories of regular entities where
+    # group isolation leaves no val/test rows.
+    split_strategy: Optional[str] = Field(default=None, pattern="^(temporal_group|temporal)$")
 
 
 class PolicyUpdateRequest(BaseModel):
@@ -189,6 +311,8 @@ async def ml_overview(
             },
             "latest_drift_reports": [drift_service.serialize_report(r) for r in latest_drift],
             "optional_capabilities": all_optional_capabilities(),
+            # What the system IS right now + the core changes that made it so
+            "system": await ml_system_state(db),
             "warnings": [
                 "Anomaly does not mean threat.",
                 "Heuristic scores are not probabilities.",
@@ -304,15 +428,18 @@ async def pause_ml(
 @router.post("/api/ml/features/compute", tags=["ML Operations"],
              summary="Run Feature Collection", status_code=202)
 async def compute_features(
+    full_rebuild: bool = Query(default=False, description="Recompute every snapshot from the start of history "
+                                                             "(needed once after a feature-set version bump)"),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(ML_MANAGE),
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """Launch feature-snapshot collection as a background job (202 + job_id). A second request while one runs returns 409 JOB_ALREADY_RUNNING; a cross-worker lock prevents concurrent collection."""
+    """Launch feature-snapshot collection as a background job (202 + job_id). Incremental by default (watermark); `full_rebuild=true` recomputes all history under the CURRENT feature set — required once after a feature-set version bump, since incremental runs only see new events. A second request while one runs returns 409 JOB_ALREADY_RUNNING; a cross-worker lock prevents concurrent collection."""
     try:
         from backend.ml.collector import launch_collection_job
-        outcome = await launch_collection_job(created_by_user_id=_actor_id(current_user))
+        outcome = await launch_collection_job(created_by_user_id=_actor_id(current_user),
+                                              full_rebuild=full_rebuild)
         if outcome.get("status") == "busy":
             raise _error(409, "JOB_ALREADY_RUNNING", outcome.get("reason", "busy"))
         return JSONResponse(status_code=202, content=outcome)
@@ -397,7 +524,8 @@ async def create_label(
             label_kind=body.label_kind, source=body.source,
             event_time=body.event_time, created_by=_actor(current_user),
             confidence=body.confidence, assessment_id=body.assessment_id,
-            notes=body.notes, actor_user_id=_actor_id(current_user))
+            notes=body.notes, actor_user_id=_actor_id(current_user),
+            selection=_selection_metadata(body.selection))
         status_code = 200 if payload.get("deduplicated") else 201
         return JSONResponse(status_code=status_code, content=jsonable(payload))
     except ValueError as e:
@@ -488,17 +616,144 @@ async def build_dataset_endpoint(
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """Build a dataset version synchronously from active feature definitions and up to 100k snapshots. Returns 201 when built; a failed quality report is returned as 422."""
+    """Build a dataset version synchronously from a typed extraction definition (default: the definition of `kind`), an optional explicit time range and a declared cap policy. Returns 201 when built; a failed quality report or a cap refusal (EXTRACTION_EXCEEDS_CAP) is returned as 422."""
     try:
         from backend.ml.dataset_builder import build_dataset
+        from backend.ml.dataset_definitions import get_definition
+        definition = None
+        if body.definition:
+            try:
+                definition = get_definition(body.definition, body.definition_version)
+            except KeyError as e:
+                raise _error(422, "UNKNOWN_DATASET_DEFINITION", str(e))
+            if definition.kind != body.kind:
+                raise _error(422, "DATASET_DEFINITION_KIND_MISMATCH",
+                             f"definition {definition.key} is {definition.kind}, request says {body.kind}")
+        start = body.time_range_start.replace(tzinfo=None) if body.time_range_start else None
+        end = body.time_range_end.replace(tzinfo=None) if body.time_range_end else None
+        if start and end and start >= end:
+            raise _error(422, "INVALID_TIME_RANGE", "time_range_start must be before time_range_end")
         outcome = await build_dataset(db, name=body.name, kind=body.kind,
-                                      created_by=_actor_id(current_user))
+                                      created_by=_actor_id(current_user),
+                                      definition=definition, time_range_start=start,
+                                      time_range_end=end, sampling_policy=body.sampling_policy,
+                                      split_strategy=body.split_strategy)
         status_code = 201 if outcome["status"] == "built" else 422
         return JSONResponse(status_code=status_code, content=jsonable(outcome))
     except HTTPException:
         raise
     except Exception as e:
         raise _safe_500("dataset build", e)
+
+
+@router.get("/api/ml/datasets/definitions", tags=["ML Operations"],
+            summary="Dataset Definitions")
+async def list_dataset_definitions(current_user=Depends(ML_MANAGE)):
+    """The typed extraction definitions a dataset can be built from, with the known limitations of the feature set each one uses."""
+    from backend.ml.dataset_definitions import feature_set_limitations, list_definitions
+    items = []
+    for d in list_definitions():
+        item = d.to_manifest()
+        item["feature_set_limitations"] = feature_set_limitations(d.feature_set_version)
+        items.append(item)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/api/ml/datasets/backfill-hashes", tags=["ML Operations"],
+             summary="Verify legacy datasets and record their file hashes")
+async def backfill_dataset_hashes_endpoint(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+    _csrf: None = Depends(require_mlops_csrf),
+    _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
+):
+    """For datasets built before file hashing: reload the Parquet, and only when the reloaded rows reproduce the registered checksum record the file sha256 + a manifest (legacy extraction policy). Lineage is never rewritten; unverifiable rows are listed with a reason."""
+    try:
+        from backend.ml.dataset_builder import backfill_dataset_file_hashes
+        report = await backfill_dataset_file_hashes(db)
+        await ml_audit(db, action="dataset_backfill_hashes",
+                       actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
+                       object_type="ml_dataset", object_id="*",
+                       after={"verified": len(report["verified"]),
+                              "unverifiable": len(report["unverifiable"])})
+        await db.commit()
+        return report
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _safe_500("dataset hash backfill", e)
+
+
+class DatasetArchiveRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=1000)
+
+
+@router.post("/api/ml/datasets/{dataset_id}/archive", tags=["ML Operations"],
+             summary="Archive an unreferenced dataset (explicit, never automatic)")
+async def archive_dataset_endpoint(
+    dataset_id: str,
+    body: DatasetArchiveRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+    _csrf: None = Depends(require_mlops_csrf),
+    _rl: None = Depends(rate_limited("ml_ops", heavy=False)),
+):
+    """Releases the Parquet bytes of a dataset no registered model was trained from. The row (provenance) and manifest stay; a dataset referenced by a model is refused with 409 DATASET_REFERENCED_BY_MODEL."""
+    try:
+        from backend.ml.dataset_builder import DatasetArchiveRefusal, archive_dataset
+        try:
+            outcome = await archive_dataset(db, dataset_id, actor=_actor(current_user), reason=body.reason)
+        except DatasetArchiveRefusal as refusal:
+            status = 404 if refusal.code == "DATASET_NOT_FOUND" else 409
+            raise _error(status, refusal.code, refusal.message)
+        await ml_audit(db, action="dataset_archived",
+                       actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
+                       object_type="ml_dataset", object_id=str(dataset_id),
+                       reason=body.reason, after=outcome)
+        await db.commit()
+        return outcome
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _safe_500("dataset archive", e)
+
+
+@router.get("/api/ml/datasets/{dataset_id}", tags=["ML Operations"], summary="Dataset Detail")
+async def dataset_detail(
+    dataset_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+):
+    """One dataset version with its extraction record, manifest-derived lineage, feature-set limitations and the models trained from it. No storage path is ever serialized."""
+    try:
+        from db_models import MLDataset, MLModel
+        from backend.ml.dataset_builder import read_manifest, serialize_dataset
+        from backend.ml.dataset_definitions import feature_set_limitations
+        try:
+            row_uuid = uuid_mod.UUID(dataset_id)
+        except (ValueError, TypeError):
+            raise _error(422, "INVALID_DATASET_ID", "dataset_id must be a uuid")
+        row = (await db.execute(select(MLDataset).where(MLDataset.id == row_uuid))).scalar_one_or_none()
+        if row is None:
+            raise _error(404, "DATASET_NOT_FOUND", "no such dataset")
+        out = serialize_dataset(row)
+        manifest = read_manifest(row) or {}
+        out["manifest"] = {k: v for k, v in manifest.items()
+                           if k in ("manifest_version", "definition", "split", "columns",
+                                    "column_count", "parquet_bytes", "comparability",
+                                    "quality", "created_at", "build_job_id")}
+        out["feature_set_limitations"] = feature_set_limitations(row.feature_set_version)
+        models = (await db.execute(
+            select(MLModel.id, MLModel.version, MLModel.stage, MLModel.algorithm)
+            .where(MLModel.dataset_id == row.id).order_by(MLModel.version))).all()
+        out["models"] = [{"id": str(m[0]), "version": m[1], "stage": m[2], "algorithm": m[3]}
+                         for m in models]
+        out["immutable"] = bool(models)   # referenced by a registered model
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _safe_500("dataset detail", e)
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +805,10 @@ async def create_training_job(
                 await trainer.run_training_job(
                     job_id, model_type=body.model_type,
                     algorithm=body.algorithm,
-                    requested_by=_actor_id(current_user))
+                    requested_by=_actor_id(current_user),
+                    dataset_id=body.dataset_id, seed=body.seed,
+                    hyperparameters=body.hyperparameters,
+                    sampling_policy=body.sampling_policy)
             finally:
                 await dlock.release()
 
@@ -560,7 +818,10 @@ async def create_training_job(
                        actor_user_id=_actor_id(current_user),
                        object_type="ml_training_job", object_id=job_id,
                        after={"model_type": body.model_type,
-                              "algorithm": body.algorithm})
+                              "algorithm": body.algorithm,
+                              "dataset_id": body.dataset_id,
+                              "seed": body.seed,
+                              "hyperparameters": body.hyperparameters})
         await db.commit()
         return JSONResponse(status_code=202, content={
             "accepted": True, "job_id": job_id, "task_id": task_id,
@@ -838,6 +1099,27 @@ async def shadow_summary(
         raise _safe_500("shadow summary", e)
 
 
+@router.get("/api/ml/shadow/evidence", tags=["ML Operations"],
+            summary="Shadow evidence for offline mapping review")
+async def shadow_evidence(
+    days: int = Query(default=90, ge=1, le=365),
+    model_id: Optional[str] = Query(default=None, max_length=64),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+):
+    """Per model/band: predictions, reviewed manual outcomes and their split, rule-severity x band crosstab, disagreement mix, score quantiles of reviewed positives vs negatives. Descriptive evidence for a human to validate a future ML->risk signal mapping; mapping_decision is always REQUIRES_VALIDATION."""
+    try:
+        from backend.ml.evaluation import shadow_evidence_report
+        report = await shadow_evidence_report(db, days=days, model_id=model_id)
+        if report.get("status") == "failed":
+            raise _error(422, report["code"], "model_id must be a uuid")
+        return report
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _safe_500("shadow evidence", e)
+
+
 @router.get("/api/ml/drift/reports", tags=["ML Operations"], summary="Drift Reports")
 async def drift_reports(
     page: int = Query(default=1, ge=1, le=10000),
@@ -964,6 +1246,21 @@ async def update_policy(
         raise
     except Exception as e:
         raise _safe_500("policy update", e)
+
+
+@router.get("/api/ml/calls", tags=["ML Operations"], summary="ML-Ops Call Log")
+async def ml_call_log(
+    limit: int = Query(default=50, ge=1, le=500),
+    errors_only: bool = Query(default=False),
+    path_contains: Optional[str] = Query(default=None, max_length=120),
+    current_user=Depends(ML_MANAGE),
+):
+    """Newest-first records of recent /api/ml/* calls (request id, actor, method, route, status, error code, duration, produced ids). The same request id is in every server log line of that call (`req=<id>`) and in the X-Request-ID response header the client received."""
+    items = call_log.read_recent(limit, status_min=400 if errors_only else None,
+                                 path_contains=path_contains)
+    return {"items": items, "total": len(items), "limit": limit,
+            "note": ("one record per ML-Ops call; bodies are sanitised summaries; "
+                     "correlate with server logs by request_id")}
 
 
 @router.get("/api/ml/audit", tags=["ML Operations"], summary="ML Audit Log")

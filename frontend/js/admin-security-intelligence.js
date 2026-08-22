@@ -407,9 +407,232 @@
         try {
             const data = await api('/api/security/capabilities');
             state.capabilities = (data && data.capabilities) || null;
+            renderEngineModePill(data && typeof data.decision_engine === 'object' ? data.decision_engine : null);
         } catch (err) {
             state.capabilities = null;
+            renderEngineModePill(null);
             if (!err.aborted) log('[SEC] capabilities load failed:', err.status);
+        }
+    }
+
+    // ============================================
+    // Engine provenance
+    // ============================================
+    //
+    // Two different things, never mixed:
+    //   * the PILL says what the system is configured to do NOW (capabilities.decision_engine);
+    //   * every result carries its OWN provenance (`engine` on rules-only
+    //     envelopes, `decision_provenance` + `ml_observation` on assessments),
+    //     persisted with it — a result labelled SHADOW yesterday stays SHADOW
+    //     after the administrator switches to RULES today.
+    // Nothing here assumes which engine produced a result; absent provenance
+    // is shown as absent.
+
+    function renderEngineModePill(engine) {
+        const pill = document.getElementById('engine-mode-pill');
+        if (!pill) return;
+        if (!engine) { pill.hidden = true; pill.replaceChildren(); return; }
+        const requested = String(engine.requested_mode || '').toUpperCase();
+        const effective = String(engine.effective_mode || '').toUpperCase();
+        const parts = [];
+        parts.push(el('strong', { text: requested || 'UNKNOWN' }));
+        if (effective && effective !== requested) {
+            parts.push(el('span', { className: 'engine-pill__gate',
+                               text: '→ not eligible, serving ' + effective }));
+        }
+        parts.push(el('span', { text: '· Anomaly signal now: ' +
+            (engine.anomaly_signal_source_now === 'ml' ? 'ML' : 'Statistical rules') }));
+        parts.push(el('span', { text: '· Final scoring: ' + safeText(engine.final_scoring_engine) }));
+        const model = engine.ml_model && typeof engine.ml_model === 'object' ? engine.ml_model : null;
+        if (model) {
+            const role = engine.ml_role_now === 'anomaly_signal' ? 'ML model'
+                : engine.ml_role_now === 'observational' ? 'ML observer' : 'Shadow model (idle)';
+            parts.push(el('span', { text: '· ' + role + ': ' + safeText(model.model_type) + ' v' + safeText(model.version) }));
+        }
+        if (engine.signal_mapping && typeof engine.signal_mapping === 'object') {
+            parts.push(el('span', { text: '· Signal policy: ' + safeText(engine.signal_mapping.version) }));
+        }
+        const gates = Array.isArray(engine.gates) ? engine.gates : [];
+        const ownGate = gates.find(function (g) { return g && String(g.mode) === String(engine.requested_mode); });
+        if (ownGate) {
+            parts.push(el('span', { className: 'engine-pill__gate', text: '· ' + safeText(ownGate.code) }));
+            pill.title = safeText(ownGate.message);
+        }
+        pill.replaceChildren.apply(pill, parts);
+        pill.hidden = false;
+    }
+
+    /** Badge for a rules-only result, from the payload's `engine` block only. */
+    function buildEngineBadge(engine) {
+        if (!engine || typeof engine !== 'object') {
+            return el('div', { className: 'engine-badge engine-badge--missing',
+                               text: 'Provenance not reported by the backend for this result' });
+        }
+        const kind = String(engine.kind || 'unknown');
+        return el('div', { className: 'engine-badge' + (kind === 'ml' ? ' engine-badge--ml' : '') }, [
+            el('strong', { text: kind === 'rules' ? 'Rules engine' : kind.toUpperCase() }),
+            el('span', { text: safeText(engine.name) }),
+            el('span', { text: '· ' + safeText(engine.algorithm_version) }),
+            el('span', { text: engine.ml_participates === false
+                ? '· ML does not take part in this feature (any mode)'
+                : engine.ml_participates === true ? '· ML participates' : '' })
+        ]);
+    }
+
+    function prependEngineBadge(container, engine) {
+        if (!container) return;
+        const existing = container.querySelector(':scope > .engine-badge');
+        if (existing) existing.remove();
+        container.insertBefore(buildEngineBadge(engine), container.firstChild);
+    }
+
+    const MODE_LABELS = { rules: 'RULES', shadow: 'SHADOW', ml: 'ML', hybrid: 'HYBRID', not_recorded: 'not recorded' };
+    const FALLBACK_TEXT = {
+        MODE_GATED: 'mode is gated this release',
+        SIGNAL_MAPPING_UNVALIDATED: 'no validated ML→risk signal mapping',
+        NO_APPROVED_MODEL: 'no approved model',
+        PREDICTION_TIMEOUT: 'ML inference timed out',
+        PREDICTION_FAILED: 'ML inference failed',
+        INVALID_PREDICTION: 'ML returned an invalid prediction',
+        MISSING_REQUIRED_FEATURES: 'required features missing',
+        FEATURE_COMPUTATION_FAILED: 'feature computation failed',
+        FEATURE_SCHEMA_MISMATCH: 'model and feature set do not match',
+        ARTIFACT_HASH_MISMATCH: 'model artifact failed integrity check',
+        DEPENDENCY_MISMATCH: 'model dependencies do not match',
+        MODEL_LOAD_FAILED: 'model could not be loaded',
+        THRESHOLD_UNRESOLVED: 'no active threshold set'
+    };
+
+    function modeLabel(value) {
+        const key = String(value || 'not_recorded');
+        return MODE_LABELS[key] || key.toUpperCase();
+    }
+
+    /** The decision block of one assessment, from its PERSISTED provenance. */
+    function buildDecisionBlock(prov, decision) {
+        if (!prov || typeof prov !== 'object') {
+            return el('div', { className: 'decision-block' }, [
+                el('h4', { text: 'Decision' }),
+                el('div', { className: 'decision-row', text: 'Provenance not reported for this assessment.' })
+            ]);
+        }
+        function row(label, value, cls) {
+            return el('div', { className: 'decision-row' }, [
+                el('span', { text: label }),
+                el('span', { className: cls || '', text: value })
+            ]);
+        }
+        const rows = [el('h4', { text: 'Decision' })];
+        rows.push(row('Requested mode', modeLabel(prov.requested_mode)));
+        rows.push(row('Executed mode', modeLabel(prov.executed_mode)));
+        rows.push(row('Anomaly signal', prov.anomaly_signal_source === 'ml'
+            ? 'ML — ' + safeText(prov.ml_model_version, 'model') +
+              (prov.signal_mapping_version ? ' via policy ' + safeText(prov.signal_mapping_version) : '')
+            : prov.anomaly_signal_source === 'not_recorded' ? 'not recorded' : 'Statistical rules'));
+        rows.push(row('Final scoring', safeText(prov.final_scoring_engine) + ' (heuristic score, not a probability)'));
+        if (prov.ml_role === 'observational') {
+            rows.push(row('ML role', 'observational — recorded, not applied to this result'));
+        }
+        if (prov.fallback) {
+            const reason = safeText(prov.fallback_reason);
+            rows.push(row('Fallback', 'yes — ' + (FALLBACK_TEXT[reason] || reason) + ' (' + reason + ')', 'decision-fallback'));
+            rows.push(row('', 'The administrator\'s configured mode was not changed; the next assessment tries again.', 'decision-fallback'));
+        } else {
+            rows.push(row('Fallback', 'no'));
+        }
+        const gates = Array.isArray(prov.gates) ? prov.gates : [];
+        gates.forEach(function (g) {
+            rows.push(row('Gate', safeText(g.code) + ' — ' + safeText(g.message), 'decision-fallback'));
+        });
+        if (prov.recorded === false) {
+            rows.push(row('Note', 'provenance from this call (the row was not persisted or predates provenance recording)'));
+        }
+        return el('div', { className: 'decision-block' }, rows);
+    }
+
+    /** The ML observation linked to an assessment — shown whenever it EXISTS,
+     *  regardless of what the page pill says today. No arithmetic against
+     *  the rules score: different quantities. */
+    function buildObservationPanel(obs) {
+        if (!obs || typeof obs !== 'object') return null;
+        const failed = obs.ml_failed === true;
+        const applied = obs.applied_to_live_result === true;
+        const rows = [
+            el('h4', { text: applied ? 'ML anomaly signal (applied as the anomaly input)'
+                                     : 'ML shadow signal — not used for the live decision' })
+        ];
+        function row(label, value) {
+            return el('div', { className: 'decision-row' }, [el('span', { text: label }), el('span', { text: value })]);
+        }
+        rows.push(row('Model', safeText(obs.model_version) + (obs.feature_set_version ? ' · ' + safeText(obs.feature_set_version) : '')));
+        if (failed) {
+            const reason = safeText(obs.failure_reason);
+            rows.push(row('Result', 'did not score — ' + (FALLBACK_TEXT[reason] || reason) + ' (' + reason + ')'));
+        } else {
+            rows.push(el('div', { className: 'decision-row' }, [
+                el('span', { text: 'Behavioral anomaly score' }),
+                el('span', {}, [
+                    document.createTextNode(safeText(obs.score) + ' '),
+                    el('span', { className: 'band-chip', text: safeText(obs.band) }),
+                    document.createTextNode(' · not a probability')
+                ])
+            ]));
+            if (obs.ml_would_flag !== null && obs.ml_would_flag !== undefined) {
+                rows.push(row('ML would flag', obs.ml_would_flag ? 'yes' : 'no'));
+            }
+            if (obs.rules_would_alert !== null && obs.rules_would_alert !== undefined) {
+                rows.push(row('Rules would alert', obs.rules_would_alert ? 'yes' : 'no'));
+            }
+            if (obs.outcome_relation) rows.push(row('Relation', safeText(obs.outcome_relation)));
+            if (obs.threshold_version) rows.push(row('Threshold set', safeText(obs.threshold_version)));
+        }
+        if (obs.latency_ms !== null && obs.latency_ms !== undefined) {
+            rows.push(row('Latency', Math.round(Number(obs.latency_ms)) + ' ms'));
+        }
+        rows.push(el('div', { className: 'ml-observation__note',
+            text: applied ? 'The rules risk engine computed the final score from this input.'
+                          : 'Recorded for comparison only; the live result above is the rules result.' }));
+        return el('div', { className: 'ml-observation' + (failed ? ' ml-observation--failed' : '') }, rows);
+    }
+
+    async function loadThreatHistory(identityId) {
+        const wrap = document.getElementById('threat-history');
+        const list = document.getElementById('threat-history-list');
+        if (!wrap || !list) return;
+        const req = beginRequest('threat-history');
+        try {
+            const data = await api('/api/security/assessments/history/identity/' + encodeURIComponent(identityId), {
+                params: { page: 1, page_size: 10 }, signal: req.signal
+            });
+            if (!req.isCurrent()) return;
+            const items = data && Array.isArray(data.items) ? data.items : [];
+            const rows = items.map(function (a) {
+                const prov = a && typeof a.decision_provenance === 'object' ? a.decision_provenance : null;
+                const line = el('div', { className: 'threat-history-row' }, [
+                    el('span', { text: fmtDateTime(a.created_at) }),
+                    el('span', { text: formatScore(a.total_risk_score) + ' ' + safeText(a.severity) }),
+                    el('span', { text: safeText(a.model_version) }),
+                    el('span', { className: 'history-prov', text: prov
+                        ? 'requested ' + modeLabel(prov.requested_mode) + ' · executed ' + modeLabel(prov.executed_mode) +
+                          ' · anomaly signal: ' + (prov.anomaly_signal_source === 'ml' ? 'ML' : prov.anomaly_signal_source === 'not_recorded' ? 'not recorded' : 'rules') +
+                          (prov.fallback ? ' · fallback: ' + safeText(prov.fallback_reason) : '')
+                        : 'provenance not reported' })
+                ]);
+                if (a && a.ml_observation && typeof a.ml_observation === 'object') {
+                    const o = a.ml_observation;
+                    line.appendChild(el('span', { className: 'history-ml', text: 'ML ' + (o.ml_failed
+                        ? 'did not score (' + safeText(o.failure_reason) + ')'
+                        : safeText(o.model_version) + ' score ' + safeText(o.score) + ' band ' + safeText(o.band) +
+                          (o.applied_to_live_result ? ' — applied as anomaly input' : ' — recorded only')) }));
+                }
+                return line;
+            });
+            list.replaceChildren.apply(list, rows.length ? rows : [el('div', { className: 'info-message', text: 'No persisted assessments yet.' })]);
+            wrap.hidden = false;
+        } catch (err) {
+            if (err.aborted || !req.isCurrent()) return;
+            list.replaceChildren(el('div', { className: 'info-message', text: 'History unavailable.' }));
+            wrap.hidden = false;
         }
     }
 
@@ -1156,6 +1379,7 @@
             });
             if (!req.isCurrent()) return;
             renderNetwork(data || {});
+            prependEngineBadge(document.getElementById('network-stats'), data && data.engine);
             updateNetworkStats(data || {});
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
@@ -1352,6 +1576,7 @@
             const items = data && Array.isArray(data.items) ? data.items
                 : (Array.isArray(data) ? data : []);
             renderPatterns(items, !!(data && data.truncated === true));
+            prependEngineBadge(document.getElementById('patterns-container'), data && data.engine);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(container, 'Failed to load patterns', err.referenceId);
@@ -1664,24 +1889,56 @@
             // anomaly-v2 envelope: {items, baseline: {sufficient, samples, ...}}
             const items = data && Array.isArray(data.items) ? data.items
                 : (Array.isArray(data) ? data : []);
-            renderAnomalies(items, data && typeof data.baseline === 'object' ? data.baseline : null);
+            renderAnomalies(items, data && typeof data.baseline === 'object' ? data.baseline : null,
+                { daysBack: daysBack, recentCount: toNonNegativeInteger(data && data.recent_count, 0) });
+            prependEngineBadge(document.getElementById('anomalies-container'), data && data.engine);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(container, err.status === 404 ? 'Identity not found' : 'Failed to load anomalies', err.referenceId);
         }
     }
 
-    function renderAnomalies(anomalies, baseline) {
+    /** Explain WHY the baseline is thin, with a concrete next step.
+     *  The baseline is what happened BEFORE the "Days back" window, so an
+     *  identity whose whole history sits inside the window has nothing to
+     *  be compared against — the fix is a shorter window, not more waiting. */
+    function describeThinBaseline(baseline, meta) {
+        const samples = toNonNegativeInteger(baseline.samples, 0);
+        const required = toNonNegativeInteger(baseline.required, 0) || 5;
+        const daysBack = toNonNegativeInteger(meta && meta.daysBack, 0);
+        const recent = toNonNegativeInteger(meta && meta.recentCount, 0);
+        const firstSeen = baseline.history_start ? new Date(baseline.history_start) : null;
+        const ageDays = firstSeen && !isNaN(firstSeen.getTime())
+            ? Math.floor((Date.now() - firstSeen.getTime()) / 86400000) : null;
+        const plural = function (n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); };
+
+        let text = 'Insufficient baseline — ' + plural(samples, 'earlier appearance') +
+            ' to compare against (needs at least ' + required + '). ';
+        if (samples === 0 && recent > 0 && daysBack > 0) {
+            text += 'All ' + plural(recent, 'appearance') + ' of this identity fall inside the last ' +
+                plural(daysBack, 'day') + ', so there is no history before the analysis window. ';
+            if (ageDays !== null && ageDays >= 1) {
+                text += 'It was first seen ' + plural(ageDays, 'day') + ' ago — set "Days back" below ' +
+                    ageDays + ' so some appearances land in the baseline.';
+            } else {
+                text += 'It was first seen less than a day ago; anomaly detection needs history older than the window.';
+            }
+        } else if (samples === 0 && recent === 0) {
+            text += 'This identity has no recorded appearances yet.';
+        } else {
+            text += 'Anomaly detection needs more history before it can judge this identity' +
+                (ageDays !== null ? ' (first seen ' + plural(ageDays, 'day') + ' ago).' : '.');
+        }
+        return text;
+    }
+
+    function renderAnomalies(anomalies, baseline, meta) {
         const container = document.getElementById('anomalies-container');
         if (!container) return;
         // 'Not enough history to judge' is NOT the same claim as 'behavior is
         // normal' — the green check must never cover an empty baseline.
         if (baseline && baseline.sufficient === false) {
-            const samples = toNonNegativeInteger(baseline.samples, 0);
-            renderStateInto(container, 'fas fa-hourglass-half',
-                'Insufficient baseline — only ' + samples +
-                ' earlier appearance' + (samples === 1 ? '' : 's') +
-                ' to compare against. Anomaly detection needs more history before it can judge this identity.');
+            renderStateInto(container, 'fas fa-hourglass-half', describeThinBaseline(baseline, meta));
             return;
         }
         if (!anomalies.length) {
@@ -1729,6 +1986,7 @@
             });
             if (!req.isCurrent()) return;
             renderThreatAssessment(assessment || {});
+            loadThreatHistory(identityId);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(container, err.status === 404 ? 'Identity not found' : 'Failed to load threat assessment', err.referenceId);
@@ -1767,6 +2025,25 @@
                     ]);
                 }).filter(Boolean)))
         ];
+        children.push(buildDecisionBlock(assessment.decision_provenance, assessment.decision));
+        // Reviewer-bias guard: the ML observation is kept BEHIND a click so an
+        // analyst recording an outcome is not primed by the band. It is still
+        // one click away for the administrator.
+        const observation = buildObservationPanel(assessment.ml_observation);
+        if (observation) {
+            observation.hidden = true;
+            const reveal = el('button', { className: 'btn-secondary ml-observation-reveal',
+                                          attrs: { type: 'button',
+                                                   title: 'Hidden by default so reviewers record outcomes blind to the ML band' } },
+                [document.createTextNode('Show ML shadow observation (blind review guard)')]);
+            reveal.addEventListener('click', function () {
+                observation.hidden = !observation.hidden;
+                reveal.textContent = observation.hidden ? 'Show ML shadow observation (blind review guard)'
+                                                        : 'Hide ML shadow observation';
+            });
+            children.push(reveal);
+            children.push(observation);
+        }
         if (assessment.last_assessed) {
             children.push(el('p', {
                 className: 'threat-calculated-at',

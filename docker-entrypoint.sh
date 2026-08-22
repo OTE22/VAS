@@ -57,6 +57,12 @@ chmod -R 777 /app/database "$STORAGE_ROOT" /var/log/face-recognition 2>/dev/null
 # Change ownership to appuser (UID 1000)
 chown -R appuser:appuser /app/database "$STORAGE_ROOT" /var/log/face-recognition 2>/dev/null || true
 
+# ML registry artifacts + Parquet datasets (ML_ARTIFACT_DIR, /app/models/ml).
+# A named volume mounted here is created by Docker as root; the registry
+# refuses to write anywhere else, so the directory must be appuser's.
+mkdir -p /app/models/ml/candidates /app/models/ml/datasets 2>/dev/null || true
+chown -R appuser:appuser /app/models/ml 2>/dev/null || true
+
 # Also ensure parent directories are writable
 chmod 777 /app/database 2>/dev/null || true
 chmod 777 "$STORAGE_ROOT" 2>/dev/null || true

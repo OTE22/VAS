@@ -206,6 +206,11 @@ class AnomalyReport:
     recent_count: int
     truncated: bool = False
     algorithm_version: str = ANOMALY_ALGORITHM_VERSION
+    # Why a baseline can be thin: the minimum it needs and when this identity
+    # was first ever seen. Lets the UI say "everything falls inside the
+    # analysis window — shorten Days back" instead of a bare sample count.
+    required_samples: int = 0
+    history_start: Optional[datetime] = None
     # anomaly-context-v3: timezone + day-bucket configuration and per-bucket
     # baseline statistics the evaluation actually used.
     context: Optional[Dict] = None
@@ -905,6 +910,9 @@ class SecurityIntelligenceService:
             .limit(int(settings.ANOMALY_MAX_ITEMS))
         )
         baseline_apps = list(baseline_result.scalars().all())
+        history_start = (await db.execute(
+            select(func.min(IdentityAppearance.start_time))
+            .where(IdentityAppearance.identity_id == identity_uuid))).scalar()
 
         # Pipeline timezones for local-hour evaluation.
         tz_result = await db.execute(select(Pipeline.pipeline_id, Pipeline.timezone))
@@ -940,6 +948,8 @@ class SecurityIntelligenceService:
                 baseline_start=baseline_start,
                 baseline_end=baseline_end,
                 recent_count=len(recent_apps),
+                required_samples=min_baseline,
+                history_start=history_start,
             )
 
         baseline_locations = set(a.pipeline_id for a in baseline_apps)
@@ -1027,6 +1037,8 @@ class SecurityIntelligenceService:
             baseline_start=baseline_start,
             baseline_end=baseline_end,
             recent_count=len(recent_apps),
+            required_samples=min_baseline,
+            history_start=history_start,
             truncated=len(anomalies) >= max_items or recent_truncated,
             context={
                 "timezones": timezones_used,
@@ -1042,7 +1054,8 @@ class SecurityIntelligenceService:
     async def assess_threat(
         self,
         db: AsyncSession,
-        identity_id: str
+        identity_id: str,
+        anomaly_signal=None,
     ) -> ThreatAssessment:
         """
         Threat assessment via the UNIFIED risk engine (profile
@@ -1142,6 +1155,7 @@ class SecurityIntelligenceService:
             baseline_sufficient=anomaly_report.baseline_sufficient,
             baseline_samples=anomaly_report.baseline_samples,
             real_appearance_count=real_appearances,
+            anomaly_signal=anomaly_signal,
         )
 
         factor_labels = {

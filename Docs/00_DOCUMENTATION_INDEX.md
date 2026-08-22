@@ -154,6 +154,7 @@ verification, settings — is documented **once**, in 46.
 
 - **[46_MAP_SERVICE_GUIDE.md](46_MAP_SERVICE_GUIDE.md)** — **canonical map documentation.** Supersedes the retired 47/49/55, which described a server-side Folium renderer that no longer exists.
 - **[48_SECURITY_INTELLIGENCE_MAP_FEATURES.md](48_SECURITY_INTELLIGENCE_MAP_FEATURES.md)** — pattern detection and risk scoring (the analysis behind the overlays)
+- **[49_BEHAVIORAL_ANOMALY_ML_STATE.md](49_BEHAVIORAL_ANOMALY_ML_STATE.md)** — behavioral-anomaly ML: shadow contract, engineering vs scientific readiness, evidence path to a validated signal mapping
 - **[89_OFFLINE_MAP_REMEDIATION.md](89_OFFLINE_MAP_REMEDIATION.md)** — the placeholder-tile defect, what it proved about structural checks, and the fail-closed content ledger that replaced them
 - **[85_MAP_MIGRATION_INVENTORY.md](85_MAP_MIGRATION_INVENTORY.md)** — MapLibre GL JS + Martin migration: inventory, frozen feature contract, verification results *(historical record of the cutover)*
 - **[86_MAP_DATASET_ACQUISITION.md](86_MAP_DATASET_ACQUISITION.md)** — Lebanon map datasets: OSM streets (Planetiler), Sentinel-2 satellite, Copernicus DEM — acquisition, build, atomic install, licences, air-gap transfer

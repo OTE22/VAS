@@ -224,3 +224,93 @@ class ShadowService:
 
 # Global instance
 shadow_service = ShadowService()
+
+
+# ---------------------------------------------------------------------------
+# Observation read-back — ONE serializer for live responses and history
+# ---------------------------------------------------------------------------
+
+SIGNAL_NAME = "behavioral_anomaly"
+SCORE_SEMANTICS = "anomaly_score_not_probability"
+# Persisted vocabulary is pinned (constants.DISAGREEMENT_VALUES / DB comment);
+# the presentation name says which MECHANISM would have raised attention.
+RELATION_PRESENTATION = {"both_flagged": "both_flagged", "rules_only": "rules_only",
+                         "anomaly_only": "ml_only", "neither": "neither"}
+
+
+def serialize_observation(prediction, comparison=None, *, role: str = "observational") -> Dict[str, Any]:
+    """The ML observation linked to an assessment: what the model said (or why
+    it could not), separate from the rules result it sat next to. Success and
+    failure are different states: a failed inference carries a reason and no
+    score/band — nothing is required of it."""
+    failed = bool(getattr(comparison, "ml_failed", False)) if comparison is not None \
+        else (prediction.fallback_reason is not None)
+    out: Dict[str, Any] = {
+        "executed": True,
+        "role": role,                                   # observational | anomaly_signal
+        "applied_to_live_result": role == "anomaly_signal",
+        "ml_failed": failed,
+        "failure_reason": (getattr(comparison, "failure_reason", None) if comparison is not None
+                           else prediction.fallback_reason) if failed else None,
+        "prediction_id": str(prediction.id),
+        "model_id": str(prediction.model_id) if prediction.model_id else None,
+        "model_version": prediction.model_version_label,
+        "model_type": prediction.model_type,
+        "feature_set_version": prediction.feature_set_version,
+        "threshold_version": prediction.threshold_version,
+        "signal_name": SIGNAL_NAME,
+        "score_semantics": SCORE_SEMANTICS,
+        "band_semantics": "relative_anomaly_band_from_train_quantiles_not_validated_severity",
+        "score": None if failed else prediction.behavioral_anomaly_score,
+        "band": None if failed else prediction.ml_anomaly_band,
+        "latency_ms": prediction.latency_ms,
+        "missing_features": prediction.missing_features or [],
+        "as_of": prediction.as_of_timestamp.isoformat() + "Z" if prediction.as_of_timestamp else None,
+    }
+    if comparison is not None:
+        persisted = comparison.operational_disagreement
+        out.update({
+            "ml_would_flag": None if failed else bool(comparison.ml_would_flag_anomaly),
+            "rules_would_alert": bool(comparison.rule_would_alert),
+            "outcome_relation": RELATION_PRESENTATION.get(persisted, persisted),
+            "outcome_relation_persisted": persisted,
+        })
+    else:
+        out.update({"ml_would_flag": (None if failed else
+                                      (prediction.ml_anomaly_band in ML_FLAG_BANDS)),
+                    "rules_would_alert": None, "outcome_relation": None,
+                    "outcome_relation_persisted": None})
+    return out
+
+
+async def load_observation(db, assessment_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The observation linked to an assessment through its prediction row
+    (assessment.ml_prediction_id, or the prediction that names the
+    assessment). None when nothing is linked (rules mode, gated modes)."""
+    if not assessment_id:
+        return None
+    import uuid as uuid_mod
+    from sqlalchemy import select
+    from db_models import MLPrediction, MLShadowComparison, ThreatAssessmentRecord
+    try:
+        aid = uuid_mod.UUID(str(assessment_id))
+    except (ValueError, TypeError):
+        return None
+    record = (await db.execute(
+        select(ThreatAssessmentRecord).where(ThreatAssessmentRecord.id == aid))).scalar_one_or_none()
+    prediction = None
+    if record is not None and record.ml_prediction_id:
+        prediction = (await db.execute(
+            select(MLPrediction).where(MLPrediction.id == record.ml_prediction_id))).scalar_one_or_none()
+    if prediction is None:
+        prediction = (await db.execute(
+            select(MLPrediction).where(MLPrediction.assessment_id == aid)
+            .order_by(MLPrediction.created_at.desc()).limit(1))).scalars().first()
+    if prediction is None:
+        return None
+    comparison = (await db.execute(
+        select(MLShadowComparison).where(MLShadowComparison.prediction_id == prediction.id)
+        .order_by(MLShadowComparison.created_at.desc()).limit(1))).scalars().first()
+    role = "anomaly_signal" if (record is not None and getattr(record, "anomaly_signal_source", None) == "ml") \
+        else "observational"
+    return serialize_observation(prediction, comparison, role=role)

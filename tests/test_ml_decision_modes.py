@@ -21,6 +21,8 @@ from datetime import datetime
 
 import pytest
 
+from backend.ml.constants import FEATURE_SET_VERSION
+
 from conftest import run_on_shared_loop as run_async
 
 BASE = "http://localhost:8000"
@@ -230,7 +232,7 @@ def _train_and_shadow():
                     "dataset_version": model["dataset_id"],
                     "evaluation_report_ref": f"ml_models:{model['model_id']}:evaluation_report",
                     "artifact_checksum": model["artifact_hash"],
-                    "feature_set_version": "secintel-features-v1",
+                    "feature_set_version": FEATURE_SET_VERSION,
                     "intended_scope": "all_pipelines",
                     "rollback_target": "stop shadow; rules remain the decision system",
                 })
@@ -353,8 +355,12 @@ def test_mode_availability_reports_exact_gate_reasons():
     assert modes["hybrid"]["available"] is False
     assert modes["ml"]["available"] is False
     assert any("release gate" in r for r in modes["hybrid"]["reasons"])
-    assert any("reviewed labels insufficient" in r for r in modes["ml"]["reasons"]), (
+    # HYBRID still states the exact label shortfall; ML is now gated by the
+    # validated signal-mapping policy (decision router), not by labels.
+    assert any("reviewed labels insufficient" in r for r in modes["hybrid"]["reasons"]), (
         "the exact label shortfall must be stated")
+    assert any("signal mapping" in r for r in modes["ml"]["reasons"]), (
+        "ML must name the missing validated mapping policy")
 
 
 def test_gated_modes_resolve_to_rules_with_recorded_reasons():
@@ -382,8 +388,14 @@ def test_gated_modes_resolve_to_rules_with_recorded_reasons():
     outcomes = run_async(_run())
     for mode, outcome in outcomes.items():
         assert outcome.actual_mode_used == "rules", mode
-        assert outcome.fallback_reason == "MODE_GATED"
-        assert outcome.gate_reasons, f"{mode} must record its unmet gates"
+        if mode == "hybrid":
+            assert outcome.fallback_reason == "MODE_GATED"
+            assert outcome.gate_reasons, f"{mode} must record its unmet gates"
+        else:
+            # ML is routed per request now: without a validated mapping policy
+            # it falls back with the exact reason, never a generic gate
+            assert outcome.fallback_reason == "SIGNAL_MAPPING_UNVALIDATED"
+            assert outcome.provenance.fallback is True
         assert outcome.assessment.overall_risk_score is not None
 
 

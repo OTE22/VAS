@@ -26,12 +26,15 @@ GET_ROUTES = [
     "/api/ml/labels/stats",
     "/api/ml/labels",
     "/api/ml/datasets",
+    "/api/ml/datasets/definitions",
     "/api/ml/models",
     "/api/ml/predictions",
     "/api/ml/shadow/summary",
+    "/api/ml/shadow/evidence",
     "/api/ml/drift/reports",
     "/api/ml/retraining-policy/behavior_anomaly_model",
     "/api/ml/audit",
+    "/api/ml/calls",
 ]
 
 MUTATIONS = [
@@ -41,6 +44,8 @@ MUTATIONS = [
     ("POST", "/api/ml/labels", {"subject_id": "0" * 36, "label": "negative",
                                 "event_time": "2026-01-01T00:00:00Z"}),
     ("POST", "/api/ml/datasets", {"name": "x", "kind": "unsupervised"}),
+    ("POST", "/api/ml/datasets/backfill-hashes", {}),
+    ("POST", "/api/ml/datasets/00000000-0000-0000-0000-000000000000/archive", {"reason": "pytest"}),
     ("POST", "/api/ml/training-jobs", {"model_type": "behavior_anomaly_model"}),
     ("POST", "/api/ml/shadow/stop", {"reason": "pytest"}),
     ("POST", "/api/ml/drift/run", {}),
@@ -297,3 +302,70 @@ def test_lifecycle_actions_on_missing_models_fail_closed(token):
     status, _, _ = _http("POST", f"/api/ml/models/{ghost}/reject",
                          {"reason": "pytest ghost"}, token=token)
     assert status in (404, 409, 422)
+
+
+def test_every_call_is_logged_with_its_request_id(token):
+    """One structured record per /api/ml/* call: the request id equals the
+    X-Request-ID the client received, refusals carry their stable code, the
+    record is in the dedicated file AND the app log, and nothing in the
+    payload is a filesystem path."""
+    import json as _json
+    import os
+    req = urllib.request.Request(BASE + "/api/ml/overview", headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        rid = r.headers.get("X-Request-ID")
+    assert rid
+    status, body, _ = _http("GET", "/api/ml/datasets/not-a-uuid", None, token)
+    assert status == 422
+    status, calls, _ = _http("GET", "/api/ml/calls?limit=20", None, token)
+    assert status == 200 and calls["items"]
+    by_rid = {c["request_id"]: c for c in calls["items"]}
+    assert rid in by_rid, "the overview call is logged under the id the client received"
+    rec = by_rid[rid]
+    assert rec["method"] == "GET" and rec["route"] == "/api/ml/overview" and rec["status"] == 200
+    assert rec["actor"] == "admin" and isinstance(rec["ms"], int) and rec["ms"] >= 0
+    refusal = next(c for c in calls["items"] if c["route"] == "/api/ml/datasets/{dataset_id}")
+    assert refusal["status"] == 422 and refusal["error_code"] == "INVALID_DATASET_ID"
+    blob = _json.dumps(calls)
+    for banned in ("/app/", "models/ml", "storage_path", "artifact_path", "C:\\"):
+        assert banned not in blob, banned
+    status, errors, _ = _http("GET", "/api/ml/calls?errors_only=true&limit=50", None, token)
+    assert status == 200 and all(int(c["status"]) >= 400 for c in errors["items"])
+    # The SERVER process writes the tagged record into the application log
+    # (utils/logging.py owns the handlers; this test process has its own QA
+    # log dir, so the server file is named explicitly — the directory conftest
+    # promises to leave untouched).
+    path = "/var/log/face-recognition/app.log"
+    assert os.path.exists(path), path
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END); size = f.tell(); f.seek(max(0, size - 2_000_000))
+        tail = f.read().decode("utf-8", errors="replace")
+    assert f"[MLOPS_CALL]" in tail and rid in tail, "the app log carries the tagged record"
+
+
+def test_overview_system_state_is_factual_and_path_free(token):
+    status, body, _ = _http("GET", "/api/ml/overview", None, token)
+    assert status == 200, body
+    system = body["system"]
+    from backend.ml.constants import FEATURE_SET_VERSION, PREVIOUS_FEATURE_SET_VERSION
+    assert system["feature_set"]["current"] == FEATURE_SET_VERSION
+    assert system["feature_set"]["previous"] == PREVIOUS_FEATURE_SET_VERSION
+    names = {f["name"] for f in system["feature_set"]["active_person_features"]}
+    assert {"is_unknown_identity", "days_since_last_seen"} <= names
+    assert system["decision"]["live_engine"] == "rules"
+    assert system["decision"]["requested_mode"] in ("rules", "shadow", "hybrid", "ml")
+    assert "hybrid" in system["decision"]["gated"]
+    assert system["datasets"]["extraction_policy_version"] == "explicit-cap-v1"
+    assert system["call_log"]["enabled"] is True and "MLOPS_CALL" in system["call_log"]["sink"]
+    assert system["migration_head"]
+    assert isinstance(system["alerts"], list) and isinstance(system["release_notes"], list)
+    assert all({"code", "level", "message"} <= set(a) for a in system["alerts"])
+    assert len(system["release_notes"]) >= 6 and all({"id", "title", "detail"} <= set(n) for n in system["release_notes"])
+    if system["shadow_model"]:
+        sm = system["shadow_model"]
+        expect_alert = sm["feature_set_version"] != FEATURE_SET_VERSION
+        assert sm["compatible_with_current_features"] is (not expect_alert)
+        assert any(a["code"] == "SHADOW_MODEL_FEATURE_SET_MISMATCH" for a in system["alerts"]) is expect_alert
+    blob = json.dumps(system)
+    for banned in ("/app/", "models/ml", "/var/log", "storage_path", "artifact_path"):
+        assert banned not in blob, banned

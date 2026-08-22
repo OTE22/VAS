@@ -107,6 +107,23 @@ def _smoke_test(payload: Dict[str, Any]) -> None:
         raise RegistryError("SMOKE_TEST_FAILED", "artifact produced a non-finite score")
 
 
+def preprocess_feature_vector(payload: Dict[str, Any], features: Dict[str, Any]):
+    """The ONE train/serve preprocessing rule: present -> float(value);
+    missing -> the artifact's training median for that feature. Returns
+    (vector, missing_feature_names). Raises KeyError when the artifact has
+    no median for a scored feature (validate_artifact refuses such artifacts
+    before they are ever cached)."""
+    medians = payload["imputation_medians"]
+    vector, missing = [], []
+    for name in payload["feature_names"]:
+        if name in features and features[name] is not None:
+            vector.append(float(features[name]))
+        else:
+            missing.append(name)
+            vector.append(float(medians[name]))
+    return vector, missing
+
+
 def score_with_payload(payload: Dict[str, Any], matrix) -> List[float]:
     """Raw behavioral anomaly scores in [0,1] (higher = more unusual).
     The ONLY scoring path — training evaluation, smoke tests and inference
@@ -182,6 +199,15 @@ def validate_artifact(path: str, *, expected_hash: str,
     if list(payload["feature_names"]) != list(expected_feature_names):
         raise RegistryError("FEATURE_SCHEMA_MISMATCH",
                             "artifact feature schema differs from the registry")
+    # Preprocessing contract: training imputed every missing feature with
+    # that feature's train median, and inference must do EXACTLY the same —
+    # so the artifact must carry a median for every feature it scores.
+    # An artifact that does not is refused; nothing invents a 0.0.
+    medians = payload.get("imputation_medians") or {}
+    without_median = [n for n in payload["feature_names"] if n not in medians]
+    if without_median:
+        raise RegistryError("ARTIFACT_IMPUTATION_INCOMPLETE",
+                            f"no training median for feature(s) {without_median[:5]}")
     for dep, expected in (expected_dependencies or {}).items():
         current = current_dependency_versions().get(dep)
         if current is None:
@@ -222,6 +248,14 @@ def serialize_model_row(row) -> Dict[str, Any]:
         "rolled_back_at": iso(row.rolled_back_at),
         "failure_code": row.failure_code, "notes": row.notes,
         "created_at": iso(row.created_at),
+        # training lineage (revision a9c4e2d7f1b3; None on older rows)
+        "training_config": getattr(row, "training_config", None),
+        "code_version": getattr(row, "code_version", None),
+        # Registry/file agreement: a row whose artifact file is gone (e.g. a
+        # container recreated without a persistent ML volume) is reported,
+        # never silently served — validate_artifact refuses it as ARTIFACT_MISSING.
+        "artifact_present": (os.path.exists(row.artifact_path)
+                             if getattr(row, "artifact_path", None) else None),
     }
 
 
@@ -244,11 +278,23 @@ class RegistryService:
             select(MLModel).where(MLModel.id == row_uuid))).scalar_one_or_none()
 
     async def get_stage_model(self, db: AsyncSession, model_type: str, stage: str):
+        """The model currently in `stage`, or None.
+
+        Only the SHADOW stage is unique by schema (uq_ml_models_one_shadow).
+        Every training run leaves another `validated` candidate behind, and
+        `archived` grows forever, so those stages legitimately hold many rows.
+        This used scalar_one_or_none(), which raises on a second row — so the
+        ML overview (which asks for the validated candidate) returned 500 the
+        moment an administrator trained twice without approving in between.
+        For the non-unique stages the answer is the NEWEST model.
+        """
         from db_models import MLModel
         return (await db.execute(
-            select(MLModel).where(MLModel.model_type == model_type,
-                                  MLModel.stage == stage)
-        )).scalar_one_or_none()
+            select(MLModel)
+            .where(MLModel.model_type == model_type, MLModel.stage == stage)
+            .order_by(MLModel.version.desc(), MLModel.created_at.desc())
+            .limit(1)
+        )).scalars().first()
 
     async def _bump_version_key(self, model_type: str) -> None:
         try:

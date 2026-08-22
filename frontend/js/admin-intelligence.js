@@ -988,6 +988,7 @@
             // Envelope {items,thresholds} (current) or bare array (legacy)
             const items = Array.isArray(data) ? data : ((data && Array.isArray(data.items)) ? data.items : []);
             renderRelatedIdentities(items);
+            prependEngineBadge(document.getElementById('related-identities-container'), data && data.engine);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(elements.relatedContainer, 'Failed to load related identities', err.referenceId);
@@ -1077,6 +1078,7 @@
             });
             if (!req.isCurrent() || state.selectedIdentityId !== identityId) return;
             renderTemporalPatterns(patterns || {});
+            prependEngineBadge(document.getElementById('temporal-container'), patterns && patterns.engine);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(elements.temporalContainer, 'Failed to load temporal patterns', err.referenceId);
@@ -1664,7 +1666,74 @@
         if (state.mapDebounceTimer) { window.clearTimeout(state.mapDebounceTimer); state.mapDebounceTimer = null; }
     }
 
+    // ============================================
+    // Engine provenance — pill = the system NOW; badges = what produced THIS
+    // result, from the payload only (a duplicated ~40-line helper: the page
+    // scripts are independent IIFEs by design).
+    // ============================================
+
+    function renderEngineModePill(engine) {
+        const pill = document.getElementById('engine-mode-pill');
+        if (!pill) return;
+        if (!engine) { pill.hidden = true; pill.replaceChildren(); return; }
+        const requested = String(engine.requested_mode || '').toUpperCase();
+        const effective = String(engine.effective_mode || '').toUpperCase();
+        const parts = [el('strong', { text: requested || 'UNKNOWN' })];
+        if (effective && effective !== requested) {
+            parts.push(el('span', { className: 'engine-pill__gate', text: '→ not eligible, serving ' + effective }));
+        }
+        parts.push(el('span', { text: '· Anomaly signal now: ' + (engine.anomaly_signal_source_now === 'ml' ? 'ML' : 'Statistical rules') }));
+        parts.push(el('span', { text: '· Final scoring: ' + safeText(engine.final_scoring_engine) }));
+        const model = engine.ml_model && typeof engine.ml_model === 'object' ? engine.ml_model : null;
+        if (model) {
+            const role = engine.ml_role_now === 'anomaly_signal' ? 'ML model'
+                : engine.ml_role_now === 'observational' ? 'ML observer' : 'Shadow model (idle)';
+            parts.push(el('span', { text: '· ' + role + ': ' + safeText(model.model_type) + ' v' + safeText(model.version) }));
+        }
+        const gates = Array.isArray(engine.gates) ? engine.gates : [];
+        const ownGate = gates.find(function (g) { return g && String(g.mode) === String(engine.requested_mode); });
+        if (ownGate) {
+            parts.push(el('span', { className: 'engine-pill__gate', text: '· ' + safeText(ownGate.code) }));
+            pill.title = safeText(ownGate.message);
+        }
+        pill.replaceChildren.apply(pill, parts);
+        pill.hidden = false;
+    }
+
+    function buildEngineBadge(engine) {
+        if (!engine || typeof engine !== 'object') {
+            return el('div', { className: 'engine-badge engine-badge--missing',
+                               text: 'Provenance not reported by the backend for this result' });
+        }
+        const kind = String(engine.kind || 'unknown');
+        return el('div', { className: 'engine-badge' }, [
+            el('strong', { text: kind === 'rules' ? 'Rules engine' : kind.toUpperCase() }),
+            el('span', { text: safeText(engine.name) }),
+            el('span', { text: '· ' + safeText(engine.algorithm_version) }),
+            el('span', { text: engine.ml_participates === false
+                ? '· ML does not take part in this feature (any mode)'
+                : engine.ml_participates === true ? '· ML participates' : '' })
+        ]);
+    }
+
+    function prependEngineBadge(container, engine) {
+        if (!container) return;
+        const existing = container.querySelector(':scope > .engine-badge');
+        if (existing) existing.remove();
+        container.insertBefore(buildEngineBadge(engine), container.firstChild);
+    }
+
+    async function loadDecisionEngine() {
+        try {
+            const data = await api('/api/security/capabilities');
+            renderEngineModePill(data && typeof data.decision_engine === 'object' ? data.decision_engine : null);
+        } catch (err) {
+            renderEngineModePill(null);   // hidden; the page works without it
+        }
+    }
+
     document.addEventListener('DOMContentLoaded', async function () {
+        loadDecisionEngine();
         cacheElements();
         setupEventListeners();
         await loadPipelines();

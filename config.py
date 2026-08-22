@@ -1207,6 +1207,19 @@ class Settings(BaseSettings):
         default="models/ml",
         description="Approved internal directory for ML artifacts; loads outside this prefix are refused. Default: models/ml"
     )
+    # Scientific-readiness minimums — deliberately UNSET (0) by default: the
+    # repository holds no validated policy for them. The readiness report and
+    # the shadow evidence report expose the statistics; a verdict other than
+    # INSUFFICIENT_EVIDENCE / NOT_CONFIGURED needs an administrator to set
+    # these from reviewed policy. 0 = not configured.
+    ML_SCIENTIFIC_MIN_HISTORY_DAYS: int = Field(
+        default=0, description="Scientific gate: minimum history span in days (0 = not configured)")
+    ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES: int = Field(
+        default=0, description="Scientific gate: minimum median appearances per entity (0 = not configured)")
+    ML_EVIDENCE_MIN_REVIEWED_TOTAL: int = Field(
+        default=0, description="Evidence adequacy: minimum reviewed manual outcomes overall (0 = not configured)")
+    ML_EVIDENCE_MIN_REVIEWED_PER_BAND: int = Field(
+        default=0, description="Evidence adequacy: minimum reviewed manual outcomes per anomaly band (0 = not configured)")
     ML_MAX_ARTIFACT_MB: int = Field(
         default=200,
         description="Maximum artifact size accepted at registration/load. Default: 200"

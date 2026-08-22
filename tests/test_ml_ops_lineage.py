@@ -101,7 +101,7 @@ def test_overview(token):
 def test_feature_definitions_match_the_table(token):
     status, body = _get(token, "/api/ml/features/definitions")
     assert status == 200 and body["total"] == len(body["items"])
-    assert body["total"] == _sql("SELECT count(*) FROM ml_feature_definitions", fetch="scalar") == 24
+    assert body["total"] == _sql("SELECT count(*) FROM ml_feature_definitions", fetch="scalar") == 26
     for item in body["items"]:
         for key in ("name", "version", "entity_type", "source", "computation", "leakage_class", "is_active"):
             assert key in item, (key, item)

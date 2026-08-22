@@ -19,6 +19,8 @@ from datetime import datetime
 
 import pytest
 
+from backend.ml.constants import FEATURE_SET_VERSION
+
 from conftest import run_on_shared_loop as run_async
 
 JOB_PREFIX = "pytest-mlt-"
@@ -277,7 +279,7 @@ def _approval_for(model, **overrides):
         "dataset_version": model["dataset_id"],
         "evaluation_report_ref": f"ml_models:{model['model_id']}:evaluation_report",
         "artifact_checksum": model["artifact_hash"],
-        "feature_set_version": "secintel-features-v1",
+        "feature_set_version": FEATURE_SET_VERSION,
         "intended_scope": "all_pipelines",
         "rollback_target": "stop shadow + return to rules-only observation",
     }
@@ -469,3 +471,67 @@ def test_model_serialization_is_path_free(trained_model):
     assert "artifact_path" not in dumped
     assert "models/ml" not in dumped and "/app/" not in dumped
     assert payload["artifact_hash"], "hash stays visible; path never"
+
+
+# ---------------------------------------------------------------------------
+# Several validated candidates
+# ---------------------------------------------------------------------------
+
+def test_second_validated_candidate_does_not_break_stage_lookup():
+    """Only the SHADOW stage is unique by schema (uq_ml_models_one_shadow).
+    Every training run leaves one more VALIDATED candidate behind, so the
+    stage lookup must tolerate several rows and answer with the newest one.
+    It used scalar_one_or_none(), so the second training without an approval
+    in between made GET /api/ml/overview answer 500 ("Multiple rows were
+    found") — the ML-Ops page went dark exactly when an admin was comparing
+    candidates."""
+    # two fresh candidates of our own: earlier tests in this module walk the
+    # shared `trained_model` through shadow and rollback, so it is archived
+    first = _train(JOB_PREFIX + uuid_mod.uuid4().hex[:8])
+    assert first["status"] == "completed", first
+    second = _train(JOB_PREFIX + uuid_mod.uuid4().hex[:8])
+    assert second["status"] == "completed", second
+    second_id = second["result"]["model_id"]
+    assert second_id != first["result"]["model_id"]
+
+    async def _run():
+        from db_connection import db_manager
+        from sqlalchemy import text as sa_text
+        from backend.ml.registry_service import registry_service
+        await _ensure_db()
+        async with db_manager.get_session() as db:
+            validated_rows = (await db.execute(sa_text(
+                "SELECT count(*) FROM ml_models WHERE model_type = 'behavior_anomaly_model' "
+                "AND stage = 'validated'"))).scalar()
+            newest = await registry_service.get_stage_model(
+                db, "behavior_anomaly_model", "validated")
+            shadow_rows = (await db.execute(sa_text(
+                "SELECT count(*) FROM ml_models WHERE model_type = 'behavior_anomaly_model' "
+                "AND stage = 'shadow'"))).scalar()
+            return validated_rows, newest, shadow_rows
+    validated_rows, newest, shadow_rows = run_async(_run())
+    assert validated_rows >= 2, "the precondition is two validated candidates"
+    assert newest is not None and str(newest.id) == second_id, (
+        "with several validated candidates the lookup answers with the newest")
+    assert shadow_rows <= 1, "the one-shadow invariant is untouched"
+
+    # the page that died: the overview through the real route, both stage
+    # slots answered (validated = newest candidate, shadow = at most one)
+    import urllib.request
+    import urllib.error
+    base = os.environ.get("REGRESSION_BASE_URL", "http://localhost:8000")
+    req = urllib.request.Request(
+        base + "/api/auth/login", method="POST",
+        data=json.dumps({"username": "admin", "password": "admin123"}).encode(),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        bearer = json.loads(r.read())["access_token"]
+    req = urllib.request.Request(base + "/api/ml/overview",
+                                 headers={"Authorization": f"Bearer {bearer}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            status, body = r.status, json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        status, body = exc.code, exc.read()[:300]
+    assert status == 200, f"overview must survive two validated candidates: {status} {body}"
+    assert body["models"]["validated_candidate"]["id"] == second_id

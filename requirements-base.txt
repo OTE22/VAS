@@ -128,8 +128,15 @@ hdbscan
 # It used to arrive only as a transitive dependency of pandas — which nothing
 # imports — so removing pandas silently broke ML training with
 # "No module named 'pyarrow'". Declared where it is actually used.
+#
+# Pinned to the major actually verified in the image (2026-08-22): both the
+# development and the regression images run pyarrow 25.0.1 on Python 3.11.16
+# / numpy 1.26.4 / scikit-learn 1.9.0, and every registered Parquet dataset
+# reads back with its full column set under it. An unpinned pyarrow beside a
+# hard-pinned numpy==1.26.4 could silently change Parquet read-back in a
+# future major; a new major is adopted by re-running that read-back proof.
 # ---------------------------------------------------------------------------
-pyarrow
+pyarrow>=25.0.1,<26
 
 # ---------------------------------------------------------------------------
 # Maps. Offline by design — see Docs/56_OFFLINE_MAP_TILES_SETUP.md.

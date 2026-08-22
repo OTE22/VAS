@@ -86,6 +86,8 @@ RUN mkdir -p \
     /app/storage/debug/cropped \
     /var/log/face-recognition \
     /app/logs \
+    /app/models/ml/candidates \
+    /app/models/ml/datasets \
     && chmod 1777 /tmp
 
 # =====================================================

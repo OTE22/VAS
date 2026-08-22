@@ -22,7 +22,20 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-FEATURE_SET_VERSION = "secintel-features-v1"
+# secintel-features-v2 (2026-08-22): two point-in-time defects of v1 fixed
+# under a NEW version — v1 snapshots, datasets, models and comparisons keep
+# their v1 label and stay valid for v1; nothing is rewritten.
+#   is_unknown_identity   v1 read the identity's CURRENT type; v2 reconstructs
+#                         the type AS OF the snapshot from the promote/merge
+#                         audit trail (identity_audit_log).
+#   days_since_last_seen  v1 took the last row of a LIMIT-5000 ascending read
+#                         of the 90-day window (stale for busy identities); v2
+#                         uses an exact MAX(start_time) < as_of aggregate.
+#   every windowed count  v1 silently undercounted when the 90-day window hit
+#                         the 5000-row cap; v2 reports those features as
+#                         unavailable (appearance_window_truncated) instead.
+FEATURE_SET_VERSION = "secintel-features-v2"
+PREVIOUS_FEATURE_SET_VERSION = "secintel-features-v1"
 LABEL_DEFINITION_VERSION = "threat-label-v1"
 
 # Model types: only behavior_anomaly_model is implemented this release; the
@@ -77,6 +90,9 @@ class FallbackReason(str, Enum):
     PREDICTION_TIMEOUT = "PREDICTION_TIMEOUT"
     THRESHOLD_UNRESOLVED = "THRESHOLD_UNRESOLVED"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"       # model row vanished between inference and persistence
+    # decision router (operational ML mode)
+    SIGNAL_MAPPING_UNVALIDATED = "SIGNAL_MAPPING_UNVALIDATED"   # no validated ML->risk mapping policy
+    INVALID_PREDICTION = "INVALID_PREDICTION"                   # band/score outside the contract
 
 
 # Redis coordination keys

@@ -43,6 +43,38 @@ class FeatureUnavailable(Exception):
 # Context loading (ONE bounded query set per entity per as_of)
 # ---------------------------------------------------------------------------
 
+PERSON_WINDOW_ROW_CAP = 5000
+
+
+async def _became_known_at(db: AsyncSession, identity_uuid, identity):
+    """When this identity stopped being UNKNOWN, from the audit trail:
+    the earliest `promote` row, or the earliest `merge` row whose recorded
+    before/after states show the target going unknown -> known. None when
+    the identity is still unknown, or has been known since creation (no
+    transition on record). Audit rows survive identity deletion (SET NULL),
+    so the trail is as complete as identity_audit_log retention allows."""
+    if identity is None:
+        return None
+    current = str(getattr(identity.type, "value", identity.type)).lower()
+    if current != "known":
+        return None
+    from db_models import IdentityAuditLog
+    rows = (await db.execute(
+        select(IdentityAuditLog.action_type, IdentityAuditLog.created_at,
+               IdentityAuditLog.before_state, IdentityAuditLog.after_state)
+        .where(IdentityAuditLog.identity_id == identity_uuid,
+               IdentityAuditLog.action_type.in_(("promote", "merge")))
+        .order_by(IdentityAuditLog.created_at))).all()
+    for action, created_at, before, after in rows:
+        if action == "promote":
+            return created_at
+        before_type = str(((before or {}).get("to_identity") or {}).get("type", "")).lower()
+        after_type = str(((after or {}).get("merged_identity") or {}).get("type", "")).lower()
+        if before_type == "unknown" and after_type == "known":
+            return created_at
+    return None
+
+
 async def load_person_context(db: AsyncSession, identity_id, as_of: datetime) -> Dict[str, Any]:
     """Everything person-level builders need, cutoff-enforced ONCE here."""
     from db_models import Identity, IdentityAppearance, Pipeline
@@ -51,7 +83,12 @@ async def load_person_context(db: AsyncSession, identity_id, as_of: datetime) ->
     identity_uuid = identity_id if not isinstance(identity_id, str) else uuid_mod.UUID(identity_id)
     floor = as_of - timedelta(days=PERSON_LOOKBACK_DAYS)
 
-    rows = list((await db.execute(
+    # The 90-day window, NEWEST first so that when the cap bites it is the
+    # oldest rows that fall off (v1 read ascending and silently lost the
+    # newest). One row beyond the cap is requested purely to DETECT
+    # truncation; the flag makes windowed builders refuse rather than
+    # undercount.
+    fetched = list((await db.execute(
         select(IdentityAppearance.pipeline_id, IdentityAppearance.start_time,
                IdentityAppearance.end_time)
         .where(and_(
@@ -59,19 +96,24 @@ async def load_person_context(db: AsyncSession, identity_id, as_of: datetime) ->
             IdentityAppearance.start_time < as_of,
             IdentityAppearance.start_time >= floor,
         ))
-        .order_by(IdentityAppearance.start_time)
-        .limit(5000)
+        .order_by(IdentityAppearance.start_time.desc())
+        .limit(PERSON_WINDOW_ROW_CAP + 1)
     )).all())
+    window_truncated = len(fetched) > PERSON_WINDOW_ROW_CAP
+    rows = sorted(fetched[:PERSON_WINDOW_ROW_CAP], key=lambda r: r[1])
 
-    # first-seen needs ALL history, not the 90d window — one aggregate.
-    first_seen = (await db.execute(
-        select(sa_func.min(IdentityAppearance.start_time))
+    # first/last-seen need EXACT aggregates over ALL history, never the
+    # capped window.
+    first_seen, last_seen = (await db.execute(
+        select(sa_func.min(IdentityAppearance.start_time),
+               sa_func.max(IdentityAppearance.start_time))
         .where(and_(IdentityAppearance.identity_id == identity_uuid,
                     IdentityAppearance.start_time < as_of))
-    )).scalar()
+    )).one()
 
     identity = (await db.execute(
         select(Identity).where(Identity.id == identity_uuid))).scalar_one_or_none()
+    became_known_at = await _became_known_at(db, identity_uuid, identity)
 
     tz_rows = await db.execute(select(Pipeline.pipeline_id, Pipeline.timezone))
     pipe_timezones = {r[0]: r[1] for r in tz_rows}
@@ -82,7 +124,10 @@ async def load_person_context(db: AsyncSession, identity_id, as_of: datetime) ->
         "identity": identity,
         "as_of": as_of,
         "rows": rows,                      # (pipeline_id, start_time, end_time), all < as_of
+        "window_truncated": window_truncated,
         "first_seen": first_seen,
+        "last_seen": last_seen,            # exact MAX(start_time) < as_of
+        "became_known_at": became_known_at,  # None = known since creation / still unknown
         "pipe_timezones": pipe_timezones,
         "weekend_days": parse_weekend_days(),
         "holidays": parse_holidays(),
@@ -105,10 +150,12 @@ def _local(ctx: Dict[str, Any], pipeline_id: str, ts: datetime):
 # ---------------------------------------------------------------------------
 
 def _b_appearance_count(ctx, params):
+    _require_full_window(ctx)
     return float(len(_window_rows(ctx, int(params.get("days", 30)))))
 
 
 def _b_distinct_pipelines(ctx, params):
+    _require_full_window(ctx)
     return float(len({r[0] for r in _window_rows(ctx, int(params.get("days", 30)))}))
 
 
@@ -119,12 +166,29 @@ def _b_days_since_first_seen(ctx, params):
 
 
 def _b_days_since_last_seen(ctx, params):
+    # v1 semantics (kept for the inactive v1 definition row): last row of the
+    # capped ascending window — stale for identities beyond the cap.
     if not ctx["rows"]:
         raise FeatureUnavailable("no_history_before_as_of")
     return max(0.0, (ctx["as_of"] - ctx["rows"][-1][1]).total_seconds() / 86400.0)
 
 
+def _b_days_since_last_seen_exact(ctx, params):
+    """v2: exact MAX(start_time) < as_of over all history."""
+    if ctx.get("last_seen") is None:
+        raise FeatureUnavailable("no_history_before_as_of")
+    return max(0.0, (ctx["as_of"] - ctx["last_seen"]).total_seconds() / 86400.0)
+
+
+def _require_full_window(ctx):
+    """Windowed counts/ratios are only honest when the 90-day window was
+    read in full; beyond the row cap they are unavailable, not undercounted."""
+    if ctx.get("window_truncated"):
+        raise FeatureUnavailable("appearance_window_truncated")
+
+
 def _b_active_days_ratio(ctx, params):
+    _require_full_window(ctx)
     days = int(params.get("days", 30))
     rows = _window_rows(ctx, days)
     if not rows:
@@ -138,6 +202,7 @@ def _off_hours_window():
 
 
 def _b_off_hours_ratio(ctx, params):
+    _require_full_window(ctx)
     rows = _window_rows(ctx, int(params.get("days", 30)))
     if not rows:
         raise FeatureUnavailable("no_rows_in_window")
@@ -153,11 +218,13 @@ def _b_off_hours_ratio(ctx, params):
 
 
 def _b_night_count(ctx, params):
+    _require_full_window(ctx)
     rows = _window_rows(ctx, int(params.get("days", 30)))
     return float(sum(1 for r in rows if 0 <= _local(ctx, r[0], r[1]).hour < 5))
 
 
 def _b_weekend_holiday_ratio(ctx, params):
+    _require_full_window(ctx)
     from backend.core.time_context import day_bucket
     rows = _window_rows(ctx, int(params.get("days", 30)))
     if not rows:
@@ -177,6 +244,7 @@ def _local_hours(ctx, days):
 
 
 def _b_hour_sin(ctx, params):
+    _require_full_window(ctx)
     from backend.core.security_intelligence_service import circular_hour_stats
     hours = _local_hours(ctx, int(params.get("days", 30)))
     if len(hours) < 3:
@@ -186,6 +254,7 @@ def _b_hour_sin(ctx, params):
 
 
 def _b_hour_cos(ctx, params):
+    _require_full_window(ctx)
     from backend.core.security_intelligence_service import circular_hour_stats
     hours = _local_hours(ctx, int(params.get("days", 30)))
     if len(hours) < 3:
@@ -195,6 +264,7 @@ def _b_hour_cos(ctx, params):
 
 
 def _b_hour_std(ctx, params):
+    _require_full_window(ctx)
     from backend.core.security_intelligence_service import circular_hour_stats
     hours = _local_hours(ctx, int(params.get("days", 30)))
     if len(hours) < 3:
@@ -208,6 +278,7 @@ def _b_hour_std(ctx, params):
 def _b_baseline_hour_deviation_last(ctx, params):
     """Deviation ratio of the LATEST pre-as_of appearance against the
     bucketed baseline built from everything before it."""
+    _require_full_window(ctx)
     from backend.core.time_context import BucketedHourBaseline, day_bucket
 
     rows = ctx["rows"]
@@ -233,6 +304,7 @@ def _b_baseline_hour_deviation_last(ctx, params):
 
 
 def _b_max_hourly_burst(ctx, params):
+    _require_full_window(ctx)
     rows = _window_rows(ctx, int(params.get("days", 30)))
     if not rows:
         raise FeatureUnavailable("no_rows_in_window")
@@ -241,6 +313,7 @@ def _b_max_hourly_burst(ctx, params):
 
 
 def _b_new_pipeline_flag(ctx, params):
+    _require_full_window(ctx)
     recent_days = int(params.get("recent_days", 7))
     rows = ctx["rows"]
     recent_floor = ctx["as_of"] - timedelta(days=recent_days)
@@ -257,12 +330,31 @@ def _b_is_unknown_identity(ctx, params):
     identity = ctx.get("identity")
     if identity is None:
         raise FeatureUnavailable("identity_row_missing")
-    # NOTE: identity type is mutable — this reflects compute time, a known
-    # limitation recorded in the feature description.
+    # v1 semantics (inactive definition row kept for the record): identity
+    # type at COMPUTE time — a point-in-time violation, superseded by
+    # is_unknown_identity_as_of under secintel-features-v2.
     return 1.0 if str(getattr(identity.type, "value", identity.type)).lower() == "unknown" else 0.0
 
 
+def _b_is_unknown_identity_as_of(ctx, params):
+    """v2: the identity's type AS OF the snapshot. Currently unknown -> 1.0.
+    Currently known -> 1.0 only if the audit trail shows it became known
+    AFTER as_of; known since creation (no transition on record) -> 0.0."""
+    identity = ctx.get("identity")
+    if identity is None:
+        raise FeatureUnavailable("identity_row_missing")
+    current = str(getattr(identity.type, "value", identity.type)).lower()
+    if current == "unknown":
+        return 1.0
+    became_known_at = ctx.get("became_known_at")
+    if became_known_at is not None and ctx["as_of"] < became_known_at:
+        return 1.0
+    return 0.0
+
+
 BUILDERS: Dict[str, Callable[[Dict[str, Any], Dict[str, Any]], float]] = {
+    "days_since_last_seen_exact": _b_days_since_last_seen_exact,
+    "is_unknown_identity_as_of": _b_is_unknown_identity_as_of,
     "appearance_count": _b_appearance_count,
     "distinct_pipelines": _b_distinct_pipelines,
     "days_since_first_seen": _b_days_since_first_seen,

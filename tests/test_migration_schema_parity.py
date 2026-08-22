@@ -212,7 +212,7 @@ def test_fresh_threshold_columns_seeds_and_principal(fresh):
     cols = {r[0] for r in fresh.sql("SELECT column_name FROM information_schema.columns "
                                     "WHERE table_name = 'ml_model_thresholds'")}
     assert cols == THRESHOLD_COLUMNS, cols ^ THRESHOLD_COLUMNS
-    assert fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True) == 24
+    assert fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True) == 26
     assert fresh.sql("SELECT count(*) FROM ml_retraining_policies", scalar=True) == 4
     assert fresh.sql("SELECT count(*) FROM users WHERE username = 'system'", scalar=True) == 1
     for col in ("image_path",):
@@ -232,7 +232,18 @@ def test_feature_seed_is_idempotent_and_matches_the_runtime_inventory(fresh):
         "d4e5", os.path.join(REPO, "alembic", "versions", "d4e5f6a7b8c9_ml_lineage.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    frozen = {(r["name"], r["version"]): r for r in mod.FROZEN_FEATURE_DEFINITIONS}
+    frozen = {(r["name"], r["version"]): dict(r) for r in mod.FROZEN_FEATURE_DEFINITIONS}
+    # secintel-features-v2 (b7d2f4a9c6e1) extends the frozen set: two v1 rows
+    # are deactivated and two v2 rows added. The union of BOTH migrations is
+    # the frozen literal the runtime inventory must match.
+    spec2 = importlib.util.spec_from_file_location(
+        "b7d2", os.path.join(REPO, "alembic", "versions", "b7d2f4a9c6e1_feature_set_v2.py"))
+    mod2 = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mod2)
+    for name in mod2.SUPERSEDED_V1:
+        frozen[(name, 1)]["is_active"] = False
+    for r in mod2.V2_DEFINITIONS:
+        frozen[(r["name"], r["version"])] = dict(r)
     before = fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True)
     for r in frozen.values():
         fresh.sql("INSERT INTO ml_feature_definitions (id, name, version, entity_type, value_type, source, computation, "
@@ -243,7 +254,7 @@ def test_feature_seed_is_idempotent_and_matches_the_runtime_inventory(fresh):
                                         "leakage_class", "is_active")}, "params": json.dumps(r["params"])})
     assert fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True) == before == len(frozen)
     from backend.ml.feature_store import FEATURE_INVENTORY
-    inv = {(i["name"], 1): i for i in FEATURE_INVENTORY}
+    inv = {(i["name"], int(i.get("version", 1))): i for i in FEATURE_INVENTORY}
     assert set(inv) == set(frozen), set(inv) ^ set(frozen)
     for key, item in inv.items():
         f = frozen[key]

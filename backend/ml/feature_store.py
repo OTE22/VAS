@@ -58,9 +58,17 @@ FEATURE_INVENTORY: List[Dict[str, Any]] = [
     {"name": "days_since_first_seen", "entity_type": "person", "window": None,
      "source": "identity_appearances", "computation": "days_since_first_seen",
      "params": {}, "description": "Age of the identity's history at as_of (days)"},
-    {"name": "days_since_last_seen", "entity_type": "person", "window": None,
+    # days_since_last_seen: v1 row kept INACTIVE for the record (its
+    # computation read the last row of a capped window and went stale for
+    # busy identities); v2 is the exact aggregate. Same name, new version.
+    {"name": "days_since_last_seen", "version": 1, "entity_type": "person", "window": None,
      "source": "identity_appearances", "computation": "days_since_last_seen",
-     "params": {}, "description": "Gap between the last pre-as_of appearance and as_of (days)"},
+     "params": {}, "is_active": False,
+     "description": "Gap between the last pre-as_of appearance and as_of (days) "
+                    "(SUPERSEDED by v2: stale beyond the 5000-row window cap)"},
+    {"name": "days_since_last_seen", "version": 2, "entity_type": "person", "window": None,
+     "source": "identity_appearances", "computation": "days_since_last_seen_exact",
+     "params": {}, "description": "Gap between MAX(start_time) < as_of and as_of (days), exact"},
     {"name": "active_days_ratio_30d", "entity_type": "person", "window": "30d",
      "source": "identity_appearances", "computation": "active_days_ratio",
      "params": {"days": 30}, "description": "Share of the last 30 days with >=1 appearance"},
@@ -95,10 +103,18 @@ FEATURE_INVENTORY: List[Dict[str, Any]] = [
      "source": "identity_appearances", "computation": "new_pipeline_flag",
      "params": {"recent_days": 7},
      "description": "1.0 when a camera appears in the last 7d that is absent from the prior 83d"},
-    {"name": "is_unknown_identity", "entity_type": "person", "window": None,
+    # is_unknown_identity: v1 row kept INACTIVE for the record (it read the
+    # identity's CURRENT type — a point-in-time violation); v2 reconstructs
+    # the type as of the snapshot from the promote/merge audit trail.
+    {"name": "is_unknown_identity", "version": 1, "entity_type": "person", "window": None,
      "source": "identities", "computation": "is_unknown_identity",
+     "params": {}, "is_active": False,
+     "description": "Identity type at compute time (SUPERSEDED by v2: point-in-time violation)"},
+    {"name": "is_unknown_identity", "version": 2, "entity_type": "person", "window": None,
+     "source": "identities+identity_audit_log", "computation": "is_unknown_identity_as_of",
      "params": {},
-     "description": "Identity type at compute time (LIMITATION: type is mutable)"},
+     "description": "1.0 when the identity was UNKNOWN as of the snapshot (promote/merge "
+                    "audit trail); known-since-creation identities are 0.0"},
     # --- ACTIVE pair feature (readiness-gated at compute time) -------------
     {"name": "pair_co_appearance_count_30d", "entity_type": "pair", "window": "30d",
      "source": "identity_appearances", "computation": "pair_co_appearance_count",
@@ -171,7 +187,7 @@ class FeatureStore:
         by_key = {(r.name, int(r.version)): r for r in rows}
         missing, drift = [], []
         for item in FEATURE_INVENTORY:
-            row = by_key.get((item["name"], 1))
+            row = by_key.get((item["name"], int(item.get("version", 1))))
             if row is None:
                 missing.append(item["name"])
                 continue
@@ -190,6 +206,15 @@ class FeatureStore:
             }
             if expected != actual:
                 drift.append({"name": item["name"], "expected": expected, "actual": actual})
+        # A feature NAME must be active under exactly one version — the set is
+        # otherwise ambiguous (two columns with one name).
+        active_versions: Dict[str, List[int]] = {}
+        for r in rows:
+            if r.is_active:
+                active_versions.setdefault(r.name, []).append(int(r.version))
+        ambiguous = {n: v for n, v in active_versions.items() if len(v) > 1}
+        if ambiguous:
+            raise RuntimeError(f"ML feature definitions ambiguous — several active versions: {ambiguous}")
         if missing or drift:
             raise RuntimeError(
                 "ML feature definitions do not match the migrated table — "

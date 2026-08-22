@@ -453,3 +453,65 @@ def test_dataset_serialization_is_path_free(seeded):
     import json
     dumped = json.dumps(payload)
     assert "storage_path" not in dumped and "models/" not in dumped
+
+
+def test_temporal_split_keeps_every_row_and_measures_entity_overlap():
+    """Split strategy 'temporal' (declared, never the silent default): same
+    time boundaries, no row dropped, no future-period row in an earlier
+    split, and the entity overlap is MEASURED — because a year of regular
+    entities under group isolation leaves ~no val/test rows at all."""
+    from backend.ml.dataset_builder import temporal_split, temporal_group_split, split_rows
+    rows = _synthetic_rows()
+    train, val, test, meta = temporal_split(rows)
+    assert len(train) + len(val) + len(test) == len(rows)
+    assert meta["method"] == "temporal" and meta["dropped_for_group_integrity"] == 0
+    g_train, g_val, g_test, g_meta = temporal_group_split(rows)
+    assert meta["holdout_boundary"] == g_meta["holdout_boundary"], "same boundaries as the group split"
+    boundary = datetime.fromisoformat(meta["holdout_boundary"].rstrip("Z"))
+    assert test and all(r["as_of"] >= boundary for r in test)
+    assert all(r["as_of"] < boundary for r in train), "no future-period row in train"
+    overlap = meta["entity_overlap"]["test"]
+    train_entities = {r["entity_id"] for r in train}
+    assert overlap["entities_shared_with_train"] == len({r["entity_id"] for r in test} & train_entities)
+    assert overlap["rows_of_train_entities"] == sum(1 for r in test if r["entity_id"] in train_entities)
+    assert "not generalisation to unseen entities" in meta["caveat"]
+    # The group split drops what the temporal split keeps — the difference is exactly the overlap rows.
+    assert g_meta["dropped_for_group_integrity"] >= 0
+    # Dispatcher refuses an undeclared strategy.
+    assert split_rows(rows, "temporal")[3]["method"] == "temporal"
+    assert split_rows(rows, "temporal_group")[3]["method"] == "temporal_group"
+    with pytest.raises(ValueError):
+        split_rows(rows, "random")
+
+
+def test_collector_drains_a_backlog_larger_than_one_batch(seeded, monkeypatch):
+    """A full rebuild used to scan at most one batch (20 000 rows) and then
+    move the watermark — a year imported at once was never fully collected.
+    With a tiny batch size the collector must keep fetching keyset batches
+    until the candidate window is exhausted, and say so in its stats."""
+    import math
+    from backend.ml import collector
+
+    monkeypatch.setattr(collector, "BATCH_ROWS", 5)
+
+    async def _run():
+        from db_connection import db_manager
+        from sqlalchemy import text as sa_text
+        await _ensure_db()
+        async with db_manager.get_session() as db:
+            candidates = int((await db.execute(sa_text(
+                "SELECT count(*) FROM identity_appearances"))).scalar())
+            stats = await collector.run_collection(db, run_id="pytest-backlog", full_rebuild=True)
+            await db.commit()
+            checkpoint = (await db.execute(sa_text(
+                "SELECT extras FROM ml_collection_checkpoints"))).scalar()
+        return candidates, stats, checkpoint
+    candidates, stats, checkpoint = run_async(_run())
+    assert candidates > 5, "the seeded corpus must exceed one (patched) batch"
+    assert stats["batch_rows"] == 5 and stats["cancelled"] is False
+    assert stats["candidate_rows"] == candidates
+    assert stats["rows_scanned"] == candidates, f"backlog not drained: {stats}"
+    assert stats["batches"] == math.ceil(candidates / 5)
+    assert checkpoint["last_rows"] == candidates and checkpoint["last_batches"] == stats["batches"]
+    # Re-running over already-collected rows is idempotent (snapshot uniqueness).
+    assert stats["snapshots_deduplicated"] >= 1

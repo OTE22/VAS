@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
-    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-2">
+    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-3">
     <style>
         /* Backend Map Container - Uses Folium-generated maps from server (no frontend Leaflet needed) */
         .offline-map-container {
@@ -51,6 +51,8 @@
                 <div class="header-text">
                     <h1>Intelligence Analysis</h1>
                     <p>Advanced analytics for identity investigation</p>
+                    <a class="engine-pill" id="engine-mode-pill" href="/admin/ml-ops" hidden
+                       title="Decision engine configured NOW (from the backend). Each result carries its own provenance."></a>
                 </div>
             </div>
         </header>
@@ -273,7 +275,7 @@
          bridges onto window.IdentityMap; the classic page script awaits
          window.IdentityMap.ready before drawing. -->
     <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
-    <script src="/frontend/js/admin-intelligence.js?v=intel-5"></script>
+    <script src="/frontend/js/admin-intelligence.js?v=intel-6"></script>
 </body>
 </html>
 

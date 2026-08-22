@@ -1559,3 +1559,12 @@
     min-width: 0;
     overflow-wrap: anywhere;
 }
+
+
+/* Engine provenance (maplibre-3): page pill (system NOW) + per-result badges (what produced THIS result) */
+.engine-pill { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin-top: 0.5rem; padding: 0.3rem 0.7rem; border-radius: 999px; border: 1px solid rgba(0, 212, 255, 0.35); background: rgba(0, 212, 255, 0.08); color: #cfe9ff; font-size: 0.78rem; text-decoration: none; }
+.engine-pill strong { color: #9fe8ff; letter-spacing: 0.04em; }
+.engine-pill .engine-pill__gate { color: #ffd699; }
+.engine-badge { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0 0 0.6rem; padding: 0.25rem 0.6rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); font-size: 0.76rem; color: #b9c8dc; }
+.engine-badge strong { color: #e4eefb; }
+.engine-badge.engine-badge--missing { color: #ffd699; border-color: rgba(255, 173, 51, 0.4); }

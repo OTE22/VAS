@@ -137,13 +137,13 @@ def test_page_chrome_follows_the_house_rules():
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
     nav_at = html.find("js/navbar-loader.js?v=nav-7")
-    page_at = html.find("js/admin-ml-ops.js?v=mlops-2")
+    page_at = html.find("js/admin-ml-ops.js?v=mlops-7")
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-1" in html, "the page stylesheet is not version-pinned"
+    assert "admin-ml-ops.css?v=mlops-7" in html, "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 
@@ -218,3 +218,55 @@ def test_page_script_exposes_no_filesystem_paths():
     code = code_only(read(JS))
     for needle in ("/app/", "models/ml", "artifact_path", "storage_path"):
         assert needle not in code, f"page script references server path token {needle!r}"
+
+
+# ---------------------------------------------------------------------------
+# Section help + call log (mlops-4)
+# ---------------------------------------------------------------------------
+
+def test_every_card_has_section_help_and_the_modal_exists():
+    import re
+    with open("/app/frontend/admin/ml-ops.html", encoding="utf-8") as f:
+        html = f.read()
+    with open("/app/frontend/js/admin-ml-ops.js", encoding="utf-8") as f:
+        js = f.read()
+    cards = re.findall(r'<div class="mlops-card(?: mlops-card-wide)?"([^>]*)>', html)
+    keys = [re.search(r'data-help="([a-z_]+)"', attrs).group(1) for attrs in cards
+            if re.search(r'data-help="([a-z_]+)"', attrs)]
+    assert len(keys) == len(cards) >= 13, "every card carries a data-help key"
+    help_keys = set(re.findall(r"^\s{8}([a-z_]+): \{\s*$", js, re.M))
+    assert set(keys) <= help_keys, set(keys) - help_keys
+    for key in keys:
+        block = js.split(f"        {key}: {{", 1)[1].split("\n        }", 1)[0]
+        assert "title:" in block and "what:" in block and "read:" in block, key
+    assert 'id="mlops-help-modal"' in html and 'id="mlops-help-body"' in html
+    assert 'id="calls-body"' in html and 'id="calls-errors-only"' in html
+    assert "function installHelpButtons" in js and "function applyTooltips" in js
+    assert "function stageStrip" in js and "progress_percent" in js
+    assert "onclick=" not in html
+
+
+def test_tooltip_targets_exist_in_markup():
+    import re
+    with open("/app/frontend/admin/ml-ops.html", encoding="utf-8") as f:
+        html = f.read()
+    with open("/app/frontend/js/admin-ml-ops.js", encoding="utf-8") as f:
+        js = f.read()
+    block = js.split("const TOOLTIPS = {", 1)[1].split("\n    };", 1)[0]
+    ids = re.findall(r"^\s+'([a-z\-]+)':", block, re.M)
+    assert len(ids) >= 25
+    missing = [i for i in ids if f'id="{i}"' not in html]
+    assert missing == [], f"tooltips name elements that do not exist: {missing}"
+
+
+def test_system_state_card_reflects_backend_facts():
+    with open("/app/frontend/admin/ml-ops.html", encoding="utf-8") as f:
+        html = f.read()
+    with open("/app/frontend/js/admin-ml-ops.js", encoding="utf-8") as f:
+        js = f.read()
+    assert 'id="system-state-body"' in html and 'id="system-notes-btn"' in html
+    assert 'data-help="system"' in html
+    assert "function renderSystemState" in js and "renderSystemState(data && data.system)" in js
+    # every fact shown comes from the payload, never a literal in the page
+    for literal in ("secintel-features-v1", "secintel-features-v2", "explicit-cap-v1", "b7d2f4a9c6e1"):
+        assert literal not in js, f"{literal} must come from /api/ml/overview, not the script"

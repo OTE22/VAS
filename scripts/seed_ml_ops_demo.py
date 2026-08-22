@@ -54,6 +54,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text  # noqa: E402
+from backend.ml.constants import FEATURE_SET_VERSION  # noqa: E402
 
 SEED = 20260815
 PIPELINES = [
@@ -61,6 +62,10 @@ PIPELINES = [
     ("seed-pipeline-02", "Seed Parking", 33.8951, 35.5030),
     ("seed-pipeline-03", "Seed Loading Dock", 33.8929, 35.5005),
 ]
+# Base volumes for --scale 1 (~1,000 linked rows). --scale N multiplies
+# identities and every per-identity stage, so --scale 10 exercises the
+# pipeline on ~10k+ rows without changing any ratio the seed relies on.
+SCALE = 1
 IDENTITIES = 120
 LABELS = 60
 JOB_PREFIX = "seed-mlops-"
@@ -136,7 +141,7 @@ async def _seed_identities(db, rng):
     now = datetime.utcnow().replace(second=0, microsecond=0)
     ids = []
     total_app = 0
-    for i in range(IDENTITIES):
+    for i in range(IDENTITIES * SCALE):
         visits = 1 + rng.randint(0, 5)                    # 1..6
         first_day = 3 + rng.randint(0, 26)                # first sighting 3..29 days back
         stamps = []
@@ -149,7 +154,7 @@ async def _seed_identities(db, rng):
             "INSERT INTO identities (id, type, status, display_name, first_seen_at, last_seen_at, created_at, "
             " updated_at, appearances_count) VALUES (gen_random_uuid(), :t, 'ACTIVE', :n, :f, :l, now(), now(), :c) "
             "RETURNING id"),
-            {"t": "KNOWN" if i % 4 == 0 else "UNKNOWN", "n": f"seed_person_{i:03d}", "f": stamps[0], "l": stamps[-1],
+            {"t": "KNOWN" if i % 4 == 0 else "UNKNOWN", "n": f"seed_person_{i:05d}", "f": stamps[0], "l": stamps[-1],
              "c": len(stamps)})).scalar()
         for v, ts in enumerate(stamps):
             pid = PIPELINES[(i + v) % 3][0] if i % 5 == 0 else PIPELINES[i % 3][0]   # some multi-camera identities
@@ -199,7 +204,7 @@ async def _labels(db, rng, assessments, ids):
     from backend.ml.labeling_service import labeling_service
     created, superseded, reviewed = [], 0, 0
     # 40 labels from assessments (manual when resolved, weak when open)
-    for k, (ident, aid, status, when, sev) in enumerate(assessments[:40]):
+    for k, (ident, aid, status, when, sev) in enumerate(assessments[:40 * SCALE]):
         kind = "manual" if status == "resolved" else "weak"
         out = await labeling_service.create_label(
             db, subject_id=ident, label=rng.choice(["positive", "negative", "unknown"]), label_kind=kind,
@@ -207,19 +212,22 @@ async def _labels(db, rng, assessments, ids):
             notes="seed label from assessment")
         created.append(out["id"])
     # 20 plain weak labels on other identities (same-day bucket linkage)
-    for k, (ident, last) in enumerate(ids[80:100]):
+    for k, (ident, last) in enumerate(ids[80 * SCALE:100 * SCALE]):
         out = await labeling_service.create_label(
             db, subject_id=ident, label="negative" if k % 2 else "positive", label_kind="weak",
             source="seed-weak-plain", event_time=last, created_by="seed")
         created.append(out["id"])
-    # reviews: confirm 12, dispute 4; supersede 6 (corrections)
-    for lid in created[:12]:
+    # reviews: confirm 30, dispute 4; supersede 6 (corrections). Confirmations
+    # were 12 per scale unit, which yielded ~38 supervised rows at scale 10 —
+    # under the 50-row floor — so the supervised training path was never
+    # actually exercised by this seed. 30 clears the floor from scale 4 up.
+    for lid in created[:30 * SCALE]:
         await labeling_service.review_label(db, lid, action="confirm", actor="seed-reviewer")
         reviewed += 1
-    for lid in created[12:16]:
+    for lid in created[30 * SCALE:34 * SCALE]:
         await labeling_service.review_label(db, lid, action="dispute", actor="seed-reviewer", notes="seed dispute")
         reviewed += 1
-    for lid in created[20:26]:
+    for lid in created[34 * SCALE:40 * SCALE]:
         row = await labeling_service.supersede_label(db, lid, label="unknown", actor="seed-reviewer",
                                                      notes="seed correction")
         if row:
@@ -276,7 +284,7 @@ def _approval(model, version_tag):
         "reason": f"seed shadow evaluation {version_tag}",
         "dataset_version": model["dataset_id"],
         "evaluation_report_ref": f"ml_models:{model['model_id']}:evaluation_report",
-        "artifact_checksum": model["artifact_hash"], "feature_set_version": "secintel-features-v1",
+        "artifact_checksum": model["artifact_hash"], "feature_set_version": FEATURE_SET_VERSION,
         "intended_scope": "all_pipelines", "rollback_target": "stop shadow + return to rules-only observation",
     }
 
@@ -457,4 +465,10 @@ if __name__ == "__main__":
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--remove", action="store_true")
     parser.add_argument("--yes-i-understand", action="store_true")
-    sys.exit(asyncio.run(main(parser.parse_args())))
+    parser.add_argument("--scale", type=int, default=1,
+                        help="volume multiplier (1 = ~1k rows, 10 = ~10k+ rows)")
+    parsed = parser.parse_args()
+    if parsed.scale < 1 or parsed.scale > 50:
+        parser.error("--scale must be between 1 and 50")
+    SCALE = parsed.scale
+    sys.exit(asyncio.run(main(parsed)))

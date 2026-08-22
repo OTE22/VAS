@@ -223,6 +223,7 @@ def serialize_threshold(row) -> Dict[str, Any]:
         "id": str(row.id), "model_id": str(row.model_id),
         "scope_type": row.scope_type, "scope_id": row.scope_id,
         "version": row.version, "version_label": version_label(row), "status": row.status,
+        "semantics": "relative anomaly bands (train-quantile cutpoints); not validated operational severity",
         "cutpoints": dict(row.cutpoints or {}), "quantiles": row.quantiles,
         "source": row.source, "expected_metrics": row.expected_metrics,
         "sample_count": row.sample_count, "notes": row.notes,

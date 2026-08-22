@@ -60,6 +60,7 @@ def serialize_label(row) -> Dict[str, Any]:
         "reviewed_at": iso(row.reviewed_at),
         "supersedes_id": str(row.supersedes_id) if row.supersedes_id else None,
         "notes": row.notes,
+        "selection": getattr(row, "selection", None),
         "created_at": iso(row.created_at),
         "created_by": row.created_by,
     }
@@ -129,7 +130,15 @@ async def _link_predictions_for_label(db: AsyncSession, label_row) -> int:
         .values(outcome_label_id=label_row.id, outcome_label=label_row.label,
                 outcome_recorded_at=datetime.utcnow())
         .execution_options(synchronize_session=False))
-    return res.rowcount or 0
+    linked = res.rowcount or 0
+    if linked and label_row.label_kind == "manual" and label_row.review_status == "reviewed":
+        try:
+            from backend.ml import metrics as ml_metrics
+            for _ in range(linked):
+                ml_metrics.observe_reviewed_outcome(label_row.label)
+        except Exception:
+            pass
+    return linked
 
 
 async def _unlink_label(db: AsyncSession, label_row) -> Dict[str, int]:
@@ -178,6 +187,7 @@ class LabelingService:
                            confidence: float = 1.0,
                            assessment_id: Optional[str] = None,
                            notes: Optional[str] = None,
+                           selection: Optional[Dict[str, Any]] = None,
                            actor_user_id: Optional[int] = None) -> Dict[str, Any]:
         """Idempotent label creation. Raises ValueError with a client-safe
         message on rule violations (routes map it to 422)."""
@@ -234,6 +244,7 @@ class LabelingService:
             status="active",
             review_status="unreviewed",
             notes=notes,
+            selection=selection,
             idempotency_key=key,
             created_at=datetime.utcnow(),
             created_by=created_by[:255],

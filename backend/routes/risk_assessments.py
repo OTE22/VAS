@@ -140,8 +140,16 @@ async def create_assessment(
             payload = await assessment_service.persist_identity_assessment(
                 db, identity_id=body.subject_id, assessment=assessment,
                 threshold_version=provenance, event_id=body.event_id,
-                decision_mode=outcome.actual_mode_used)
+                decision_mode=outcome.actual_mode_used,
+                provenance=outcome.provenance)
             payload["decision"] = outcome.decision_record
+            if outcome.prediction_id and not payload.get("deduplicated"):
+                from backend.ml.shadow_service import shadow_service as _shadow_link
+                try:
+                    await _shadow_link._link_assessment(db, payload["id"], outcome.prediction_id)
+                except Exception:
+                    logger.warning("[ASSESSMENTS] could not link ML prediction to %s", payload["id"],
+                                   exc_info=True)
         finally:
             if acquired:
                 await lock.release()

@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
     <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-2">
-    <link rel="stylesheet" href="/frontend/css/admin-security-intelligence.css?v=sec-ui-3">
+    <link rel="stylesheet" href="/frontend/css/admin-security-intelligence.css?v=sec-ui-5">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -33,6 +33,8 @@
             <div class="sec-masthead__text">
                 <h1>Security Intelligence</h1>
                 <p>Network, behaviour and movement analysis across the estate</p>
+                <a class="engine-pill" id="engine-mode-pill" href="/admin/ml-ops" hidden
+                   title="Decision engine configured NOW (from the backend). Each result below carries its own provenance."></a>
             </div>
         </header>
 
@@ -238,6 +240,10 @@
                             <i class="fas fa-info-circle" aria-hidden="true"></i>
                             <p>Choose an identity to perform a threat assessment</p>
                         </div>
+                    </div>
+                    <div class="threat-history sec-results" id="threat-history" hidden>
+                        <h3>Previous assessments (persisted provenance)</h3>
+                        <div id="threat-history-list"></div>
                     </div>
                 </div>
             </section>
@@ -454,6 +460,6 @@
     <script src="/frontend/vendor/vis-network/vis-network.min.js"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
-    <script src="/frontend/js/admin-security-intelligence.js?v=sec-9"></script>
+    <script src="/frontend/js/admin-security-intelligence.js?v=sec-12"></script>
 </body>
 </html>

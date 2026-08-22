@@ -13,7 +13,7 @@ import threading
 import time
 import uuid as uuid_mod
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, BackgroundTasks, status as http_status
 from pydantic import BaseModel, Field
@@ -23,6 +23,7 @@ from config import settings
 from db_connection import get_db
 from db_models import Pipeline, Identity
 from sqlalchemy import select
+from fastapi.encoders import jsonable_encoder
 from backend.auth.auth_service import get_current_user, require_admin
 from backend.core.intelligence_service import intelligence_service
 from backend.core.security_intelligence_service import (
@@ -229,6 +230,47 @@ _THRESHOLD_JOB_MAX_AGE_SECONDS = 3600  # threshold learning is minutes, not hour
 THRESHOLD_ALGORITHM_VERSION = "threshold-v2"
 TRAJECTORY_MODEL_VERSION = "trajectory-v2"
 CORRELATION_ALGORITHM_VERSION = "xcca-v2"
+# Rules-only features name their own algorithm in an `engine` block so the UI
+# never has to assume what produced a result. These two had no version yet.
+RELATED_ALGORITHM_VERSION = "related-cooccurrence-v1"
+TEMPORAL_ALGORITHM_VERSION = "temporal-activity-v1"
+
+
+def rules_engine_block(name: str, algorithm_version: str) -> Dict[str, Any]:
+    return {"kind": "rules", "name": name, "algorithm_version": algorithm_version,
+            "ml_participates": False}
+
+
+async def _provenance_for(db, assessment_id, outcome) -> Dict[str, Any]:
+    """Persisted row first (history is the truth), router outcome otherwise."""
+    if assessment_id:
+        try:
+            from db_models import ThreatAssessmentRecord
+            from backend.core.assessment_service import provenance_of
+            import uuid as _uuid
+            row = (await db.execute(
+                select(ThreatAssessmentRecord)
+                .where(ThreatAssessmentRecord.id == _uuid.UUID(str(assessment_id))))).scalar_one_or_none()
+            if row is not None:
+                out = provenance_of(row)
+                if outcome.provenance is not None and out.get("requested_mode") == "not_recorded":
+                    out = {**outcome.provenance.as_dict(), "recorded": False}
+                return out
+        except Exception:
+            logger.warning("[INTELLIGENCE] provenance read failed for %s", assessment_id, exc_info=True)
+    if outcome.provenance is not None:
+        return {**outcome.provenance.as_dict(), "recorded": False}
+    return {"requested_mode": "not_recorded", "executed_mode": outcome.actual_mode_used,
+            "recorded": False}
+
+
+async def _observation_for(db, assessment_id):
+    try:
+        from backend.ml.shadow_service import load_observation
+        return await load_observation(db, assessment_id)
+    except Exception:
+        logger.warning("[INTELLIGENCE] observation read failed for %s", assessment_id, exc_info=True)
+        return None
 CORRELATION_MIN_SEQUENCES = 3
 
 CORRELATION_NOTE = (
@@ -312,6 +354,7 @@ class TemporalPatternResponse(BaseModel):
     first_appearance: Optional[str]
     last_appearance: Optional[str]
     average_appearances_per_day: float
+    engine: Optional[Dict[str, Any]] = None
 
 
 class CameraMovementResponse(BaseModel):
@@ -390,6 +433,7 @@ class TrajectoryPredictionResponse(BaseModel):
     model_version: str
     insufficient_evidence: bool
     note: str
+    engine: Optional[Dict[str, Any]] = None
 
 
 class ActivitySequenceResponse(BaseModel):
@@ -414,6 +458,7 @@ class ActivityCorrelationResponse(BaseModel):
     # xcca-v2: per-side appearance caps — when hit, the score covers a
     # truncated window and the UI must not present it as exhaustive.
     truncated: bool = False
+    engine: Optional[Dict[str, Any]] = None
 
 
 # =====================================================
@@ -498,7 +543,8 @@ async def get_related_identities(
                row_count=len(items))
         # Envelope: items + the authoritative threshold policy so the UI
         # never hard-codes divergent strength rules.
-        return {"items": items, "thresholds": RELATIONSHIP_THRESHOLDS}
+        return {"items": items, "thresholds": RELATIONSHIP_THRESHOLDS,
+                "engine": rules_engine_block("co-occurrence relationship scoring", RELATED_ALGORITHM_VERSION)}
 
     except HTTPException:
         raise
@@ -583,7 +629,8 @@ async def get_temporal_patterns(
             "total_appearances": patterns.total_appearances,
             "first_appearance": _iso_z(patterns.first_appearance),
             "last_appearance": _iso_z(patterns.last_appearance),
-            "average_appearances_per_day": patterns.average_appearances_per_day
+            "average_appearances_per_day": patterns.average_appearances_per_day,
+            "engine": rules_engine_block("temporal activity analysis", TEMPORAL_ALGORITHM_VERSION),
         }
 
     except HTTPException:
@@ -1141,6 +1188,7 @@ async def get_social_network(
             # Node risk rubric provenance — three risk rubrics coexist on the
             # security page; each response labels which one produced its score.
             "risk_score_version": NETWORK_RISK_VERSION,
+            "engine": rules_engine_block("co-occurrence graph + risk rubric", NETWORK_RISK_VERSION),
         }
         _audit("social_network", current_user,
                duration_ms=int((time.monotonic() - started) * 1000),
@@ -1235,6 +1283,7 @@ async def get_suspicious_patterns(
             "pipeline_id": report.pipeline_id,
             "scope_note": report.scope_note,
             "algorithm_version": report.algorithm_version,
+            "engine": rules_engine_block("sliding-window pattern heuristics", report.algorithm_version),
         }
 
     except HTTPException:
@@ -1306,11 +1355,15 @@ async def get_anomalies(
             "baseline": {
                 "sufficient": report.baseline_sufficient,
                 "samples": report.baseline_samples,
+                "required": report.required_samples,
                 "window_start": _iso_z(report.baseline_start),
                 "window_end": _iso_z(report.baseline_end),
+                # first appearance ever for this identity (None = never seen)
+                "history_start": _iso_z(report.history_start) if report.history_start else None,
             },
             "recent_count": report.recent_count,
             "algorithm_version": report.algorithm_version,
+            "engine": rules_engine_block("hour-bucket statistical baseline", report.algorithm_version),
             # anomaly-context-v3: timezone + day-bucket configuration and the
             # per-bucket baseline statistics the evaluation used.
             "context": report.context,
@@ -1381,10 +1434,19 @@ async def get_threat_assessment(
             stored = await assessment_service.persist_identity_assessment(
                 db, identity_id=identity_id, assessment=assessment,
                 threshold_version=await _threshold_provenance(db),
-                decision_mode=outcome.actual_mode_used)
+                decision_mode=outcome.actual_mode_used,
+                provenance=outcome.provenance)
             assessment_id = stored["id"]
             persisted = True
             deduplicated = stored.get("deduplicated")
+            # ML mode: the prediction the router used is this assessment's lineage
+            if outcome.prediction_id and not deduplicated:
+                from backend.ml.shadow_service import shadow_service as _shadow_link
+                try:
+                    await _shadow_link._link_assessment(db, assessment_id, outcome.prediction_id)
+                except Exception:
+                    logger.warning("[INTELLIGENCE] could not link ML prediction to assessment %s",
+                                   assessment_id, exc_info=True)
         except Exception:
             logger.warning("[INTELLIGENCE] assessment persistence failed identity=%s",
                            identity_id, exc_info=True)
@@ -1425,6 +1487,13 @@ async def get_threat_assessment(
             # currently-possible value the LIVE result above is the rules
             # result; gated modes record their exact unmet reasons.
             "decision": outcome.decision_record,
+            # What happened for THIS assessment. Built from the PERSISTED row
+            # when one exists (a deduplicated read returns the row an earlier
+            # mode produced), else from the router outcome of this call.
+            "decision_provenance": await _provenance_for(db, assessment_id, outcome),
+            # The ML observation linked to this assessment (shadow leg or ML
+            # signal), or None when ML did not run.
+            "ml_observation": await _observation_for(db, assessment_id),
         }
         # Honest labelling: this number is a weighted heuristic, never a
         # probability — 80 does not mean an 80% chance of anything.
@@ -1933,7 +2002,8 @@ async def get_threshold_job(
     description="Report ACTUAL backend readiness per feature — never hard-coded 'enabled'."
 )
 async def get_security_capabilities(
-    current_user: dict = Depends(require_admin())
+    current_user: dict = Depends(require_admin()),
+    db: AsyncSession = Depends(get_db),
 ):
     """Honest feature-status report used by the frontend status dialog."""
     import importlib.util
@@ -1953,6 +2023,7 @@ async def get_security_capabilities(
         "network_analysis": {
             "enabled": True, "status": "ready",
             "risk_score_version": NETWORK_RISK_VERSION,
+            "engine": rules_engine_block("co-occurrence graph + risk rubric", NETWORK_RISK_VERSION),
         },
         "pattern_detection": {
             "enabled": True, "status": "ready",
@@ -2013,7 +2084,17 @@ async def get_security_capabilities(
             "styles_available": usable_basemaps,
         },
     }
-    resp = JSONResponse(content={"capabilities": caps, "checked_at": _iso_z(datetime.utcnow())})
+    # Page-level decision-engine state (the system NOW — never used to label
+    # a past result; per-result provenance travels with each assessment).
+    decision_engine = None
+    try:
+        from backend.ml.decision_service import decision_service
+        decision_engine = await decision_service.decision_engine_state(db)
+    except Exception:
+        logger.warning("[INTELLIGENCE] decision engine state unavailable", exc_info=True)
+    resp = JSONResponse(content=jsonable_encoder({"capabilities": caps,
+                                                  "decision_engine": decision_engine,
+                                                  "checked_at": _iso_z(datetime.utcnow())}))
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -2117,6 +2198,7 @@ async def predict_next_camera(
                 for camera, prob, est_time in predictions
             ],
             model_version=TRAJECTORY_MODEL_VERSION,
+            engine=rules_engine_block("transition-frequency trajectory model", TRAJECTORY_MODEL_VERSION),
             insufficient_evidence=len(predictions) == 0,
             note=("Estimated times are statistical projections from historical "
                   "movement, not certainties.")
@@ -2251,6 +2333,7 @@ async def calculate_activity_correlation(
             days_back=days_back,
             insufficient_evidence=len(sequences) < CORRELATION_MIN_SEQUENCES,
             algorithm_version=CORRELATION_ALGORITHM_VERSION,
+            engine=rules_engine_block("cross-camera activity correlation", CORRELATION_ALGORITHM_VERSION),
             note=CORRELATION_NOTE,
             truncated=bool(correlation_meta.get("truncated", False))
         )
