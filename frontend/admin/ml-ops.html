@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-7">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-8">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -179,6 +179,12 @@
                                 <option value="7" selected>7 days</option>
                                 <option value="30">30 days</option>
                                 <option value="90">90 days</option>
+                                <option value="180">180 days</option>
+                                <option value="365">365 days</option>
+                            </select>
+                            <label for="shadow-model-select" class="mlops-inline-label">Model:</label>
+                            <select id="shadow-model-select" class="mlops-select">
+                                <option value="" selected>all models</option>
                             </select>
                             <button class="mlops-btn mlops-btn-small" id="shadow-evidence-btn" type="button" title="Offline evidence for reviewing a future ML-to-risk signal mapping">
                                 <i class="fas fa-clipboard-check"></i> Evidence report
@@ -246,12 +252,13 @@
                         <div class="mlops-form-row">
                             <label for="training-model-type">Model type:</label>
                             <select id="training-model-type" class="mlops-select">
-                                <option value="behavior_anomaly_model" selected>behavior_anomaly_model</option>
-                                <option value="coappearance_anomaly_model">coappearance_anomaly_model (interface)</option>
-                                <option value="social_graph_anomaly_model">social_graph_anomaly_model (interface)</option>
-                                <option value="threat_ranking_model">threat_ranking_model (interface)</option>
+                                <option value="behavior_anomaly_model" selected>behavior_anomaly_model — Available</option>
+                                <option value="coappearance_anomaly_model" disabled>coappearance_anomaly_model — Reserved / Future · not trainable</option>
+                                <option value="social_graph_anomaly_model" disabled>social_graph_anomaly_model — Reserved / Future · not trainable</option>
+                                <option value="threat_ranking_model" disabled>threat_ranking_model — Reserved / Future · not trainable</option>
                             </select>
                         </div>
+                        <div id="model-type-note" class="mlops-mode-desc" role="note"></div>
                         <div class="mlops-form-row">
                             <label for="training-algorithm">Algorithm:</label>
                             <select id="training-algorithm" class="mlops-select">
@@ -372,6 +379,23 @@
                             <input type="datetime-local" id="label-event-time">
                         </div>
                         <div class="mlops-form-row">
+                            <label for="label-selection-method">Selection:</label>
+                            <select id="label-selection-method" class="mlops-select">
+                                <option value="natural" selected>natural (as encountered)</option>
+                                <option value="stratified_by_band">stratified_by_band (deliberate per-band sample)</option>
+                                <option value="top_scores">top_scores</option>
+                                <option value="random">random</option>
+                                <option value="manual">manual (hand-picked)</option>
+                            </select>
+                            <label for="label-assessment-id">Assessment id:</label>
+                            <input type="text" id="label-assessment-id" maxlength="64" autocomplete="off" placeholder="optional — resolved assessment">
+                        </div>
+                        <div class="mlops-form-row">
+                            <label for="label-notes">Notes:</label>
+                            <input type="text" id="label-notes" maxlength="2000" autocomplete="off" placeholder="optional (never written to logs)">
+                            <span class="mlops-mode-desc">Recorded here with the ML band visible — marked revealed, never blind. Blind outcomes come from the Security Intelligence threat card.</span>
+                        </div>
+                        <div class="mlops-form-row">
                             <button class="mlops-btn mlops-btn-primary" id="create-label-btn" type="button">
                                 <i class="fas fa-plus"></i> Create label
                             </button>
@@ -386,10 +410,10 @@
                         <h2><i class="fas fa-clock"></i> Retraining Policy</h2>
                         <div class="mlops-header-actions">
                             <select id="policy-model-type" class="mlops-select">
-                                <option value="behavior_anomaly_model" selected>behavior_anomaly_model</option>
-                                <option value="coappearance_anomaly_model">coappearance_anomaly_model</option>
-                                <option value="social_graph_anomaly_model">social_graph_anomaly_model</option>
-                                <option value="threat_ranking_model">threat_ranking_model</option>
+                                <option value="behavior_anomaly_model" selected>behavior_anomaly_model — Available</option>
+                                <option value="coappearance_anomaly_model">coappearance_anomaly_model — Reserved / Future</option>
+                                <option value="social_graph_anomaly_model">social_graph_anomaly_model — Reserved / Future</option>
+                                <option value="threat_ranking_model">threat_ranking_model — Reserved / Future</option>
                             </select>
                         </div>
                     </div>
@@ -457,6 +481,6 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-7"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-8"></script>
 </body>
 </html>

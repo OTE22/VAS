@@ -505,13 +505,127 @@ def test_collector_drains_a_backlog_larger_than_one_batch(seeded, monkeypatch):
             await db.commit()
             checkpoint = (await db.execute(sa_text(
                 "SELECT extras FROM ml_collection_checkpoints"))).scalar()
-        return candidates, stats, checkpoint
-    candidates, stats, checkpoint = run_async(_run())
+            # a second full rebuild over the same rows: idempotent by snapshot uniqueness
+            again = await collector.run_collection(db, run_id="pytest-backlog-2", full_rebuild=True)
+        return candidates, stats, checkpoint, again
+    candidates, stats, checkpoint, again = run_async(_run())
     assert candidates > 5, "the seeded corpus must exceed one (patched) batch"
     assert stats["batch_rows"] == 5 and stats["cancelled"] is False
     assert stats["candidate_rows"] == candidates
     assert stats["rows_scanned"] == candidates, f"backlog not drained: {stats}"
     assert stats["batches"] == math.ceil(candidates / 5)
     assert checkpoint["last_rows"] == candidates and checkpoint["last_batches"] == stats["batches"]
-    # Re-running over already-collected rows is idempotent (snapshot uniqueness).
-    assert stats["snapshots_deduplicated"] >= 1
+    # Re-running over already-collected rows is idempotent (snapshot uniqueness):
+    # every event snapshot of the second pass deduplicates, nothing is rewritten.
+    assert again["rows_scanned"] == candidates
+    assert again["snapshots_deduplicated"] >= candidates, again
+
+
+def test_collector_phase2_cancel_is_durable_and_reconciled_on_restart(seeded, monkeypatch):
+    """Phase 2 (one current-state snapshot per affected identity) commits per
+    chunk, honours cancellation, records what is still pending, and the NEXT
+    run recomputes exactly the identities that were left without a
+    current-state snapshot - nothing is skipped permanently."""
+    from backend.ml import collector
+    monkeypatch.setattr(collector, "BATCH_ROWS", 5)
+    monkeypatch.setattr(collector, "CURRENT_STATE_CHUNK", 1)
+
+    async def _run():
+        from db_connection import db_manager
+        from sqlalchemy import text as sa_text
+        await _ensure_db()
+        async with db_manager.get_session() as db:
+            # an identity of this test's own, with an appearance and NO snapshot
+            fresh = str((await db.execute(sa_text(
+                "INSERT INTO identities (id, type, status, display_name, first_seen_at, last_seen_at, "
+                " created_at, updated_at, appearances_count) VALUES (gen_random_uuid(), 'UNKNOWN', 'ACTIVE', "
+                " :n, now(), now(), now(), now(), 0) RETURNING id"), {"n": PREFIX + "p2-fresh"})).scalar())
+            await db.execute(sa_text(
+                "INSERT INTO identity_appearances (identity_id, pipeline_id, start_time, created_at) "
+                "VALUES (CAST(:i AS uuid), :p, now() - interval '1 day', now())"), {"i": fresh, "p": CAM_UTC})
+            await db.commit()
+            candidates = int((await db.execute(sa_text("SELECT count(*) FROM identity_appearances"))).scalar())
+            calls = {"n": 0}
+
+            def cancel_after_phase1():
+                calls["n"] += 1
+                return calls["n"] > candidates + 1      # first check inside phase 2 -> cancel
+            first = await collector.run_collection(db, run_id="pytest-p2-cancel", full_rebuild=True,
+                                                   cancel_check=cancel_after_phase1)
+            extras = (await db.execute(sa_text("SELECT extras FROM ml_collection_checkpoints"))).scalar()
+            missing = await collector._identities_missing_current_state(db, extras["phase2"])
+            second = await collector.run_collection(db, run_id="pytest-p2-resume", full_rebuild=False)
+            extras_after = (await db.execute(sa_text("SELECT extras FROM ml_collection_checkpoints"))).scalar()
+            started = datetime.fromisoformat(extras["phase2"]["started_at"].rstrip("Z"))
+            fresh_has_state = int((await db.execute(sa_text(
+                "SELECT count(*) FROM ml_feature_snapshots s WHERE s.entity_type = 'person' AND s.entity_id = :i "
+                "AND s.event_timestamp IS NULL AND s.as_of_timestamp >= :t"), {"i": fresh, "t": started})).scalar())
+        return candidates, fresh, first, extras, missing, second, extras_after, fresh_has_state
+    candidates, fresh, first, extras, missing, second, extras_after, fresh_has_state = run_async(_run())
+    assert first["cancelled"] is True and first["rows_scanned"] == candidates, first
+    assert first["current_state_pending"] >= 1, "cancellation in phase 2 leaves work pending ..."
+    assert extras["phase2"]["status"] == "in_progress" and extras["phase2"]["pending"] == first["current_state_pending"]
+    assert fresh in missing, "... and the identities still lacking a current-state snapshot are found by SQL"
+    assert second["cancelled"] is False and second["current_state_pending"] == 0
+    assert extras_after["phase2"]["status"] == "complete" and extras_after["phase2"]["pending"] == 0
+    assert fresh_has_state == 1, "after the restart the left-behind identity has its current-state snapshot"
+
+
+def test_collector_job_renews_its_lock_and_refuses_a_concurrent_launch(seeded, monkeypatch):
+    from backend.ml import collector
+    from backend.core import distributed_lock as dl
+    monkeypatch.setattr(collector, "BATCH_ROWS", 5)
+    renewals = {"n": 0}
+    original_renew = dl.DistributedLock.renew
+
+    async def counting_renew(self):
+        renewals["n"] += 1
+        return await original_renew(self)
+    monkeypatch.setattr(dl.DistributedLock, "renew", counting_renew)
+
+    async def _run():
+        import asyncio
+        from backend.core.task_history import task_history_manager
+        await _ensure_db()
+        first = await collector.launch_collection_job(full_rebuild=True)
+        second = await collector.launch_collection_job(full_rebuild=True)
+        for _ in range(600):
+            task = await task_history_manager.get_task_by_job_id(first["job_id"])
+            if task and task["status"] in ("completed", "failed", "cancelled"):
+                break
+            await asyncio.sleep(0.1)
+        return first, second, task
+    first, second, task = run_async(_run())
+    assert first["status"] == "scheduled" and first["job_id"].startswith("mlcollect-")
+    assert second["status"] == "busy", second
+    assert task["status"] == "completed", task
+    assert task["result"]["batches"] >= 2
+    assert renewals["n"] >= task["result"]["batches"], "the lock is renewed between batches/chunks"
+
+
+def test_collector_watermark_progresses_and_incremental_runs_pick_up_new_rows(seeded):
+    async def _run():
+        from db_connection import db_manager
+        from sqlalchemy import text as sa_text
+        from backend.ml import collector
+        await _ensure_db()
+        async with db_manager.get_session() as db:
+            await collector.run_collection(db, run_id="pytest-wm-1", full_rebuild=True)
+            wm1 = (await db.execute(sa_text(
+                "SELECT watermark_event_time, watermark_id FROM ml_collection_checkpoints"))).one()
+            newest = (await db.execute(sa_text(
+                "SELECT created_at, id FROM identity_appearances ORDER BY created_at DESC, id DESC LIMIT 1"))).one()
+            # a new appearance arrives after the watermark
+            await db.execute(sa_text(
+                "INSERT INTO identity_appearances (identity_id, pipeline_id, start_time, created_at) "
+                "VALUES ((SELECT identity_id FROM identity_appearances LIMIT 1), "
+                "        (SELECT pipeline_id FROM identity_appearances LIMIT 1), now(), now())"))
+            await db.commit()
+            second = await collector.run_collection(db, run_id="pytest-wm-2", full_rebuild=False)
+            wm2 = (await db.execute(sa_text(
+                "SELECT watermark_event_time, watermark_id FROM ml_collection_checkpoints"))).one()
+        return wm1, newest, second, wm2
+    wm1, newest, second, wm2 = run_async(_run())
+    assert (wm1[0], wm1[1]) == (newest[0], newest[1]), "the watermark is the newest processed (created_at, id)"
+    assert second["rows_scanned"] >= 1 and second["full_rebuild"] is False
+    assert (wm2[0], wm2[1]) > (wm1[0], wm1[1]), "an incremental run advances the watermark monotonically"

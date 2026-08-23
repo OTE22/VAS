@@ -260,10 +260,21 @@ def engineering_gate(*, quality_gates: Dict[str, Any], dataset_quality_passed: b
 # Scientific gate (evidence-based; thresholds only from configuration)
 # ---------------------------------------------------------------------------
 
+def _scientific_minimums_raw() -> Dict[str, Any]:
+    """The four minimums read LITERALLY from settings (a registered, editable
+    knob must have a visible consumer; 0 = not configured, no default invented)."""
+    from config import settings
+    return {
+        "ML_SCIENTIFIC_MIN_HISTORY_DAYS": settings.ML_SCIENTIFIC_MIN_HISTORY_DAYS,
+        "ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES": settings.ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES,
+        "ML_EVIDENCE_MIN_REVIEWED_TOTAL": settings.ML_EVIDENCE_MIN_REVIEWED_TOTAL,
+        "ML_EVIDENCE_MIN_REVIEWED_PER_BAND": settings.ML_EVIDENCE_MIN_REVIEWED_PER_BAND,
+    }
+
+
 def _configured(name: str) -> Optional[float]:
     try:
-        from config import settings
-        value = getattr(settings, name, None)
+        value = _scientific_minimums_raw().get(name)
     except Exception:
         value = None
     try:
@@ -348,7 +359,35 @@ def scientific_gate(*, population: Dict[str, Any], availability: Dict[str, Any],
                       "meaning": "val/test scores describe later behaviour of known entities, "
                                  "not generalisation to unseen entities"})
     status = SCIENTIFIC_SUFFICIENT if (any_configured and not reasons) else SCIENTIFIC_INSUFFICIENT
+
+    # Per-criterion view (measured / required / PASS|FAIL|NOT_CONFIGURED) —
+    # the same facts the reasons are built from, laid out for a reader. No
+    # criterion gets a default: unconfigured stays NOT_CONFIGURED.
+    def _criterion(name, setting, measured, ok_when_configured):
+        required = configured[setting]
+        if required is None:
+            state = "NOT_CONFIGURED"
+        else:
+            state = "PASS" if ok_when_configured else "FAIL"
+        return {"criterion": name, "setting": setting, "measured": measured,
+                "required": required, "status": state}
+    per_band_min = configured["ML_EVIDENCE_MIN_REVIEWED_PER_BAND"]
+    criteria = [
+        _criterion("history_span_days", "ML_SCIENTIFIC_MIN_HISTORY_DAYS", span,
+                   (span or 0) >= (configured["ML_SCIENTIFIC_MIN_HISTORY_DAYS"] or 0)),
+        _criterion("median_appearances_per_entity", "ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES", median_app,
+                   (median_app or 0) >= (configured["ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES"] or 0)),
+        _criterion("reviewed_outcomes_total", "ML_EVIDENCE_MIN_REVIEWED_TOTAL", total_reviewed,
+                   (total_reviewed or 0) >= (configured["ML_EVIDENCE_MIN_REVIEWED_TOTAL"] or 0)),
+        _criterion("reviewed_outcomes_per_band", "ML_EVIDENCE_MIN_REVIEWED_PER_BAND",
+                   per_band or None,
+                   bool(per_band) and all((n or 0) >= (per_band_min or 0) for n in per_band.values())),
+        {"criterion": "signal_mapping", "setting": None,
+         "measured": "VALIDATED" if mapping_validated else "REQUIRES_VALIDATION",
+         "required": "VALIDATED", "status": "PASS" if mapping_validated else "FAIL"},
+    ]
     return {"status": status, "metrics": metrics, "configured_minimums": configured,
+            "criteria": criteria,
             "reasons": reasons, "facts": facts,
             "meaning": "evidence that the model represents behaviour — independent of engineering soundness"}
 
@@ -357,71 +396,97 @@ def scientific_gate(*, population: Dict[str, Any], availability: Dict[str, Any],
 # Post-hoc readiness for an existing model (no retraining)
 # ---------------------------------------------------------------------------
 
-async def compute_model_readiness(db, model_row, *, persist: bool = True) -> Dict[str, Any]:
-    """Both gates for a model trained BEFORE gate recording existed, computed
-    from its registered artifact and dataset (never by retraining). Recorded
-    on evaluation_report with computed_post_hoc=True so nobody mistakes it for
-    a training-time record. Idempotent."""
+async def compute_model_readiness(db, model_row, *, persist: bool = True,
+                                  light: bool = False) -> Dict[str, Any]:
+    """Both gates for an existing model, computed from its registered artifact
+    and dataset (never by retraining). Recorded on evaluation_report with
+    computed_post_hoc=True so nobody mistakes it for a training-time record.
+    Idempotent.
+
+    light=True is the LIVE variant the page reads on every load: it reuses the
+    recorded engineering gate and recorded feature availability (those only
+    change with the artifact/dataset, which are immutable) and recomputes what
+    DOES change over time - reviewed-outcome evidence and the mapping status.
+    The full variant re-validates the artifact and reloads the Parquet."""
     from sqlalchemy import select
-    from db_models import MLDataset, MLPrediction
-    from backend.ml.registry_service import validate_artifact
-    from backend.ml.trainer import _load_parquet_rows
+    from db_models import MLDataset, MLLabel, MLPrediction
 
     report = dict(model_row.evaluation_report or {})
     dataset = None
     if model_row.dataset_id:
         dataset = (await db.execute(
             select(MLDataset).where(MLDataset.id == model_row.dataset_id))).scalar_one_or_none()
-    artifact_ok, medians, artifact_error = False, {}, None
-    try:
-        payload = validate_artifact(model_row.artifact_path, expected_hash=model_row.artifact_hash,
-                                    expected_feature_names=list(model_row.feature_names or []),
-                                    expected_dependencies=model_row.dependency_versions)
-        medians = payload.get("imputation_medians") or {}
-        artifact_ok = True
-    except Exception as exc:
-        artifact_error = getattr(exc, "code", type(exc).__name__)
-
-    rows = []
-    if dataset is not None and dataset.storage_path:
-        try:
-            rows = _load_parquet_rows(dataset.storage_path)
-        except Exception:
-            rows = []
     feature_names = list(model_row.feature_names or [])
-    split_rows = [r for r in rows if r.get("split")]
-    availability = feature_availability_by_split(split_rows, feature_names) if rows else {}
     dq = (dataset.quality_report if dataset is not None else None) or {}
     population = dq.get("population") or {}
-    if not population and rows:
-        population = await entity_history_statistics(
-            db, [r["entity_id"] for r in rows], feature_names, rows=split_rows)
 
-    gates = dict((model_row.quality_gates or {}).get("gates") or {})
-    if not artifact_ok:
-        gates["artifact_validates"] = {"passed": False, "actual": artifact_error, "required": "valid artifact"}
-    engineering = engineering_gate(
-        quality_gates=gates, dataset_quality_passed=bool(dq.get("passed", True)),
-        split_meta=(dataset.split_config if dataset is not None else None) or {},
-        artifact_hash=model_row.artifact_hash, code_version=getattr(model_row, "code_version", None),
-        feature_names=feature_names, medians=medians,
-        seed_stability=report.get("seed_stability_correlation"),
-        dataset_checksum=(dataset.checksum if dataset is not None else None),
-        parquet_sha256=(getattr(dataset, "parquet_sha256", None) if dataset is not None else None))
+    if light:
+        availability = report.get("feature_availability_by_split") or {}
+        engineering = dict(report.get("engineering_gate") or {})
+        if not engineering:
+            engineering = {"status": "NOT_RECORDED", "checks": {}, "failed": [],
+                           "meaning": "engineering gate was never recorded for this model - run a "
+                                      "full readiness recomputation"}
+        if not population:
+            population = (report.get("scientific_gate") or {}).get("metrics") or {}
+    else:
+        from backend.ml.registry_service import validate_artifact
+        from backend.ml.trainer import _load_parquet_rows
+        artifact_ok, medians, artifact_error = False, {}, None
+        try:
+            payload = validate_artifact(model_row.artifact_path, expected_hash=model_row.artifact_hash,
+                                        expected_feature_names=feature_names,
+                                        expected_dependencies=model_row.dependency_versions)
+            medians = payload.get("imputation_medians") or {}
+            artifact_ok = True
+        except Exception as exc:
+            artifact_error = getattr(exc, "code", type(exc).__name__)
 
-    # reviewed-outcome coverage for THIS model (unreviewed = unknown)
-    from backend.ml import evidence_stats
+        rows = []
+        if dataset is not None and dataset.storage_path:
+            try:
+                rows = _load_parquet_rows(dataset.storage_path)
+            except Exception:
+                rows = []
+        split_rows = [r for r in rows if r.get("split")]
+        availability = feature_availability_by_split(split_rows, feature_names) if rows else {}
+        if not population and rows:
+            population = await entity_history_statistics(
+                db, [r["entity_id"] for r in rows], feature_names, rows=split_rows)
+
+        gates = dict((model_row.quality_gates or {}).get("gates") or {})
+        if not artifact_ok:
+            gates["artifact_validates"] = {"passed": False, "actual": artifact_error, "required": "valid artifact"}
+        engineering = engineering_gate(
+            quality_gates=gates, dataset_quality_passed=bool(dq.get("passed", True)),
+            split_meta=(dataset.split_config if dataset is not None else None) or {},
+            artifact_hash=model_row.artifact_hash, code_version=getattr(model_row, "code_version", None),
+            feature_names=feature_names, medians=medians,
+            seed_stability=report.get("seed_stability_correlation"),
+            dataset_checksum=(dataset.checksum if dataset is not None else None),
+            parquet_sha256=(getattr(dataset, "parquet_sha256", None) if dataset is not None else None))
+
+    # reviewed-outcome coverage for THIS model — evidence-grade labels only
+    # (THE canonical definition; unreviewed / weak / seed / synthetic are
+    # distinct populations and are reported, never counted)
+    from backend.ml import evidence_grade, evidence_stats
     preds = (await db.execute(
-        select(MLPrediction.ml_anomaly_band, MLPrediction.outcome_label)
+        select(MLPrediction.ml_anomaly_band, MLPrediction.behavioral_anomaly_score, MLLabel)
+        .outerjoin(MLLabel, MLLabel.id == MLPrediction.outcome_label_id)
         .where(MLPrediction.model_id == model_row.id, MLPrediction.ml_anomaly_band.isnot(None)))).all()
     counts: Dict[str, int] = {}
     reviewed_rows = []
-    for band, outcome in preds:
+    populations = evidence_grade.empty_population_counts()
+    for band, score, label in preds:
         counts[band] = counts.get(band, 0) + 1
-        if outcome in ("positive", "negative"):
-            reviewed_rows.append({"band": band, "outcome": outcome, "score": None})
+        populations[evidence_grade.population_of(label)] += 1
+        if evidence_grade.is_evidence_grade(label):
+            reviewed_rows.append({"band": band, "outcome": label.label,
+                                  "score": float(score) if score is not None else None})
     table = evidence_stats.band_table(reviewed_rows)
     cov = evidence_stats.coverage(counts, table)
+    cov["populations"] = populations
+    cov["evidence_grade_definition"] = evidence_grade.DEFINITION_TEXT
 
     shift = report.get("temporal_shift")
     if shift is None and report.get("splits"):
@@ -434,8 +499,12 @@ async def compute_model_readiness(db, model_row, *, persist: bool = True) -> Dic
                                  evidence_coverage=cov, mapping_validated=bool(mapping),
                                  split_meta=(dataset.split_config if dataset is not None else None) or {})
     stamp = datetime.utcnow().isoformat() + "Z"
-    engineering["computed_post_hoc"] = scientific["computed_post_hoc"] = True
-    engineering["computed_at"] = scientific["computed_at"] = stamp
+    if not light:
+        engineering["computed_post_hoc"] = True
+        engineering["computed_at"] = stamp
+    scientific["computed_post_hoc"] = True
+    scientific["computed_at"] = stamp
+    scientific["computation"] = "live" if light else "full"
     if availability and "feature_availability_by_split" not in report:
         report["feature_availability_by_split"] = availability
     report["engineering_gate"] = engineering
@@ -451,4 +520,27 @@ async def compute_model_readiness(db, model_row, *, persist: bool = True) -> Dic
         await db.commit()
     return {"model_id": str(model_row.id), "version": model_row.version,
             "engineering_gate": engineering, "scientific_gate": scientific,
-            "reviewed_outcome_coverage": cov, "computed_post_hoc": True, "computed_at": stamp}
+            "reviewed_outcome_coverage": cov, "computed_post_hoc": True, "computed_at": stamp,
+            "computation": "live" if light else "full"}
+
+
+async def refresh_recorded_scientific_status(db, model_row, live: Dict[str, Any]) -> bool:
+    """Keep the RECORDED scientific status (what the mode gate reads) equal to
+    the live one. Writes only when it changed; never rewrites history - the
+    previous status and the recomputation stamp are kept in training_config."""
+    status = (live.get("scientific_gate") or {}).get("status")
+    if not status:
+        return False
+    cfg = dict(getattr(model_row, "training_config", None) or {})
+    recorded = dict((getattr(model_row, "evaluation_report", None) or {}).get("scientific_gate") or {})
+    if cfg.get("scientific_gate") == status and "criteria" in recorded:
+        return False
+    cfg["scientific_gate_previous"] = cfg.get("scientific_gate")
+    cfg["scientific_gate"] = status
+    cfg["scientific_gate_refreshed_at"] = live.get("computed_at")
+    model_row.training_config = cfg
+    report = dict(model_row.evaluation_report or {})
+    report["scientific_gate"] = live["scientific_gate"]
+    model_row.evaluation_report = report
+    await db.commit()
+    return True

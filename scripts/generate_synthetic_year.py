@@ -209,7 +209,8 @@ async def _guards(db, allow_development: bool):
     # The isolated regression stack carries the REGRESSION_ISOLATION_ID marker
     # (the same one scripts/regression_isolation_check.py asserts); without it
     # this is a development container and needs the explicit opt-in.
-    if not os.environ.get("REGRESSION_ISOLATION_ID") and not allow_development:
+    from regression_isolation_check import isolation_marker   # scripts/ is on sys.path when run as a script
+    if not isolation_marker() and not allow_development:
         problems.append("no REGRESSION_ISOLATION_ID marker — this is not the isolated regression stack; pass "
                         "--allow-development to write synthetic data into the development database")
     return problems
@@ -367,6 +368,7 @@ async def _remove(db):
         f"DELETE FROM ml_labels WHERE source = '{LABEL_SOURCE}'",
         f"DELETE FROM ml_drift_reports WHERE model_id IN (SELECT id FROM ml_models WHERE training_job_id LIKE '{JOB_PREFIX}%')",
         f"DELETE FROM ml_audit_log WHERE object_id IN (SELECT id::text FROM ml_models WHERE training_job_id LIKE '{JOB_PREFIX}%')",
+        f"DELETE FROM ml_audit_log WHERE object_type = 'ml_training_job' AND object_id LIKE '{JOB_PREFIX}%'",
     ]
     for s in stmts:
         await db.execute(text(s))

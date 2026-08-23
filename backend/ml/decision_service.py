@@ -48,9 +48,22 @@ GATE_CODES = (
     ("no administrator-approved shadow model", "NO_SHADOW_MODEL"),
     ("no active threshold set", "THRESHOLD_UNRESOLVED"),
     ("no validated ML->risk signal mapping", "SIGNAL_MAPPING_UNVALIDATED"),
+    ("scientific validity", "SCIENTIFIC_EVIDENCE_INSUFFICIENT"),
+    ("engineering readiness", "ENGINEERING_GATE_FAILED"),
     ("the anomaly model", "GATED"),
 )
 _UNSAFE_FRAGMENTS = ("/app", "/var/", "Traceback", "Exception", "postgres", "password", "token")
+
+
+def mode_gated_detail(report: Dict[str, Any]) -> Dict[str, Any]:
+    """The ONE 409 body for a refused mode change (both routes)."""
+    return {"error_code": "MODE_GATED",
+            "message": f"mode '{report['target_mode']}' cannot be activated yet",
+            "unmet_gates": list(report.get("unmet_gates") or []),
+            "gates": list(report.get("gates") or []),
+            "reasons": list(report.get("reasons") or []),
+            "current_mode": report.get("current_mode"),
+            "note": report.get("note")}
 
 
 def sanitize_gate_reasons(mode: str, reasons: List[str]) -> List[Dict[str, str]]:
@@ -156,12 +169,27 @@ class DecisionService:
             from backend.ml.threshold_service import threshold_service
             if await threshold_service.get_active(db, model_id=shadow_model.id) is None:
                 ml_reasons.append("no active threshold set for the shadow model")
+        if shadow_model is not None:
+            recorded = self._recorded_gates(shadow_model)
+            if recorded["engineering"] != "PASS":
+                ml_reasons.append(
+                    f"engineering readiness is {recorded['engineering']} for the shadow model "
+                    "(must be PASS)")
+            if recorded["scientific"] != "SUFFICIENT_EVIDENCE":
+                ml_reasons.append(
+                    f"scientific validity is {recorded['scientific']} for the shadow model "
+                    "(configured minimums unmet or not configured; reviewed evidence required)")
         mapping = await self._mapping_policy(db)
         if mapping is None:
             ml_reasons.append(
                 "no validated ML->risk signal mapping policy is active (profile "
                 "ml_anomaly_signal_map must be active AND calibration_status=validated "
                 "with evidence) — see the shadow evidence report")
+
+        # HYBRID needs everything ML needs, plus the release gate.
+        for reason in ml_reasons:
+            if reason not in hybrid_reasons:
+                hybrid_reasons.append(reason)
 
         current = self.current_mode()
         return {
@@ -231,13 +259,74 @@ class DecisionService:
             "gates": gates,
         }
 
-    async def validate_mode_change(self, db: AsyncSession, target_mode: str) -> List[str]:
-        """[] when the switch is permitted, else the exact unmet reasons."""
+    @staticmethod
+    def _recorded_gates(model_row) -> Dict[str, str]:
+        """Engineering / scientific gate status recorded on the model row
+        (training time, or the latest readiness recomputation)."""
+        cfg = dict(getattr(model_row, "training_config", None) or {})
+        report = dict(getattr(model_row, "evaluation_report", None) or {})
+        eng = cfg.get("engineering_gate") or (report.get("engineering_gate") or {}).get("status")
+        sci = cfg.get("scientific_gate") or (report.get("scientific_gate") or {}).get("status")
+        return {"engineering": str(eng or "NOT_RECORDED"), "scientific": str(sci or "NOT_RECORDED")}
+
+    async def mode_gate_report(self, db: AsyncSession, target_mode: str) -> Dict[str, Any]:
+        """THE authoritative gate evaluation for a mode change — used by
+        PUT /api/ml/config/mode, PUT /api/settings/ML_DECISION_MODE and the
+        page. One implementation, one answer.
+
+        Returns {target_mode, allowed, unmet_gates: [str], gates: [{gate,
+        label, status, ok, required}], reasons: [{mode, code, message}],
+        current_mode}. `gates` lists every gate with its state so the UI can
+        show ✓/✗ — satisfied ones included."""
+        from backend.ml.registry_service import registry_service
         if target_mode not in MODES:
-            return [f"unknown mode {target_mode!r} (valid: {', '.join(MODES)})"]
+            unmet = [f"unknown mode {target_mode!r} (valid: {', '.join(MODES)})"]
+            return {"target_mode": target_mode, "allowed": False, "unmet_gates": unmet,
+                    "gates": [], "reasons": sanitize_gate_reasons(target_mode, unmet),
+                    "current_mode": self.current_mode()}
         availability = await self.mode_availability(db)
         mode_info = availability["modes"][target_mode]
-        return [] if mode_info["available"] else list(mode_info["reasons"])
+        unmet = [] if mode_info["available"] else list(mode_info["reasons"])
+
+        shadow_model = await registry_service.get_stage_model(db, MODEL_TYPE_BEHAVIOR_ANOMALY, "shadow")
+        recorded = self._recorded_gates(shadow_model) if shadow_model is not None else             {"engineering": "NOT_RECORDED", "scientific": "NOT_RECORDED"}
+        threshold_ok = False
+        if shadow_model is not None:
+            from backend.ml.threshold_service import threshold_service
+            threshold_ok = await threshold_service.get_active(db, model_id=shadow_model.id) is not None
+        mapping = await self._mapping_policy(db) if shadow_model is not None else None
+        needs_authority = target_mode in ("ml", "hybrid")
+        gates = [
+            {"gate": "shadow_model", "label": "Shadow model",
+             "status": (f"ACTIVE (v{shadow_model.version})" if shadow_model is not None else "NONE"),
+             "ok": shadow_model is not None, "required": target_mode != "rules"},
+            {"gate": "engineering_readiness", "label": "Engineering readiness",
+             "status": recorded["engineering"], "ok": recorded["engineering"] == "PASS",
+             "required": needs_authority},
+            {"gate": "threshold_set", "label": "Active threshold set",
+             "status": "ACTIVE" if threshold_ok else "NONE", "ok": threshold_ok,
+             "required": needs_authority},
+            {"gate": "scientific_validity", "label": "Scientific validity",
+             "status": recorded["scientific"], "ok": recorded["scientific"] == "SUFFICIENT_EVIDENCE",
+             "required": needs_authority},
+            {"gate": "signal_mapping", "label": "Signal mapping",
+             "status": ("VALIDATED" if mapping is not None else "REQUIRES_VALIDATION"),
+             "ok": mapping is not None, "required": needs_authority},
+        ]
+        if target_mode == "hybrid":
+            gates.append({"gate": "release_gate", "label": "HYBRID release gate",
+                          "status": "GATED this release", "ok": False, "required": True})
+        return {"target_mode": target_mode, "allowed": not unmet, "unmet_gates": unmet,
+                "gates": gates, "reasons": sanitize_gate_reasons(target_mode, unmet),
+                "current_mode": availability["current_mode"],
+                "note": ("Rules remain authoritative. ML continues in shadow mode."
+                         if unmet and self.current_mode() == "shadow" else
+                         "Rules remain authoritative." if unmet else None)}
+
+    async def validate_mode_change(self, db: AsyncSession, target_mode: str) -> List[str]:
+        """[] when the switch is permitted, else the exact unmet reasons.
+        Thin view over mode_gate_report — never a second implementation."""
+        return list((await self.mode_gate_report(db, target_mode))["unmet_gates"])
 
     async def decide(self, db: AsyncSession, identity_id: str) -> DecisionOutcome:
         """THE decision router — the only place mode selection and fallback live.
@@ -280,10 +369,21 @@ class DecisionService:
                     "note": ("live decision is the rules result; the anomaly "
                              "model runs in parallel without affecting it")})
 
-        # hybrid: gated — rules serve, the gates are recorded.
-        gate_reasons = await self.validate_mode_change(db, requested)
+        # hybrid: gated — rules serve, the gates are recorded. The rules
+        # result is already sealed above; gate BOOKKEEPING must never turn
+        # it into an error (critical-path rule).
+        try:
+            gate_reasons = await self.validate_mode_change(db, requested)
+        except Exception as exc:
+            logger.warning("[ML_OPS] gate lookup failed for mode %s: %s — serving rules", requested, exc)
+            gate_reasons = [f"gate lookup unavailable ({type(exc).__name__})"]
         logger.warning("[ML_OPS] mode %s requested but gated — serving rules "
                        "(reasons recorded)", requested)
+        try:
+            from backend.ml import metrics as ml_metrics
+            ml_metrics.observe_fallback(FallbackReason.MODE_GATED.value)
+        except Exception:
+            pass
         provenance = DecisionProvenance(
             requested_mode=requested, executed_mode="rules", fallback=True,
             fallback_reason=FallbackReason.MODE_GATED.value,
@@ -315,7 +415,12 @@ class DecisionService:
         model_id: Optional[str] = None
         model_label: Optional[str] = None
 
-        policy = await self._mapping_policy(db)
+        result = None
+        try:
+            policy = await self._mapping_policy(db)
+        except Exception as exc:   # bookkeeping failure => rules, never an error
+            logger.warning("[ML_OPS] mapping policy lookup failed: %s — serving rules", exc)
+            policy = None
         if policy is None:
             fallback_reason = FallbackReason.SIGNAL_MAPPING_UNVALIDATED.value
         else:
@@ -341,16 +446,26 @@ class DecisionService:
                     except SignalMappingError as exc:
                         logger.warning("[ML_OPS] mapping %s refused prediction: %s", policy.version, exc)
                         fallback_reason = FallbackReason.INVALID_PREDICTION.value
-                try:
-                    prediction_id = await inference_service.persist_prediction(
-                        db, result, identity_id=identity_id, requested_mode="ml",
-                        actual_mode_used="ml" if signal is not None else "rules",
-                        fallback_reason=None if signal is not None else fallback_reason)
-                except Exception as exc:   # persistence failure never changes the decision
-                    logger.warning("[ML_OPS] ML-mode prediction persistence failed: %s", exc)
 
         assessment = await security_intelligence_service.assess_threat(
             db=db, identity_id=identity_id, anomaly_signal=signal)
+
+        # Persist AFTER the rules result so the prediction carries the event
+        # time (the label join is by event day or assessment id — a
+        # prediction without either could never receive an outcome).
+        if result is not None:
+            try:
+                prediction_id = await inference_service.persist_prediction(
+                    db, result, identity_id=identity_id, requested_mode="ml",
+                    actual_mode_used="ml" if signal is not None else "rules",
+                    fallback_reason=None if signal is not None else fallback_reason,
+                    event_time=getattr(assessment, "last_assessed", None))
+            except Exception as exc:   # persistence failure never changes the decision
+                logger.warning("[ML_OPS] ML-mode prediction persistence failed: %s", exc)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
         if signal is not None:
             provenance = DecisionProvenance(

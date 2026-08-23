@@ -1456,12 +1456,16 @@ async def get_threat_assessment(
         # touch the response (swallow-all inside).
         if outcome.shadow_planned:
             from backend.ml.shadow_service import shadow_service
+            from backend.routes.risk_assessments import _parse_iso, _persisted_value
+            persisted_row = stored if persisted else {}
             await shadow_service.run_shadow(
                 identity_id=identity_id,
-                rule_score=assessment.overall_risk_score,
-                rule_severity=assessment.severity or assessment.threat_level,
+                rule_score=_persisted_value(persisted_row, "total_risk_score", assessment.overall_risk_score),
+                rule_severity=_persisted_value(persisted_row, "severity",
+                                               assessment.severity or assessment.threat_level),
                 assessment_id=assessment_id,
-                event_time=getattr(assessment, "last_assessed", None))
+                event_time=_parse_iso(persisted_row.get("source_timestamp"))
+                or getattr(assessment, "last_assessed", None))
 
         _audit("threat_assessment", current_user, identity_id,
                duration_ms=int((time.monotonic() - started) * 1000),

@@ -124,6 +124,32 @@
         return el('div', 'mlops-json-block', text);
     }
 
+    function simpleTable(headers, rows) {
+        const table = el('table', 'mlops-table');
+        const thead = el('thead');
+        const hr = el('tr');
+        headers.forEach(function (h) { hr.appendChild(el('th', null, h)); });
+        thead.appendChild(hr);
+        table.appendChild(thead);
+        const tbody = el('tbody');
+        rows.forEach(function (cells) {
+            const tr = el('tr');
+            cells.forEach(function (c, i) {
+                const td = el('td', null, c === null || c === undefined ? 'N/A' : String(c));
+                if (i === cells.length - 1 && /^(PASS|FAIL|NOT_CONFIGURED|INSUFFICIENT_SAMPLE)$/.test(String(c))) {
+                    td.className = String(c) === 'PASS' ? 'mlops-status-ok'
+                        : String(c) === 'FAIL' ? 'mlops-status-bad' : 'mlops-status-warn';
+                }
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        const wrap = el('div', 'mlops-table-wrap');
+        wrap.appendChild(table);
+        return wrap;
+    }
+
     function kvList(pairs) {
         const dl = el('dl', 'mlops-kv');
         for (const pair of pairs) {
@@ -325,6 +351,7 @@
             renderLabelReadiness(data && data.label_readiness);
             renderDataReadiness(data && data.data_readiness);
             renderOptionalCapabilities(data && data.optional_capabilities);
+            renderModelTypeContract(data && data.model_types);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderCardError('mode-cards', err);
@@ -399,13 +426,36 @@
             loadOverview();
         } catch (err) {
             if (err.aborted) return;
-            let message = toText(err.message, 'mode change failed');
-            const gates = err.detailExtra && err.detailExtra.unmet_gates;
-            if (Array.isArray(gates) && gates.length) {
-                message += '\nUnmet gates:\n' + gates.map(function (g) { return '• ' + g; }).join('\n');
-            }
-            setNote('mode-action-note', message, 'bad');
+            setNote('mode-action-note', describeModeGate(err), 'bad');
         }
+    }
+
+    // The gate refusal names EVERY gate with its state (✓ satisfied /
+    // ✗ unmet), then the unmet reasons - the reader sees what is ready
+    // as well as what blocks. Rules stay authoritative either way.
+    function describeModeGate(err) {
+        const detail = err && err.detailExtra && typeof err.detailExtra === 'object' ? err.detailExtra : {};
+        const lines = [];
+        if (err && err.code === 'MODE_GATED') {
+            lines.push('ML decision authority is not ready.');
+        } else {
+            lines.push(toText(err && err.message, 'mode change failed'));
+        }
+        const gates = Array.isArray(detail.gates) ? detail.gates : [];
+        gates.forEach(function (g) {
+            if (!g || typeof g !== 'object') return;
+            const mark = g.ok ? '✓' : (g.required === false ? '–' : '✗');
+            lines.push(mark + ' ' + toText(g.label || g.gate) + ': ' + toText(g.status)
+                + (g.required === false ? ' (not required for this mode)' : ''));
+        });
+        const unmet = Array.isArray(detail.unmet_gates) ? detail.unmet_gates : [];
+        if (unmet.length) {
+            lines.push('Unmet:');
+            unmet.forEach(function (u) { lines.push('• ' + toText(u)); });
+        }
+        if (detail.note) lines.push(toText(detail.note));
+        else if (err && err.code === 'MODE_GATED') lines.push('Rules remain authoritative.');
+        return lines.join('\n');
     }
 
     async function pauseMl() {
@@ -486,6 +536,58 @@
         body.replaceChildren(frag);
     }
 
+    // Reserved model types are interfaces for future releases: the backend
+    // refuses to train them (MODEL_TYPE_NOT_IMPLEMENTED) and the page must
+    // never offer a request it knows will be refused. Both selects are
+    // rebuilt from the capability contract the overview returns.
+    function renderModelTypeContract(types) {
+        if (!Array.isArray(types) || !types.length) return;
+        state.modelTypes = types;
+        ['training-model-type', 'policy-model-type'].forEach(function (id) {
+            const select = getElement(id);
+            if (!select) return;
+            const previous = select.value;
+            const frag = document.createDocumentFragment();
+            types.forEach(function (t) {
+                if (!t || typeof t !== 'object') return;
+                const option = document.createElement('option');
+                option.value = toText(t.model_type);
+                const trainable = t.trainable === true;
+                option.textContent = toText(t.model_type) + (trainable
+                    ? ' — Available'
+                    : ' — Reserved / Future · not trainable');
+                option.dataset.trainable = trainable ? 'true' : 'false';
+                if (id === 'training-model-type' && !trainable) option.disabled = true;
+                frag.appendChild(option);
+            });
+            select.replaceChildren(frag);
+            const keep = [...select.options].find(function (o) { return o.value === previous && !o.disabled; });
+            select.value = keep ? previous : (types.find(function (t) { return t.trainable; }) || {}).model_type || '';
+        });
+        updateTrainingAvailability();
+    }
+
+    function selectedModelTypeContract() {
+        const select = getElement('training-model-type');
+        const value = select ? select.value : 'behavior_anomaly_model';
+        return (state.modelTypes || []).find(function (t) { return t.model_type === value; }) || null;
+    }
+
+    function updateTrainingAvailability() {
+        const contract = selectedModelTypeContract();
+        const startBtn = getElement('start-training-btn');
+        const note = getElement('model-type-note');
+        const trainable = !contract || contract.trainable === true;
+        if (startBtn && !state.activeJobId) startBtn.disabled = !trainable;
+        if (note) {
+            note.textContent = contract
+                ? (trainable ? 'Status: Available — ' + toText(contract.note)
+                             : 'Status: Reserved / Future — Not trainable. ' + toText(contract.note))
+                : '';
+            note.classList.toggle('note-bad', !trainable);
+        }
+    }
+
     function renderOptionalCapabilities(caps) {
         const body = getElement('optional-capabilities-body');
         if (!body) return;
@@ -525,6 +627,24 @@
     // Model registry
     // ============================================
 
+    function renderEvidenceModelFilter(items) {
+        const select = getElement('shadow-model-select');
+        if (!select) return;
+        const previous = select.value;
+        const frag = document.createDocumentFragment();
+        const all = el('option', null, 'all models');
+        all.value = '';
+        frag.appendChild(all);
+        items.forEach(function (m) {
+            if (!m || !m.id) return;
+            const option = el('option', null, toText(m.model_type) + ' v' + formatMetric(m.version) + ' · ' + toText(m.stage));
+            option.value = String(m.id);
+            frag.appendChild(option);
+        });
+        select.replaceChildren(frag);
+        if ([...select.options].some(function (o) { return o.value === previous; })) select.value = previous;
+    }
+
     async function loadModels() {
         const req = beginRequest('models');
         const tbody = getElement('models-table-body');
@@ -535,6 +655,7 @@
             });
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
+            renderEvidenceModelFilter(items);
             const frag = document.createDocumentFragment();
             if (!items.length) {
                 const row = el('tr');
@@ -712,8 +833,38 @@
                 frag.appendChild(el('div', 'mlops-subheading', 'Readiness gates (two different questions)'));
                 frag.appendChild(kvList([
                     ['Engineering gate', toText(eg.status, 'NOT_RECORDED') + (Array.isArray(eg.failed) && eg.failed.length ? ' — failed: ' + eg.failed.join(', ') : '') + ' — ' + toText(eg.meaning)],
-                    ['Scientific gate', toText(sg.status, 'NOT_RECORDED') + ' — ' + (Array.isArray(sg.reasons) ? sg.reasons.map(function (r) { return toText(r.code); }).join(', ') : '') + ' — ' + toText(sg.meaning)]
+                    ['Scientific gate', toText(sg.status, 'NOT_RECORDED') + ' — ' + (Array.isArray(sg.reasons) ? sg.reasons.map(function (r) { return toText(r.code); }).join(', ') : '') + ' — ' + toText(sg.meaning)
+                        + (sg.computation ? ' (' + toText(sg.computation) + ' computation' + (sg.computed_at ? ' at ' + formatDateTime(sg.computed_at) : '') + ')' : '')]
                 ]));
+                if (Array.isArray(sg.criteria) && sg.criteria.length) {
+                    frag.appendChild(el('div', 'mlops-subheading', 'Scientific criteria — measured / required / status'));
+                    frag.appendChild(simpleTable(['Criterion', 'Measured', 'Required', 'Status'], sg.criteria.map(function (c) {
+                        const measured = (c.measured && typeof c.measured === 'object')
+                            ? Object.keys(c.measured).map(function (k) { return k + '=' + formatMetric(c.measured[k]); }).join(', ')
+                            : (typeof c.measured === 'number' ? formatMetric(c.measured, 2) : toText(c.measured, 'N/A'));
+                        return [toText(c.criterion) + (c.setting ? ' (' + c.setting + ')' : ''), measured,
+                                c.required === null || c.required === undefined ? 'not configured' : String(c.required),
+                                toText(c.status)];
+                    })));
+                    frag.appendChild(el('div', 'mlops-mode-desc', 'NOT_CONFIGURED = no minimum is set for this criterion (ML_SCIENTIFIC_* / ML_EVIDENCE_* settings). No default is assumed; the gate stays INSUFFICIENT_EVIDENCE until minimums are configured from reviewed policy and met.'));
+                }
+                if (Array.isArray(eg.failed) || (eg.checks && typeof eg.checks === 'object')) {
+                    const checks = eg.checks && typeof eg.checks === 'object' ? eg.checks : {};
+                    const names = Object.keys(checks);
+                    if (names.length) {
+                        frag.appendChild(el('div', 'mlops-subheading', 'Engineering checks'));
+                        frag.appendChild(simpleTable(['Check', 'Actual', 'Required', 'Status'], names.map(function (n) {
+                            const c = checks[n] || {};
+                            const fmt = function (v) { return (v && typeof v === 'object') ? JSON.stringify(v) : toText(v, 'N/A'); };
+                            return [n, fmt(c.actual), fmt(c.required), c.passed ? 'PASS' : 'FAIL'];
+                        })));
+                    }
+                }
+                const recompute = el('button', 'mlops-btn', 'Recompute readiness (no retraining)');
+                recompute.type = 'button';
+                recompute.title = 'Re-evaluates both gates from the registered artifact, dataset, current reviewed evidence and mapping status; recorded on the model as computed_post_hoc. Nothing here marks a model validated.';
+                recompute.addEventListener('click', function () { recomputeReadiness(model.id); });
+                frag.appendChild(recompute);
                 const m = sg.metrics && typeof sg.metrics === 'object' ? sg.metrics : {};
                 const app = m.appearances_per_entity && typeof m.appearances_per_entity === 'object' ? m.appearances_per_entity : {};
                 frag.appendChild(kvList([
@@ -1101,11 +1252,17 @@
         const startBtn = getElement('start-training-btn');
         const cancelBtn = getElement('cancel-training-btn');
         if (startBtn) startBtn.disabled = false;
+        updateTrainingAvailability();
         if (cancelBtn) cancelBtn.hidden = true;
     }
 
     async function startTraining() {
         if (state.activeJobId) return;
+        const contract = selectedModelTypeContract();
+        if (contract && contract.trainable !== true) {
+            renderJobStatus(null, toText(contract.model_type) + ' is a reserved interface (Reserved / Future) — not trainable in this release.');
+            return;
+        }
         const typeSelect = getElement('training-model-type');
         const algoSelect = getElement('training-algorithm');
         const datasetSelect = getElement('training-dataset-select');
@@ -1145,6 +1302,8 @@
             });
         } catch (err) {
             if (startBtn) startBtn.disabled = false;
+            updateTrainingAvailability();
+        updateTrainingAvailability();
             if (err.aborted) return;
             renderJobStatus(null,
                 toText(err.code, 'ERROR') + ': ' + toText(err.message, 'training failed to schedule'));
@@ -1334,6 +1493,62 @@
 
     /** Shadow evidence — what a reviewer needs to judge a signal mapping.
      *  Descriptive only; the mapping decision stays REQUIRES_VALIDATION. */
+    async function recomputeReadiness(modelId) {
+        try {
+            const out = await api('/api/ml/models/' + encodeURIComponent(modelId) + '/readiness',
+                { method: 'POST', timeout: 120000, body: {} });
+            setNote('registry-note', 'Readiness recomputed: engineering '
+                + toText(out && out.engineering_gate && out.engineering_gate.status)
+                + ' · scientific ' + toText(out && out.scientific_gate && out.scientific_gate.status), 'ok');
+            loadModelDetail(modelId);
+            loadOverview();
+        } catch (err) {
+            if (err.aborted) return;
+            setNote('registry-note', toText(err.code, 'ERROR') + ': ' + toText(err.message, 'readiness recomputation failed'), 'bad');
+        }
+    }
+
+    function renderEvidenceBlock(ev) {
+        const frag = document.createDocumentFragment();
+        if (!ev || typeof ev !== 'object') return frag;
+        const adequacy = ev.adequacy && typeof ev.adequacy === 'object' ? ev.adequacy : {};
+        const cov = ev.coverage && typeof ev.coverage === 'object' ? ev.coverage : {};
+        const pops = ev.populations && typeof ev.populations === 'object' ? ev.populations : {};
+        frag.appendChild(el('div', 'mlops-subheading', 'Evidence (reviewed outcomes only — ' + toText(ev.note) + ')'));
+        frag.appendChild(kvList([
+            ['Adequacy', toText(adequacy.status) + (adequacy.detail ? ' — ' + toText(adequacy.detail) : '')
+                + (adequacy.shortfalls && typeof adequacy.shortfalls === 'object' && Object.keys(adequacy.shortfalls).length
+                    ? ' — shortfalls: ' + JSON.stringify(adequacy.shortfalls) : '')],
+            ['Reviewed / predictions', formatMetric(cov.reviewed_total) + ' / ' + formatMetric(cov.predictions_total)
+                + ' (coverage ' + formatMetric(cov.review_coverage_overall, 4) + ')'],
+            ['Populations', ['blind_reviewed', 'revealed_reviewed', 'self_reviewed', 'unreviewed', 'weak', 'synthetic_or_seed', 'disputed', 'retracted', 'unknown_outcome']
+                .map(function (k) { return k + '=' + formatMetric(pops[k]); }).join(' · ')],
+            ['Selection methods', Object.keys(ev.review_selection_methods || {}).map(function (k) { return k + '=' + formatMetric(ev.review_selection_methods[k]); }).join(', ') || 'none'],
+            ['Sampling caveat', toText(ev.sampling_caveat)]
+        ]));
+        const bands = ev.bands && typeof ev.bands === 'object' ? ev.bands : {};
+        const bandNames = Object.keys(bands);
+        if (bandNames.length) {
+            frag.appendChild(simpleTable(['Band', 'Reviewed', 'Positive', 'Negative', 'Positive rate', 'Wilson 95% CI'], bandNames.map(function (b) {
+                const t = bands[b] || {};
+                const ci = t.wilson_95 && typeof t.wilson_95 === 'object' ? formatMetric(t.wilson_95.low, 3) + ' – ' + formatMetric(t.wilson_95.high, 3) : 'N/A';
+                return [b, formatMetric(t.reviewed_count), formatMetric(t.positive_count), formatMetric(t.negative_count), formatMetric(t.positive_rate, 3), ci];
+            })));
+        }
+        const stat = function (label, obj, keys) {
+            if (!obj || typeof obj !== 'object') return [label, 'N/A'];
+            if (obj.status) return [label, toText(obj.status) + (obj.n !== undefined ? ' (n=' + formatMetric(obj.n) + ')' : '') + (obj.reason ? ' — ' + toText(obj.reason) : '')];
+            return [label, keys.map(function (k) { return k + '=' + formatMetric(obj[k], 4); }).join(', ')];
+        };
+        frag.appendChild(kvList([
+            stat('Monotonic trend (Cochran–Armitage)', ev.monotonicity_trend, ['statistic', 'p_value', 'reviewed_total']),
+            stat('Spearman score↔outcome', ev.spearman_score_vs_outcome, ['rho', 'p_value', 'n']),
+            stat('Ranking (PR-AUC / ROC-AUC / precision@5% / lift@5%)', ev.ranking, ['pr_auc', 'roc_auc', 'precision_at_top_5_pct', 'lift_at_top_5_pct']),
+            ['Band separation', toText(ev.band_separation)]
+        ]));
+        return frag;
+    }
+
     async function openShadowEvidence() {
         const req = beginRequest('shadow-evidence');
         const drawer = getElement('model-detail-drawer');
@@ -1345,16 +1560,24 @@
         if (title) title.textContent = 'Shadow evidence (offline mapping review)';
         body.replaceChildren(el('div', 'mlops-mode-desc', 'Loading…'));
         try {
-            const report = await api('/api/ml/shadow/evidence', {
-                params: { days: daysSelect ? daysSelect.value : 90 }, signal: req.signal
-            });
+            const modelSelect = getElement('shadow-model-select');
+            const params = { days: daysSelect ? daysSelect.value : 90 };
+            if (modelSelect && modelSelect.value) params.model_id = modelSelect.value;
+            const report = await api('/api/ml/shadow/evidence', { params: params, signal: req.signal });
             if (!req.isCurrent()) return;
             const frag = document.createDocumentFragment();
             frag.appendChild(el('div', 'mlops-mode-desc', toText(report.note)));
+            const dq = report.data_quality && typeof report.data_quality === 'object' ? report.data_quality : {};
+            const pops = report.populations && typeof report.populations === 'object' ? report.populations : {};
+            const excluded = report.excluded_non_evidence_labels && typeof report.excluded_non_evidence_labels === 'object' ? report.excluded_non_evidence_labels : {};
             frag.appendChild(kvList([
                 ['Window', formatMetric(report.window_days) + ' days'],
                 ['Predictions', formatMetric(report.predictions) + (toBoolean(report.truncated) ? ' (truncated)' : '')],
-                ['Mapping decision', toText(report.mapping_decision)]
+                ['Mapping decision', toText(report.mapping_decision)],
+                ['Evidence-grade definition', toText(report.evidence_grade_definition)],
+                ['Populations (all predictions)', Object.keys(pops).map(function (k) { return k + '=' + formatMetric(pops[k]); }).join(' · ')],
+                ['Excluded non-evidence labels', Object.keys(excluded).length ? Object.keys(excluded).map(function (k) { return k + '=' + formatMetric(excluded[k]); }).join(', ') : 'none'],
+                ['Duplicate comparison rows (historical, not counted)', formatMetric(dq.duplicate_comparisons)]
             ]));
             const models = (report.models && typeof report.models === 'object') ? Object.values(report.models) : [];
             if (!models.length) frag.appendChild(el('div', 'mlops-mode-desc', 'No shadow predictions in the window.'));
@@ -1376,6 +1599,7 @@
                         + ', positive=' + formatMetric(b.positive) + ', negative=' + formatMetric(b.negative)
                         + ', positive share of reviewed=' + formatMetric(b.positive_share_of_reviewed, 4)));
                 }
+                frag.appendChild(renderEvidenceBlock(m.evidence));
                 frag.appendChild(el('div', 'mlops-subheading', 'Rule severity × band · disagreement · score quantiles'));
                 frag.appendChild(jsonBlock({
                     rule_severity_x_band: m.rule_severity_x_band,
@@ -1561,7 +1785,11 @@
                     + ', event: ' + formatDateTime(label.event_time)));
                 if (label.status === 'active') {
                     const actionRow = el('div');
-                    for (const action of ['confirm', 'dispute', 'retract']) {
+                    const actions = label.label_kind === 'manual' ? ['confirm', 'dispute', 'retract'] : ['dispute', 'retract'];
+                    if (label.label_kind !== 'manual') {
+                        actionRow.appendChild(el('span', 'mlops-mode-desc', 'weak label — never confirmable into reviewed evidence'));
+                    }
+                    for (const action of actions) {
                         const btn = el('button', 'mlops-btn', action);
                         btn.type = 'button';
                         btn.addEventListener('click', function () { reviewLabel(label.id, action); });
@@ -1649,25 +1877,38 @@
         // (which is what it is) and convert to the true UTC instant.
         const eventTime = new Date(eventRaw).toISOString();
         const source = sourceInput && sourceInput.value.trim() ? sourceInput.value.trim() : 'analyst_review';
+        const methodSelect = getElement('label-selection-method');
+        const assessmentInput = getElement('label-assessment-id');
+        const notesInput = getElement('label-notes');
+        const body = {
+            subject_id: subjectId,
+            label: valueSelect ? valueSelect.value : 'negative',
+            label_kind: kindSelect ? kindSelect.value : 'manual',
+            source: source,
+            event_time: eventTime,
+            // Recorded from THIS page, where bands are visible: never blind.
+            selection: { method: methodSelect && methodSelect.value ? methodSelect.value : 'natural',
+                         entry_point: 'ml_ops', ml_observation_revealed: true }
+        };
+        if (assessmentInput && assessmentInput.value.trim()) body.assessment_id = assessmentInput.value.trim();
+        if (notesInput && notesInput.value.trim()) body.notes = notesInput.value.trim();
         try {
-            const result = await api('/api/ml/labels', {
-                method: 'POST',
-                body: {
-                    subject_id: subjectId,
-                    label: valueSelect ? valueSelect.value : 'negative',
-                    label_kind: kindSelect ? kindSelect.value : 'manual',
-                    source: source,
-                    event_time: eventTime
-                }
-            });
+            const result = await api('/api/ml/labels', { method: 'POST', body: body });
             setNote('label-form-note',
                 toBoolean(result && result.deduplicated)
                     ? 'Identical label already existed — no duplicate created.'
-                    : 'Label created. Manual labels must pass review before they count.', 'ok');
+                    : 'Label created (unreviewed, recorded with the ML band visible). Manual labels must pass review before they count.', 'ok');
             loadLabels();
             loadOverview();
         } catch (err) {
             if (err.aborted) return;
+            if (err.code === 'LABEL_CONFLICT') {
+                const extra = err.detailExtra || {};
+                setNote('label-form-note', 'A different label (' + toText(extra.existing_label)
+                    + ') already exists for this subject/source/day — your value was NOT recorded. '
+                    + 'Correct it through "correct →" on label ' + toText(extra.existing_label_id) + ' in the queue (history is kept).', 'bad');
+                return;
+            }
             setNote('label-form-note',
                 toText(err.code, 'ERROR') + ': ' + toText(err.message, 'label creation failed'), 'bad');
         }
@@ -1866,7 +2107,11 @@
         'shadow-evidence-btn': 'Per-band evidence with reviewed outcomes, for reviewing a future ML→risk mapping. Read-only; decision stays REQUIRES_VALIDATION.',
         'predictions-fallback-only': 'Show only predictions where the model did not score and rules served alone.',
         'run-drift-btn': 'Compute PSI/KS/JS drift now. Observation only; never retrains.',
-        'training-model-type': 'Only behavior_anomaly_model trains this release; the others are reserved interfaces.',
+        'training-model-type': 'Capability contract from the backend: Available types train; Reserved / Future types are interfaces for later releases and cannot be submitted (the API would refuse them with MODEL_TYPE_NOT_IMPLEMENTED).',
+        'label-selection-method': 'How this review was selected. Anything other than natural marks a stratified subset: positive rates then describe the selection, not population prevalence.',
+        'label-assessment-id': 'Anchor the outcome to a RESOLVED assessment so it links to that assessment\u2019s shadow prediction exactly (otherwise the link is by subject and event day).',
+        'label-notes': 'Free text for reviewers. Stored on the label only; never written to the call log.',
+        'shadow-model-select': 'Restrict the evidence report to one registered model version.',
         'training-algorithm': 'isolation_forest (sklearn, seeded) or mad_baseline (robust median/MAD). Both unsupervised.',
         'training-dataset-select': 'Reuse a built dataset (verified by checksum AND Parquet file hash) instead of building a new one.',
         'training-seed-input': 'Random seed recorded with the model (default 42).',
@@ -2173,6 +2418,7 @@
         });
         on('create-label-btn', 'click', createLabel);
         on('policy-model-type', 'change', loadPolicy);
+        on('training-model-type', 'change', updateTrainingAvailability);
         on('audit-prev', 'click', function () {
             if (state.auditPage > 1) { state.auditPage -= 1; loadAudit(); }
         });

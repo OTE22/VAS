@@ -227,9 +227,10 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
     from sqlalchemy import select
     from db_models import MLLabel, MLModel, MLPrediction, MLShadowComparison
 
+    from backend.ml import evidence_grade
+
     floor = datetime.utcnow() - timedelta(days=days)
-    query = (select(MLPrediction, MLShadowComparison, MLLabel)
-             .outerjoin(MLShadowComparison, MLShadowComparison.prediction_id == MLPrediction.id)
+    query = (select(MLPrediction, MLLabel)
              .outerjoin(MLLabel, MLLabel.id == MLPrediction.outcome_label_id)
              .where(MLPrediction.created_at >= floor,
                     MLPrediction.behavioral_anomaly_score.isnot(None),
@@ -239,17 +240,45 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
             query = query.where(MLPrediction.model_id == uuid_mod.UUID(str(model_id)))
         except (ValueError, TypeError):
             return {"status": "failed", "code": "INVALID_MODEL_ID"}
-    rows = (await db.execute(query.order_by(MLPrediction.created_at.desc()).limit(50000))).all()
+    pred_rows = (await db.execute(query.order_by(MLPrediction.created_at.desc()).limit(50000))).all()
+
+    # Comparisons: analytically ONE per prediction (the earliest). Historical
+    # duplicate rows are never deleted; they are counted and reported as a
+    # data-quality fact instead of inflating every statistic through the join.
+    comparison_of: Dict[Any, Any] = {}
+    duplicate_comparisons = 0
+    if pred_rows:
+        ids = [pred.id for pred, _ in pred_rows]
+        cmp_rows = (await db.execute(
+            select(MLShadowComparison)
+            .where(MLShadowComparison.prediction_id.in_(ids))
+            .order_by(MLShadowComparison.prediction_id, MLShadowComparison.created_at))).scalars().all()
+        for cmp in cmp_rows:
+            if cmp.prediction_id in comparison_of:
+                duplicate_comparisons += 1
+                continue
+            comparison_of[cmp.prediction_id] = cmp
+    rows = [(pred, comparison_of.get(pred.id), label) for pred, label in pred_rows]
 
     report: Dict[str, Any] = {
         "status": "ok",
         "window_days": days,
         "mapping_decision": "REQUIRES_VALIDATION",
+        "evidence_grade_definition": evidence_grade.DEFINITION_TEXT,
         "note": ("descriptive evidence only: reviewed outcomes are analyst decisions about "
                  "assessments, not ground truth about anomaly; rule severity and anomaly "
                  "bands are different concepts; no score delta and no threshold is derived"),
         "predictions": len(rows),
         "truncated": len(rows) >= 50000,
+        "data_quality": {
+            "duplicate_comparisons": duplicate_comparisons,
+            "note": ("duplicate comparison rows are historical and left in place; the report "
+                     "uses the earliest comparison per prediction"),
+        },
+        # every linked label lands in exactly one population; predictions
+        # without any label are 'unreviewed' — populations are never mixed
+        "populations": evidence_grade.empty_population_counts(),
+        "excluded_non_evidence_labels": {},
         "models": {},
     }
     by_model: Dict[str, Dict[str, Any]] = {}
@@ -262,8 +291,21 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
             "bands": {}, "rule_severity_x_band": {}, "operational_disagreement": {},
             "scores": {"positive": [], "negative": [], "all": []},
             "_reviewed_rows": [], "_selection_methods": {},
+            "populations": evidence_grade.empty_population_counts(),
         })
         entry["predictions"] += 1
+        # Raw-source retention: identity deletion cascades the raw appearances
+        # and SET NULLs person_id; the prediction, its immutable snapshot and
+        # any outcome survive (audit reproducibility) but the features can no
+        # longer be recomputed from source events (raw recomputability).
+        if pred.subject_type == "identity" and pred.person_id is None:
+            entry["source_events_not_retained"] = entry.get("source_events_not_retained", 0) + 1
+        population = evidence_grade.population_of(label)
+        entry["populations"][population] += 1
+        report["populations"][population] += 1
+        if label is not None and evidence_grade.is_non_evidence_source(label.source):
+            src = str(label.source)[:64]
+            report["excluded_non_evidence_labels"][src] = report["excluded_non_evidence_labels"].get(src, 0) + 1
         if pred.threshold_version:
             entry["threshold_versions"].add(pred.threshold_version)
         band = pred.ml_anomaly_band
@@ -271,8 +313,7 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
                                               "positive": 0, "negative": 0, "unknown": 0})
         b["n"] += 1
         entry["scores"]["all"].append(float(pred.behavioral_anomaly_score))
-        reviewed = (label is not None and label.label_kind == "manual"
-                    and label.review_status == "reviewed" and label.status == "active")
+        reviewed = evidence_grade.is_evidence_grade(label)
         if reviewed:
             entry["with_reviewed_outcome"] += 1
             b["with_reviewed_outcome"] += 1
@@ -284,6 +325,10 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
                 sel = getattr(label, "selection", None) or {}
                 method = str(sel.get("method") or "natural") if isinstance(sel, dict) else "natural"
                 entry["_selection_methods"][method] = entry["_selection_methods"].get(method, 0) + 1
+                # recorded blind vs revealed (independent of who reviewed it)
+                revealed = sel.get("ml_observation_revealed") if isinstance(sel, dict) else None
+                key_rv = "_recorded_revealed" if revealed is True else "_recorded_blind"
+                entry[key_rv] = entry.get(key_rv, 0) + 1
         if cmp is not None:
             sev = cmp.rule_threat_severity or "unknown"
             xb = entry["rule_severity_x_band"].setdefault(sev, {})
@@ -311,6 +356,15 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
             "ranking": evidence_stats.ranking_metrics(reviewed_rows),
             "band_separation": evidence_stats.band_separation_note(table),
             "review_selection_methods": selection_methods,
+            "populations": entry["populations"],
+            # population split (each label in exactly one; self-review wins)
+            "blind_reviewed": entry["populations"][evidence_grade.POP_BLIND_REVIEWED],
+            "revealed_reviewed": entry["populations"][evidence_grade.POP_REVEALED_REVIEWED],
+            "self_reviewed": entry["populations"][evidence_grade.POP_SELF_REVIEWED],
+            # how evidence-grade outcomes were RECORDED (blind vs revealed),
+            # regardless of reviewer identity
+            "recorded_blind": entry.pop("_recorded_blind", 0),
+            "recorded_revealed": entry.pop("_recorded_revealed", 0),
             "sampling_caveat": ("reviewed outcomes under any method other than 'natural' are a "
                                 "stratified subset: positive rates are conditional on selection, "
                                 "not population prevalence" if any(m != "natural" for m in selection_methods)
@@ -323,6 +377,13 @@ async def shadow_evidence_report(db, *, days: int = 90, model_id: Optional[str] 
             name: (_quantiles(vals) if vals else None) for name, vals in scores.items()}
         entry["reviewed_outcome_coverage"] = (round(entry["with_reviewed_outcome"] / entry["predictions"], 4)
                                               if entry["predictions"] else None)
+        entry["source_retention"] = {
+            "predictions_with_deleted_subject": entry.pop("source_events_not_retained", 0),
+            "audit_reproducibility": "prediction, snapshot features, comparison and outcome rows are immutable "
+                                     "and survive identity deletion",
+            "raw_recomputability": "NOT available for a deleted subject: its raw appearances are deleted with "
+                                   "the identity, so features cannot be recomputed from source events",
+        }
         entry["threshold_versions"] = sorted(entry["threshold_versions"])
         report["models"][key] = entry
 

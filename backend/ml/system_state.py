@@ -8,10 +8,13 @@ Path-free by construction: file names only, never directories.
 """
 
 import os
+import logging
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from backend.ml.constants import (
     FEATURE_SET_VERSION, MODEL_TYPE_BEHAVIOR_ANOMALY, PREVIOUS_FEATURE_SET_VERSION)
@@ -117,6 +120,64 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
                        "message": f"{models_missing_file} registered shadow/validated model(s) point at an "
                                   "artifact file that is absent — they cannot be served or approved."})
 
+    # Non-evidence labels present (demo seed / synthetic corpus): they are
+    # EXCLUDED from every evidence statistic by the canonical filter, and
+    # their presence is stated - never silently cleaned up.
+    non_evidence_by_source: Dict[str, int] = {}
+    try:
+        from sqlalchemy import or_ as sa_or
+        from db_models import MLLabel
+        from backend.ml.evidence_grade import NON_EVIDENCE_SOURCE_PREFIXES
+        rows = (await db.execute(
+            select(MLLabel.source, sa_func.count())
+            .where(sa_or(*[MLLabel.source.ilike(p + "%") for p in NON_EVIDENCE_SOURCE_PREFIXES]))
+            .group_by(MLLabel.source))).all()
+        non_evidence_by_source = {str(src): int(n) for src, n in rows}
+    except Exception:
+        non_evidence_by_source = {}
+    if non_evidence_by_source:
+        alerts.append({"code": "NON_EVIDENCE_LABELS_PRESENT", "level": "warn",
+                       "message": (f"{sum(non_evidence_by_source.values())} label(s) from demo-seed / "
+                                   "synthetic sources exist (" +
+                                   ", ".join(f"{k}: {v}" for k, v in sorted(non_evidence_by_source.items())) +
+                                   "). They are excluded from all evidence statistics; remove them "
+                                   "with the generating script before production use.")})
+
+    # ACTIVE feature definitions whose computation has no registered builder
+    # cannot be computed by anything (today: the seeded pair feature). Reported
+    # as a fact - never silently deactivated.
+    unreachable_definitions = []
+    try:
+        from backend.ml.feature_builders import BUILDERS
+        rows = (await db.execute(
+            select(MLFeatureDefinition.name, MLFeatureDefinition.entity_type, MLFeatureDefinition.computation)
+            .where(MLFeatureDefinition.is_active.is_(True)))).all()
+        unreachable_definitions = [
+            {"name": name, "entity_type": etype, "computation": comp}
+            for name, etype, comp in rows if comp not in BUILDERS]
+    except Exception:
+        unreachable_definitions = []
+    if unreachable_definitions:
+        alerts.append({"code": "FEATURE_DEFINITION_UNREACHABLE", "level": "info",
+                       "message": ("active feature definition(s) with no registered builder - declared, "
+                                   "never computed: " +
+                                   ", ".join(f"{d['name']} ({d['entity_type']}/{d['computation']})"
+                                             for d in unreachable_definitions))})
+
+    # LIVE scientific readiness of the shadow model: reviewed evidence and
+    # the mapping status change over time, the training-time snapshot does
+    # not. The recorded status (what the mode gate reads) is refreshed when
+    # it differs - never rewritten otherwise.
+    live_readiness = None
+    if shadow is not None:
+        try:
+            from backend.ml.readiness import compute_model_readiness, refresh_recorded_scientific_status
+            live_readiness = await compute_model_readiness(db, shadow, persist=False, light=True)
+            await refresh_recorded_scientific_status(db, shadow, live_readiness)
+        except Exception:
+            logger.warning("[ML_OPS] live readiness computation failed", exc_info=True)
+            live_readiness = None
+
     availability = await decision_service.mode_availability(db)
     try:
         from sqlalchemy import text as sa_text
@@ -127,13 +188,33 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
     # ---- the ML contract, in the exact vocabulary operators read ----------
     ml_mode_available = availability["modes"]["ml"]["available"]
     mapping = await decision_service._mapping_policy(db)
+    if mapping is not None:
+        # A validated mapping row is created out-of-band (no endpoint writes
+        # one). The first time the system sees a policy version it records
+        # the fact, so even an out-of-band row leaves an audit trail.
+        try:
+            from db_models import MLAuditLog
+            from backend.ml.audit import ml_audit
+            seen = (await db.execute(
+                select(MLAuditLog.id).where(MLAuditLog.action == "mapping_observed",
+                                            MLAuditLog.object_id == str(mapping.version)[:64])
+                .limit(1))).scalar_one_or_none()
+            if seen is None:
+                await ml_audit(db, action="mapping_observed", actor_username="system",
+                               object_type="ml_signal_mapping", object_id=str(mapping.version),
+                               after={"kind": mapping.kind, "scope": mapping.scope,
+                                      "calibration_status": mapping.calibration_status})
+                await db.commit()
+        except Exception:
+            logger.debug("[ML_OPS] mapping_observed audit failed", exc_info=True)
     contract = {
         "dataset": "VALID_FOR_EXPERIMENTATION",
         "feature_set": "ACTIVE",
         "model": ("SHADOW_APPROVED" if shadow and shadow_compatible
                   else "SHADOW_INCOMPATIBLE" if shadow else "NONE"),
         "engineering_readiness": _gate_of(shadow, "engineering_gate"),
-        "scientific_validity": _gate_of(shadow, "scientific_gate") or "INSUFFICIENT_EVIDENCE",
+        "scientific_validity": ((live_readiness or {}).get("scientific_gate") or {}).get("status")
+                               or _gate_of(shadow, "scientific_gate") or "INSUFFICIENT_EVIDENCE",
         "signal_mapping": "VALIDATED" if mapping else "REQUIRES_VALIDATION",
         "ml_decision_authority": "ENABLED" if (ml_mode_available and availability["current_mode"] == "ml") else "DISABLED",
         "rules": "AUTHORITATIVE",
@@ -146,8 +227,10 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
     }
     try:
         from backend.ml import metrics as ml_metrics
+        coverage = ((live_readiness or {}).get("reviewed_outcome_coverage") or {}).get("review_coverage_overall")
         ml_metrics.set_state(ml_authority=contract["ml_decision_authority"] == "ENABLED",
-                             mapping_validated=bool(mapping), shadow_model=shadow)
+                             mapping_validated=bool(mapping), shadow_model=shadow,
+                             review_coverage=(float(coverage) if coverage is not None else None))
     except Exception:
         pass
 
@@ -179,6 +262,12 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
         "models": {"by_stage": by_stage, "missing_artifact_files": models_missing_file},
         "call_log": {"enabled": True, "sink": "application log (tag [MLOPS_CALL])",
                      "readable_via": "/api/ml/calls"},
+        "scientific_readiness": ((live_readiness or {}).get("scientific_gate")
+                                 if live_readiness else None),
+        "evidence_populations": (((live_readiness or {}).get("reviewed_outcome_coverage") or {})
+                                 .get("populations") if live_readiness else None),
+        "non_evidence_labels": non_evidence_by_source,
+        "unreachable_feature_definitions": unreachable_definitions,
         "migration_head": migration_head,
         "alerts": alerts,
         "release_notes": RELEASE_NOTES,

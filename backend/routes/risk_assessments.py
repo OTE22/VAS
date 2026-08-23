@@ -71,9 +71,30 @@ def _safe_500(action: str, exc: Exception) -> HTTPException:
                          detail=f"Internal error during {action}. Reference: {ref}")
 
 
+def _persisted_value(payload, key, fallback):
+    value = (payload or {}).get(key)
+    return value if value is not None else fallback
+
+
+def _parse_iso(value):
+    """ISO-8601 (with optional Z) -> naive UTC datetime, else None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        from datetime import datetime as _dt
+        parsed = _dt.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except ValueError:
+        return None
+
+
 def _actor(current_user: dict) -> str:
     return str((current_user or {}).get("username")
                or (current_user or {}).get("id") or "unknown")
+
+
+def _actor_id(current_user: dict) -> Optional[int]:
+    return (current_user or {}).get("id") or (current_user or {}).get("user_id")
 
 
 class CreateAssessmentRequest(BaseModel):
@@ -86,6 +107,14 @@ class CreateAssessmentRequest(BaseModel):
 class ResolveRequest(BaseModel):
     resolution_status: str = Field(default="resolved", max_length=32)
     notes: Optional[str] = Field(default=None, max_length=4000)
+    # The analyst's OUTCOME for this assessment (optional). When given, a
+    # manual, UNREVIEWED outcome label is recorded against the assessment;
+    # it becomes evidence only after an authorized review in ML-Ops.
+    outcome: Optional[str] = Field(default=None, pattern="^(positive|negative)$")
+    # Whether the ML shadow observation had been revealed to the analyst
+    # before recording the outcome (the card hides it by default). Recorded
+    # verbatim so blind and revealed reviews are never mixed.
+    ml_observation_revealed: bool = False
 
 
 class ReopenRequest(BaseModel):
@@ -106,6 +135,9 @@ async def _threshold_provenance(db: AsyncSession) -> str:
         return (f"{SIGNAL_TIME_WINDOW}={window.provenance},"
                 f"{SIGNAL_DISTANCE}={distance.provenance}")[:128]
     except Exception:
+        # Persisted as the assessment's threshold_version — say why in the log
+        # so an "unresolved" row is explainable later.
+        logger.warning("[ASSESSMENTS] threshold provenance unresolved", exc_info=True)
         return "unresolved"
 
 
@@ -154,15 +186,19 @@ async def create_assessment(
             if acquired:
                 await lock.release()
 
-        # SHADOW runs after the live result is sealed — comparison only.
+        # SHADOW runs after the live result is sealed — comparison only. The
+        # comparison describes the PERSISTED row (a deduplicated request
+        # returns the earlier, sealed assessment and its rules result).
         if outcome.shadow_planned:
             from backend.ml.shadow_service import shadow_service
             await shadow_service.run_shadow(
                 identity_id=body.subject_id,
-                rule_score=assessment.overall_risk_score,
-                rule_severity=assessment.severity or assessment.threat_level,
+                rule_score=_persisted_value(payload, "total_risk_score", assessment.overall_risk_score),
+                rule_severity=_persisted_value(payload, "severity",
+                                               assessment.severity or assessment.threat_level),
                 assessment_id=payload.get("id"),
-                event_time=getattr(assessment, "last_assessed", None))
+                event_time=_parse_iso(payload.get("source_timestamp"))
+                or getattr(assessment, "last_assessed", None))
 
         _audit("assessment_create", current_user, f"identity:{body.subject_id}",
                duration_ms=int((time.monotonic() - started) * 1000),
@@ -309,9 +345,25 @@ async def resolve_assessment(
     current_user: dict = Depends(require_admin()),
     _csrf: None = Depends(require_intel_csrf),
 ):
-    """Resolve an assessment with a resolution status and optional notes, back-filling acknowledgement if it was never acknowledged."""
-    return await _workflow("resolve", assessment_id, current_user, db,
-                           notes=body.notes, resolution_status=body.resolution_status)
+    """Resolve an assessment with a resolution status and optional notes, back-filling acknowledgement if it was never acknowledged. With `outcome` (positive | negative) the analyst's decision is also recorded as a manual, UNREVIEWED outcome label anchored to this assessment (source assessment_resolution, blind/revealed flag kept) - evidence-grade only after an authorized review in ML-Ops."""
+    payload = await _workflow("resolve", assessment_id, current_user, db,
+                              notes=body.notes, resolution_status=body.resolution_status)
+    if body.outcome:
+        from backend.core.assessment_service import assessment_service
+        try:
+            label = await assessment_service.record_outcome(
+                db, assessment_id, outcome=body.outcome, actor=_actor(current_user),
+                actor_user_id=_actor_id(current_user), notes=body.notes,
+                ml_observation_revealed=bool(body.ml_observation_revealed))
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except Exception as e:
+            raise _safe_500("assessment outcome", e)
+        payload["outcome_label"] = label
+        _audit("assessment_outcome", current_user, assessment_id=payload["id"],
+               outcome=body.outcome, blind=not body.ml_observation_revealed,
+               label_id=label.get("id"))
+    return payload
 
 
 @router.post("/api/security/assessments/{assessment_id}/reopen",

@@ -70,11 +70,30 @@ async function apiFetch(url, options = {}) {
     }
     if (!response.ok) {
         const detail = (body && (body.detail || body.message)) || `HTTP ${response.status}`;
-        const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        const err = new Error(typeof detail === 'string' ? detail : describeStructuredError(detail));
         err.status = response.status;
         throw err;
     }
     return body;
+}
+
+// A structured refusal (e.g. MODE_GATED from the ML decision-authority gate)
+// is rendered as its message plus each gate's state — never raw JSON.
+function describeStructuredError(detail) {
+    if (!detail || typeof detail !== 'object') return String(detail);
+    const lines = [];
+    if (detail.message) lines.push(String(detail.message));
+    if (Array.isArray(detail.gates) && detail.gates.length) {
+        detail.gates.forEach(function (g) {
+            if (!g || typeof g !== 'object') return;
+            lines.push((g.ok ? '✓ ' : '✗ ') + String(g.label || g.gate) + ': ' + String(g.status));
+        });
+    } else if (Array.isArray(detail.unmet_gates) && detail.unmet_gates.length) {
+        detail.unmet_gates.forEach(function (g) { lines.push('• ' + String(g)); });
+    }
+    if (detail.note) lines.push(String(detail.note));
+    if (!lines.length) return JSON.stringify(detail);
+    return lines.join('\n');
 }
 
 function escapeHtml(text) {

@@ -465,15 +465,35 @@ class DataRetentionManager:
         # PostgreSQL transaction, it took the ml_drift_reports sweep down with
         # it. Both failures were swallowed by the except below and reported as
         # zero rows, which is indistinguishable from "nothing was expired".
+        # EVIDENCE IS NEVER AGED OUT. A shadow prediction that carries an
+        # outcome label, is anchored to an assessment, or is named by an
+        # assessment's ml_prediction_id is part of the immutable lineage
+        # (assessment -> prediction -> model/threshold version -> comparison
+        # -> reviewed outcome); threat_assessments are never swept, so their
+        # predictions must not be either. The age sweep applies only to
+        # UNLINKED predictions (e.g. failure rows with no assessment). The
+        # same holds one level down: a feature snapshot referenced by a kept
+        # prediction is its feature/version provenance and stays.
+        ML_PREDICTION_EVIDENCE_GUARD = (
+            " AND outcome_label_id IS NULL AND assessment_id IS NULL"
+            " AND id NOT IN (SELECT ml_prediction_id FROM threat_assessments"
+            "                WHERE ml_prediction_id IS NOT NULL)"
+            " AND id NOT IN (SELECT prediction_id FROM ml_shadow_comparisons"
+            "                WHERE assessment_id IS NOT NULL)")
+        ML_SNAPSHOT_EVIDENCE_GUARD = (
+            " AND id NOT IN (SELECT snapshot_id FROM ml_predictions"
+            "                WHERE snapshot_id IS NOT NULL)")
         ml_sweeps = (
             ("ml_predictions_deleted", "ml_predictions", "created_at",
-             int(settings.ML_PREDICTION_RETENTION_DAYS)),
+             int(settings.ML_PREDICTION_RETENTION_DAYS), ML_PREDICTION_EVIDENCE_GUARD,
+             "ml_predictions_retained_as_evidence"),
             ("ml_snapshots_deleted", "ml_feature_snapshots", "computed_at",
-             int(settings.ML_SNAPSHOT_RETENTION_DAYS)),
+             int(settings.ML_SNAPSHOT_RETENTION_DAYS), ML_SNAPSHOT_EVIDENCE_GUARD,
+             "ml_snapshots_retained_as_provenance"),
             ("ml_drift_reports_deleted", "ml_drift_reports", "created_at",
-             int(settings.ML_DRIFT_REPORT_RETENTION_DAYS)),
+             int(settings.ML_DRIFT_REPORT_RETENTION_DAYS), "", None),
         )
-        for key, table, column, days in ml_sweeps:
+        for key, table, column, days, guard, retained_key in ml_sweeps:
             # SAVEPOINT per sweep. Without one, a single bad statement poisons
             # the transaction and every later sweep in this function fails with
             # InFailedSQLTransactionError — the failure spreads instead of
@@ -485,13 +505,20 @@ class DataRetentionManager:
                     # 7 and was never told. The registry minimum rejects an
                     # out-of-range value at save time instead, with a message.
                     cutoff = now - timedelta(days=days)
+                    if retained_key:
+                        # rows past the cutoff that the evidence guard keeps
+                        # (reported every run; never deleted)
+                        kept = (await db.execute(sa_text(
+                            f"SELECT count(*) FROM {table} WHERE {column} < :c"
+                            f" AND NOT (TRUE{guard})"), {"c": cutoff})).scalar() or 0
+                        extra[retained_key] = int(kept)
                     if dry_run:
                         extra[key] = (await db.execute(sa_text(
-                            f"SELECT count(*) FROM {table} WHERE {column} < :c"),
+                            f"SELECT count(*) FROM {table} WHERE {column} < :c{guard}"),
                             {"c": cutoff})).scalar() or 0
                     else:
                         r = await db.execute(sa_text(
-                            f"DELETE FROM {table} WHERE {column} < :c"), {"c": cutoff})
+                            f"DELETE FROM {table} WHERE {column} < :c{guard}"), {"c": cutoff})
                         extra[key] = r.rowcount or 0
             except Exception as e:
                 logger.warning(f"[RETENTION] {table} cleanup failed: {e}")

@@ -101,12 +101,177 @@ Minimums for (1)–(3) are **not hard-coded**. `ML_SCIENTIFIC_MIN_HISTORY_DAYS`,
 `ML_EVIDENCE_MIN_REVIEWED_PER_BAND` default to 0 (= not configured); until an administrator sets them
 from reviewed policy, the gates report `NOT_CONFIGURED` / `INSUFFICIENT_EVIDENCE` with the statistics.
 
-## Reviewer bias
+## Evidence-grade data — the one definition
 
-The Security Intelligence threat card keeps the ML observation **hidden behind a click** so an analyst
-recording an outcome is not primed by the band. The ML-Ops page (administrators) shows bands openly.
-Outcomes recorded from the ML-Ops predictions table after looking at the band are not evidence-grade;
-use `selection.method` to mark stratified reviews.
+`backend/ml/evidence_grade.py` is the only definition, used by the shadow evidence report, the scientific
+gate / readiness computation and the supervised label gate (`label_stats`). A label counts as evidence
+when **all** hold:
+
+```
+label_kind    = manual
+review_status = reviewed          (an authorized review confirmed it — never the creator's own act)
+status        = active
+label         in {positive, negative}
+source        not seed-* / synthetic-* / synth-*   (demo seed and synthetic corpus are excluded)
+```
+
+Everything else is a distinct population and is **reported, never mixed in**: `unreviewed`, `weak`,
+`synthetic_or_seed`, `disputed`, `retracted`, `unknown_outcome`. Evidence-grade labels are further split by
+how they were obtained: `blind_reviewed`, `revealed_reviewed`, `self_reviewed` (creator == reviewer — still
+evidence-grade, but stated). A weak label can never be confirmed (`WEAK_LABEL_NOT_REVIEWABLE`); re-posting a
+different value for the same subject/source/day is refused (`LABEL_CONFLICT` — correct through supersede).
+When seed/synthetic labels exist the system state shows `NON_EVIDENCE_LABELS_PRESENT`; they are excluded,
+not deleted.
+
+## The operational outcome workflow (blind review)
+
+```
+analyst resolves the assessment on the Security Intelligence threat card
+   ("Confirmed threat" / "Not a threat", optional notes)
+        │   POST /api/security/assessments/{id}/resolve {outcome, ml_observation_revealed}
+        ▼
+manual outcome label, source=assessment_resolution, anchored to the assessment   → UNREVIEWED
+        │   links to the assessment's shadow prediction (assessment id ∪ same-subject UTC day)
+        ▼
+authorized review in ML-Ops (confirm)                                            → REVIEWED
+        ▼
+eligible as scientific evidence (evidence report, readiness criteria)
+```
+
+The threat card hides the ML observation by default and the threat-history rows show no band until it is
+revealed; whether it was revealed before the outcome was recorded is stored on the label
+(`selection.ml_observation_revealed`, `selection.entry_point`). Outcomes entered on the ML-Ops page (bands
+visible) are always recorded as revealed. Reports show `recorded_blind` / `recorded_revealed` and the
+population split, so blind and revealed evidence are never silently mixed. `selection.method`
+(`natural | stratified_by_band | top_scores | random | manual`) records deliberate per-band sampling; any
+method other than `natural` switches the report's sampling caveat.
+
+## Decision authority gate — one implementation
+
+`decision_service.mode_gate_report()` is the only gate evaluation; `PUT /api/ml/config/mode` and
+`PUT /api/settings/ML_DECISION_MODE` both call it, return the same 409 `MODE_GATED` body (every gate with its
+state — shadow model, engineering readiness, active threshold set, scientific validity, signal mapping —
+plus the unmet reasons) and audit the refusal (`mode_change_rejected`, counted in
+`ml_decision_mode_rejections_total`). ML and HYBRID require engineering PASS, an active threshold set,
+scientific validity `SUFFICIENT_EVIDENCE` and a validated, exactly-scoped mapping; HYBRID is additionally
+release-gated. Scientific validity shown on the page is computed **live** (reviewed evidence + mapping status
+change over time; the training-time snapshot does not) and the recorded status the gate reads is refreshed
+when it changes; `POST /api/ml/models/{id}/readiness` recomputes both gates in full (no retraining).
+
+## Retention and immutability
+
+Shadow predictions that carry an outcome label, are anchored to an assessment or are named by an
+assessment's `ml_prediction_id` are never aged out (`threat_assessments` are never swept either); feature
+snapshots referenced by a kept prediction stay. `ML_PREDICTION_RETENTION_DAYS` applies only to unlinked
+predictions (e.g. failure rows without an assessment). Retention reports `ml_predictions_retained_as_evidence`
+and `ml_snapshots_retained_as_provenance` on every run. Historical duplicate comparison rows are never
+deleted: the insert guard prevents new ones, reports use the earliest comparison per prediction and state
+`duplicate_comparisons` as a data-quality fact. Note that `ml_predictions.person_id` / `assessment_id` FKs
+are `SET NULL` on identity/assessment deletion — the prediction row survives with its `subject_id`.
+
+## Lineage chain and retention (what survives what)
+
+| object | retention | deletion mechanism | FK behaviour | reproducibility after deletion |
+|---|---|---|---|---|
+| training request | durable | none (`ml_audit_log` is never swept) | — | `training_requested` (API, actor + request_id), `training_started` / `training_finished` (trainer, both entry points, actor user id, params, outcome/error) |
+| dataset | durable | `archive` releases the Parquet bytes only (refused while a model references it); row + manifest stay | `ml_models.dataset_id` SET NULL (never exercised: rows are not deleted) | logical checksum + Parquet sha256 on the row and in the manifest; `training_config.dataset_checksum/parquet_sha256` on the model |
+| feature-set version | durable | definitions are migration-seeded, boot-verified | — | stamped on dataset, model, prediction |
+| training job (`background_task_history`) | **30 days** (`TASK_HISTORY_RETENTION_DAYS`) | retention sweep | none (job id is a string on the model) | every answer lives elsewhere — see audit rows above and the model row (`created_by`, `created_at`, `training_job_id`, `hyperparameters`, `seed`, `code_version`) |
+| model | durable | none; stage transitions only (RESTRICT from predictions/comparisons) | — | `artifact_hash`, `evaluation_report`, `quality_gates`, `training_config`, `shadow_approval{approved_by, approved_at, reason, artifact_checksum}` + `model_shadow` audit row |
+| artifact file | durable (`ML_ARTIFACT_DIR`, persistent volume required in prod) | none in the application | — | re-validated by hash on every load; a missing file is reported (`ARTIFACT_FILES_MISSING`) never silently replaced |
+| shadow prediction / comparison | durable when linked (outcome, assessment) — see Retention above | age sweep of UNLINKED rows only | model/threshold RESTRICT; assessment/person SET NULL | immutable; comparison 1:1 per prediction |
+| assessment | durable | none | person SET NULL | provenance columns + `ml_prediction_id` |
+| reviewed label | durable | none (supersede keeps history) | person SET NULL | creator/reviewer usernames **and user ids**, selection metadata, review timestamps |
+| evidence report | computed | — | — | recomputable from the rows above at any time |
+
+After `background_task_history` expires the following are still answerable from `ml_models` + `ml_datasets`
++ `ml_audit_log` (proven by `test_training_lineage_survives_without_task_history`): who requested, when,
+which dataset and hashes, code version, feature set, hyperparameters/seed, artifact and checksum, the
+evaluation, and who approved into SHADOW when.
+
+### Identity deletion: audit reproducibility vs raw recomputability
+
+Deleting an identity cascades its raw `identity_appearances` (by design — deletion must be real) and SET
+NULLs `person_id` on predictions, labels and assessments; `ml_feature_snapshots`, `ml_predictions`,
+`ml_shadow_comparisons`, `ml_labels` and Parquet datasets are untouched. Consequences, stated exactly:
+
+* **Audit reproducibility — kept.** Every persisted score, band, snapshot feature vector, comparison and
+  outcome stays exactly as recorded; a dataset reproduces byte-for-byte from its Parquet + hashes.
+* **Raw-data recomputability — lost for that subject.** Its features cannot be recomputed from source
+  events, and re-extracting a dataset definition over the same window would yield a different row set.
+  The evidence report states this per model (`source_retention.predictions_with_deleted_subject`). No raw
+  identity data is duplicated anywhere to work around deletion.
+
+### Storage growth (measured 2026-08-23, dev)
+
+Per operational assessment under SHADOW: one prediction (≈0.7 KB tuple, ≈1.6 KB with indexes), one
+comparison (≈0.2 KB tuple, ≈0.6 KB), one event snapshot (≈0.9 KB tuple, ≈1.4 KB), one assessment
+(≈1.1 KB) ≈ **4.7 KB per assessment**; labels are human-rate and negligible (≈0.5 KB each).
+
+| assessments / day | per year | 3 years | 5 years |
+|---|---|---|---|
+| 100 | 0.17 GB | 0.5 GB | 0.9 GB |
+| 1 000 | 1.7 GB | 5.1 GB | 8.6 GB |
+| 10 000 | 17 GB | 51 GB | 86 GB |
+
+Recommendation: **retain indefinitely** at the current rate (evidence-linked rows must outlive any
+scientific validation), make growth observable (`ml_evidence_table_bytes{table}`, `ml_evidence_table_rows{table}`
+on `/metrics`), and plan **monthly partitioning** of `ml_predictions` / `ml_shadow_comparisons` /
+`ml_feature_snapshots` before they exceed tens of millions of rows. Bounded retention already applies to
+unlinked failure rows only. No retention period is chosen here.
+
+### Metrics contract
+
+ML state gauges (`ml_decision_authority`, `ml_signal_mapping_validated`, `ml_active_shadow_model_info`,
+`ml_review_coverage_ratio`, `ml_collector_watermark_age_seconds`, `ml_evidence_table_*`,
+`ml_state_refreshed_timestamp_seconds`) are refreshed by every state-changing operation (mode change / pause,
+registry transition incl. threshold activation, label review, collection end) and by a throttled
+scrape-time refresh (a few cheap queries, at most every 30 s per process). Opening the ML-Ops page is not
+required for correctness.
+
+Face counters changed shape (2026-08-23) — the person's display name is no longer a Prometheus label:
+
+```
+OLD: face_recognition_faces_detected_total{name="<display name>"}
+     face_recognition_faces_skipped_total{name="..."}
+     face_recognition_batch_duplicates_total{name="..."}
+NEW: face_recognition_faces_detected_total
+     face_recognition_faces_skipped_total
+     face_recognition_batch_duplicates_total
+```
+
+Repository-controlled consumers (`monitoring/grafana/dashboards/face-detector-overview.json` uses
+`sum(rate(face_recognition_faces_detected_total[5m]))`, `monitoring/alerts/face-detector.yml`) never used the
+label. External dashboards that grouped `by (name)` must drop the grouping; per-person counts live in the
+database behind authorization.
+
+### Separation of duties (policy scaffold)
+
+Labels record creator and reviewer as usernames **and user ids** (`created_by_user_id`,
+`reviewed_by_user_id`, revision `a3c8e5f1b7d2`). `ML_EVIDENCE_REQUIRE_INDEPENDENT_REVIEW` (default **off**)
+makes `confirm` refuse a label by its own creator (`SELF_REVIEW_REFUSED`); while off, self-reviewed labels
+remain evidence-grade and are reported as the `self_reviewed` population. Turning it on is a policy
+decision, not made here.
+
+## Signal-mapping policy — how a validated row comes to exist
+
+No endpoint, CLI or seed creates a `risk_model_versions` row with profile `ml_anomaly_signal_map` (the
+only writers are test fixtures). Creating one is a deliberate, out-of-band administrative act: an
+administrator inserts the row with `status=active`, `calibration_status=validated`, non-empty
+`calibration_data` citing the shadow evidence report it was derived from, and the exact
+`scope{model_id, feature_set_version, threshold_version}`. The lookup requires **all three** scope values
+to be known and equal (no wildcard; a model without an active threshold set gets no policy), examines every
+active row (a newer invalid row never masks a valid one) and logs why each rejected row was ignored. The
+first time the system sees a new policy version it writes `ml_audit(mapping_observed)` so even an
+out-of-band row leaves an audit trail.
+
+## Reserved model types
+
+`coappearance_anomaly_model`, `social_graph_anomaly_model` and `threat_ranking_model` are reserved
+interfaces: no dataset definition, features, trainer, artifact or inference path exists. The API refuses to
+train them (`422 MODEL_TYPE_NOT_IMPLEMENTED`), the trainer refuses them too (defense in depth), and the
+ML-Ops page renders them from the capability contract (`GET /api/ml/overview` → `model_types`) as
+*Reserved / Future — not trainable* with the Train action disabled.
 
 ## Retraining
 

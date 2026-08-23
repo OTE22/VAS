@@ -1220,6 +1220,14 @@ class Settings(BaseSettings):
         default=0, description="Evidence adequacy: minimum reviewed manual outcomes overall (0 = not configured)")
     ML_EVIDENCE_MIN_REVIEWED_PER_BAND: int = Field(
         default=0, description="Evidence adequacy: minimum reviewed manual outcomes per anomaly band (0 = not configured)")
+    # Separation of duties for evidence-grade outcomes. OFF by default: today a
+    # self-reviewed label (creator == reviewer) still counts and is REPORTED as
+    # its own population. Turning this on makes review_label refuse to confirm
+    # a label by the person who created it (SELF_REVIEW_REFUSED). A policy
+    # decision - not set here.
+    ML_EVIDENCE_REQUIRE_INDEPENDENT_REVIEW: bool = Field(
+        default=False,
+        description="Refuse confirming a label by its own creator (separation of duties); default off")
     ML_MAX_ARTIFACT_MB: int = Field(
         default=200,
         description="Maximum artifact size accepted at registration/load. Default: 200"

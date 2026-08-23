@@ -620,10 +620,13 @@
                 ]);
                 if (a && a.ml_observation && typeof a.ml_observation === 'object') {
                     const o = a.ml_observation;
-                    line.appendChild(el('span', { className: 'history-ml', text: 'ML ' + (o.ml_failed
+                    const bandText = 'ML ' + (o.ml_failed
                         ? 'did not score (' + safeText(o.failure_reason) + ')'
                         : safeText(o.model_version) + ' score ' + safeText(o.score) + ' band ' + safeText(o.band) +
-                          (o.applied_to_live_result ? ' — applied as anomaly input' : ' — recorded only')) }));
+                          (o.applied_to_live_result ? ' — applied as anomaly input' : ' — recorded only'));
+                    const span = el('span', { className: 'history-ml', attrs: { 'data-band-text': bandText } });
+                    span.textContent = state.mlObservationRevealed === true ? bandText : 'ML observation recorded (hidden — blind review guard)';
+                    line.appendChild(span);
                 }
                 return line;
             });
@@ -1993,6 +1996,66 @@
         }
     }
 
+    function buildOutcomePanel(assessment) {
+        const panel = el('div', { className: 'outcome-panel' });
+        panel.appendChild(el('h3', { text: 'Record outcome (blind review)' }));
+        panel.appendChild(el('p', { className: 'outcome-help',
+            text: 'Resolves this assessment and records your decision as a manual outcome label. It counts as scientific evidence only after an authorized review in ML-Ops. Whether the ML shadow observation was revealed before you decided is recorded with it.' }));
+        const note = el('input', { className: 'outcome-note', attrs: { type: 'text', maxlength: '4000',
+                                   placeholder: 'notes (optional)', 'aria-label': 'Outcome notes' } });
+        const status = el('div', { className: 'outcome-status', attrs: { role: 'status' } });
+        const row = el('div', { className: 'outcome-actions' });
+        const mk = function (label, outcome, cls) {
+            const btn = el('button', { className: cls, attrs: { type: 'button', 'data-outcome': outcome } }, [document.createTextNode(label)]);
+            btn.addEventListener('click', function () { recordOutcome(assessment, outcome, note.value, row, status); });
+            return btn;
+        };
+        row.appendChild(mk('Confirmed threat', 'positive', 'btn-danger'));
+        row.appendChild(mk('Not a threat', 'negative', 'btn-secondary'));
+        panel.appendChild(note);
+        panel.appendChild(row);
+        panel.appendChild(status);
+        if (assessment.decision_provenance && assessment.decision_provenance.executed_mode === 'shadow') {
+            panel.appendChild(el('p', { className: 'outcome-help',
+                text: 'Blind by default: the ML band is hidden unless you reveal it above.' }));
+        }
+        return panel;
+    }
+
+    async function recordOutcome(assessment, outcome, notes, row, status) {
+        const buttons = row.querySelectorAll('button');
+        buttons.forEach(function (b) { b.disabled = true; });
+        status.textContent = 'Recording…';
+        try {
+            const result = await api('/api/security/assessments/' + encodeURIComponent(assessment.assessment_id) + '/resolve', {
+                method: 'POST',
+                body: { resolution_status: outcome === 'positive' ? 'confirmed_threat' : 'not_a_threat',
+                        notes: notes && notes.trim() ? notes.trim() : null,
+                        outcome: outcome,
+                        ml_observation_revealed: state.mlObservationRevealed === true }
+            });
+            const label = result && result.outcome_label ? result.outcome_label : null;
+            status.textContent = 'Outcome recorded (' + outcome + ', ' + (state.mlObservationRevealed ? 'ML observation revealed' : 'blind') +
+                '). Label ' + safeText(label && label.id, '?') + ' is UNREVIEWED until confirmed in ML-Ops.';
+            status.className = 'outcome-status ok';
+            loadThreatHistory(assessment.identity_id);
+        } catch (err) {
+            if (err.aborted) return;
+            status.textContent = 'Could not record the outcome: ' + safeText(err.message);
+            status.className = 'outcome-status bad';
+            buttons.forEach(function (b) { b.disabled = false; });
+        }
+    }
+
+    // The history list must not leak the band while the card is blind:
+    // band text is rendered only after the analyst reveals the observation.
+    function applyHistoryBandGuard() {
+        const revealed = state.mlObservationRevealed === true;
+        document.querySelectorAll('.history-ml[data-band-text]').forEach(function (node) {
+            node.textContent = revealed ? node.dataset.bandText : 'ML observation recorded (hidden — blind review guard)';
+        });
+    }
+
     function renderThreatAssessment(assessment) {
         const container = document.getElementById('threat-container');
         if (!container) return;
@@ -2030,6 +2093,7 @@
         // analyst recording an outcome is not primed by the band. It is still
         // one click away for the administrator.
         const observation = buildObservationPanel(assessment.ml_observation);
+        state.mlObservationRevealed = false;
         if (observation) {
             observation.hidden = true;
             const reveal = el('button', { className: 'btn-secondary ml-observation-reveal',
@@ -2038,11 +2102,22 @@
                 [document.createTextNode('Show ML shadow observation (blind review guard)')]);
             reveal.addEventListener('click', function () {
                 observation.hidden = !observation.hidden;
+                // Once revealed, the outcome recorded for this assessment is
+                // marked REVEALED for good (hiding it again does not un-see it).
+                if (!observation.hidden) state.mlObservationRevealed = true;
                 reveal.textContent = observation.hidden ? 'Show ML shadow observation (blind review guard)'
                                                         : 'Hide ML shadow observation';
+                applyHistoryBandGuard();
             });
             children.push(reveal);
             children.push(observation);
+        }
+        // Operational outcome: the analyst records the decision here, BEFORE
+        // seeing the band by default. The server stores it as a manual,
+        // UNREVIEWED label anchored to this assessment (evidence-grade only
+        // after review in ML-Ops) together with the blind/revealed flag.
+        if (assessment.assessment_id && assessment.persisted !== false) {
+            children.push(buildOutcomePanel(assessment));
         }
         if (assessment.last_assessed) {
             children.push(el('p', {

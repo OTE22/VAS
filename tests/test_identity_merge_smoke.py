@@ -309,4 +309,4 @@ def test_faces_dir_holds_only_uuid_folders():
 
 def test_schema_head_is_current():
     head = _sql("SELECT version_num FROM alembic_version", fetch="scalar")
-    assert head == "d5f9b2c7e3a1", head
+    assert head == "a3c8e5f1b7d2", head

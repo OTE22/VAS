@@ -375,7 +375,7 @@ def test_html_no_inline_handlers():
     src = _read(HTML_PATH)
     for banned in ("onclick=", "onerror=", "onmouseover=", "onmouseout=", "onload="):
         assert banned not in src, f"inline handler {banned} must be removed"
-    assert "admin-security-intelligence.js?v=sec-12" in src
+    assert "admin-security-intelligence.js?v=sec-13" in src
 
 
 def test_html_security_features_opt_in():

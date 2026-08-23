@@ -95,46 +95,61 @@ class SignalMappingService:
                             model_id: Optional[str] = None,
                             feature_set_version: Optional[str] = None,
                             threshold_version: Optional[str] = None) -> Optional[MappingPolicy]:
-        """The validated, active policy WHOSE SCOPE MATCHES the given model /
-        feature set / threshold set — or None (the normal state today). A
-        policy validated for another model, feature set or threshold set is
-        never reused silently."""
+        """The policy that is active AND validated (non-empty calibration
+        data) AND has a valid payload AND whose scope EXACTLY matches the
+        given model / feature set / threshold set — newest such first — or
+        None (the normal state today).
+
+        No wildcard: every scope dimension must be known to the caller and
+        must match. A caller that cannot name its threshold set (no active
+        set) gets no policy. Other active rows of the profile never mask a
+        valid one; each is examined and the reasons are logged."""
         from db_models import RiskModelVersion
-        row = (await db.execute(
+        expected = {"model_id": model_id, "feature_set_version": feature_set_version,
+                    "threshold_version": threshold_version}
+        missing = [k for k, v in expected.items() if v in (None, "")]
+        if missing:
+            logger.info("[ML_OPS] signal mapping lookup without a full scope (%s) — no policy",
+                        ", ".join(missing))
+            return None
+        rows = (await db.execute(
             select(RiskModelVersion)
             .where(RiskModelVersion.profile == MAPPING_PROFILE,
                    RiskModelVersion.status == "active")
-            .order_by(RiskModelVersion.activated_at.desc().nullslast())
-            .limit(1))).scalars().first()
-        if row is None:
-            return None
-        if row.calibration_status != "validated" or not row.calibration_data:
-            logger.warning("[ML_OPS] signal mapping %s is active but not validated — ignored",
-                           row.version)
-            return None
+            .order_by(RiskModelVersion.activated_at.desc().nullslast(),
+                      RiskModelVersion.version.desc()))).scalars().all()
+        for row in rows:
+            reason = self._policy_rejection(row, expected, anomaly_cap=anomaly_cap)
+            if reason is not None:
+                logger.warning("[ML_OPS] signal mapping %s ignored: %s", row.version, reason)
+                continue
+            weights = dict(row.weights or {})
+            scope = weights.get("scope")
+            band_points = validate_policy_payload(weights, anomaly_cap=anomaly_cap)
+            return MappingPolicy(version=str(row.version), kind="band_points",
+                                 band_points=band_points, calibration_status=row.calibration_status,
+                                 scope={k: str(scope.get(k)) for k in expected})
+        return None
+
+    @staticmethod
+    def _policy_rejection(row, expected: Dict[str, Optional[str]], *, anomaly_cap: float) -> Optional[str]:
+        """Why one active row is NOT the policy — None when it qualifies."""
+        if row.calibration_status != "validated":
+            return f"calibration_status={row.calibration_status!r} (validated required)"
+        if not row.calibration_data:
+            return "empty calibration_data"
         weights = dict(row.weights or {})
         try:
-            band_points = validate_policy_payload(weights, anomaly_cap=anomaly_cap)
+            validate_policy_payload(weights, anomaly_cap=anomaly_cap)
         except SignalMappingError as exc:
-            logger.warning("[ML_OPS] signal mapping %s rejected: %s", row.version, exc)
-            return None
+            return f"invalid payload: {exc}"
         scope = weights.get("scope") if isinstance(weights.get("scope"), dict) else None
         if not scope:
-            logger.warning("[ML_OPS] signal mapping %s has no scope — ignored", row.version)
-            return None
-        expected = {"model_id": model_id, "feature_set_version": feature_set_version,
-                    "threshold_version": threshold_version}
+            return "no scope"
         for key, value in expected.items():
-            if value is None:
-                continue
             if str(scope.get(key) or "") != str(value):
-                logger.warning("[ML_OPS] signal mapping %s scope %s=%s does not match current %s — ignored",
-                               row.version, key, scope.get(key), value)
-                return None
-        return MappingPolicy(version=str(row.version), kind="band_points",
-                             band_points=band_points, calibration_status=row.calibration_status,
-                             scope={k: (str(scope.get(k)) if scope.get(k) is not None else None)
-                                    for k in ("model_id", "feature_set_version", "threshold_version")})
+                return f"scope {key}={scope.get(key)!r} does not match current {value!r}"
+        return None
 
     def apply(self, policy: MappingPolicy, prediction) -> MLAnomalySignal:
         """Turn a successful prediction into the engine's anomaly contribution."""

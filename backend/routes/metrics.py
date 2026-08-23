@@ -64,6 +64,17 @@ async def metrics():
             except Exception as e:
                 logger.debug(f"Vector index metrics refresh skipped: {e}")
 
+            # ML state gauges (decision authority, mapping, active shadow
+            # model, review coverage, collector lag, evidence-table sizes):
+            # events update them in the worker that handled the event; the
+            # scrape refresh (a few cheap queries, throttled per process)
+            # keeps every worker current without any page being opened.
+            try:
+                from backend.ml import metrics as ml_metrics
+                await ml_metrics.refresh_state_with_own_session(reason="scrape")
+            except Exception as e:
+                logger.debug(f"ML metrics refresh skipped: {e}")
+
         return Response(
             content=generate_latest().decode('utf-8'),
             media_type=CONTENT_TYPE_LATEST

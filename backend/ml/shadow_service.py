@@ -52,7 +52,14 @@ class ShadowService:
                          event_time=None) -> None:
         """Bounded, swallow-all shadow pass (fresh session; the caller's
         request session and response are never touched). `event_time` is the
-        assessment's source timestamp — persisted on the prediction as-is."""
+        assessment's source timestamp - persisted on the prediction as-is.
+
+        Callers pass the rules result OF THE PERSISTED ASSESSMENT ROW (for a
+        deduplicated request that is the earlier, sealed row - never the
+        re-computed value of this call), so a comparison always describes
+        the assessment it names. The prediction insert is idempotent inside
+        the dedup window, the comparison is one-per-prediction and the
+        assessment link is first-wins: repeats never duplicate or relink."""
         timeout_s = float(settings.ML_SHADOW_TIMEOUT_MS) / 1000.0
         try:
             await asyncio.wait_for(
@@ -94,8 +101,19 @@ class ShadowService:
     async def _persist_comparison(self, db, *, identity_id: str, rule_score: float,
                                   rule_severity: str, assessment_id: Optional[str],
                                   prediction_id: Optional[str], result) -> None:
+        from sqlalchemy import select
         from db_models import MLShadowComparison
         if prediction_id is None:
+            return
+        # Exactly one comparison per prediction. The prediction insert is
+        # idempotent (it returns the existing row inside the window); the
+        # comparison must be too, or the evidence report double-counts.
+        existing = (await db.execute(
+            select(MLShadowComparison.id)
+            .where(MLShadowComparison.prediction_id == uuid_mod.UUID(prediction_id))
+            .limit(1))).scalar_one_or_none()
+        if existing is not None:
+            logger.debug("[ML_OPS] comparison already recorded for prediction %s", prediction_id)
             return
         rule_would_alert = rule_severity in RULES_ALERT_SEVERITIES
         ml_would_flag = (result.ml_anomaly_band in ML_FLAG_BANDS) if result.ok else None
@@ -161,16 +179,30 @@ class ShadowService:
             logger.debug("[ML_OPS] shadow failure recording failed", exc_info=True)
 
     async def _link_assessment(self, db, assessment_id: str, prediction_id: str) -> None:
+        """Link both directions, and only where the slot is still empty: an
+        assessment keeps its FIRST prediction, a prediction keeps its FIRST
+        assessment — sealed provenance is never overwritten."""
         try:
             from sqlalchemy import update
-            from db_models import ThreatAssessmentRecord
+            from db_models import MLPrediction, ThreatAssessmentRecord
+            a_id = uuid_mod.UUID(str(assessment_id))
+            p_id = uuid_mod.UUID(str(prediction_id))
             await db.execute(
                 update(ThreatAssessmentRecord)
-                .where(ThreatAssessmentRecord.id == uuid_mod.UUID(str(assessment_id)))
-                .values(ml_prediction_id=uuid_mod.UUID(prediction_id)))
+                .where(ThreatAssessmentRecord.id == a_id,
+                       ThreatAssessmentRecord.ml_prediction_id.is_(None))
+                .values(ml_prediction_id=p_id))
+            await db.execute(
+                update(MLPrediction)
+                .where(MLPrediction.id == p_id, MLPrediction.assessment_id.is_(None))
+                .values(assessment_id=a_id))
             await db.commit()
         except Exception:
             logger.debug("[ML_OPS] assessment link failed", exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     async def shadow_summary(self, db, *, days: int = 7) -> Dict[str, Any]:
         """DESCRIPTIVE aggregates only: review-signal crossings, band
@@ -181,11 +213,23 @@ class ShadowService:
         from datetime import timedelta
 
         floor = datetime.utcnow() - timedelta(days=days)
-        rows = (await db.execute(
+        raw_rows = (await db.execute(
             select(MLShadowComparison)
             .where(MLShadowComparison.created_at >= floor)
-            .order_by(MLShadowComparison.created_at.desc())
+            .order_by(MLShadowComparison.created_at.asc())
             .limit(5000))).scalars().all()
+        # Analytically one comparison per prediction (earliest kept);
+        # historical duplicates are never deleted — counted as a fact.
+        seen = set()
+        rows = []
+        duplicate_comparisons = 0
+        for row in raw_rows:
+            if row.prediction_id in seen:
+                duplicate_comparisons += 1
+                continue
+            seen.add(row.prediction_id)
+            rows.append(row)
+        rows.reverse()
         if not rows:
             return {"window_days": days, "comparisons": 0,
                     "insufficient_data": True,
@@ -208,6 +252,7 @@ class ShadowService:
                     band_by_severity[row.rule_threat_severity].get(row.ml_anomaly_band, 0) + 1)
         latencies.sort()
         return {
+            "duplicate_comparisons": duplicate_comparisons,
             "window_days": days,
             "comparisons": len(rows),
             "note": ("rule threat severity and anomaly bands are DIFFERENT "

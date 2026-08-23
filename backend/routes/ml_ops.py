@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func as sa_func
@@ -33,7 +34,7 @@ from backend.core.distributed_lock import DistributedLock
 from backend.core.rate_limiter import rate_limited
 from backend.ml.audit import ml_audit
 from backend.ml.constants import (
-    MODEL_TYPE_BEHAVIOR_ANOMALY, MODEL_TYPES, all_optional_capabilities)
+    MODEL_TYPE_BEHAVIOR_ANOMALY, MODEL_TYPES, all_optional_capabilities, model_type_status)
 from backend.utils.time_utils import iso_utc
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,18 @@ class LoggedMLRoute(APIRoute):
                               "error_code": detail.get("error_code") or (
                                   exc.detail if isinstance(exc.detail, str) else None),
                               "actor": getattr(request.state, "ml_actor", None)})
+                # a refused mode change records WHY (gate codes only)
+                if detail.get("error_code") == "MODE_GATED":
+                    entry["gates"] = [str(r.get("code")) for r in (detail.get("reasons") or [])
+                                      if isinstance(r, dict)][:12]
+                call_log.record(entry)
+                raise
+            except RequestValidationError as exc:
+                # The client receives 422 from the app-level handler; record
+                # it as the client error it is, never as a server fault.
+                entry.update({"status": 422, "ms": timer.ms,
+                              "error_code": "VALIDATION_ERROR",
+                              "actor": getattr(request.state, "ml_actor", None)})
                 call_log.record(entry)
                 raise
             except Exception as exc:
@@ -116,6 +129,39 @@ def _safe_500(action: str, exc: Exception) -> HTTPException:
                  action, ref, exc, exc_info=True)
     return HTTPException(status_code=500,
                          detail=f"Internal error during {action}. Reference: {ref}")
+
+
+async def record_mode_rejection(db, report: Dict[str, Any], *, actor_username: str,
+                                actor_user_id: Optional[int], reason: Optional[str],
+                                ip_address: Optional[str]) -> None:
+    """A REFUSED mode change is a governance event: audited (gate codes) and
+    counted — a refusal that leaves no durable trace is invisible later."""
+    try:
+        await ml_audit(db, action="mode_change_rejected", actor_username=actor_username,
+                       actor_user_id=actor_user_id, object_type="ml_config",
+                       object_id="ML_DECISION_MODE",
+                       before={"mode": report.get("current_mode")},
+                       after={"requested_mode": report.get("target_mode"),
+                              "gates": [r["code"] for r in report.get("reasons", [])]},
+                       reason=reason, ip_address=ip_address)
+        await db.commit()
+    except Exception:
+        logger.debug("[ML_OPS] mode rejection audit failed", exc_info=True)
+    try:
+        from backend.ml import metrics as ml_metrics
+        ml_metrics.observe_mode_rejection(report.get("target_mode"))
+    except Exception:
+        pass
+
+
+def _current_request_id() -> Optional[str]:
+    """The request id of the call being handled (for job rows), or None."""
+    try:
+        from utils.logging import request_id_var
+        value = request_id_var.get()
+        return value if value and value != "-" else None
+    except Exception:
+        return None
 
 
 def _error(status_code: int, error_code: str, message: str, **extra) -> HTTPException:
@@ -186,17 +232,31 @@ class TrainingRequest(BaseModel):
 
 
 _SELECTION_METHODS = ("natural", "stratified_by_band", "top_scores", "random", "manual")
+_ENTRY_POINTS = ("security_intelligence", "ml_ops", "api")
 
 
-def _selection_metadata(raw):
-    """Bounded, typed selection metadata: {method, band, sampling_probability, reason, selected_at}."""
-    if not raw:
-        return None
+def _selection_metadata(raw, *, default_entry_point: str = "api",
+                        default_revealed=None):
+    """Bounded, typed selection metadata: {method, band, sampling_probability,
+    reason, selected_at, entry_point, ml_observation_revealed}. The last two
+    record HOW the outcome was obtained - from which page and whether the ML
+    observation had been revealed to the reviewer first - so evidence reports
+    can keep blind and revealed reviews apart."""
+    if raw is None:
+        raw = {}
     if not isinstance(raw, dict):
         raise _error(422, "INVALID_SELECTION", "selection must be an object")
+    if not raw and default_revealed is None:
+        return None
     method = str(raw.get("method") or "natural")
     if method not in _SELECTION_METHODS:
         raise _error(422, "INVALID_SELECTION", f"selection.method must be one of {_SELECTION_METHODS}")
+    entry_point = str(raw.get("entry_point") or default_entry_point)
+    if entry_point not in _ENTRY_POINTS:
+        raise _error(422, "INVALID_SELECTION", f"selection.entry_point must be one of {_ENTRY_POINTS}")
+    revealed = raw.get("ml_observation_revealed", default_revealed)
+    if revealed is not None and not isinstance(revealed, bool):
+        raise _error(422, "INVALID_SELECTION", "selection.ml_observation_revealed must be true/false")
     prob = raw.get("sampling_probability")
     if prob is not None:
         try:
@@ -207,7 +267,8 @@ def _selection_metadata(raw):
             raise _error(422, "INVALID_SELECTION", "sampling_probability must be in (0, 1]")
     return {"method": method, "band": (str(raw.get("band"))[:32] if raw.get("band") else None),
             "sampling_probability": prob, "reason": (str(raw.get("reason"))[:200] if raw.get("reason") else None),
-            "selected_at": iso_utc(datetime.utcnow())}
+            "selected_at": iso_utc(datetime.utcnow()),
+            "entry_point": entry_point, "ml_observation_revealed": revealed}
 
 
 class LabelCreateRequest(BaseModel):
@@ -311,6 +372,10 @@ async def ml_overview(
             },
             "latest_drift_reports": [drift_service.serialize_report(r) for r in latest_drift],
             "optional_capabilities": all_optional_capabilities(),
+            # Capability contract per model type: the UI renders reserved
+            # types as "Reserved / Future - not trainable" from THIS list and
+            # never submits a request the API must refuse.
+            "model_types": [model_type_status(t) for t in MODEL_TYPES],
             # What the system IS right now + the core changes that made it so
             "system": await ml_system_state(db),
             "warnings": [
@@ -354,12 +419,13 @@ async def change_mode(
 ):
     """Change the ML decision mode. Refused with 409 MODE_GATED while any promotion gate is unmet; on success the mode is persisted, applied to the runtime, and audited with the caller and reason."""
     try:
-        from backend.ml.decision_service import decision_service
-        unmet = await decision_service.validate_mode_change(db, body.mode)
-        if unmet:
-            raise _error(409, "MODE_GATED",
-                         f"mode '{body.mode}' cannot be activated yet",
-                         unmet_gates=unmet)
+        from backend.ml.decision_service import decision_service, mode_gated_detail
+        report = await decision_service.mode_gate_report(db, body.mode)
+        if not report["allowed"]:
+            await record_mode_rejection(
+                db, report, actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
+                reason=body.reason, ip_address=(request.client.host if request.client else None))
+            raise HTTPException(status_code=409, detail=mode_gated_detail(report))
 
         from config import settings as app_settings
         from backend.core.runtime_settings import apply_to_runtime
@@ -378,6 +444,11 @@ async def change_mode(
                        reason=body.reason,
                        ip_address=(request.client.host if request.client else None))
         await db.commit()
+        try:
+            from backend.ml import metrics as ml_metrics
+            await ml_metrics.refresh_state(db, reason="mode_change")
+        except Exception:
+            pass
         return {"success": True, "mode": body.mode, "previous_mode": before}
     except HTTPException:
         raise
@@ -413,6 +484,11 @@ async def pause_ml(
                        reason=body.reason,
                        ip_address=(request.client.host if request.client else None))
         await db.commit()
+        try:
+            from backend.ml import metrics as ml_metrics
+            await ml_metrics.refresh_state(db, reason="pause")
+        except Exception:
+            pass
         return {"success": True, "mode": "rules", "previous_mode": before,
                 "note": "rules engine restored as the sole decision path"}
     except HTTPException:
@@ -439,9 +515,15 @@ async def compute_features(
     try:
         from backend.ml.collector import launch_collection_job
         outcome = await launch_collection_job(created_by_user_id=_actor_id(current_user),
-                                              full_rebuild=full_rebuild)
+                                              full_rebuild=full_rebuild,
+                                              request_id=_current_request_id())
         if outcome.get("status") == "busy":
             raise _error(409, "JOB_ALREADY_RUNNING", outcome.get("reason", "busy"))
+        await ml_audit(db, action="collection_requested", actor_username=_actor(current_user),
+                       actor_user_id=_actor_id(current_user), object_type="ml_collection_job",
+                       object_id=str(outcome.get("job_id")),
+                       after={"full_rebuild": bool(full_rebuild)})
+        await db.commit()
         return JSONResponse(status_code=202, content=outcome)
     except HTTPException:
         raise
@@ -525,10 +607,15 @@ async def create_label(
             event_time=body.event_time, created_by=_actor(current_user),
             confidence=body.confidence, assessment_id=body.assessment_id,
             notes=body.notes, actor_user_id=_actor_id(current_user),
-            selection=_selection_metadata(body.selection))
+            selection=_selection_metadata(body.selection, default_entry_point="ml_ops",
+                                          default_revealed=True))
         status_code = 200 if payload.get("deduplicated") else 201
         return JSONResponse(status_code=status_code, content=jsonable(payload))
     except ValueError as e:
+        from backend.ml.labeling_service import LabelConflict
+        if isinstance(e, LabelConflict):
+            raise _error(409, "LABEL_CONFLICT", str(e),
+                         existing_label_id=e.existing_id, existing_label=e.existing_label)
         code = "UNREVIEWED_ALERT" if str(e).startswith("UNREVIEWED_ALERT") else "INVALID_LABEL"
         raise _error(422, code, str(e))
     except HTTPException:
@@ -553,7 +640,11 @@ async def review_label(
             db, label_id, action=body.action, actor=_actor(current_user),
             notes=body.notes, actor_user_id=_actor_id(current_user))
     except ValueError as e:
-        raise _error(409, "INVALID_REVIEW", str(e))
+        message = str(e)
+        code = ("WEAK_LABEL_NOT_REVIEWABLE" if message.startswith("WEAK_LABEL_NOT_REVIEWABLE")
+                else "SELF_REVIEW_REFUSED" if message.startswith("SELF_REVIEW_REFUSED")
+                else "INVALID_REVIEW")
+        raise _error(422 if code in ("WEAK_LABEL_NOT_REVIEWABLE", "SELF_REVIEW_REFUSED") else 409, code, message)
     except Exception as e:
         raise _safe_500("label review", e)
     if payload is None:
@@ -639,6 +730,19 @@ async def build_dataset_endpoint(
                                       time_range_end=end, sampling_policy=body.sampling_policy,
                                       split_strategy=body.split_strategy)
         status_code = 201 if outcome["status"] == "built" else 422
+        # datasets are provenance: their creation (and refusal) is audited
+        try:
+            await ml_audit(db, action="dataset_build", actor_username=_actor(current_user),
+                           actor_user_id=_actor_id(current_user), object_type="ml_dataset",
+                           object_id=str(outcome.get("dataset_id") or body.name),
+                           after={"status": outcome.get("status"), "name": body.name,
+                                  "definition": (definition.key if definition else None),
+                                  "row_count": outcome.get("row_count"),
+                                  "refused": (outcome.get("extraction") or {}).get("refused")
+                                  if isinstance(outcome.get("extraction"), dict) else None})
+            await db.commit()
+        except Exception:
+            logger.debug("[ML_OPS] dataset build audit failed", exc_info=True)
         return JSONResponse(status_code=status_code, content=jsonable(outcome))
     except HTTPException:
         raise
@@ -798,7 +902,8 @@ async def create_training_job(
             job_id=job_id, task_type="ml_training",
             task_name="ML Anomaly Model Training",
             description=f"{body.model_type} / {body.algorithm}",
-            created_by_user_id=_actor_id(current_user))
+            created_by_user_id=_actor_id(current_user),
+            request_id=_current_request_id())
 
         async def _run_and_release():
             try:
@@ -860,15 +965,26 @@ async def cancel_training_job(
     current_user=Depends(ML_MANAGE),
     _csrf: None = Depends(require_mlops_csrf),
 ):
-    """Request cooperative cancellation of a running training job. 404 if no cancellable job holds that id; acceptance is audited."""
+    """Request cooperative cancellation of a running ML job - a training job (mltrain-*) or a feature-collection job (mlcollect-*; the collector checks between batches and chunks). 404 if no cancellable job holds that id; acceptance is audited."""
     from backend.ml import trainer
-    accepted = trainer.request_cancel(job_id)
-    if not accepted:
-        raise HTTPException(status_code=404, detail="No cancellable job with that id")
-    await ml_audit(db, action="training_cancelled",
+    if job_id.startswith("mlcollect-"):
+        from backend.core.task_history import task_history_manager
+        task = await task_history_manager.get_task_by_job_id(job_id)
+        if not task or task.get("status") not in ("running", "scheduled"):
+            raise HTTPException(status_code=404, detail="No cancellable job with that id")
+        ok, outcome = await task_history_manager.request_cancel(int(task["id"]))
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"No cancellable job with that id ({outcome})")
+        action, object_type = "collection_cancelled", "ml_collection_job"
+    else:
+        accepted = trainer.request_cancel(job_id)
+        if not accepted:
+            raise HTTPException(status_code=404, detail="No cancellable job with that id")
+        action, object_type = "training_cancelled", "ml_training_job"
+    await ml_audit(db, action=action,
                    actor_username=_actor(current_user),
                    actor_user_id=_actor_id(current_user),
-                   object_type="ml_training_job", object_id=job_id)
+                   object_type=object_type, object_id=job_id)
     await db.commit()
     return {"success": True, "job_id": job_id, "status": "cancel_requested"}
 
@@ -924,6 +1040,44 @@ async def get_model(
     payload = serialize_model_row(row)
     payload["thresholds"] = [serialize_threshold(t) for t in await threshold_service.list_for_model(db, row.id)]
     return payload
+
+
+@router.post("/api/ml/models/{model_id}/readiness", tags=["ML Operations"],
+             summary="Recompute Model Readiness")
+async def recompute_model_readiness(
+    model_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+    _csrf: None = Depends(require_mlops_csrf),
+    _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
+):
+    """Recompute BOTH readiness gates for a registered model from its artifact,
+    dataset, reviewed evidence and the current mapping status (no retraining),
+    and record them on the model as computed_post_hoc. The scientific gate
+    uses only configured minimums - nothing here invents a threshold or marks
+    a model validated. Audited."""
+    from backend.ml.readiness import compute_model_readiness
+    from backend.ml.registry_service import registry_service
+    row = await registry_service.get_model(db, model_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+    try:
+        before = {"engineering_gate": (row.training_config or {}).get("engineering_gate"),
+                  "scientific_gate": (row.training_config or {}).get("scientific_gate")}
+        out = await compute_model_readiness(db, row, persist=True)
+        await ml_audit(db, action="readiness_recomputed", actor_username=_actor(current_user),
+                       actor_user_id=_actor_id(current_user), object_type="ml_model",
+                       object_id=str(row.id), before=before,
+                       after={"engineering_gate": out["engineering_gate"]["status"],
+                              "scientific_gate": out["scientific_gate"]["status"]},
+                       ip_address=(request.client.host if request.client else None))
+        await db.commit()
+        return jsonable(out)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _safe_500("readiness recomputation", e)
 
 
 @router.post("/api/ml/models/{model_id}/shadow-approve", tags=["ML Operations"],
@@ -1164,7 +1318,16 @@ async def run_drift(
     """Run data-drift and prediction-drift analysis synchronously in the request and return both reports."""
     try:
         from backend.ml.drift_service import drift_service
-        return await drift_service.run_all(db, job_id=f"manual-{uuid_mod.uuid4().hex[:8]}")
+        job_id = f"manual-{uuid_mod.uuid4().hex[:8]}"
+        report = await drift_service.run_all(db, job_id=job_id)
+        try:
+            await ml_audit(db, action="drift_run_requested", actor_username=_actor(current_user),
+                           actor_user_id=_actor_id(current_user), object_type="ml_drift_run",
+                           object_id=job_id)
+            await db.commit()
+        except Exception:
+            logger.debug("[ML_OPS] drift run audit failed", exc_info=True)
+        return report
     except Exception as e:
         raise _safe_500("drift run", e)
 

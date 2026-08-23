@@ -33,6 +33,24 @@ VALID_KINDS = ("manual", "weak")
 REVIEW_ACTIONS = ("confirm", "dispute", "retract")
 
 
+def same_actor(created_by, created_by_user_id, actor, actor_user_id) -> bool:
+    """Creator and reviewer are the same person: by user id when BOTH sides
+    recorded one (the reliable identity), by username otherwise (rows that
+    predate the id columns, CLI/seed writers)."""
+    if created_by_user_id is not None and actor_user_id is not None:
+        return int(created_by_user_id) == int(actor_user_id)
+    return bool(created_by) and bool(actor) and str(created_by) == str(actor)
+
+
+class LabelConflict(ValueError):
+    """An active label with a different value already owns this
+    subject/source/day slot."""
+    def __init__(self, existing_id: str, existing_label: str, message: str):
+        super().__init__(message)
+        self.existing_id = existing_id
+        self.existing_label = existing_label
+
+
 def _label_idempotency_key(subject_type: str, subject_id: str, source: str,
                            event_time: datetime) -> str:
     day_bucket = event_time.strftime("%Y%m%d")
@@ -57,6 +75,8 @@ def serialize_label(row) -> Dict[str, Any]:
         "status": row.status,
         "review_status": row.review_status,
         "reviewed_by": row.reviewed_by,
+        "reviewed_by_user_id": getattr(row, "reviewed_by_user_id", None),
+        "created_by_user_id": getattr(row, "created_by_user_id", None),
         "reviewed_at": iso(row.reviewed_at),
         "supersedes_id": str(row.supersedes_id) if row.supersedes_id else None,
         "notes": row.notes,
@@ -131,13 +151,14 @@ async def _link_predictions_for_label(db: AsyncSession, label_row) -> int:
                 outcome_recorded_at=datetime.utcnow())
         .execution_options(synchronize_session=False))
     linked = res.rowcount or 0
-    if linked and label_row.label_kind == "manual" and label_row.review_status == "reviewed":
-        try:
-            from backend.ml import metrics as ml_metrics
+    try:
+        from backend.ml import metrics as ml_metrics
+        ml_metrics.observe_outcome_linked(label_row.label_kind, linked)
+        if linked and label_row.label_kind == "manual" and label_row.review_status == "reviewed":
             for _ in range(linked):
                 ml_metrics.observe_reviewed_outcome(label_row.label)
-        except Exception:
-            pass
+    except Exception:
+        pass
     return linked
 
 
@@ -197,6 +218,13 @@ class LabelingService:
             raise ValueError(f"label must be one of {VALID_LABELS}")
         if label_kind not in VALID_KINDS:
             raise ValueError(f"label_kind must be one of {VALID_KINDS}")
+        if event_time is None:
+            raise ValueError("event_time is required - labels are anchored in time")
+        if event_time.tzinfo is not None:
+            # Columns are naive UTC. A tz-aware instant (the API accepts
+            # "...Z") is converted, never compared naive-vs-aware at the DB.
+            from datetime import timezone as _tz
+            event_time = event_time.astimezone(_tz.utc).replace(tzinfo=None)
         confidence = max(0.0, min(1.0, float(confidence)))
         if label_kind == "weak" and confidence >= 1.0:
             confidence = 0.5  # weak labels never carry full confidence
@@ -248,12 +276,21 @@ class LabelingService:
             idempotency_key=key,
             created_at=datetime.utcnow(),
             created_by=created_by[:255],
+            created_by_user_id=actor_user_id,
         ).on_conflict_do_nothing(index_elements=["idempotency_key"])
         result = await db.execute(insert_stmt)
         inserted = bool(result.rowcount)
 
         row = (await db.execute(
             select(MLLabel).where(MLLabel.idempotency_key == key))).scalar_one()
+        if not inserted and (row.label != label or row.status != "active"):
+            # Same subject/source/day but a DIFFERENT value (or a retracted
+            # row): never report "identical" — the analyst's value would be
+            # silently discarded. Corrections go through supersede.
+            raise LabelConflict(
+                str(row.id), row.label,
+                f"LABEL_CONFLICT: a {row.status} label '{row.label}' already exists for this "
+                f"subject/source/day (id {row.id}); supersede it to record '{label}'")
         linked = 0
         if inserted:
             linked = await _link_predictions_for_label(db, row)
@@ -290,6 +327,13 @@ class LabelingService:
 
         before = {"review_status": row.review_status, "status": row.status}
         now = datetime.utcnow()
+        if action == "confirm" and row.label_kind != "manual":
+            raise ValueError("WEAK_LABEL_NOT_REVIEWABLE: only manual labels can be confirmed "
+                             "into reviewed evidence; a weak label stays weak")
+        if action == "confirm" and bool(settings.ML_EVIDENCE_REQUIRE_INDEPENDENT_REVIEW) \
+                and same_actor(row.created_by, getattr(row, "created_by_user_id", None), actor, actor_user_id):
+            raise ValueError("SELF_REVIEW_REFUSED: ML_EVIDENCE_REQUIRE_INDEPENDENT_REVIEW is on - a label "
+                             "must be confirmed by someone other than its creator")
         if action == "confirm":
             row.review_status = "reviewed"
         elif action == "dispute":
@@ -297,6 +341,7 @@ class LabelingService:
         else:  # retract
             row.status = "retracted"
         row.reviewed_by = actor[:255]
+        row.reviewed_by_user_id = actor_user_id
         row.reviewed_at = now
         if notes:
             row.notes = (row.notes + "\n" if row.notes else "") + f"[{action}] {notes}"[:2000]
@@ -314,6 +359,11 @@ class LabelingService:
                        after={"review_status": row.review_status, "status": row.status, **link_stats},
                        reason=notes)
         await db.commit()
+        try:   # review coverage changed -> gauges current
+            from backend.ml import metrics as ml_metrics
+            await ml_metrics.refresh_state(db, reason="label_review")
+        except Exception:
+            pass
         return serialize_label(row)
 
     async def supersede_label(self, db: AsyncSession, label_id: str, *, label: str,
@@ -397,11 +447,10 @@ class LabelingService:
         """The honest supervised-gate payload: what counts, what doesn't,
         and how far the gate is from opening. No number here is fabricated."""
         from db_models import MLLabel
-        counted = select(MLLabel).where(
-            MLLabel.status == "active",
-            MLLabel.label_kind == "manual",
-            MLLabel.review_status == "reviewed",
-        ).subquery()
+        from backend.ml.evidence_grade import evidence_filter
+        # THE evidence-grade definition (unknown kept for the breakdown; it
+        # never satisfies a per-class minimum)
+        counted = select(MLLabel).where(evidence_filter(MLLabel, outcomes_only=False)).subquery()
         rows = (await db.execute(
             select(counted.c.label, sa_func.count()).group_by(counted.c.label))).all()
         by_class = {label: int(count) for label, count in rows}
@@ -429,6 +478,8 @@ class LabelingService:
                 for kind, status, count in all_rows
                 if not (kind == "manual" and status == "reviewed")
             ],
+            "evidence_grade_definition": "manual AND reviewed AND active AND outcome in "
+                                         "{positive, negative} AND source not seed-/synthetic-",
             "required_total": required_total,
             "required_per_class": required_per_class,
             "supervised_gate_open": gate_open,

@@ -137,13 +137,13 @@ def test_page_chrome_follows_the_house_rules():
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
     nav_at = html.find("js/navbar-loader.js?v=nav-7")
-    page_at = html.find("js/admin-ml-ops.js?v=mlops-7")
+    page_at = html.find("js/admin-ml-ops.js?v=mlops-8")
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-7" in html, "the page stylesheet is not version-pinned"
+    assert "admin-ml-ops.css?v=mlops-8" in html, "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 

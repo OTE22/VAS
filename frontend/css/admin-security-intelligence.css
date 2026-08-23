@@ -1655,3 +1655,17 @@
 
 .ml-observation-reveal { margin: 0.4rem 0; font-size: 0.8rem; }
 .ml-observation[hidden] { display: none; }
+
+/* Operational outcome (blind review) on the threat card */
+.outcome-panel { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border-color, #30363d); border-radius: 8px; background: rgba(255,255,255,0.02); }
+.outcome-panel h3 { margin: 0 0 6px; font-size: 0.95rem; }
+.outcome-help { margin: 4px 0 8px; font-size: 0.82rem; opacity: 0.85; }
+.outcome-note { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color, #30363d); background: transparent; color: inherit; }
+.outcome-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.outcome-status { margin-top: 8px; font-size: 0.85rem; min-height: 1.2em; }
+.outcome-status.ok { color: #3fb950; }
+.outcome-status.bad { color: #f85149; }
+.outcome-actions .btn-danger { background: #b62324; color: #fff; border: 1px solid #d73a49; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.outcome-actions .btn-danger:hover:not(:disabled) { background: #d73a49; }
+.outcome-actions .btn-secondary { border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.outcome-actions button:disabled { opacity: 0.6; cursor: not-allowed; }

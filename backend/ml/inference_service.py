@@ -17,6 +17,7 @@ calibration_status="not_applicable") — never threat probabilities.
 
 import asyncio
 import logging
+import math
 import time
 import uuid as uuid_mod
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ class MLPredictionResult:
     score_type: str = "anomaly_score"
     is_probability: bool = False
     calibration_status: str = "not_applicable"
+    feature_set_version: Optional[str] = None   # the MODEL's feature set (stamped on the row)
 
 
 class _CachedModel:
@@ -222,7 +224,14 @@ class InferenceService:
                       if e.code == "ARTIFACT_HASH_MISMATCH"
                       else FallbackReason.DEPENDENCY_MISMATCH.value
                       if e.code == "DEPENDENCY_MISMATCH"
+                      else FallbackReason.ARTIFACT_PATH_INVALID.value
+                      if e.code == "ARTIFACT_PATH_INVALID"
                       else FallbackReason.MODEL_LOAD_FAILED.value)
+            try:
+                from backend.ml import metrics as ml_metrics
+                ml_metrics.observe_model_load_failure(e.code)
+            except Exception:
+                pass
             return MLPredictionResult(
                 ok=False, failure_reason=reason,
                 latency_ms=(time.monotonic() - started) * 1000.0)
@@ -261,6 +270,7 @@ class InferenceService:
             return MLPredictionResult(
                 ok=False, failure_reason=FallbackReason.FEATURE_SCHEMA_MISMATCH.value,
                 model_id=cached.row_id, model_version_label=version_label,
+                feature_set_version=payload.get("feature_set_version"),
                 snapshot_id=snapshot["snapshot_id"],
                 features_checksum=snapshot["features_checksum"],
                 unavailable_features=snapshot["unavailable_features"],
@@ -285,13 +295,30 @@ class InferenceService:
                 latency_ms=(time.monotonic() - started) * 1000.0)
 
         from backend.ml.registry_service import score_with_payload
-        score = score_with_payload(payload, [vector])[0]
+        score = float(score_with_payload(payload, [vector])[0])
+        # Contract: a finite score in [0, 1]. NaN/inf/out-of-range is a
+        # FAILURE (recorded as such), never silently the lowest band — in
+        # shadow mode nothing downstream would otherwise notice.
+        if not math.isfinite(score) or not (0.0 <= score <= 1.0):
+            logger.warning("[ML_OPS] model %s produced an invalid score %r identity=%s — not banded",
+                           version_label, score, identity_id)
+            return MLPredictionResult(
+                ok=False, failure_reason=FallbackReason.INVALID_PREDICTION.value,
+                model_id=cached.row_id, model_version_label=version_label,
+                feature_set_version=payload.get("feature_set_version"),
+                snapshot_id=snapshot["snapshot_id"],
+                features_checksum=snapshot["features_checksum"],
+                missing_features=missing,
+                unavailable_features=snapshot["unavailable_features"],
+                as_of_timestamp=snapshot["as_of_timestamp"],
+                latency_ms=(time.monotonic() - started) * 1000.0)
         # Bands come from the ACTIVE threshold set (DB), not the artifact.
         band = self._band_for(score, cached.threshold["cutpoints"])
         return MLPredictionResult(
             ok=True,
             model_id=cached.row_id,
             model_version_label=version_label,
+            feature_set_version=payload.get("feature_set_version"),
             behavioral_anomaly_score=round(score, 6),
             ml_anomaly_band=band,
             band_cutpoints=dict(cached.threshold["cutpoints"]),
@@ -391,7 +418,9 @@ class InferenceService:
             actual_mode_used=actual_mode_used,
             fallback_reason=fallback_reason or result.failure_reason,
             snapshot_id=result.snapshot_id,
-            feature_set_version=FEATURE_SET_VERSION,
+            # The MODEL's feature set when one scored (or refused) the row;
+            # the current constant only when no model was involved at all.
+            feature_set_version=result.feature_set_version or FEATURE_SET_VERSION,
             features_checksum=result.features_checksum,
             behavioral_anomaly_score=result.behavioral_anomaly_score,
             normalized_anomaly_score=result.behavioral_anomaly_score,

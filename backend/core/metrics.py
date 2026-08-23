@@ -97,9 +97,16 @@ def initialize_metrics():
             return metric_class(name, documentation, **kwargs)
         except ValueError as e:
             if "Duplicated timeseries" in str(e):
-                # Get existing metric
+                # Get existing metric (CollectorRegistry has no .get(); the
+                # name map is the lookup - same discipline as backend/ml/metrics)
                 from prometheus_client import REGISTRY
-                return REGISTRY.get(name)
+                existing = REGISTRY._names_to_collectors.get(name)
+                if existing is None:
+                    for collector in list(REGISTRY._names_to_collectors.values()):
+                        if getattr(collector, "_name", None) == name:
+                            existing = collector
+                            break
+                return existing
             else:
                 raise
 
@@ -191,14 +198,19 @@ def initialize_metrics():
         Histogram, 'face_recognition_request_duration_seconds',
         'HTTP request duration', labelnames=['method', 'status']
     )
+    # Totals only. These counters used to carry the recognised person's
+    # display name as a label: unbounded cardinality and, on an endpoint that
+    # is unauthenticated at the application layer, a who-was-seen-how-often
+    # disclosure through a metrics scrape. Per-person counts live in the
+    # database behind authorization, never in Prometheus labels.
     metrics_faces_detected = safe_metric(
-        Counter, 'face_recognition_faces_detected_total', 'Total faces detected', labelnames=['name']
+        Counter, 'face_recognition_faces_detected_total', 'Total faces detected'
     )
     metrics_faces_skipped = safe_metric(
-        Counter, 'face_recognition_faces_skipped_total', 'Faces skipped (already tracked)', labelnames=['name']
+        Counter, 'face_recognition_faces_skipped_total', 'Faces skipped (already tracked)'
     )
     metrics_faces_batch_skipped = safe_metric(
-        Counter, 'face_recognition_batch_duplicates_total', 'Faces skipped (duplicate in same batch)', labelnames=['name']
+        Counter, 'face_recognition_batch_duplicates_total', 'Faces skipped (duplicate in same batch)'
     )
     metrics_active_pipelines = safe_metric(
         Gauge, 'face_recognition_active_pipelines', 'Number of active pipelines'

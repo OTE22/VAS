@@ -57,7 +57,9 @@ def build_idempotency_key(subject_type: str, subject_id: str,
     return f"{subject_type}:{subject_id}:{model_version}:{bucket}"
 
 
-FINAL_SCORING_ENGINE = "risk-engine-v1"
+# The one source of truth for the engine name lives in the decision router;
+# this alias exists only so existing imports keep working.
+from backend.ml.decision_service import FINAL_SCORING_ENGINE  # noqa: E402
 
 
 def provenance_of(record) -> Dict[str, Any]:
@@ -76,7 +78,10 @@ def provenance_of(record) -> Dict[str, Any]:
         "ml_role": ("anomaly_signal" if source == "ml"
                     else "observational" if executed == "shadow" else "none"),
         "signal_mapping_version": getattr(record, "signal_mapping_version", None),
-        "final_scoring_engine": getattr(record, "model_version", None) or FINAL_SCORING_ENGINE,
+        # The scoring ENGINE is a constant of the router; `model_version` on
+        # the row is the rules ALGORITHM version (reported separately).
+        "final_scoring_engine": FINAL_SCORING_ENGINE,
+        "rules_algorithm_version": getattr(record, "model_version", None),
         "fallback": bool(fallback_reason),
         "fallback_reason": fallback_reason,
         "ml_prediction_id": (str(record.ml_prediction_id)
@@ -354,6 +359,42 @@ class AssessmentService:
         logger.info("[ASSESSMENT] %s id=%s actor=%s status=%s",
                     action, record.id, actor, record.status)
         return serialize_assessment(record)
+
+    async def record_outcome(self, db: AsyncSession, assessment_id: str, *,
+                             outcome: str, actor: str,
+                             actor_user_id: Optional[int] = None,
+                             notes: Optional[str] = None,
+                             ml_observation_revealed: bool = False) -> Dict[str, Any]:
+        """The operational outcome path: a RESOLVED assessment + the
+        analyst's decision -> one manual, UNREVIEWED outcome label anchored to
+        the assessment (source assessment_resolution). The label links to
+        the assessment's shadow prediction through the existing point-in-time
+        rule and becomes evidence-grade only when an authorized reviewer
+        confirms it in ML-Ops (two-stage, never self-certifying here).
+        Raises ValueError when the assessment is unknown or not resolved."""
+        from backend.ml.labeling_service import labeling_service
+        try:
+            row_uuid = uuid_mod.UUID(str(assessment_id))
+        except (ValueError, TypeError):
+            raise ValueError("assessment_id is not a valid id")
+        record = (await db.execute(
+            select(ThreatAssessmentRecord).where(ThreatAssessmentRecord.id == row_uuid)
+        )).scalar_one_or_none()
+        if record is None:
+            raise ValueError("assessment not found")
+        if record.status != "resolved":
+            raise ValueError("an outcome can be recorded only on a RESOLVED assessment")
+        if outcome not in ("positive", "negative"):
+            raise ValueError("outcome must be positive or negative")
+        selection = {"method": "natural", "band": None, "sampling_probability": None,
+                     "reason": None, "selected_at": iso_utc(datetime.utcnow()),
+                     "entry_point": "security_intelligence",
+                     "ml_observation_revealed": bool(ml_observation_revealed)}
+        return await labeling_service.create_label(
+            db, subject_id=str(record.subject_id), label=outcome, label_kind="manual",
+            source="assessment_resolution", event_time=record.source_timestamp,
+            created_by=actor, assessment_id=str(record.id), notes=notes,
+            actor_user_id=actor_user_id, selection=selection)
 
 
 # Global instance

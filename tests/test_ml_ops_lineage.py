@@ -121,8 +121,15 @@ def test_labels_list_stats_filters_and_pagination(token):
     status, stats = _get(token, "/api/ml/labels/stats")
     assert status == 200 and {"counted_reviewed_manual", "not_counted", "required_total", "supervised_gate_open"} <= set(stats)
     counted = stats["counted_reviewed_manual"]
+    # the oracle mirrors THE canonical evidence-grade definition: demo-seed /
+    # synthetic sources are reported, never counted (backend/ml/evidence_grade.py)
     assert counted["total"] == _sql("SELECT count(*) FROM ml_labels WHERE status = 'active' AND label_kind = 'manual' "
-                                    "AND review_status = 'reviewed'", fetch="scalar")
+                                    "AND review_status = 'reviewed' AND source NOT ILIKE 'seed-%' "
+                                    "AND source NOT ILIKE 'synthetic-%' AND source NOT ILIKE 'synth-%'", fetch="scalar")
+    seed_reviewed = _sql("SELECT count(*) FROM ml_labels WHERE status = 'active' AND label_kind = 'manual' "
+                         "AND review_status = 'reviewed' AND source ILIKE 'seed-%'", fetch="scalar")
+    assert seed_reviewed >= 1, "the seed produces reviewed manual labels ..."
+    assert counted["total"] == 0, "... and none of them is evidence-grade"
     assert counted["total"] == counted["positive"] + counted["negative"] + counted["unknown"]
     superseded = _sql("SELECT count(*) FROM ml_labels WHERE status = 'superseded'", fetch="scalar")
     assert superseded >= 1, "the seed supersedes labels"

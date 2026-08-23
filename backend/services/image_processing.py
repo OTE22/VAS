@@ -623,7 +623,7 @@ async def process_image_async(
 
             if max_sim >= FACE_TRACKING_SIMILARITY_THRESHOLD:
                 logger.info(f"[BATCH] Skipping face - high similarity ({max_sim:.3f}) with same-name '{name}' in same image")
-                metrics_faces_batch_skipped.labels(name=name).inc()
+                metrics_faces_batch_skipped.inc()
                 duplicate_in_batch = True
 
         if duplicate_in_batch:
@@ -798,7 +798,7 @@ async def process_image_async(
 
         detected_faces.append(face_data)
         new_faces_count += 1
-        metrics_faces_detected.labels(name=name).inc()
+        metrics_faces_detected.inc()
 
         # =====================================================
         # REAL-TIME UPDATE: Send NEW face immediately

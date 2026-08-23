@@ -522,3 +522,9 @@
 .mlops-contract-cell { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; padding: 0.3rem 0.5rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; }
 .mlops-contract-label { font-size: 0.8rem; opacity: 0.85; }
 .mlops-chip.chip-info { border-color: rgba(120, 160, 255, 0.6); color: #cfe0ff; }
+
+/* Readiness criteria / evidence tables: status cells */
+.mlops-status-ok { color: #3fb950; font-weight: 600; }
+.mlops-status-bad { color: #f85149; font-weight: 600; }
+.mlops-status-warn { color: #d29922; font-weight: 600; }
+#model-type-note.note-bad { color: #f85149; }

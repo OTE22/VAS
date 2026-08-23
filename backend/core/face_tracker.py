@@ -132,7 +132,7 @@ class FaceTracker:
                 # Update with new embedding to adapt to appearance changes
                 pipeline_faces[best_match_hash] = (embedding, name, current_time)
                 logger.info(f"[TRACKER] Skipping {name} (already tracked, sim={best_similarity:.3f}, updated embedding)")
-                metrics_faces_skipped.labels(name=name).inc()
+                metrics_faces_skipped.inc()
                 self.total_faces_skipped += 1
                 return True
 

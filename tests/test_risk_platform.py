@@ -340,7 +340,7 @@ def test_migration_applied_and_indexed():
     #        -> b0c1d2e3f4a5 -> c2d3e4f5a6b7 -> d4e5f6a7b8c9 -> f6a7b8c9d0e1
     #        -> 7d3f91a2c4e6 (JSON null literals -> SQL NULL)
     #        -> d5f9b2c7e3a1 (current head: identity_audit_log survives deletion).
-    assert version == "d5f9b2c7e3a1"
+    assert version == "a3c8e5f1b7d2"
     for t in ("threat_assessments", "risk_signal_results", "risk_model_versions", "learned_thresholds"):
         assert t in tables, f"missing table {t}"
     for idx in ("uq_assessment_idempotency", "idx_assessment_person_created",

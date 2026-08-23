@@ -448,9 +448,17 @@ def test_shadow_mode_never_changes_the_live_result(token):
 
 def test_shadow_failure_never_breaks_rules(token):
     """Shadow mode with NO shadow model: the live endpoint still serves the
-    rules result; the failed attempt is persisted as data."""
-    identity = _get_identity(token)
+    rules result; the failed attempt is persisted as data.
+
+    The state is reached the way production reaches it: shadow mode is
+    enabled while a model exists (the mode gate requires one), then the
+    model is stopped/archived. Setting the mode without a model through the
+    generic settings route is no longer possible - that route is governed by
+    the same MODE_GATED gate as /api/ml/config/mode."""
+    _train_and_shadow()
     _set_mode(token, "shadow", "pytest failure isolation")
+    _stop_shadow_and_cleanup()          # mode stays shadow; the model is gone
+    identity = _get_identity(token)     # (the cleanup also removes the seeded subject)
     try:
         status, body = _http(f"GET", f"/api/security/threat/{identity}",
                              token=token, timeout=120)

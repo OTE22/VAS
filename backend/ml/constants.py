@@ -17,7 +17,7 @@ Semantics that must never blur (approval-binding):
 import importlib.util
 import logging
 from enum import Enum
-from typing import Dict, List
+from typing import Any, Dict, List
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,26 @@ class FallbackReason(str, Enum):
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"       # model row vanished between inference and persistence
     # decision router (operational ML mode)
     SIGNAL_MAPPING_UNVALIDATED = "SIGNAL_MAPPING_UNVALIDATED"   # no validated ML->risk mapping policy
-    INVALID_PREDICTION = "INVALID_PREDICTION"                   # band/score outside the contract
+    INVALID_PREDICTION = "INVALID_PREDICTION"                   # band/score outside the contract (incl. NaN/inf)
+    SHADOW_INTERNAL_ERROR = "SHADOW_INTERNAL_ERROR"             # shadow wrapper failed outside inference
+
+
+# Model types that have a dataset definition, features, trainer, artifact and
+# inference path in THIS release. Every other MODEL_TYPES entry is a reserved
+# interface: the API refuses to train it (MODEL_TYPE_NOT_IMPLEMENTED) and the
+# trainer refuses it too (defense in depth — the HTTP boundary is not the only
+# caller).
+IMPLEMENTED_MODEL_TYPES = (MODEL_TYPE_BEHAVIOR_ANOMALY,)
+
+
+def model_type_status(model_type: str) -> Dict[str, Any]:
+    """Capability contract for one model type — what the UI renders."""
+    implemented = model_type in IMPLEMENTED_MODEL_TYPES
+    return {"model_type": model_type,
+            "status": "available" if implemented else "reserved",
+            "trainable": implemented,
+            "note": ("trains in this release" if implemented
+                     else "reserved interface for a future release — not trainable")}
 
 
 # Redis coordination keys

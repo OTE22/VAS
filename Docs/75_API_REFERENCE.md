@@ -2,7 +2,7 @@
 
 **Generated from the running application's OpenAPI document — do not edit by hand.** Regenerate with `scripts/generate_api_reference.py` after any route change; a stale copy is worse than none.
 
-- **263 operations** across **239 paths**
+- **264 operations** across **240 paths**
 - Service: `Face Recognition Service` v`5.0.0`
 
 ## How to read this
@@ -31,7 +31,7 @@
 - [Live Alerts](#live-alerts) — 14 operations
 - [Intelligence](#intelligence) — 21 operations
 - [Security Intelligence](#security-intelligence) — 10 operations
-- [ML Operations](#ml-operations) — 33 operations
+- [ML Operations](#ml-operations) — 34 operations
 - [SQL Agent](#sql-agent) — 20 operations
 - [Conversations](#conversations) — 9 operations
 - [Users](#users) — 12 operations
@@ -259,6 +259,7 @@ The model lifecycle: features, labels, datasets, training jobs, candidates, drif
 | `POST` | `/api/ml/labels/{label_id}/supersede` | Correct a label by supersession | `label_id` | — | yes | 200, 422 |
 | `GET` | `/api/ml/models` | List Models | — | `model_type`, `stage`, `page`, `page_size` | — | 200, 422 |
 | `GET` | `/api/ml/models/{model_id}` | Model Detail | `model_id` | — | — | 200, 422 |
+| `POST` | `/api/ml/models/{model_id}/readiness` | Recompute Model Readiness | `model_id` | — | — | 200, 422 |
 | `POST` | `/api/ml/models/{model_id}/reject` | Reject a Model | `model_id` | — | yes | 200, 422 |
 | `POST` | `/api/ml/models/{model_id}/shadow-approve` | Approve a VALIDATED model into SHADOW | `model_id` | — | yes | 200, 422 |
 | `GET` | `/api/ml/overview` | ML Operations Overview | — | — | — | 200 |

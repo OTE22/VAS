@@ -245,6 +245,7 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES": SettingMeta("integer", "count", 0, 100000, None, _DYN),
     "ML_EVIDENCE_MIN_REVIEWED_TOTAL": SettingMeta("integer", "count", 0, 1000000, None, _DYN),
     "ML_EVIDENCE_MIN_REVIEWED_PER_BAND": SettingMeta("integer", "count", 0, 1000000, None, _DYN),
+    "ML_EVIDENCE_REQUIRE_INDEPENDENT_REVIEW": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "ML_PREDICTION_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
     "ML_SNAPSHOT_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
     "ML_DRIFT_REPORT_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),

@@ -37,6 +37,9 @@ logger = logging.getLogger("backend.ml.call_log")
 _recent: "deque[Dict[str, Any]]" = deque(maxlen=500)   # in-process ring buffer (fallback reader)
 
 
+_FREE_TEXT_HINTS = ("note", "notes", "comment", "description")
+
+
 def sanitize_body(body: Any, *, max_str: int = 200) -> Any:
     """Keys + bounded scalars only; secrets and nested bulk are elided."""
     if isinstance(body, dict):
@@ -45,6 +48,11 @@ def sanitize_body(body: Any, *, max_str: int = 200) -> Any:
             lowered = str(key).lower()
             if any(hint in lowered for hint in _SECRET_HINTS):
                 out[key] = "<redacted>"
+            elif any(hint in lowered for hint in _FREE_TEXT_HINTS):
+                # analyst notes are free text about a surveilled subject:
+                # never in the log line (the contract at the top of this
+                # module promises exactly that) - only their length.
+                out[key] = f"<text:{len(str(value)) if value is not None else 0}>"
             elif isinstance(value, (dict, list)):
                 out[key] = f"<{type(value).__name__}:{len(value)}>"
             elif isinstance(value, str):

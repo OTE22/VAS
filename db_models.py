@@ -540,6 +540,9 @@ class IdentityAppearance(Base):
         # the second lacks identity_id (wrong driver). See alembic revision
         # e4f5a6b7c8d9.
         Index('idx_appearance_identity_pipeline', 'identity_id', 'pipeline_id'),
+        # ML collector keyset order: WHERE created_at > x [AND (created_at, id) > cursor]
+        # ORDER BY created_at, id  (rev f2b7c9d4e1a6, built CONCURRENTLY)
+        Index('idx_appearance_created_at_id', 'created_at', 'id'),
     )
 
 
@@ -2129,6 +2132,7 @@ class MLLabel(Base):
     review_status = Column(String(16), nullable=False, default="unreviewed",
                            comment="unreviewed | reviewed | disputed")
     reviewed_by = Column(String(255), nullable=True)
+    reviewed_by_user_id = Column(Integer, nullable=True, comment="reviewer identity (user id); NULL for CLI/seed")
     reviewed_at = Column(DateTime, nullable=True)
     # How this review was SELECTED (revision d5f9b2c7e3a1): {method, band,
     # sampling_probability, reason, selected_at}. NULL = no explicit metadata.
@@ -2138,6 +2142,7 @@ class MLLabel(Base):
     idempotency_key = Column(String(255), nullable=False, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_by = Column(String(255), nullable=False)
+    created_by_user_id = Column(Integer, nullable=True, comment="creator identity (user id); NULL for CLI/seed")
 
     __table_args__ = (
         Index('idx_ml_label_subject', 'subject_type', 'subject_id', 'status'),
@@ -2525,9 +2530,12 @@ class MLAuditLog(Base):
     after = Column(JSONB, nullable=True)
     reason = Column(Text, nullable=True)
     ip_address = Column(String(45), nullable=True)
+    request_id = Column(String(64), nullable=True,
+                        comment="HTTP request id (matches [MLOPS_CALL] log lines); NULL for CLI/background")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
         Index('idx_ml_audit_object', 'object_type', 'object_id', 'created_at'),
         Index('idx_ml_audit_action', 'action', 'created_at'),
+        Index('idx_ml_audit_request', 'request_id'),
     )

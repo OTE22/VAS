@@ -51,6 +51,14 @@ def _mount_info(path: str):
     return best[0], best[2]
 
 
+def isolation_marker():
+    """The REGRESSION_ISOLATION_ID run marker the regression compose stamps on
+    its container (None elsewhere). Reading the environment is this module's
+    job; other scripts that must know whether they run on the isolated stack
+    import this instead of reading the environment themselves."""
+    return os.environ.get("REGRESSION_ISOLATION_ID") or None
+
+
 def _resolves(name: str):
     try:
         return socket.gethostbyname(name)

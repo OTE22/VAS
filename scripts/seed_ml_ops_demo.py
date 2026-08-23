@@ -203,6 +203,7 @@ async def _assessments(db, rng, ids):
 async def _labels(db, rng, assessments, ids):
     from backend.ml.labeling_service import labeling_service
     created, superseded, reviewed = [], 0, 0
+    manual_ids = []   # only manual labels may be confirmed (weak stays weak)
     # 40 labels from assessments (manual when resolved, weak when open)
     for k, (ident, aid, status, when, sev) in enumerate(assessments[:40 * SCALE]):
         kind = "manual" if status == "resolved" else "weak"
@@ -211,6 +212,8 @@ async def _labels(db, rng, assessments, ids):
             source=f"seed-{kind}", event_time=when, created_by="seed", assessment_id=aid,
             notes="seed label from assessment")
         created.append(out["id"])
+        if kind == "manual":
+            manual_ids.append(out["id"])
     # 20 plain weak labels on other identities (same-day bucket linkage)
     for k, (ident, last) in enumerate(ids[80 * SCALE:100 * SCALE]):
         out = await labeling_service.create_label(
@@ -221,7 +224,10 @@ async def _labels(db, rng, assessments, ids):
     # were 12 per scale unit, which yielded ~38 supervised rows at scale 10 —
     # under the 50-row floor — so the supervised training path was never
     # actually exercised by this seed. 30 clears the floor from scale 4 up.
-    for lid in created[:30 * SCALE]:
+    # Confirmations apply to MANUAL labels only - a weak label can never be
+    # confirmed into reviewed evidence (WEAK_LABEL_NOT_REVIEWABLE). Seed
+    # labels carry source seed-* and are excluded from evidence regardless.
+    for lid in manual_ids[:30 * SCALE]:
         await labeling_service.review_label(db, lid, action="confirm", actor="seed-reviewer")
         reviewed += 1
     for lid in created[30 * SCALE:34 * SCALE]:
@@ -247,7 +253,12 @@ async def _outcomes(db, rng, ids, assessments, created):
             db, subject_id=ident, label="positive" if k % 3 else "negative", label_kind="weak",
             source="seed-outcome", event_time=last, created_by="seed")
         linked += out["linked_predictions"]
-    for lid in created[26:36]:                        # confirm → re-link (manual+reviewed outranks weak)
+    # confirm -> re-link (manual+reviewed outranks weak); only MANUAL labels
+    # can be confirmed, so pick them by kind rather than by position
+    manual_pending = (await db.execute(text(
+        "SELECT id::text FROM ml_labels WHERE label_kind = 'manual' AND review_status = 'unreviewed' "
+        "AND status = 'active' AND source LIKE 'seed-%' ORDER BY created_at LIMIT 10"))).scalars().all()
+    for lid in manual_pending:
         await labeling_service.review_label(db, lid, action="confirm", actor="seed-reviewer")
     n = (await db.execute(text(
         "SELECT count(*) FROM ml_predictions WHERE outcome_label_id IS NOT NULL AND subject_id IN "
@@ -408,6 +419,7 @@ async def _remove(db):
         "DELETE FROM ml_drift_reports WHERE model_id IN (SELECT id FROM ml_models WHERE training_job_id LIKE 'seed-mlops-%')",
         "DELETE FROM ml_audit_log WHERE object_type = 'ml_model_threshold' AND object_id IN (SELECT id::text FROM ml_model_thresholds WHERE model_id IN (SELECT id FROM ml_models WHERE training_job_id LIKE 'seed-mlops-%'))",
         "DELETE FROM ml_audit_log WHERE object_type = 'ml_model' AND object_id IN (SELECT id::text FROM ml_models WHERE training_job_id LIKE 'seed-mlops-%')",
+        "DELETE FROM ml_audit_log WHERE object_type = 'ml_training_job' AND object_id LIKE 'seed-mlops-%'",
         "DELETE FROM ml_models WHERE training_job_id LIKE 'seed-mlops-%'",           # thresholds cascade
         "DELETE FROM ml_datasets WHERE build_job_id LIKE 'seed-mlops-%' OR name LIKE 'seed-%'",
         "DELETE FROM background_task_history WHERE job_id LIKE 'seed-mlops-%'",

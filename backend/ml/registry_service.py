@@ -26,6 +26,7 @@ explicitly.
 
 import hashlib
 import logging
+import math
 import os
 import pickle
 import uuid as uuid_mod
@@ -149,7 +150,16 @@ def score_with_payload(payload: Dict[str, Any], matrix) -> List[float]:
         raise RegistryError("UNKNOWN_ALGORITHM", f"unsupported algorithm {algorithm!r}")
     norm = payload["normalization"]
     span = max(norm["max"] - norm["min"], 1e-9)
-    return [float(min(1.0, max(0.0, (v - norm["min"]) / span))) for v in raw]
+    out = []
+    for v in raw:
+        value = float(v)
+        if not math.isfinite(value):
+            # NaN/inf must surface as a failure, never as the lowest band:
+            # max(0.0, nan) == 0.0 in CPython would silently band it "normal".
+            out.append(float("nan"))
+            continue
+        out.append(float(min(1.0, max(0.0, (value - norm["min"]) / span))))
+    return out
 
 
 def save_artifact(payload: Dict[str, Any], path: str) -> str:
@@ -409,6 +419,11 @@ class RegistryService:
         await self._bump_version_key(row.model_type)
         logger.info("[ML_OPS] model %s v%s: %s -> %s by %s",
                     row.model_type, row.version, before_stage, to_stage, actor)
+        try:   # state-changing event -> gauges current without any page load
+            from backend.ml import metrics as ml_metrics
+            await ml_metrics.refresh_state(db, reason=f"model_{to_stage}")
+        except Exception:
+            pass
         return serialize_model_row(row)
 
     async def stop_shadow(self, db: AsyncSession, model_type: str, *,

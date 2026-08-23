@@ -316,6 +316,26 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
     started = time.monotonic()
     seed = TRAINING_SEED if seed is None else int(seed)
     await task_history_manager.mark_running(job_id)
+    # Durable lineage: background_task_history is transient (30-day
+    # retention); the request itself - who, when, what - must survive in
+    # ml_audit_log regardless of the entry point (API or CLI) and outcome.
+    await _audit_training_event("training_started", job_id, requested_by, {
+        "model_type": model_type, "algorithm": algorithm, "dataset_id": dataset_id,
+        "seed": seed, "hyperparameters": hyperparameters, "sampling_policy": sampling_policy})
+
+    # Defense in depth: the HTTP boundary refuses reserved model types, but
+    # it is not the only caller. A reserved type must never be trained here
+    # either — an IsolationForest registered as threat_ranking_model would
+    # not even be shadow-capped (its name lacks "anomaly").
+    from backend.ml.constants import IMPLEMENTED_MODEL_TYPES
+    if model_type not in IMPLEMENTED_MODEL_TYPES:
+        await task_history_manager.finish_job(
+            job_id, success=False, error_code="MODEL_TYPE_NOT_IMPLEMENTED",
+            error_message=f"{model_type} is a reserved interface; only "
+                          f"{', '.join(IMPLEMENTED_MODEL_TYPES)} trains in this release")
+        release_training(job_id)
+        await _observe_training_outcome_async(job_id)
+        return
 
     async def stage(name: str, percent: int):
         logger.info("[ML_OPS] job_id=%s training_stage=%s progress_percent=%s",
@@ -708,6 +728,51 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
             error_message=str(e)[:500])
     finally:
         release_training(job_id)
+        await _observe_training_outcome_async(job_id)
+
+
+async def _audit_training_event(action: str, job_id: str, requested_by: Optional[int],
+                                after: Dict[str, Any]) -> None:
+    """Own session: the training session may be rolled back or closed."""
+    try:
+        from db_connection import db_manager
+        from backend.ml.audit import ml_audit
+        async with db_manager.get_session() as db:
+            await ml_audit(db, action=action, actor_user_id=requested_by,
+                           actor_username=("user" if requested_by is not None else "cli"),
+                           object_type="ml_training_job", object_id=job_id, after=after)
+            await db.commit()
+    except Exception:
+        logger.debug("[ML_OPS] training audit %s failed", action, exc_info=True)
+
+
+async def _observe_training_outcome_async(job_id: str) -> None:
+    """One metric per finished job: completed | failed:<stable code>. The
+    error codes are a small fixed vocabulary (refusal/gate codes), never
+    free text. The outcome is also audited durably (model id when one was
+    registered, the error code when not) - a failed training leaves no
+    model row, so without this it would vanish with task-history retention."""
+    try:
+        from backend.core.task_history import task_history_manager
+        from backend.ml import metrics as ml_metrics
+        task = await task_history_manager.get_task_by_job_id(job_id)
+        if not task:
+            return
+        result = task.get("result") or {}
+        if task.get("status") == "completed":
+            ml_metrics.observe_training_job("completed")
+            await _audit_training_event("training_finished", job_id, None, {
+                "status": "completed", "model_id": result.get("model_id"),
+                "version": result.get("version"), "dataset_id": result.get("dataset_id"),
+                "artifact_hash": result.get("artifact_hash")})
+        else:
+            code = str(task.get("error_code") or "UNKNOWN")[:48]
+            ml_metrics.observe_training_job(f"failed:{code}")
+            await _audit_training_event("training_finished", job_id, None, {
+                "status": task.get("status"), "error_code": code,
+                "error_message": str(task.get("error_message") or "")[:200]})
+    except Exception:
+        pass
 
 
 def _raw_scores(payload: Dict[str, Any], matrix) -> List[float]:

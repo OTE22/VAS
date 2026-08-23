@@ -432,6 +432,11 @@ async def sync_settings_from_config(db: AsyncSession):
             "ML_DRIFT_MIN_SAMPLES", "ML_DRIFT_PSI_WARNING", "ML_DRIFT_PSI_CRITICAL",
             "ML_PREDICTION_RETENTION_DAYS", "ML_SNAPSHOT_RETENTION_DAYS",
             "ML_DRIFT_REPORT_RETENTION_DAYS", "ML_MAX_ARTIFACT_MB",
+            # scientific-gate minimums (0 = not configured; no defaults are
+            # invented - the gate reports NOT_CONFIGURED until set from policy)
+            "ML_SCIENTIFIC_MIN_HISTORY_DAYS", "ML_SCIENTIFIC_MIN_MEDIAN_APPEARANCES",
+            "ML_EVIDENCE_MIN_REVIEWED_TOTAL", "ML_EVIDENCE_MIN_REVIEWED_PER_BAND",
+            "ML_EVIDENCE_REQUIRE_INDEPENDENT_REVIEW",
             "MLFLOW_ENABLED", "OPTUNA_ENABLED", "XGBOOST_ENABLED", "SHAP_ENABLED",
         ],
     }
@@ -1221,6 +1226,23 @@ async def update_setting(
                     )
                 )
 
+        # ML decision authority is governed by ONE gate implementation
+        # (decision_service.mode_gate_report). The generic settings path must
+        # never be an alternate route around it: same report, same 409 body,
+        # same audit row as PUT /api/ml/config/mode.
+        if setting_key == "ML_DECISION_MODE":
+            from backend.ml.decision_service import decision_service, mode_gated_detail
+            from backend.routes.ml_ops import record_mode_rejection
+            report = await decision_service.mode_gate_report(db, str(typed_value))
+            if not report["allowed"]:
+                ip_addr, _ua = get_client_info(request)
+                await record_mode_rejection(
+                    db, report, actor_username=current_user.username,
+                    actor_user_id=current_user.id, reason=update_data.change_reason,
+                    ip_address=ip_addr)
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                                    detail=mode_gated_detail(report))
+
         meta = runtime_settings.get_meta(setting_key, setting.category)
 
         # Store old value for audit
@@ -1267,8 +1289,23 @@ async def update_setting(
             audit_log.action = audit_action
         db.add(audit_log)
 
+        if setting_key == "ML_DECISION_MODE":
+            # Same ML audit row the ML-Ops route writes — one history.
+            from backend.ml.audit import ml_audit
+            await ml_audit(db, action="mode_change", actor_username=current_user.username,
+                           actor_user_id=current_user.id, object_type="ml_config",
+                           object_id="ML_DECISION_MODE", before={"mode": old_value},
+                           after={"mode": setting.value}, reason=update_data.change_reason,
+                           ip_address=ip_address)
+
         await db.commit()
         await db.refresh(setting)
+        if setting_key == "ML_DECISION_MODE":
+            try:
+                from backend.ml import metrics as ml_metrics
+                await ml_metrics.refresh_state(db, reason="mode_change")
+            except Exception:
+                pass
 
         logger.info(
             f"Setting '{setting_key}' updated by {current_user.username} "
