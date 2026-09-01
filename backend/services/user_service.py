@@ -81,7 +81,11 @@ class UserService:
             full_name=full_name,
             role=role,
             can_use_chatbot=can_use_chatbot,
-            is_active=True
+            is_active=True,
+            # An admin typed this password, so the admin knows it. It is a
+            # hand-over credential, not the user's own — the account cannot do
+            # anything until the owner replaces it at first sign-in.
+            must_change_password=True,
         )
         db.add(user)
         logger.info(f"[CREATE_USER] ✅ Step 3 SUCCESS: User object created and added to session")
@@ -214,8 +218,15 @@ class UserService:
         db: AsyncSession = None,
         actor: Optional[User] = None,
         context: Optional[dict] = None,
+        force_rotation: bool = True,
     ) -> User:
         """Update user information.
+
+        `force_rotation` applies only when a password is supplied: an
+        admin-assigned password is a hand-over credential, so the owner is made
+        to replace it at next sign-in. Callers pass False when the admin is
+        changing their OWN password, which would otherwise lock them into
+        changing it again immediately.
 
         `actor` and `context` are optional so existing callers keep working,
         but the route passes both so the audit row records who made the change
@@ -254,7 +265,13 @@ class UserService:
                 new_password_hash = await _hash_password_async(password)
                 old_hash = user.password_hash
                 user.password_hash = new_password_hash
-                logger.info(f"[UPDATE_USER] ✅ Step 3 SUCCESS: Password hashed and updated")
+                # Stamped on every password write: it is what invalidates the
+                # user's other live sessions (see the freshness check in
+                # backend/auth/auth_service.py).
+                user.password_changed_at = datetime.utcnow()
+                user.must_change_password = force_rotation
+                logger.info(f"[UPDATE_USER] ✅ Step 3 SUCCESS: Password hashed and updated "
+                            f"(rotation_required={force_rotation})")
                 logger.debug(f"[UPDATE_USER]   Old hash: {old_hash[:30] if old_hash else 'None'}...")
                 logger.debug(f"[UPDATE_USER]   New hash: {user.password_hash[:30]}...")
             except Exception as e:
@@ -406,8 +423,15 @@ class UserService:
         return user
 
     @staticmethod
-    async def reset_password(user_id: int, new_password: str, db: AsyncSession) -> User:
-        """Reset user password (admin only)"""
+    async def reset_password(user_id: int, new_password: str, db: AsyncSession,
+                             force_rotation: bool = True) -> User:
+        """Reset user password (admin only).
+
+        `force_rotation` defaults to True because an admin-chosen password is
+        known to the admin: the owner must replace it at next sign-in. Callers
+        pass False when an admin resets their own password, which would
+        otherwise force them straight into a change-password screen.
+        """
         logger.info(f"[PASSWORD_RESET] 🔐 Starting password reset for user ID: {user_id}")
         
         # Step 1: Find user
@@ -438,8 +462,14 @@ class UserService:
         logger.info(f"[PASSWORD_RESET] Step 3: Updating user object in session...")
         old_hash = user.password_hash
         user.password_hash = new_password_hash
+        # Stamped on every password write: it is what invalidates this user's
+        # other live sessions (see backend/auth/auth_service.py). A reset is
+        # often a response to a compromise, so ending those sessions matters.
+        user.password_changed_at = datetime.utcnow()
+        user.must_change_password = force_rotation
         logger.debug(f"[PASSWORD_RESET]   Old hash: {old_hash[:30] if old_hash else 'None'}...")
         logger.debug(f"[PASSWORD_RESET]   New hash: {user.password_hash[:30]}...")
+        logger.info(f"[PASSWORD_RESET]   rotation_required={force_rotation}")
         
         # Step 4: Ensure user is attached to session and flush changes
         logger.info(f"[PASSWORD_RESET] Step 4: Ensuring user is tracked by session...")

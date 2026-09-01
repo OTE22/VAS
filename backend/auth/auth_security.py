@@ -46,6 +46,13 @@ AUTH_ERROR_CODES = frozenset({
     "AUTH_SERVICE_UNAVAILABLE",
     "CSRF_FAILED",
     "INVALID_REQUEST",
+    # Self-service password change. Unregistered codes are rewritten to
+    # INVALID_REQUEST by auth_error(), which would leave the client unable to
+    # tell "your current password is wrong" from "that password is too weak".
+    "INVALID_CURRENT_PASSWORD",
+    "PASSWORD_REUSED",
+    "WEAK_PASSWORD",
+    "PASSWORD_UPDATE_FAILED",
 })
 
 # The SAME message is returned for "no such user" and "wrong password" so the
@@ -420,7 +427,9 @@ def read_auth_cookie(request: Request) -> Optional[str]:
 # Redirect allowlist (backend is authoritative)
 # ---------------------------------------------------------------------------
 
-ALLOWED_REDIRECTS = ("/home", "/dashboard")
+# "/change-password" is a destination login can choose (for an account whose
+# password is still the seeded or admin-assigned one), so it belongs here.
+ALLOWED_REDIRECTS = ("/home", "/dashboard", "/change-password")
 
 
 def redirect_for_role(role: str) -> str:

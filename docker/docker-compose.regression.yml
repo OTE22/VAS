@@ -127,6 +127,14 @@ services:
       MAP_DATA_DIR: /app/map-data-test
       # regression-only marker read by the isolation assertions
       REGRESSION_ISOLATION_ID: ${REGRESSION_ID}
+      # The dev service passes the NVIDIA NIM dev-LLM switch through from
+      # docker/.env, and `extends` would inherit it here — giving the
+      # ISOLATED stack a path to an external API, and flipping which model
+      # the registry prefers (test_real_registry_prefers_the_sql_specialist
+      # caught exactly that). Forced off: the regression stack talks to
+      # nothing outside itself, whatever the developer's .env says.
+      LLM_DEV_PROVIDER: ""
+      NVIDIA_NIM_API_KEY: ""
     # The inherited dev healthcheck allows 60s + 3x30s before declaring the
     # container unhealthy. That is ample for a machine running ONE stack, but
     # this one starts while the developer's stack is still up, and two API
@@ -148,7 +156,14 @@ services:
       - fr_regression_ml:/app/models/ml
       - fr_regression_database:/app/database
       - fr_regression_logs:/var/log/face-recognition
-      - fr_regression_chroma:/home/appuser/.cache/chroma
+      # SHARED and external, so `down -v` cannot destroy it. This holds
+      # ChromaDB's all-MiniLM-L6-v2 ONNX model (~80 MB), which its
+      # embedding function otherwise re-downloads on EVERY run — at the
+      # 168 KB/s this host gets from S3, that is ~8 minutes and
+      # test_kb_isolation times out. A third-party model file and a
+      # telemetry id: no database, no storage, no user data, so the
+      # isolation this stack guarantees is untouched.
+      - fr_shared_onnx_cache:/home/appuser/.cache/chroma
     # !override, not a merge: `extends` would otherwise UNION this list with the
     # dev service's `face_recognition_network`, quietly putting the regression
     # API back on the developer's network — the exact coupling this stack exists
@@ -186,7 +201,13 @@ volumes:
   fr_regression_ml:
   fr_regression_database:
   fr_regression_logs:
-  fr_regression_chroma:
+  # EXTERNAL on purpose: compose never removes an external volume, so the
+  # model cache survives the run's `down -v`. Create it once with
+  #     docker volume create fr_shared_onnx_cache
+  # It is populated by the first run that needs it (or seeded from the dev
+  # cache), and shared by every run afterwards.
+  fr_shared_onnx_cache:
+    external: true
 
 networks:
   # Private to this project. NOT external: the whole point is that no dev

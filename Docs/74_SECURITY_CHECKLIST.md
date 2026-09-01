@@ -55,9 +55,19 @@ list includes `admin`, `admin123`, `password`, `changeme`, `letmein`, `root`,
 
 - [ ] Generate a real password and supply it as a **file**, not an env var:
       `secrets/bootstrap_admin_password` (see §2).
-- [ ] Log in once and change it. `BOOTSTRAP_ADMIN_REQUIRE_ROTATION` is forced
-      on in production.
-- [ ] Confirm no other account still has a shared or handover password.
+- [ ] Log in once and change it. You cannot forget this one: the account
+      authenticates but every gated endpoint answers
+      `403 PASSWORD_ROTATION_REQUIRED` until the password is changed at
+      `/change-password`. `docker/docker-compose.prod.yml` hardcodes
+      `BOOTSTRAP_ADMIN_REQUIRE_ROTATION: "true"` (it is not read from `.env`,
+      and there is no config-guard rule for it — the compose file is what
+      pins it).
+- [ ] Confirm no other account still has a shared or handover password. Any
+      account an admin created or reset carries `must_change_password` until
+      its owner replaces the credential — check the **MUST CHANGE PASSWORD**
+      badge in Admin → Users, or:
+      `SELECT username FROM users WHERE must_change_password;`
+      An admin resetting their *own* password is exempt by design.
 
 **Verify**
 
@@ -273,9 +283,12 @@ paths run a dummy bcrypt verify and return an identical message, so neither
 timing nor wording reveals whether an account exists.
 
 **Rate limiting exists at two layers:** nginx caps
-`/api/auth/(login|logout)` at **10 r/m** (burst 5, 429), and the application
-throttles **8 account failures / 900 s**, **30 IP failures / 900 s**, and a
-**600 attempts / 60 s** global surge cap.
+`/api/auth/(login|logout|change-password)` at **10 r/m** (burst 5, 429), and the
+application throttles **8 account failures / 900 s**, **30 IP failures / 900 s**,
+and a **600 attempts / 60 s** global surge cap. `change-password` sits behind
+both — it calls `check_rate_limits` on entry and `record_failure` on a wrong
+current password — so it is not a way to guess a password without the throttle
+that guards login.
 
 **⚠️ Not a gap, but know it: there is no persistent account lockout.** No
 `locked_until`, no failed-attempt column. Counters expire on their own, and a
@@ -284,6 +297,22 @@ user out by burning their counter.
 
 Token lifetime is `ACCESS_TOKEN_EXPIRE_MINUTES`, default **1440 (24 h)**. There
 is **no refresh token**; renewal means logging in again.
+
+**A password nobody else chose is a precondition for using the system.** An
+account carrying a seeded or admin-assigned password can authenticate but
+nothing more: `must_change_password` is checked in the single dependency every
+gated route already builds on, so the refusal reaches all of them at once
+rather than route by route. The four exemptions are `GET /api/auth/me`,
+`POST /api/auth/logout`, `POST /api/auth/change-password` and
+`GET /change-password`. Enforcing it server-side is the point — a client that
+ignores the redirect gains nothing.
+
+**A password change ends every other session for that account.** Each password
+write stamps `users.password_changed_at`, and any token whose `iat` predates it
+is refused 401. This is a **second revocation channel alongside the Redis jti
+denylist**, and unlike that denylist it is database-side: it keeps working
+while Redis is down, which matters because a password change is often the
+reaction to a suspected compromise.
 
 **You must:**
 
@@ -357,7 +386,8 @@ gap** — and the administrator is not left without a reference:
    offline. A test fails if it drifts from the code.
 2. **Extract the full spec from the production system itself** — no server
    route is exposed, nothing is enabled, the double gate stays shut
-   (verified: 231 paths extracted while `/docs` remains unregistered):
+   (the path count grows as routes are added — verify the extraction works,
+   not that it matches a number, while `/docs` remains unregistered):
 
    ```bash
    docker compose -f docker/docker-compose.prod.yml exec face_recognition \
@@ -500,7 +530,7 @@ Everything that resets or clears is admin-gated at the **router** level:
 |---|---|
 | `POST /api/cache/clear` | admin (router-level), plus a pattern allowlist |
 | `POST /api/face-tracker/reset/{pipeline_id}` | admin (router-level); in-memory tracker state only |
-| `POST /api/users/{user_id}/reset-password` | admin **and** CSRF |
+| `POST /api/users/{user_id}/reset-password` | admin **and** CSRF — forces rotation on the target and ends its sessions, unless the target is the caller |
 
 `GET /webhook/test` **is** registered in production, deliberately — it is
 guarded by the ingest key and gives an installer a "200 means your key works"
@@ -514,7 +544,10 @@ path+method pair is ever registered twice.
 
 - [ ] Confirm no page is reachable without a session. This audit found and fixed
       one such page (`/tracking-people`, which documented an access requirement
-      it did not enforce); re-check after adding any new page.
+      it did not enforce); re-check after adding any new page. The newest is
+      `/change-password`, which does require a session — it is exempt from the
+      password-rotation gate, not from authentication, so an anonymous request
+      gets 401 and is redirected to `/signin`.
 
 ---
 

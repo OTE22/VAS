@@ -161,7 +161,7 @@ def test_migration_head_and_seeds():
     # e1f2a3b4c5d6 -> d0e1f2a3b4c5 -> b8c9d0e1f2a3 (this ML-pipeline
     # migration) — so asserting the newest head still proves the ML lineage
     # is applied.
-    assert head == "a3c8e5f1b7d2"
+    assert head == "c5e7f9a1b3d4"
     assert [p[0] for p in policies] == [
         "behavior_anomaly_model", "coappearance_anomaly_model",
         "social_graph_anomaly_model", "threat_ranking_model"]

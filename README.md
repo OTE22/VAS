@@ -96,6 +96,12 @@ Redis, storage, models, background services. There is no `/api/health`.
 
 Then open <http://localhost/signin> and log in.
 
+On a fresh deployment the first sign-in lands on `/change-password`: the
+bootstrap administrator holds a password from `secrets/bootstrap_admin_password`
+that the system requires it to replace before anything else works. The same
+applies to any account an administrator creates or resets. See
+[`Docs/61_DEPLOYMENT_RUNBOOK.md`](Docs/61_DEPLOYMENT_RUNBOOK.md) §7.
+
 ---
 
 ## API documentation
@@ -104,7 +110,7 @@ Then open <http://localhost/signin> and log in.
 |---|---|
 | `/docs` | Swagger UI (interactive) |
 | `/redoc` | ReDoc (reference) |
-| `/openapi.json` | Raw OpenAPI 3 spec — 231 paths |
+| `/openapi.json` | Raw OpenAPI 3 spec |
 
 Served entirely from vendored local assets (`frontend/vendor/swagger/`); no CDN,
 no internet. **Disabled in production** by design — the docs publish every admin

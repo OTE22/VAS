@@ -53,6 +53,12 @@ curl -X GET "http://localhost:8000/api/identities" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
+> A login can succeed and still leave the session gated. If the response has
+> `"rotation_required": true`, the account holds a seeded or admin-assigned
+> password: the token is valid but every endpoint except `/api/auth/me`,
+> `/api/auth/logout` and `/api/auth/change-password` returns
+> `403 PASSWORD_ROTATION_REQUIRED`. Call `POST /api/auth/change-password` first.
+
 > **The webhook ingest endpoints are the one exception.** They authenticate with
 > a separate, non-JWT machine credential — a JWT will not work there, and the
 > ingest token will not work on any other endpoint. See
@@ -119,6 +125,22 @@ never on message text**:
 | `QUALITY_GATES_FAILED` | 409 | Model candidate failed its safety gates |
 | `INVALID_STATUS` | 409 | Object is not in a valid state for this action |
 | `ACCOUNT_BLOCKED` / `QUERY_DENIED` | 403 | SQL Agent policy decisions |
+| `PASSWORD_ROTATION_REQUIRED` | 403 | Seeded or admin-assigned password not yet changed |
+
+> **`PASSWORD_ROTATION_REQUIRED` breaks the shape convention above.** It arrives
+> as **`detail.code`**, not `detail.error_code`, and carries
+> `detail.redirect_url` (`"/change-password"`). It can be returned by *any*
+> gated endpoint, so treat it as an auth-state signal rather than an error from
+> the endpoint you called:
+>
+> ```json
+> {"detail": {"code": "PASSWORD_ROTATION_REQUIRED",
+>             "message": "You must change your password before continuing.",
+>             "redirect_url": "/change-password"}}
+> ```
+>
+> Resolve it with `POST /api/auth/change-password`; see
+> [`25_API_AUTHENTICATION_GUIDE.md`](25_API_AUTHENTICATION_GUIDE.md).
 
 **Unknown or malformed IDs return `404`, never `500`** — and identically for
 both, so IDs cannot be probed by guessing.
@@ -1645,7 +1667,7 @@ read by no code.
 **Common Status Codes**:
 - `400 Bad Request`: Invalid parameters, or a structured precondition failure (`DATASET_NOT_READY`, `CONFIRMATION_REQUIRED`)
 - `401 Unauthorized`: Authentication required
-- `403 Forbidden`: Insufficient permissions, a missing CSRF header on a cookie-authenticated mutation, **or a disabled feature flag** (`"{FLAG} is disabled"` — see Feature Flags below)
+- `403 Forbidden`: Insufficient permissions, a missing CSRF header on a cookie-authenticated mutation, a disabled feature flag (`"{FLAG} is disabled"` — see Feature Flags below), **or a pending password rotation** (`detail.code == "PASSWORD_ROTATION_REQUIRED"`, returned by every gated endpoint until the account's seeded/assigned password is changed)
 - `404 Not Found`: Resource not found **or malformed ID** (identical response for both — IDs cannot be probed)
 - `409 Conflict`: `*_ALREADY_RUNNING`, `NAME_CONFLICT`, `VERSION_CONFLICT`, `QUALITY_GATES_FAILED`, `INVALID_STATUS`
 - `422 Unprocessable Entity`: Validation failure (bad color/icon/alert level, `page_size`/`limit` above `API_MAX_PAGE_SIZE`, `top_k` above `SEARCH_MAX_TOP_K`, `max_nodes` above ceiling)
@@ -1797,6 +1819,8 @@ Map endpoints use Redis caching:
 | 12 | Updates watchlists concurrently | ⚠️ Send `version`; handle **409 VERSION_CONFLICT** |
 | 13 | Parses error message strings | ⚠️ Branch on `detail.error_code` instead |
 | 14 | Downloads full identity lists | ⚠️ Use `?page=&page_size=&q=` server-side search |
+| 15 | Logs in as an account an admin **created or reset** | ⚠️ Handle `rotation_required: true` on login, and `403 detail.code == PASSWORD_ROTATION_REQUIRED` on everything else, by calling `POST /api/auth/change-password` |
+| 16 | Caches a token for a long time | ⚠️ A password change on that account invalidates it — expect **401** "Password was changed" and re-login |
 
 ---
 

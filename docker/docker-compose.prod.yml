@@ -141,7 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-f6a7b8c9d0e1}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-c5e7f9a1b3d4}
       DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
@@ -221,7 +221,7 @@ services:
 
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-f6a7b8c9d0e1}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-c5e7f9a1b3d4}
 
       DETECTION_MODEL: /app/weights/det_10g.onnx
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
@@ -267,6 +267,9 @@ services:
       # find. Identical across cpu/gpu/prod; docker-entrypoint.sh creates it,
       # chowns it to appuser, and refuses to start if it is not writable.
       HF_HOME: /home/appuser/.cache/huggingface
+      # tqdm progress bars ("Loading weights", "Batches") are terminal UI;
+      # in a container they only shred the logs.
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: qwen2.5:1.5b
       OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
@@ -298,6 +301,15 @@ services:
       # and their alerts can never fire.
       - backup_data:/backups:ro
       - ../certs:/etc/nginx/certs:ro
+      # Offline basemap archives (MAP_DATA_DIR): the API's own map verify gate
+      # (POST /api/maps/verify, scripts/map_data/production_gate.py) and the
+      # /health/detailed map block read them. Without this mount the runbook's
+      # own verification step has nothing to measure.
+      - ../map-data:/app/map-data:ro
+      # sentence-transformers MiniLM cache (HF_HOME): without a volume the
+      # ~90 MB model re-downloads on every container recreate - and never
+      # arrives at all on an offline host.
+      - hf_cache_data:/home/appuser/.cache/huggingface
     expose:
       - "8000"
     depends_on:
@@ -375,7 +387,6 @@ services:
   # ---------------------------------------------------------------------------
   martin:
     image: ghcr.io/maplibre/martin:1.13.0
-    container_name: face_recognition_martin
     command: ["--config", "/config/martin.yaml"]
     volumes:
       - ../map-data:/map-data:ro
@@ -395,8 +406,11 @@ services:
         max-size: "50m"
         max-file: "3"
     restart: unless-stopped
+    # edge, deliberately: nginx (edge-only) proxies /maps/ to martin and
+    # depends_on its health - an undeclared/other network here made the whole
+    # prod file unparseable and would have isolated martin from its one client.
     networks:
-      - face_recognition_network
+      - edge
 
   nginx:
     image: nginx:alpine
@@ -457,6 +471,10 @@ services:
       - backup_data:/backups
       - storage_data:/data/storage:ro
       - face_database_data:/data/database:ro
+      # ML registry artifacts + Parquet datasets (ml_artifacts_data): the DB
+      # references these files by sha256; they are unrecoverable if only the
+      # database is restored.
+      - ml_artifacts_data:/data/ml:ro
     entrypoint: ["/bin/sh", "/scripts/backup-loop.sh"]
     depends_on:
       postgres:
@@ -530,6 +548,7 @@ volumes:
   face_database_data: { driver: local }
   ml_artifacts_data: { driver: local }
   chromadb_cache: { driver: local }
+  hf_cache_data: { driver: local }
   ollama_models: { driver: local }
   backup_data: { driver: local }
   prometheus_data: { driver: local }

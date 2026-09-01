@@ -1077,6 +1077,18 @@ class SimilarityTrainingData(Base):
     user = relationship("User")
     
     __table_args__ = (
+        # An association table feeding an ML training set: a duplicate pair
+        # double-weights a training example. Partial, because a row with a
+        # NULL member is not a pair and many NULLs must not collide. The
+        # CHECK is what makes the unique index meaningful — without a fixed
+        # ordering, (A,B) and (B,A) are distinct to the index and identical
+        # in meaning. See b4d5e6f7a8c9.
+        Index('uq_similarity_training_pair', 'identity_id_1', 'identity_id_2',
+              unique=True,
+              postgresql_where=text('identity_id_1 IS NOT NULL AND identity_id_2 IS NOT NULL')),
+        CheckConstraint('identity_id_1 IS NULL OR identity_id_2 IS NULL '
+                        'OR identity_id_1 < identity_id_2',
+                        name='ck_similarity_training_ordered'),
         Index('idx_similarity_training_label', 'label', 'created_at'),
         Index('idx_similarity_training_created', 'created_at'),
         Index('idx_similarity_training_user', 'created_by_user_id', 'created_at'),
@@ -1462,8 +1474,14 @@ class IdentityRelationship(Base):
     __table_args__ = (
         Index('idx_relationship_identity1', 'identity_id_1'),
         Index('idx_relationship_identity2', 'identity_id_2'),
-        # Ensure consistent ordering (id1 < id2) with unique constraint
+        # The unique index is on the ORDERED pair, so it only prevents a
+        # duplicate when the ordering actually holds — without the CHECK,
+        # (A,B) and (B,A) are two rows for one relationship. The comment
+        # here used to claim ordering was 'ensured' when only application
+        # convention did it. See b4d5e6f7a8c9.
         Index('idx_relationship_pair', 'identity_id_1', 'identity_id_2', unique=True),
+        CheckConstraint('identity_id_1 < identity_id_2',
+                        name='ck_identity_relationship_ordered'),
     )
 
 
@@ -1827,6 +1845,75 @@ class Message(Base):
     )
 
 
+class AgentArtifact(Base):
+    """A document the SQL agent produced: a PDF or Word report.
+
+    Exists so the agent can answer "the last report" / "that PDF" from a
+    record instead of a guess. Before this, exports were bytes in an HTTP
+    response and nothing remembered they had happened, so every follow-up
+    referring to a generated document was unresolvable.
+
+    LINEAGE, not free text. `source_query` is the human phrasing and is
+    informational only; reproduction uses `source_sql` plus the immutable ids
+    (`source_message_id`, `source_result_id`, `parent_artifact_id`). That is
+    what makes "same report but only for camera 3" modify the report's OWN
+    originating query rather than whichever SQL happened to run most recently.
+
+    `source_content` holds the pre-render narrative so a translation is
+    text -> LLM -> re-render, never PDF parsing. It carries the same
+    surveillance data as the document, so it is treated like the document:
+    owner-scoped, never serialized into API responses, deleted with the row.
+
+    Attribution follows the conversation rule — chat history outlives the
+    account, so user_id is SET NULL on delete and created_by_username keeps
+    the record readable.
+    """
+    __tablename__ = "agent_artifacts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'),
+                     nullable=True, index=True)
+    created_by_username = Column(String(255), nullable=False,
+                                 comment="Denormalized owner name; survives account deletion")
+    conversation_id = Column(UUID(as_uuid=True),
+                             ForeignKey('conversations.id', ondelete='SET NULL'),
+                             nullable=True, index=True)
+
+    type = Column(String(16), nullable=False, comment="pdf | word | report")
+    title = Column(String(255), nullable=False)
+    language = Column(String(8), nullable=False, default='en')
+
+    # RELATIVE to settings.ARTIFACTS_DIR. Never an absolute path and never
+    # client-supplied: the download route joins it to the configured root and
+    # re-checks containment, so a stored value cannot escape the directory.
+    storage_path = Column(String(512), nullable=False)
+
+    source_query = Column(Text, nullable=True, comment="User phrasing (informational)")
+    source_sql = Column(Text, nullable=True, comment="The query this document reports on")
+    source_content = Column(Text, nullable=True,
+                            comment="Pre-render narrative. Owner-scoped; never returned by an API")
+    source_message_id = Column(UUID(as_uuid=True),
+                               ForeignKey('messages.id', ondelete='SET NULL'), nullable=True)
+    source_result_id = Column(Integer,
+                              ForeignKey('user_query_history.id', ondelete='SET NULL'),
+                              nullable=True)
+    modification_meta = Column(JSONB, nullable=True,
+                               comment="Normalized delta applied vs the parent artifact")
+    parent_artifact_id = Column(UUID(as_uuid=True),
+                                ForeignKey('agent_artifacts.id', ondelete='SET NULL'),
+                                nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    deleted_at = Column(DateTime, nullable=True,
+                        comment="Soft delete; retention removes the row and the file together")
+
+    __table_args__ = (
+        # The resolver's hot path: newest live artifacts for one owner.
+        Index('idx_artifact_owner_recent', 'user_id', 'created_at'),
+        Index('idx_artifact_conversation', 'conversation_id', 'created_at'),
+    )
+
+
 class MessageFeedback(Base):
     """Thumbs up/down + optional comment, one per user per message."""
     __tablename__ = "message_feedback"
@@ -1945,6 +2032,18 @@ class RiskSignalResult(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     assessment = relationship("ThreatAssessmentRecord", back_populates="signal_results")
+
+    __table_args__ = (
+        # This table is what per-signal analytics aggregate over, so a
+        # duplicate row silently doubles an aggregate. The parent guards
+        # retries (children are written only when the parent's ON CONFLICT
+        # actually inserted), so the exposure is two signals colliding
+        # INSIDE one assessment — which the writer's signal_name[:64]
+        # truncation can manufacture from two distinct long names.
+        # See b4d5e6f7a8c9.
+        Index('uq_risk_signal_assessment_name', 'assessment_id', 'signal_name',
+              unique=True),
+    )
 
 
 class RiskModelVersion(Base):
@@ -2446,6 +2545,11 @@ class MLShadowComparison(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
+        # One comparison per prediction. ml_predictions is protected by
+        # idempotency_key; without this its child was not, and two shadow
+        # evaluations of the same prediction could both persist (observed:
+        # two rows 3s apart with different contents). See b4d5e6f7a8c9.
+        Index('uq_ml_shadow_comparison_prediction', 'prediction_id', unique=True),
         Index('idx_ml_shadow_model_created', 'model_id', 'created_at'),
         Index('idx_ml_shadow_created', 'created_at'),
         Index('idx_ml_shadow_disagreement', 'operational_disagreement', 'created_at'),

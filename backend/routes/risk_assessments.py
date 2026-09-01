@@ -25,7 +25,7 @@ import logging
 import time
 import uuid as uuid_mod
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db_connection import get_db
+from db_models import ThreatAssessmentRecord
 from backend.auth.auth_service import require_admin
 from backend.core.assessment_service import assessment_service
 from backend.core.distributed_lock import DistributedLock
@@ -121,9 +122,24 @@ class ReopenRequest(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=4000)
 
 
+# Width of threat_assessments.threshold_version, read off the model rather than
+# repeated as a literal here: widen the column and this follows it, instead of
+# quietly going on truncating at the old size.
+_THRESHOLD_VERSION_MAX = ThreatAssessmentRecord.threshold_version.type.length or 128
+
+
 async def _threshold_provenance(db: AsyncSession) -> str:
     """Which learned-threshold versions the co-appearance analysis is
-    currently consuming (recorded on every persisted assessment)."""
+    currently consuming (recorded on every persisted assessment).
+
+    The column is String(128) and this packs TWO `signal=version` pairs into
+    it, comma-separated. A blind `[:128]` therefore used to cut mid-pair and
+    store something like `...distance=global:multi_came`, which parses as a
+    version that never existed — worse than recording nothing, because it is
+    indistinguishable from a real value. Truncation now happens on the comma
+    boundary, so the value is always a complete list of complete pairs, and
+    the loss is reported rather than silent.
+    """
     try:
         from config import settings
         window = await threshold_store.resolve(
@@ -132,8 +148,26 @@ async def _threshold_provenance(db: AsyncSession) -> str:
         distance = await threshold_store.resolve(
             db, SIGNAL_DISTANCE,
             static_default=settings.MULTI_CAMERA_DISTANCE_METERS)
-        return (f"{SIGNAL_TIME_WINDOW}={window.provenance},"
-                f"{SIGNAL_DISTANCE}={distance.provenance}")[:128]
+
+        pairs = [f"{SIGNAL_TIME_WINDOW}={window.provenance}",
+                 f"{SIGNAL_DISTANCE}={distance.provenance}"]
+        rendered = ",".join(pairs)
+        if len(rendered) <= _THRESHOLD_VERSION_MAX:
+            return rendered
+
+        kept: List[str] = []
+        for pair in pairs:
+            candidate = ",".join(kept + [pair])
+            if len(candidate) > _THRESHOLD_VERSION_MAX:
+                break
+            kept.append(pair)
+        logger.warning(
+            "[ASSESSMENTS] threshold provenance too long for the column "
+            "(%d chars); recorded %d of %d pairs",
+            len(rendered), len(kept), len(pairs))
+        # A single pair longer than the column is still cut, but at least the
+        # caller is told; returning "" would lose the provenance entirely.
+        return ",".join(kept) if kept else pairs[0][:_THRESHOLD_VERSION_MAX]
     except Exception:
         # Persisted as the assessment's threshold_version — say why in the log
         # so an "unresolved" row is explainable later.

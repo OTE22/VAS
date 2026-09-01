@@ -2,7 +2,7 @@
 
 **Generated from the running application's OpenAPI document — do not edit by hand.** Regenerate with `scripts/generate_api_reference.py` after any route change; a stale copy is worse than none.
 
-- **264 operations** across **240 paths**
+- **267 operations** across **243 paths**
 - Service: `Face Recognition Service` v`5.0.0`
 
 ## How to read this
@@ -21,7 +21,7 @@
 
 ## Contents
 
-- [Authentication](#authentication) — 4 operations
+- [Authentication](#authentication) — 5 operations
 - [Health](#health) — 4 operations
 - [Ingest (Webhook)](#ingest-webhook) — 6 operations
 - [Identity Management](#identity-management) — 30 operations
@@ -32,7 +32,7 @@
 - [Intelligence](#intelligence) — 21 operations
 - [Security Intelligence](#security-intelligence) — 10 operations
 - [ML Operations](#ml-operations) — 34 operations
-- [SQL Agent](#sql-agent) — 20 operations
+- [SQL Agent](#sql-agent) — 21 operations
 - [Conversations](#conversations) — 9 operations
 - [Users](#users) — 12 operations
 - [Settings Management](#settings-management) — 6 operations
@@ -49,16 +49,17 @@
 - [System Management](#system-management) — 4 operations
 - [Metrics](#metrics) — 1 operations
 - [Admin Tutorial](#admin-tutorial) — 2 operations
-- [Admin Pages](#admin-pages) — 25 operations
+- [Admin Pages](#admin-pages) — 26 operations
 
 ---
 
 ## Authentication
 
-Log in, inspect the current session, log out. Start here: every other bearer-token endpoint needs a token from `POST /api/auth/login`.
+Log in, inspect the current session, change your own password, log out. Start here: every other bearer-token endpoint needs a token from `POST /api/auth/login`. If that login answers `rotation_required: true`, the account still holds a seeded or admin-assigned password and every endpoint outside this group returns `403 PASSWORD_ROTATION_REQUIRED` until `POST /api/auth/change-password` succeeds.
 
 | Method | Path | Summary | Path params | Query | Body | Returns |
 |---|---|---|---|---|---|---|
+| `POST` | `/api/auth/change-password` | Change Password | — | — | yes | 200, 422 |
 | `POST` | `/api/auth/login` | Login | — | — | yes | 200, 422 |
 | `POST` | `/api/auth/logout` | Logout | — | — | — | 200 |
 | `GET` | `/api/auth/me` | Get Current User Info | — | — | — | 200 |
@@ -280,6 +281,7 @@ Natural-language querying, executed under a read-only database role.
 
 | Method | Path | Summary | Path params | Query | Body | Returns |
 |---|---|---|---|---|---|---|
+| `GET` | `/api/sql-agent/artifacts/{artifact_id}` | Download Artifact | `artifact_id` | — | — | 200, 422 |
 | `GET` | `/api/sql-agent/context` | Get Query Context | — | `session_id` | — | 200, 422 |
 | `POST` | `/api/sql-agent/export/pdf` | Export To Pdf | — | — | yes | 200, 422 |
 | `POST` | `/api/sql-agent/export/word` | Export To Word | — | — | yes | 200, 422 |
@@ -513,6 +515,7 @@ Server-rendered HTML pages for the admin console. These return pages, not JSON, 
 | `GET` | `/admin/unknown` | Unknown Faces | — | — | — | 200, 422 |
 | `GET` | `/admin/users` | Admin Users | — | — | — | 200 |
 | `GET` | `/admin/watchlists` | Admin Watchlists | — | — | — | 200 |
+| `GET` | `/change-password` | Change Password Page | — | — | — | 200 |
 | `GET` | `/dashboard` | Dashboard | — | — | — | 200 |
 | `GET` | `/docs/overview` | Api Overview | — | — | — | 200 |
 | `GET` | `/home` | Home | — | — | — | 200, 422 |

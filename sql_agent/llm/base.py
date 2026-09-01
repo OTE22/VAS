@@ -38,6 +38,12 @@ class TaskType(str, Enum):
     INTENT = "intent"
     NORMALIZE = "normalize"
     SQL_GENERATION = "sql_generation"
+    # Rewriting VALID SQL under a new constraint ("the same, but only camera
+    # 3"). Deliberately not SQL_REPAIR: repair's prompt exists to fix broken
+    # SQL, and overloading it would tell the model the input is wrong when it
+    # is not — corrupting both prompts' purpose. Same model preference as
+    # generation, different intent.
+    SQL_MODIFICATION = "sql_modification"
     SQL_REPAIR = "sql_repair"
     EXPLANATION = "explanation"
 

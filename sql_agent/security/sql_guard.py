@@ -110,6 +110,64 @@ class SqlVerdict:
         return self.allowed
 
 
+# --------------------------------------------------------------- code sets
+#
+# A denial is not automatically an ATTACK. Two of these codes mean the model
+# wrote something broken and one means our own parser is missing; treating
+# those as attempted intrusions blocks accounts for typing "hello" (observed
+# live 2026-08-30) and, worse, buries real attempts in false positives.
+#
+# Enforcement and reasoning both classify from these sets rather than from
+# the denial text, because the text is prose and prose drifts.
+
+#: The user (or the model on their behalf) asked for something the policy
+#: forbids. These are the genuine security events: refuse, audit, enforce.
+ENFORCEABLE_CODES = frozenset({
+    "READ_ONLY_VIOLATION",
+    "TABLE_NOT_ALLOWED",
+    "SYSTEM_SCHEMA",
+    "FORBIDDEN_FUNCTION",
+    "MULTIPLE_STATEMENTS",
+    "UNSUPPORTED_STATEMENT",
+    "EXPLAIN_NOT_ALLOWED",
+})
+
+#: The generated SQL is broken or absent, or the request outgrew the
+#: complexity budget. Nothing forbidden was attempted — these are mistakes to
+#: CORRECT, and the reasoning layer may re-plan them.
+MALFORMED_CODES = frozenset({
+    "PARSE_ERROR",
+    "EMPTY",
+    "TOO_COMPLEX",
+})
+
+#: Our own dependency is missing. Never the user's doing; never enforceable
+#: and never correctable by re-planning.
+INFRASTRUCTURE_CODES = frozenset({
+    "PARSER_UNAVAILABLE",
+})
+
+
+def is_enforceable(code: Optional[str]) -> bool:
+    """Whether a denial code represents a genuine forbidden-operation attempt.
+
+    Fails CLOSED for an unrecognised code: a new denial reason is treated as
+    a security event until someone classifies it deliberately, which is the
+    safe direction for the enforcement gate.
+    """
+    if not code:
+        return False
+    code = str(code).upper()
+    if code in MALFORMED_CODES or code in INFRASTRUCTURE_CODES:
+        return False
+    return True
+
+
+def is_malformed(code: Optional[str]) -> bool:
+    """Whether a denial means the query was broken rather than forbidden."""
+    return bool(code) and str(code).upper() in MALFORMED_CODES
+
+
 def _deny(code: str, reason: str, **kw) -> SqlVerdict:
     return SqlVerdict(allowed=False, code=code, reason=reason, **kw)
 

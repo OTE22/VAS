@@ -168,6 +168,12 @@ def pytest_configure(config):
         "Run explicitly with `-m benchmark`; passing its budget is mandatory "
         "for a release-readiness verdict.")
 
+    config.addinivalue_line(
+        "markers",
+        "slow: end-to-end agent tests that make real model calls. Minutes, "
+        "not seconds, and they need the live stack. Selected by default — "
+        "deselect with `-m 'not slow'` when iterating on something else.")
+
 
 @pytest.fixture
 def session_log_dir():
@@ -225,3 +231,95 @@ def pytest_collection_modifyitems(config, items):
 def pytest_sessionfinish(session, exitstatus):
     """Flush and dispose of the session's logging before the process exits."""
     _teardown_test_logging()
+
+
+# ---------------------------------------------------------------------------
+# Chat-store sandbox: tests that touch conversations / history / artifacts
+# clean up after themselves WITHOUT hand-written teardown.
+#
+# Why this exists: the dev stack has no row-level test isolation, so a test
+# that exercises the query pipeline writes into the REAL chat store. Every
+# suite used to hand-roll its own cleanup, and the ones that got it wrong
+# (test_sql_agent_streaming_session deleting only the history row and never
+# the conversation record_exchange_for_session created for it) filled the
+# admin's sidebar with `cancel_survival_probe_query` threads — ten of them,
+# one per run. This fixture makes "delete everything my test created" the
+# default instead of a per-test skill.
+#
+# How: snapshot the max ids / existing UUID sets of the four chat tables
+# before the test, and afterwards delete only rows that appeared during it.
+# It deliberately deletes by "created during this test", NOT by content
+# fingerprints — a fixture must clean up whatever the test created, including
+# rows from titles nobody thought to register.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def chat_sandbox():
+    """Track and remove chat rows created while the test ran.
+
+    Usage: just take the fixture. Everything created in `conversations`,
+    `user_query_history`, `user_conversation_sessions` and `agent_artifacts`
+    during the test is removed afterwards (branches/messages/feedback cascade;
+    artifact FILES are unlinked through the registry's contained delete).
+
+    Scope note: this cleans the CHAT domain only. Tests creating users,
+    identities, detections etc. still own that cleanup.
+    """
+    from sqlalchemy import text as sa_text
+
+    async def _snapshot():
+        from db_connection import db_manager
+        if not getattr(db_manager, "_initialized", False):
+            await db_manager.init_db()
+        async with db_manager.get_session() as db:
+            return {
+                "conversations": {str(r[0]) for r in (await db.execute(
+                    sa_text("SELECT id FROM conversations"))).fetchall()},
+                "history_max": (await db.execute(sa_text(
+                    "SELECT coalesce(max(id), 0) FROM user_query_history"))).scalar(),
+                "sessions": {r[0] for r in (await db.execute(sa_text(
+                    "SELECT session_id FROM user_conversation_sessions"))).fetchall()},
+                "artifacts": {str(r[0]) for r in (await db.execute(
+                    sa_text("SELECT id FROM agent_artifacts"))).fetchall()},
+            }
+
+    before = run_on_shared_loop(_snapshot())
+    yield before
+
+    async def _cleanup():
+        from db_connection import db_manager
+        from sql_agent.services import artifact_registry
+        async with db_manager.get_session() as db:
+            # Artifacts first: files must be unlinked via the registry's
+            # contained delete before their rows go.
+            new_artifacts = (await db.execute(sa_text(
+                "SELECT id, storage_path FROM agent_artifacts"))).fetchall()
+            for artifact_id, path in new_artifacts:
+                if str(artifact_id) not in before["artifacts"]:
+                    artifact_registry.delete_file(path)
+                    await db.execute(sa_text(
+                        "DELETE FROM agent_artifacts WHERE id = :i"),
+                        {"i": artifact_id})
+
+            new_conversations = [str(r[0]) for r in (await db.execute(
+                sa_text("SELECT id FROM conversations"))).fetchall()
+                if str(r[0]) not in before["conversations"]]
+            for conversation_id in new_conversations:
+                await db.execute(sa_text(
+                    "DELETE FROM conversations WHERE id = CAST(:i AS uuid)"),
+                    {"i": conversation_id})
+
+            await db.execute(sa_text(
+                "DELETE FROM user_query_history WHERE id > :m"),
+                {"m": before["history_max"]})
+
+            new_sessions = [r[0] for r in (await db.execute(sa_text(
+                "SELECT session_id FROM user_conversation_sessions"))).fetchall()
+                if r[0] not in before["sessions"]]
+            for session_id in new_sessions:
+                await db.execute(sa_text(
+                    "DELETE FROM user_conversation_sessions WHERE session_id = :s"),
+                    {"s": session_id})
+            await db.commit()
+
+    run_on_shared_loop(_cleanup())

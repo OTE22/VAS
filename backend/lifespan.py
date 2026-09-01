@@ -1012,7 +1012,12 @@ async def lifespan(app: FastAPI):
             set_sql_agent_instance = set_instance
             
             logger.info("  🔄 Initializing SQL Intelligence Agent...")
-            memory = ConversationMemory(storage_dir="conversation_cache")
+            # No storage_dir argument: the default derives from STORAGE_DIR
+            # (settings.CONVERSATION_CACHE_DIR), which the storage volume
+            # persists. The old literal "conversation_cache" pinned the
+            # global agent's memory to the container's writable layer, where
+            # every --force-recreate erased it.
+            memory = ConversationMemory()
             session_id = memory.start_session()
             sql_agent_instance = SQLIntelligenceAgent(conversation_memory=memory)
             logger.info(f"  ✅ SQL Agent initialized (session: {session_id})")

@@ -179,6 +179,18 @@ TOKEN=$(curl -fsS -X POST http://localhost/api/auth/login \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 ```
 
+> If every command below then returns **403**, that login also answered
+> `"rotation_required": true` — the account still holds a seeded or
+> admin-assigned password and can do nothing until it is changed:
+>
+> ```bash
+> curl -fsS -X POST http://localhost/api/auth/change-password \
+>   -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+>   -d '{"current_password":"<current>","new_password":"<12+ chars, 6+ distinct>"}'
+> ```
+>
+> Use the `access_token` from that response afterwards — the old one is revoked.
+
 Recent detections:
 
 ```bash
@@ -313,6 +325,7 @@ from backup instead. Check the migration before assuming it can be undone.
 | Backend exits code 78 | `$DC logs face_recognition \| tail -30` | config preflight rejected a setting (reason is printed) |
 | Frames rejected 503 | `curl .../health/detailed` → queue | ingest outrunning inference; queue at capacity |
 | Map blank | `curl -o /dev/null -w '%{http_code}' .../tiles/13/4892/3253.png` | tiles not mounted |
-| Login fails | `$DC logs face_recognition \| grep AUTH` | wrong password, or account locked out |
+| Login fails | `$DC logs face_recognition \| grep AUTH` | wrong password, or rate-limited (there is no account lockout) |
+| Login works, everything 403s | `$DC logs face_recognition \| grep 'rotation pending'` | pending password rotation — change it at `/change-password` |
 
 Full decision tree: [`73_TROUBLESHOOTING.md`](73_TROUBLESHOOTING.md).

@@ -33,6 +33,11 @@ After assigning pipelines:
 - They can click it to access the Unknown Faces page
 - They will only see unknown identities from their assigned pipelines
 
+> ⚠️ **If you also typed a new password in that same edit form**, the user is
+> now required to change it: they will be redirected to `/change-password`
+> instead of `/admin/unknown` until they do. Assigning pipelines alone does not
+> have this effect — only setting a password does.
+
 ---
 
 ## How It Works (Technical)
@@ -55,6 +60,11 @@ user_pipeline_access
 2. **Backend route `/admin/unknown` is called**
    ↓
 3. **Backend validates token and gets user**
+   ↓
+3b. **Backend checks `must_change_password`** — if set, 403
+    `PASSWORD_ROTATION_REQUIRED` → redirect to `/change-password`. This happens
+    *before* any pipeline check, and it is special-cased in the error handler
+    because `/dashboard` is itself gated and would otherwise loop
    ↓
 4. **Backend checks: `AuthService.get_user_pipelines(user_id, db)`**
    ↓
@@ -95,6 +105,17 @@ user_pipeline_access
 
 4. **No pipelines exist in system**
    - Solution: Ensure pipelines exist in `pipelines` table first
+
+### Problem: User is redirected to `/change-password`, not `/dashboard`
+
+Different cause entirely, and no amount of pipeline access will fix it. The
+account still holds a password an administrator set, so it is gated until the
+user replaces it. Check for the **MUST CHANGE PASSWORD** badge in Admin → Users,
+or:
+
+```sql
+SELECT username, must_change_password FROM users WHERE username = '<user>';
+```
 
 ### How to Verify Pipeline Access
 

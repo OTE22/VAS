@@ -27,8 +27,14 @@ storage/
 chromadb_data/
 conversation_cache/
 sql_agent/chromadb_data/
-debug/
-backup/
+# Anchored to the repository root ON PURPOSE. Unanchored, `backup/` matches a
+# directory of that name at ANY depth — which silently excluded the whole of
+# scripts/backup/ (backup.sh, restore.sh, backup-loop.sh). The production
+# compose file mounts that directory into the backup service and runs
+# /scripts/backup-loop.sh as its entrypoint, so a fresh clone had no backups,
+# no restore and no rollback path, with nothing in `git status` to show it.
+/debug/
+/backup/
 *.dump
 *.sql.gz
 *.tar.gz
@@ -216,3 +222,9 @@ map-data/metadata/content_verdicts.json
 # scripts/map_data/make_test_fixtures.py, deterministic, a few MB of binary.
 # Reproducible artifacts do not belong in git.
 map-data-test/
+
+# Deployment automation (deploy.sh): host-specific generated files and outputs
+docker/gpu-allocation.generated.yml
+logs/deploy/
+backups/
+.deployment/

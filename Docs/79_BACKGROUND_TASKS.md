@@ -95,6 +95,9 @@ Never logged: passwords, JWTs, cookies, auth headers, API keys, embeddings
 TOKEN=$(curl -s -X POST http://localhost/api/auth/login -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"***"}' | jq -r .access_token)
 
+# If every call below returns 403, that login also said "rotation_required": true —
+# the account has not yet replaced its seeded/assigned password. See 61 §7.
+
 # 1. Status
 curl -s -H "Authorization: Bearer $TOKEN" http://localhost/api/admin/retention/status | jq
 

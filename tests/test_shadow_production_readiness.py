@@ -652,14 +652,33 @@ def test_seed_labels_and_duplicate_comparisons_cannot_reach_readiness_gate_or_re
          {"id": seed_id, "s": identity, "t": day, "k": "pytest-contam-" + seed_id})
     _sql("UPDATE ml_predictions SET outcome_label_id = CAST(:l AS uuid), outcome_label = 'positive', "
          "outcome_recorded_at = now() WHERE id = CAST(:p AS uuid)", {"l": seed_id, "p": prediction_id})
-    # a historical duplicate comparison row (exact repeat of the existing one)
-    _sql("INSERT INTO ml_shadow_comparisons (id, prediction_id, model_id, assessment_id, subject_id, "
-         " rule_threat_score, rule_threat_severity, behavioral_anomaly_score, ml_anomaly_band, rule_would_alert, "
-         " ml_would_flag_anomaly, operational_disagreement, ml_failed, created_at) "
-         "SELECT gen_random_uuid(), prediction_id, model_id, assessment_id, subject_id, rule_threat_score, "
-         " rule_threat_severity, behavioral_anomaly_score, ml_anomaly_band, rule_would_alert, ml_would_flag_anomaly, "
-         " operational_disagreement, ml_failed, now() FROM ml_shadow_comparisons WHERE prediction_id = CAST(:p AS uuid) LIMIT 1",
-         {"p": prediction_id})
+    # A historical duplicate comparison row can no longer be CREATED, which is
+    # a stronger guarantee than the one this test was written for.
+    #
+    # It used to be inserted here to simulate legacy contamination, and the
+    # gate was then asserted to exclude it. Since the duplicate-prevention
+    # migration (b4d5e6f7a8c9) added
+    #
+    #     CREATE UNIQUE INDEX uq_ml_shadow_comparison_prediction ON
+    #         ml_shadow_comparisons (prediction_id)
+    #
+    # the insert raises instead. A duplicate cannot reach the readiness gate
+    # because it cannot reach the table, so that is what is asserted — the
+    # seed-label half below, which IS still insertable, is unchanged.
+    import sqlalchemy.exc as _sa_exc
+
+    with pytest.raises(_sa_exc.IntegrityError):
+        _sql("INSERT INTO ml_shadow_comparisons (id, prediction_id, model_id, assessment_id, subject_id, "
+             " rule_threat_score, rule_threat_severity, behavioral_anomaly_score, ml_anomaly_band, rule_would_alert, "
+             " ml_would_flag_anomaly, operational_disagreement, ml_failed, created_at) "
+             "SELECT gen_random_uuid(), prediction_id, model_id, assessment_id, subject_id, rule_threat_score, "
+             " rule_threat_severity, behavioral_anomaly_score, ml_anomaly_band, rule_would_alert, ml_would_flag_anomaly, "
+             " operational_disagreement, ml_failed, now() FROM ml_shadow_comparisons WHERE prediction_id = CAST(:p AS uuid) LIMIT 1",
+             {"p": prediction_id})
+
+    # ...and there is still exactly one.
+    assert _sql("SELECT count(*) FROM ml_shadow_comparisons WHERE prediction_id = CAST(:p AS uuid)",
+                {"p": prediction_id})[0][0] == 1
     try:
         overview = _overview(token)
         cov = overview["system"]["scientific_readiness"]["metrics"]["reviewed_outcome_coverage"]

@@ -54,6 +54,13 @@ The user will now be able to:
 - View unknown identities from assigned pipelines
 - Manage those identities (promote, merge, etc.)
 
+> ⚠️ **Not until they have signed in once and replaced the password you gave
+> them.** A newly created account — or one whose password you just reset —
+> carries `must_change_password`, and until the user changes it at
+> `/change-password` every one of the endpoints above answers
+> `403 PASSWORD_ROTATION_REQUIRED`. Granting more pipelines will not change
+> that. Admin → Users shows a **MUST CHANGE PASSWORD** badge while it applies.
+
 ---
 
 ## 👤 User Experience: Working with Pipeline Access
@@ -138,6 +145,15 @@ If a user tries to access something they don't have permission for:
 - **403 Forbidden**: "Access denied to this identity"
 - **403 Forbidden**: "Access denied to one or both identities"
 - **403 Forbidden**: "Access denied to one or more identities in this merge suggestion"
+
+A fourth 403 is **not** an authorization failure and is not fixed by granting
+pipelines — the account has not yet replaced its admin-assigned password:
+
+```json
+{"detail": {"code": "PASSWORD_ROTATION_REQUIRED",
+            "message": "You must change your password before continuing.",
+            "redirect_url": "/change-password"}}
+```
 
 ---
 
@@ -228,11 +244,17 @@ POST /api/admin/merge-suggestions/{id}/reject
 1. User has no pipeline access assigned
 2. No unknown identities exist in assigned pipelines
 3. User is looking at wrong page
+4. **The account has never replaced its admin-assigned password** — the most
+   likely cause for an account created recently. It is bounced to
+   `/change-password` and sees nothing else
 
 **Solution:**
 1. Check user's pipeline access in Admin → Users
 2. Verify there are unknown identities in those pipelines
 3. Ensure user is on `/admin/unknown` page
+4. Look for the **MUST CHANGE PASSWORD** badge in Admin → Users, or check
+   `must_change_password` on `GET /api/users`; if set, the user must sign in
+   and change their password before anything else works
 
 ### Problem: "Access Denied" When Promoting
 

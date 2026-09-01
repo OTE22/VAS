@@ -1591,6 +1591,26 @@ body::before {
     animation: blockedPulse 2s ease-in-out infinite;
 }
 
+/* An account still holding the password an administrator assigned. Amber, not
+   red: it is a pending hand-over, not a fault — and deliberately not animated,
+   because it is a normal state for every newly created user. */
+.badge-warning {
+    display: inline-block;
+    padding: 0.3rem 0.75rem;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: rgba(245, 158, 11, 0.2);
+    border: 1px solid rgba(245, 158, 11, 0.55);
+    color: #ffe2b0;
+    box-shadow:
+        0 0 10px rgba(245, 158, 11, 0.3),
+        inset 0 0 10px rgba(245, 158, 11, 0.1);
+    text-shadow: 0 0 8px rgba(245, 158, 11, 0.7);
+}
+
 @keyframes blockedPulse {
     0%, 100% {
         box-shadow: 

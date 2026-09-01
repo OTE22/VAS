@@ -663,6 +663,32 @@ body {
     flex-shrink: 0;
 }
 
+/* Bidirectional text. Each block resolves its own base direction from its
+   own first strong character (Arabic paragraph -> RTL, English line -> LTR),
+   which is what makes an Arabic report readable while camera names and
+   numbers inside it remain Latin. text-align follows the direction. */
+.message-content p,
+.message-content li,
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content blockquote {
+    unicode-bidi: plaintext;
+    text-align: start;
+}
+
+/* Visible status beside the dots ("Thinking…", then the pipeline stage,
+   then the patience message on long waits). Muted and italic: progress
+   commentary, not content. */
+.typing-label {
+    margin-left: 0.6rem;
+    font-size: 0.82rem;
+    font-style: italic;
+    color: rgba(255, 255, 255, 0.55);
+    vertical-align: middle;
+}
+
 .typing-indicator span {
     width: 6px;
     height: 6px;
@@ -1251,6 +1277,40 @@ body {
     font-size: 0.8rem;
     font-style: italic;
     opacity: 0.7;
+}
+
+/* A document the assistant generated. Styled as an affordance rather than a
+   sentence: the user has just been told the report is ready, and this is the
+   thing they are looking for. */
+.block-artifact {
+    margin-top: 0.6rem;
+}
+
+.artifact-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    max-width: 100%;
+    padding: 0.5rem 0.85rem;
+    border-radius: 8px;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    color: inherit;
+    font-size: 0.85rem;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+}
+
+.artifact-download::before {
+    content: "\2913";           /* downwards arrow to bar */
+    opacity: 0.8;
+}
+
+.artifact-download:hover,
+.artifact-download:focus-visible {
+    background: rgba(56, 189, 248, 0.2);
+    border-color: rgba(56, 189, 248, 0.75);
+    text-decoration: underline;
 }
 
 /* SQL viewer block */

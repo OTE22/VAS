@@ -89,6 +89,9 @@ _ORIGIN_RE = re.compile(r"^https?://[A-Za-z0-9._~%-]+(?::\d{1,5})?$")
 DERIVED_PATHS = {
     "FACES_DIR":           ("STORAGE_DIR",     ("faces",)),
     "UPLOAD_TEMP_DIR":     ("STORAGE_DIR",     ("faces", ".incoming")),
+    "ARTIFACTS_DIR":       ("STORAGE_DIR",     ("artifacts",)),
+    "CONVERSATION_CACHE_DIR": ("STORAGE_DIR",   ("conversation_cache",)),
+    "ARTIFACTS_TEMP_DIR":  ("STORAGE_DIR",     ("artifacts", ".incoming")),
     "PENDING_UPLOAD_DIR":  ("STORAGE_DIR",     ("pending",)),
     "WEBHOOK_IMAGES_DIR":  ("STORAGE_DIR",     ("debug", "webhook_images")),
     "CROPPED_IMAGES_DIR":  ("STORAGE_DIR",     ("debug", "cropped")),
@@ -130,6 +133,11 @@ SECURITY_CRITICAL_KEYS = frozenset({
     # this to 86400 can make a revoked credential keep working for a day, which
     # is the same class of hole as flipping WEBHOOK_AUTH_MODE to off.
     "WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS",
+    # The development-only hosted LLM switch. Not listed here, an admin token
+    # could persist LLM_DEV_PROVIDER=nim to the settings table and the next
+    # boot would apply it (at_boot lifts the apply-mode gate) — routing SQL
+    # agent prompts to an external endpoint without touching the environment.
+    "LLM_DEV_PROVIDER", "NVIDIA_NIM_API_KEY", "NVIDIA_NIM_BASE_URL",
 })
 
 
@@ -397,6 +405,37 @@ def collect_violations(
                 "The SQL agent shares the application's database role, so "
                 "generated SQL inherits its write privileges.",
                 "Point SQL_AGENT_DB_USER at a SELECT-only role such as fr_readonly.",
+            ))
+
+        # The development-only hosted LLM provider (NVIDIA NIM) sends the
+        # database schema and every user question to an external endpoint.
+        # This system queries biometric data and is documented as running
+        # fully offline, so in production that is data exfiltration, not a
+        # configuration preference. No acknowledgement escape — like
+        # WEBHOOK_AUTH_DISABLED, "on" is not accepted in production under any
+        # justification. (The model registry independently registers no NIM
+        # model in production; this rule exists so the misconfiguration stops
+        # the boot loudly instead of being silently ignored.)
+        dev_provider = str(getattr(cfg, "LLM_DEV_PROVIDER", "") or "").strip()
+        if dev_provider:
+            add(ConfigViolation(
+                "LLM_EXTERNAL_PROVIDER_IN_PRODUCTION", "LLM_DEV_PROVIDER",
+                f"LLM_DEV_PROVIDER={dev_provider!r} selects a hosted LLM "
+                "endpoint. The SQL agent's prompts carry the schema and user "
+                "questions about biometric data; a hosted provider sends them "
+                "off-box from a system documented as fully offline.",
+                "Unset LLM_DEV_PROVIDER. Production uses the local Ollama "
+                "models only (OLLAMA_MODEL / OLLAMA_SQL_MODEL).",
+            ))
+        if str(getattr(cfg, "NVIDIA_NIM_API_KEY", "") or "").strip():
+            add(ConfigViolation(
+                "LLM_EXTERNAL_API_KEY_PRESENT", "NVIDIA_NIM_API_KEY",
+                "A credential for an external LLM endpoint is configured in "
+                "production. Nothing uses it while LLM_DEV_PROVIDER is unset, "
+                "but a live credential on a box that must not call out is an "
+                "accident waiting for a caller.",
+                "Remove NVIDIA_NIM_API_KEY from the production environment.",
+                severity="warn",
             ))
 
     # ---- Cookies ---------------------------------------------------------

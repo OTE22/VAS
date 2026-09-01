@@ -32,12 +32,18 @@ The Face Recognition Surveillance System is a comprehensive, real-time face dete
 ## 👑 Admin Capabilities
 
 ### 1. **User Management** (`/admin/users`)
-- ✅ **Create Users**: Add new users with custom roles (admin/user)
+- ✅ **Create Users**: Add new users with custom roles (admin/user). The
+  password you type is a hand-over credential: the user **must replace it at
+  their first sign-in** before the account can do anything
 - ✅ **Edit Users**: Update user information, email, full name
 - ✅ **Assign Pipelines**: Grant users access to specific surveillance pipelines
 - ✅ **Grant Chatbot Access**: Enable/disable AI chatbot access per user
 - ✅ **Activate/Deactivate Accounts**: Enable or disable user accounts
-- ✅ **Reset Passwords**: Reset user passwords securely
+- ✅ **Reset Passwords**: Reset user passwords securely. Resetting *another*
+  account forces that user to change it and ends their sessions immediately;
+  resetting your own does not
+- ✅ **See Accounts Awaiting Rotation**: a **MUST CHANGE PASSWORD** badge marks
+  every account still holding an admin-assigned password
 - ✅ **View User List**: See all registered users with their details
 - ✅ **View User Pipeline Access**: See which pipelines each user can access
 - ✅ **View Blocked Users**: See users blocked for security violations

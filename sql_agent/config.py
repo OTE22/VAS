@@ -74,6 +74,18 @@ class Config:
     ollama_temperature: float = field(default_factory=lambda: settings.OLLAMA_TEMPERATURE)
     ollama_timeout: int = field(default_factory=lambda: settings.OLLAMA_TIMEOUT)
 
+    # Development-only hosted provider (NVIDIA NIM). The registry consults
+    # is_production and refuses to register it there regardless of these
+    # values; the production config guard additionally fails the boot. See
+    # the LLM_DEV_PROVIDER block in the central config for the full policy.
+    llm_dev_provider: str = field(default_factory=lambda: settings.LLM_DEV_PROVIDER)
+    nim_base_url: str = field(default_factory=lambda: settings.NVIDIA_NIM_BASE_URL)
+    nim_api_key: str = field(default_factory=lambda: settings.NVIDIA_NIM_API_KEY)
+    nim_model: str = field(default_factory=lambda: settings.NVIDIA_NIM_MODEL)
+    nim_sql_model: str = field(default_factory=lambda: settings.NVIDIA_NIM_SQL_MODEL)
+    nim_timeout: int = field(default_factory=lambda: settings.NVIDIA_NIM_TIMEOUT)
+    is_production: bool = field(default_factory=lambda: settings.is_production)
+
     # PostgreSQL
     db_url: str = field(default_factory=lambda: settings.DATABASE_URL)
     db_host: str = field(default_factory=lambda: settings.DB_HOST)

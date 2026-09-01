@@ -66,6 +66,19 @@ def probe_users():
         if not getattr(db_manager, "_initialized", False):
             await db_manager.init_db()
         async with db_manager.get_session() as db:
+            # session_id is UNIQUE. A previous run that was killed before
+            # teardown leaves rows holding this suite's FIXED session ids
+            # (orphaned to user_id=NULL when its probe users went) — and any
+            # new run then fails get_or_create_session with a
+            # UniqueViolation, which surfaces as phantom dual-write
+            # regressions. Clear them up front, exactly like the
+            # DELETE-then-INSERT the user rows already get.
+            await db.execute(text("""
+                DELETE FROM user_conversation_sessions
+                WHERE session_id IN ('dualwrite_probe_session',
+                                     'some_other_session',
+                                     'b_fallback_session')
+            """))
             for name in names:
                 await db.execute(text("DELETE FROM users WHERE username = :u"), {"u": name})
                 await db.execute(text("""
@@ -78,7 +91,29 @@ def probe_users():
 
     async def destroy():
         async with db_manager.get_session() as db:
+            # Conversations FIRST, then the users. conversations.user_id is
+            # ON DELETE SET NULL, so deleting the users alone orphans every
+            # thread this suite created — and orphaned conversations are
+            # VISIBLE to workspace admins (badged "Deleted User"). Three runs
+            # of this suite put 31 such threads in the admin's sidebar.
+            # Deleting them here cascades branches/messages/feedback.
+            # The suite's history rows must go too: they are what made
+            # test_every_history_session_has_a_conversation fail on the NEXT
+            # run, and their fixed session ids collide with the unique index.
             for name in names:
+                await db.execute(text("""
+                    DELETE FROM conversations
+                    WHERE user_id = (SELECT id FROM users WHERE username = :u)
+                """), {"u": name})
+                await db.execute(text("""
+                    DELETE FROM user_query_history
+                    WHERE user_id = (SELECT id FROM users WHERE username = :u)
+                       OR historical_user_id = (SELECT id FROM users WHERE username = :u)
+                """), {"u": name})
+                await db.execute(text("""
+                    DELETE FROM user_conversation_sessions
+                    WHERE user_id = (SELECT id FROM users WHERE username = :u)
+                """), {"u": name})
                 await db.execute(text("DELETE FROM users WHERE username = :u"), {"u": name})
             await db.commit()
 

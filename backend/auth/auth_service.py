@@ -7,6 +7,7 @@ Handles user authentication, JWT tokens, and authorization.
 import os
 import sys
 import jwt
+import calendar
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -202,17 +203,23 @@ class AuthService:
         return pipelines
 
 
-async def get_current_user(
+async def get_current_user_allow_pending_rotation(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db)
 ) -> User:
     """
     Get the current authenticated user from JWT token.
-    
+
     Checks both:
     1. Authorization header (Bearer token) - for API calls
     2. HttpOnly cookie (access_token) - for browser-based authentication
+
+    This variant does NOT enforce the password-rotation gate, so it is the
+    dependency for the handful of endpoints a user with a pending rotation must
+    still reach: reading their own identity, logging out, changing the password,
+    and the change-password page itself. Everything else uses `get_current_user`
+    below, which wraps this one and adds the gate.
     """
     token = None
 
@@ -295,8 +302,71 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account is inactive",
         )
-    
+
+    # A password change ends every OTHER live session for that user. Tokens
+    # minted before the change are older than password_changed_at, so they are
+    # refused here; revoking only the token that performed the change would
+    # leave a stolen session alive precisely when the user is reacting to it.
+    #
+    # Compared at whole seconds with a strict `<`, so the token minted during
+    # the change itself (same second as the timestamp) survives its own rule.
+    #
+    # timegm(), not .timestamp(): password_changed_at is a NAIVE utcnow(), which
+    # .timestamp() would read as LOCAL time while PyJWT encodes the naive `iat`
+    # as UTC. With TZ set ahead of UTC the two would be compared across that
+    # offset and every token issued within it would survive a password change —
+    # exactly the sessions this exists to end. Both sides are read as UTC here.
+    changed_at = getattr(user, "password_changed_at", None)
+    issued_at = payload.get("iat")
+    if changed_at is not None and issued_at is not None:
+        try:
+            if int(issued_at) < calendar.timegm(changed_at.utctimetuple()):
+                logger.info(
+                    "[AUTH] Token rejected (issued before the password changed) user=%s",
+                    user.username,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Password was changed. Please log in again.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        except HTTPException:
+            raise
+        except (TypeError, ValueError, OverflowError, AttributeError) as exc:
+            # A malformed claim must not authenticate anyone by accident, but it
+            # is also not evidence of a stale session — fail open on the
+            # freshness rule only, having already verified signature and expiry.
+            logger.warning("[AUTH] Token freshness check skipped: %s", type(exc).__name__)
+
     logger.debug(f"[AUTH] ✅ User authenticated: {user.username} (ID: {user.id}, Role: {user.role})")
+    return user
+
+
+async def get_current_user(
+    user: User = Depends(get_current_user_allow_pending_rotation),
+) -> User:
+    """The default authenticated-user dependency: everything the plain one does,
+    plus the password-rotation gate.
+
+    A seeded or admin-assigned password is known to someone other than its
+    owner, so an account still carrying one is not yet the user's own. Until it
+    is changed the account can authenticate but cannot ACT: this raises 403 for
+    every endpoint built on this dependency, which is all of them except the
+    four that `get_current_user_allow_pending_rotation` exists for.
+
+    Enforcing it here rather than in the frontend is the point — a client that
+    skips the redirect still cannot use the API with the seeded credential.
+    """
+    if getattr(user, "must_change_password", False):
+        logger.info("[AUTH] Blocked: password rotation pending for user=%s", user.username)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "PASSWORD_ROTATION_REQUIRED",
+                "message": "You must change your password before continuing.",
+                "redirect_url": "/change-password",
+            },
+        )
     return user
 
 

@@ -27,7 +27,9 @@
 
     // The backend returns the destination; we still refuse anything not on
     // this list so a compromised/spoofed response cannot redirect off-site.
-    const ALLOWED_REDIRECTS = new Set(['/home', '/dashboard']);
+    // '/change-password' is where the backend sends an account still carrying a
+    // seeded or admin-assigned password; it is a real login destination.
+    const ALLOWED_REDIRECTS = new Set(['/home', '/dashboard', '/change-password']);
     const DEFAULT_REDIRECT = '/dashboard';
 
     // Messages are chosen HERE by code, never interpolated from the server,

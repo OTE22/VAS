@@ -49,9 +49,14 @@ _openapi_url = "/openapi.json" if _docs_enabled else None
 # a description. Keep the names identical to the `tags=` on each router.
 OPENAPI_TAGS = [
     {"name": "Authentication",
-     "description": "Log in, inspect the current session, log out. Start here: "
-                    "every other bearer-token endpoint needs a token from "
-                    "`POST /api/auth/login`."},
+     "description": "Log in, inspect the current session, change your own "
+                    "password, log out. Start here: every other bearer-token "
+                    "endpoint needs a token from `POST /api/auth/login`. If "
+                    "that login answers `rotation_required: true`, the account "
+                    "still holds a seeded or admin-assigned password and every "
+                    "endpoint outside this group returns "
+                    "`403 PASSWORD_ROTATION_REQUIRED` until "
+                    "`POST /api/auth/change-password` succeeds."},
     {"name": "Health",
      "description": "Liveness, readiness and per-component detail. "
                     "`/health/live` does no I/O. `/health/ready` returns 503 "
@@ -709,8 +714,16 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         logger.warning(f"[AUTH] HTML page request to {request.url.path} returned 401, redirecting to /signin")
         return RedirectResponse(url="/signin", status_code=302)
     
-    # For 403 (Forbidden) errors on HTML pages, redirect to dashboard
+    # For 403 (Forbidden) errors on HTML pages, redirect to dashboard —
+    # EXCEPT a pending password rotation, which must go to /change-password.
+    # /dashboard is itself gated, so sending a pending user there would 403
+    # again and bounce them between the two forever.
     if exc.status_code == status.HTTP_403_FORBIDDEN and is_html_request:
+        detail = exc.detail
+        if isinstance(detail, dict) and detail.get("code") == "PASSWORD_ROTATION_REQUIRED":
+            logger.info("[AUTH] HTML page request to %s blocked pending password rotation, "
+                        "redirecting to /change-password", request.url.path)
+            return RedirectResponse(url="/change-password", status_code=302)
         logger.warning(f"[AUTH] HTML page request to {request.url.path} returned 403, redirecting to /dashboard")
         return RedirectResponse(url="/dashboard", status_code=302)
     

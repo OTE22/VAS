@@ -7,6 +7,7 @@ Integrates with the database tables for persistent storage and retrieval.
 
 import logging
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from sqlalchemy import select, func, and_, or_, desc, text
@@ -30,7 +31,14 @@ class UserQueryHistoryService:
     Service for managing user query history, sessions, and memory.
     Production-ready with error handling, async operations, and optimization.
     """
-    
+
+    # Process-wide guard for the sentence-transformer load. Class-level on
+    # purpose: the first burst of embedding calls (history save + similar-query
+    # search) races the initial load, and per-instance state would still let
+    # each racer build its own ~90 MB model.
+    _embedding_load_lock = threading.Lock()
+    _shared_embedding_model = None
+
     def __init__(self):
         """Initialize the service."""
         self.logger = logger
@@ -176,23 +184,59 @@ class UserQueryHistoryService:
             self.logger.error(f"[QUERY_HISTORY] Error getting query history: {e}", exc_info=True)
             return []
     
-    async def get_query_by_id(
+    async def get_query_by_id_for_user(
         self,
         db: AsyncSession,
         query_id: int,
-        user_id: Optional[int] = None
+        user_id: int
     ) -> Optional[UserQueryHistory]:
-        """Get a specific query by ID."""
+        """One history row, ALWAYS scoped to its owner.
+
+        The ownership filter is not conditional and `user_id` has no default,
+        so it cannot be forgotten. The previous accessor gated the filter on
+        `if user_id:`, which meant `None` — and `0` — returned any user's
+        row: the safe behaviour was the caller's responsibility and the
+        dangerous one was the default.
+
+        A falsy id returns None, the SAME answer as a row that does not
+        exist. A caller must not be able to distinguish "not yours" from "not
+        there": that difference is itself a disclosure about other users'
+        queries, which here are surveillance questions about named people.
+
+        This mirrors `delete_query` below, which has always had this contract.
+        """
+        if not user_id:
+            self.logger.warning(
+                "[QUERY_HISTORY] refused an unscoped lookup of query %s", query_id)
+            return None
         try:
-            query = select(UserQueryHistory).where(UserQueryHistory.id == query_id)
-            if user_id:
-                query = query.where(UserQueryHistory.user_id == user_id)
-            
+            query = select(UserQueryHistory).where(
+                and_(
+                    UserQueryHistory.id == query_id,
+                    UserQueryHistory.user_id == user_id
+                )
+            )
             result = await db.execute(query)
             return result.scalar_one_or_none()
         except Exception as e:
             self.logger.error(f"[QUERY_HISTORY] Error getting query by ID: {e}", exc_info=True)
             return None
+
+    async def get_query_by_id(
+        self,
+        db: AsyncSession,
+        query_id: int,
+        user_id: int
+    ) -> Optional[UserQueryHistory]:
+        """Deprecated name for `get_query_by_id_for_user`.
+
+        Kept so existing callers keep working, but `user_id` is now REQUIRED:
+        omitting it used to silently drop the ownership filter, and a caller
+        that forgets is now a TypeError at the call site instead of a quiet
+        cross-user read.
+        """
+        return await self.get_query_by_id_for_user(
+            db=db, query_id=query_id, user_id=user_id)
 
     async def delete_query(
         self,
@@ -589,10 +633,27 @@ class UserQueryHistoryService:
         self.logger.info(f"[EMBEDDING] 🚀 Starting automatic embedding generation for query: {query_text[:100]}...")
         
         try:
-            # Step 1: Try to import sentence-transformers
+            # Step 1: import sentence-transformers — IN AN EXECUTOR.
+            #
+            # `import sentence_transformers` pulls in torch and transformers:
+            # seconds of synchronous CPU work the first time. Doing it here on
+            # the loop froze the whole process for a measured 14.02s (the
+            # loop-lag watchdog caught it), stalling every other request
+            # including /health/live. The model load and the encode below were
+            # already off-loop; this import was the one that was missed.
+            #
+            # Python caches modules, so on every later turn this executor hop
+            # returns immediately.
             self.logger.debug("[EMBEDDING] Step 1: Checking if sentence-transformers is available...")
-            try:
+            loop = asyncio.get_running_loop()
+
+            def _import_sentence_transformers():
                 from sentence_transformers import SentenceTransformer
+                return SentenceTransformer
+
+            try:
+                SentenceTransformer = await loop.run_in_executor(
+                    None, _import_sentence_transformers)
                 self.logger.info("[EMBEDDING] ✅ Step 1: sentence-transformers library imported successfully")
             except ImportError:
                 self.logger.warning("[EMBEDDING] ❌ Step 1: sentence-transformers not available, embeddings will not be generated")
@@ -600,13 +661,48 @@ class UserQueryHistoryService:
                 return None
             
             # Step 2: Load model (cache it for performance)
+            #
+            # LOCAL FIRST. A plain SentenceTransformer(name) call asks the HF
+            # Hub to revalidate every file even when the model is fully cached
+            # — a dozen HEAD/GET requests per process start, and a hard
+            # dependency on huggingface.co being reachable. With the cache
+            # populated (HF_HOME is a named volume), local_files_only loads
+            # with ZERO network traffic; the online path below runs only the
+            # one time the cache is actually empty.
+            #
+            # Both loading and encoding are CPU-bound and used to run directly
+            # on the event loop, freezing every other request for ~10s on
+            # first use. Off-loop, like bcrypt and the ONNX sessions.
             self.logger.debug(f"[EMBEDDING] Step 2: Checking if model '{embedding_model}' is loaded...")
             if not hasattr(self, '_embedding_model') or self._embedding_model is None:
-                self.logger.info(f"[EMBEDDING] Step 2: Model not in cache, loading '{embedding_model}'...")
+                def _load():
+                    # Double-checked under a process-wide lock: several callers
+                    # (history save, similar-query search) race the FIRST use,
+                    # and without this each ran its own load — the same model
+                    # constructed three or four times back to back, visible as
+                    # repeated tqdm "Loading weights" bars in the logs.
+                    with UserQueryHistoryService._embedding_load_lock:
+                        cached = UserQueryHistoryService._shared_embedding_model
+                        if cached is not None:
+                            return cached
+                        model = _load_locked()
+                        UserQueryHistoryService._shared_embedding_model = model
+                        return model
+
+                def _load_locked():
+                    try:
+                        model = SentenceTransformer(embedding_model, local_files_only=True)
+                        self.logger.info(
+                            f"[EMBEDDING] ✅ Step 2: '{embedding_model}' loaded from the "
+                            f"LOCAL cache (no network)")
+                        return model
+                    except Exception:
+                        self.logger.info(
+                            f"[EMBEDDING] Step 2: '{embedding_model}' not in the local "
+                            f"cache — downloading once (persists in the HF_HOME volume)")
+                        return SentenceTransformer(embedding_model)
                 try:
-                    self.logger.debug("[EMBEDDING] Step 2a: Initializing SentenceTransformer...")
-                    self._embedding_model = SentenceTransformer(embedding_model)
-                    self.logger.info(f"[EMBEDDING] ✅ Step 2: Model loaded successfully: {embedding_model}")
+                    self._embedding_model = await loop.run_in_executor(None, _load)
                     self.logger.info(f"[EMBEDDING] 📦 Model info: {self._embedding_model.get_sentence_embedding_dimension()} dimensions")
                 except Exception as e:
                     self.logger.error(f"[EMBEDDING] ❌ Step 2: Failed to load embedding model: {e}", exc_info=True)
@@ -614,11 +710,15 @@ class UserQueryHistoryService:
                     return None
             else:
                 self.logger.debug("[EMBEDDING] ✅ Step 2: Using cached model (already loaded)")
-            
-            # Step 3: Generate embedding
+
+            # Step 3: Generate embedding (CPU-bound -> executor, see above)
             self.logger.debug(f"[EMBEDDING] Step 3: Encoding query text (length: {len(query_text)} chars)...")
             try:
-                embedding = self._embedding_model.encode(query_text, convert_to_numpy=True)
+                embedding = await loop.run_in_executor(
+                    None,
+                    lambda: self._embedding_model.encode(
+                        query_text, convert_to_numpy=True, show_progress_bar=False),
+                )
                 embedding_list = embedding.tolist()
                 
                 self.logger.info(f"[EMBEDDING] ✅ Step 3: Embedding generated successfully")

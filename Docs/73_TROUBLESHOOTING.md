@@ -504,11 +504,53 @@ Usernames and IPs are pseudonymized — raw values never appear in logs, by desi
 
 | `failure_code` | HTTP | Meaning | Fix |
 |---|---|---|---|
-| `INVALID_CREDENTIALS` | 401 | wrong password, or no such user — **identical response for both**, deliberately | reset the password |
+| `INVALID_CREDENTIALS` | 401 | wrong password, or no such user — **identical response for both**, deliberately | reset the password (note: this forces the user through `/change-password` at their next sign-in) |
 | `RATE_LIMITED` | 429 | too many failures in the window | wait `retry_after_seconds`, or see below |
 | `CSRF_FAILED` | 403 | the sign-in came from an untrusted origin | `AUTH_ALLOWED_ORIGINS` must contain the exact browser origin |
 | `SESSION_CREATION_FAILED` | 500 | token could not be issued | check Redis and the logs for `reference_id` |
 | `AUTH_SERVICE_UNAVAILABLE` | 500 | unhandled error | grep the `reference_id` |
+
+`POST /api/auth/change-password` writes to the same `[AUTH_AUDIT]` channel with
+`event=change_password`, so these codes appear there too:
+
+| `failure_code` | HTTP | Meaning |
+|---|---|---|
+| `INVALID_CURRENT_PASSWORD` | 403 | the current password was wrong; counts against the login throttle |
+| `PASSWORD_REUSED` | 400 | the new password equals the current one |
+| `WEAK_PASSWORD` | 400 | under 12 chars, fewer than 6 distinct, or a known default — the same rule the bootstrap password is judged by |
+| `RATE_LIMITED` | 429 | too many attempts |
+| `PASSWORD_UPDATE_FAILED` | 500 | the write failed; nothing changed |
+
+## 8b. Everyone can log in, but nothing works
+
+**Symptom:** login returns 200, every other call returns 403, and browsers
+bounce to `/change-password` no matter which page they ask for.
+
+```
+[AUTH] Blocked: password rotation pending for user=<username>
+```
+
+**Cause:** the account still holds a password somebody else chose — the
+deployment seed, or one an administrator typed. This is the rotation gate doing
+its job, not a fault.
+
+```sql
+SELECT username, must_change_password, password_changed_at FROM users
+WHERE must_change_password;
+```
+
+**Fix:** the user changes it at `/change-password` (or
+`POST /api/auth/change-password`). Only that, logout and `/api/auth/me` work
+until they do.
+
+**The related 401**, seen by scripts rather than browsers:
+
+```
+[AUTH] Token rejected (issued before the password changed) user=<username>
+```
+
+The token predates that account's `password_changed_at`. A password change ends
+every other session for the account, deliberately — log in again.
 
 ### There is no account lockout
 
@@ -526,9 +568,11 @@ throttle** on expiring counters:
 cannot lock a real user out by burning their counter. Nothing to "unlock" —
 either wait out the window, or restart Redis to clear counters in an emergency.
 
-nginx throttles independently: `/api/auth/(login|logout)` at **10 r/m**,
-`burst=5`, returning 429. If you see 429 with no `[AUTH_AUDIT]` line at all,
-you were stopped at the proxy, not the app.
+nginx throttles independently: `/api/auth/(login|logout|change-password)` at
+**10 r/m**, `burst=5`, returning 429. `change-password` is in that list because
+it verifies the *current* password — outside the zone it would be an
+unthrottled password oracle sitting beside a throttled one. If you see 429 with
+no `[AUTH_AUDIT]` line at all, you were stopped at the proxy, not the app.
 
 Token lifetime is `ACCESS_TOKEN_EXPIRE_MINUTES` (default 1440 = 24 h). **There
 is no refresh token** — renewal means logging in again.

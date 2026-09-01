@@ -18,7 +18,9 @@ if parent_dir not in sys.path:
 
 from config import settings
 from backend.config import FACE_TRACKING_ENABLED
-from backend.auth.auth_service import (AuthService, require_chatbot_access,
+from backend.auth.auth_service import (AuthService,
+                                       get_current_user_allow_pending_rotation,
+                                       require_chatbot_access,
                                        require_strict_access)
 from db_models import User
 from db_connection import get_db
@@ -393,6 +395,23 @@ async def signin():
         return FileResponse("frontend/signin.html")
     except:
         return JSONResponse(content={"message": "Sign in page not found"})
+
+
+@router.get("/change-password")
+async def change_password_page(
+    current_user: User = Depends(get_current_user_allow_pending_rotation),
+):
+    """Change-password page.
+
+    Uses the allow-pending dependency deliberately: this is the one page an
+    account with a seeded or admin-assigned password must be able to open.
+    It still requires a session — an unauthenticated caller raises 401, which
+    the global handler turns into a redirect to /signin.
+    """
+    try:
+        return FileResponse("frontend/change-password.html")
+    except Exception:
+        return JSONResponse(content={"message": "Change password page not found"})
 
 
 @router.get("/admin/users")

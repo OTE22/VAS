@@ -259,6 +259,11 @@ def test_compose_sets_no_unknown_application_setting():
         # deployment configuration rather than a library default that varies
         # with $HOME — the image creates and owns exactly this path.
         "HF_HOME",
+        # Same class as HF_HOME: read straight from the environment by
+        # huggingface_hub. Progress bars write carriage-return animations to
+        # stdout, which is the log stream here — one model load turns into
+        # thousands of unreadable partial lines in the container log.
+        "HF_HUB_DISABLE_PROGRESS_BARS",
     }
 
     declared = set(Settings.model_fields)

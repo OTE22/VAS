@@ -12,6 +12,7 @@ Parsed as text rather than YAML so the checks run without PyYAML and so
 comments (which carry the reasoning) are visible to the assertions.
 """
 
+import os
 import re
 
 import pytest
@@ -637,3 +638,249 @@ def test_the_secret_generator_writes_every_secret_file_compose_requires():
     assert not missing, (
         f"compose requires secret files the generator never writes: {missing}. "
         "Add a `write_secret <name>` line to scripts/setup/generate-secrets.sh.")
+
+
+# ---------------------------------------------------------------------------
+# Structural parseability: undeclared references
+# ---------------------------------------------------------------------------
+# `docker compose config -q` cannot run inside the API container (no docker
+# CLI), and no test asserted the equivalent - which is exactly how prod
+# shipped with martin on an undeclared network and the documented runbook
+# gate (`config -q`, runbook section 5) failing on every attempt. These
+# checks are the in-container equivalent for the reference classes that made
+# a stack unparseable; deploy.sh --self-test runs the real `config -q` on the
+# host as well.
+
+
+def _top_level_block_keys(source, block):
+    """Top-level `networks:`/`volumes:` definition keys of a compose file."""
+    lines = source.splitlines()
+    keys = []
+    inside = False
+    for line in lines:
+        if re.match(rf"^{block}:\s*$", line):
+            inside = True
+            continue
+        if inside:
+            if line.strip() and not line.startswith(" ") and not line.startswith("#"):
+                inside = False
+                continue
+            match = re.match(r"^  ([A-Za-z0-9_-]+):", line)
+            if match:
+                keys.append(match.group(1))
+    return set(keys)
+
+
+def _service_network_references(source):
+    """Every `networks:` list entry under any service, with aliases-style
+    mapping keys included (e.g. `webhook_integration:` with an aliases map)."""
+    refs = set()
+    in_networks = False
+    networks_indent = 0
+    for line in source.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if stripped == "networks:" and indent >= 4:
+            in_networks = True
+            networks_indent = indent
+            continue
+        if in_networks:
+            if not stripped or stripped.startswith("#"):
+                continue
+            if indent <= networks_indent:
+                in_networks = False
+                continue
+            # Only entries at exactly one level in are network names. Deeper
+            # lines belong to a per-network mapping (`aliases:` items are NOT
+            # networks - counting them reported `face-webhook` as undeclared).
+            if indent != networks_indent + 2:
+                continue
+            match = re.match(r"-\s*([A-Za-z0-9_-]+)\s*$", stripped)
+            if match:
+                refs.add(match.group(1))
+                continue
+            match = re.match(r"([A-Za-z0-9_-]+):\s*$", stripped)
+            if match:
+                refs.add(match.group(1))
+    return refs
+
+
+@pytest.mark.parametrize("label, path", [
+    ("prod", PROD_COMPOSE),
+    ("dev", DEV_COMPOSE),
+    ("regression", f"{REPO}/docker/docker-compose.regression.yml"),
+])
+def test_every_service_network_is_declared(label, path):
+    source = read(path)
+    declared = _top_level_block_keys(source, "networks")
+    referenced = _service_network_references(source)
+    undeclared = sorted(referenced - declared)
+    assert not undeclared, (
+        f"{label}: services reference networks the file never declares: {undeclared}. "
+        "This makes the whole stack unparseable (`docker compose config -q` fails) - "
+        "it is how prod shipped with martin on face_recognition_network.")
+
+
+def test_prod_martin_is_on_edge_without_container_name():
+    """Martin must share nginx's network (nginx proxies /maps/ to it and
+    depends_on its health) and must not pin a container_name - the only one
+    in prod collided with the dev stack's martin and defeated the project
+    namespacing this file documents at length."""
+    source = read(PROD_COMPOSE)
+    martin = source.split("\n  martin:", 1)[1].split("\n  nginx:", 1)[0]
+    assert "container_name" not in martin, "prod martin must not pin a container name"
+    assert re.search(r"networks:\s*(?:\n\s*#[^\n]*)*\n\s*- edge", martin), (
+        "prod martin must join the edge network (nginx's only network)")
+
+
+def test_prod_api_mounts_map_data_and_hf_cache():
+    """MAP_DATA_DIR (/app/map-data) feeds the map verify gate the runbook
+    itself prescribes; HF_HOME on a named volume stops the
+    sentence-transformers model re-downloading on every recreate (and never
+    arriving on an offline host)."""
+    source = read(PROD_COMPOSE)
+    api = source.split("\n  face_recognition:", 1)[1].split("\n  ollama:", 1)[0]
+    assert "../map-data:/app/map-data:ro" in api
+    assert "hf_cache_data:/home/appuser/.cache/huggingface" in api
+    volumes = _top_level_block_keys(source, "volumes")
+    assert "hf_cache_data" in volumes
+
+
+def test_backup_service_covers_ml_artifacts():
+    """The DB registry references ML artifacts by sha256; a backup that
+    restores the database but not the files leaves every registered
+    model/dataset row dangling."""
+    source = read(PROD_COMPOSE)
+    backup = source.split("\n  backup:", 1)[1].split("\nvolumes:", 1)[0]
+    assert "ml_artifacts_data:/data/ml:ro" in backup
+    script = read(f"{REPO}/scripts/backup/backup.sh")
+    assert "/data/ml" in script and "ml_artifacts.tar.gz" in script
+
+
+def _repo_migration_head():
+    """The single alembic head, derived exactly the way deploy.sh derives it
+    (no alembic import: revisions minus every referenced down_revision)."""
+    import glob
+    revisions, downs = set(), set()
+    for path in glob.glob(f"{REPO}/alembic/versions/*.py"):
+        text = read(path)
+        rev = re.search(r"^revision(?::\s*[^=]+)?\s*=\s*['\"]([A-Za-z0-9_]+)['\"]", text, re.M)
+        if rev:
+            revisions.add(rev.group(1))
+        for line in text.splitlines():
+            if line.startswith("down_revision"):
+                downs.update(re.findall(r"['\"]([A-Za-z0-9_]{6,})['\"]", line))
+    heads = sorted(revisions - downs)
+    assert len(heads) == 1, f"expected exactly one alembic head, got {heads}"
+    return heads[0]
+
+
+def test_prod_migrations_head_default_matches_the_repo_head():
+    """A stale MIGRATIONS_EXPECTED_HEAD default makes a fresh deploy of
+    current code fail the migrate job (REVISION_MISMATCH, fail-closed). The
+    default shipped 14 revisions behind once; deploy.sh derives the pin into
+    docker/.env, and this locks the fallback to the code it ships with."""
+    head = _repo_migration_head()
+    source = read(PROD_COMPOSE)
+    defaults = set(re.findall(r"MIGRATIONS_EXPECTED_HEAD:-([A-Za-z0-9_]+)", source))
+    assert defaults == {head}, (
+        f"prod compose pins MIGRATIONS_EXPECTED_HEAD default(s) {sorted(defaults)} "
+        f"but the repository's migration head is {head}")
+
+
+# ---------------------------------------------------------------------------
+# Host paths the stack mounts must actually be in the repository
+# ---------------------------------------------------------------------------
+def _prod_bind_sources(source):
+    """Host-side paths of every `- ../x:/y` bind mount in the prod stack."""
+    found = set()
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ../"):
+            continue
+        spec = stripped[2:]
+        host = spec.split(":", 1)[0]
+        found.add(host)
+    return found
+
+
+def test_every_host_path_the_prod_stack_mounts_exists():
+    """
+    A bind mount whose source is missing does not fail loudly: Docker creates
+    an empty directory and the container starts with nothing where its code or
+    configuration should be. The backup service runs /scripts/backup-loop.sh
+    from such a mount, so an absent source means no backups and no restore.
+    """
+    missing = []
+    for host in sorted(_prod_bind_sources(read(PROD_COMPOSE))):
+        # Sources are relative to the compose project directory, docker/.
+        resolved = os.path.normpath(os.path.join(REPO, "docker", host))
+        if not os.path.exists(resolved):
+            missing.append(host)
+    assert not missing, (
+        "the prod stack mounts host paths that do not exist here: " + repr(missing)
+    )
+
+
+def _bare_directory_patterns(gitignore):
+    """Unanchored `name/` patterns — the ones that match at ANY depth."""
+    patterns = []
+    for raw in gitignore.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if not line.endswith("/"):
+            continue
+        body = line[:-1]
+        if body.startswith("/") or "/" in body or "*" in body or "?" in body:
+            continue
+        patterns.append(body)
+    return patterns
+
+
+def test_no_unanchored_gitignore_pattern_hides_source():
+    """
+    `backup/` in .gitignore matches a directory of that name at ANY depth, and
+    it silently excluded the whole of scripts/backup/ -- backup.sh, restore.sh
+    and backup-loop.sh -- from version control. Nothing showed in `git status`,
+    and a fresh clone had no disaster-recovery path at all. Anchor such a
+    pattern (`/backup/`) so it only means the directory at the repository root.
+    """
+    # Caches are supposed to be matched wherever they appear; anchoring those
+    # would be wrong. Everything else that shadows a source directory is not.
+    tool_caches = {
+        "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache",
+        ".ruff_cache", ".ipynb_checkpoints", "htmlcov", ".eggs",
+    }
+    source_suffixes = (".py", ".sh", ".sql", ".js", ".yml", ".yaml", ".conf", ".json")
+    source_roots = ["scripts", "backend", "frontend", "alembic", "db", "config", "tests"]
+
+    offenders = []
+    for pattern in _bare_directory_patterns(read(f"{REPO}/.gitignore")):
+        if pattern in tool_caches:
+            continue
+        for root in source_roots:
+            root_path = os.path.join(REPO, root)
+            if not os.path.isdir(root_path):
+                continue
+            for dirpath, dirnames, _ in os.walk(root_path):
+                if any(cache in dirpath for cache in tool_caches):
+                    continue
+                if pattern not in dirnames:
+                    continue
+                hidden = os.path.join(dirpath, pattern)
+                # Only a directory that actually holds source is a problem.
+                carries_source = any(
+                    name.endswith(source_suffixes)
+                    for _, _, names in os.walk(hidden)
+                    for name in names
+                )
+                if carries_source:
+                    offenders.append(
+                        f"{pattern}/ hides {os.path.relpath(hidden, REPO)}"
+                    )
+    assert not offenders, (
+        "unanchored .gitignore directory patterns are hiding source: "
+        + repr(sorted(set(offenders)))
+        + " -- anchor them with a leading slash"
+    )

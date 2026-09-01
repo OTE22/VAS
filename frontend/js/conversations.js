@@ -113,7 +113,16 @@
         if (loadingEl) loadingEl.style.display = 'none';
         if (result.aborted) return;
         if (!result.ok || !result.payload) {
-            if (result.status === 401 || result.status === 403) return; // auth flow handles it
+            if (result.status === 401 || result.status === 403) {
+                // The auth flow will redirect, but that takes a beat — leaving
+                // #historyLoading hidden with nothing shown rendered the
+                // sidebar as a silent blank in the meantime.
+                if (emptyEl && !listEl.childElementCount) {
+                    emptyEl.replaceChildren(document.createTextNode('Sign in to see your conversations'));
+                    emptyEl.style.display = 'flex';
+                }
+                return;
+            }
             if (emptyEl && !listEl.childElementCount) {
                 emptyEl.replaceChildren(document.createTextNode('Failed to load conversations'));
                 emptyEl.style.display = 'flex';
@@ -433,6 +442,35 @@
      * escape-safe renderer; unknown types fall back to a labelled safe
      * placeholder instead of being dropped silently or rendered raw.
      */
+    /**
+     * A download link for a document the assistant generated.
+     *
+     * The URL is rebuilt here from the id alone — never taken from the
+     * payload — so a hostile or malformed `url` field cannot become the
+     * href. The id must look like a UUID or nothing is rendered.
+     */
+    function artifactBlock(block) {
+        const wrap = document.createElement('div');
+        wrap.className = 'block-artifact';
+
+        const id = String((block && block.artifact_id) || '');
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            wrap.textContent = '[Document unavailable]';
+            return wrap;
+        }
+
+        const kind = String((block && block.artifact_type) || 'file').toUpperCase();
+        const link = document.createElement('a');
+        link.className = 'artifact-download';
+        link.href = '/api/sql-agent/artifacts/' + encodeURIComponent(id);
+        link.rel = 'noopener noreferrer';
+        link.setAttribute('download', '');
+        link.textContent = (String((block && block.title) || 'Report')
+                            + '  (' + kind + ')');
+        wrap.appendChild(link);
+        return wrap;
+    }
+
     function renderBlocks(target, message) {
         const blocks = Array.isArray(message.content_blocks) ? message.content_blocks : [];
         blocks.forEach(block => {
@@ -451,6 +489,8 @@
                     el.textContent = String(block.text || '');
                 }
                 target.appendChild(el);
+            } else if (type === 'artifact') {
+                target.appendChild(artifactBlock(block));
             } else if (type === 'sql') {
                 target.appendChild(sqlBlock(String(block.sql || '')));
             } else if (type === 'error') {

@@ -144,9 +144,16 @@ function renderUserRow(user) {
         ? `<span class="badge badge-active">Active</span>`
         : `<span class="badge badge-inactive">Inactive</span>`;
 
+    // The account still carries the password an administrator assigned, so it
+    // has not been claimed yet: the user cannot do anything until they change
+    // it at sign-in. Worth seeing at a glance when an account "does not work".
+    const rotationBadge = user.must_change_password
+        ? `<span class="badge badge-warning" title="This user must change their password at next sign-in before the account can be used.">MUST CHANGE PASSWORD</span>`
+        : '';
+
     return `
         <tr ${isBlocked ? 'class="user-blocked"' : ''}>
-            <td>${user.username} ${blockedBadge}</td>
+            <td>${user.username} ${blockedBadge} ${rotationBadge}</td>
             <td>${user.email}</td>
             <td>${user.full_name || '-'}</td>
             <td><span class="badge badge-${user.role}">${user.role}</span></td>

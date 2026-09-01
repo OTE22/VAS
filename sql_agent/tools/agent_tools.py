@@ -14,12 +14,17 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 
+from config import settings
 from ..config import config
 from ..state import AgentState
 from ..llm import TaskType, create_llm, create_sql_llm
 from ..database import DatabaseManager
 from ..knowledge_base import SQLKnowledgeBase
 from .sql_tools import prepare_sql_from_llm_response, validate_sql_query
+from . import planner
+from .agent_loop import _MAX_TURN_OBSERVATIONS
+from .. import observability
+from ..security import sql_guard as sql_security
 
 # Setup logger for SQL Agent Tools
 logger = logging.getLogger(__name__)
@@ -49,6 +54,98 @@ def _is_timeout_error(exc: BaseException) -> bool:
     if cause is not None and cause is not exc:
         return _is_timeout_error(cause)
     return False
+
+
+def _has_new_information(state: dict, planned: dict) -> bool:
+    """Would re-running this action actually do something different?
+
+    Repeating an action is usually futile — translating the same missing
+    document, or re-rendering the same failed report, just spends the budget
+    reproducing one error. SQL generation is the exception: the rejected
+    query and the validator\'s reason are fed back into the prompt
+    (`_correction_hint`), so the second attempt has strictly more to work
+    with than the first.
+
+    Judged from what the graph will DO, never from how the model describes
+    its intentions.
+    """
+    if planned.get("action") not in ("query_database", "modify_previous_query"):
+        return False
+    return bool(state.get("sql_correction_hint"))
+
+
+def _plan_arguments(plan: dict) -> dict:
+    """The argument-shaped fields of a plan, for fingerprinting a retry.
+
+    Only what the user actually asked for: two plans differing solely in
+    confidence, provenance or derived routing metadata are the SAME attempt.
+
+    `target` is deliberately excluded. It is derived ("artifact" /
+    "last_result") and `artifact_id` already says which document is meant, so
+    including it only risks making a literal repeat look novel when one side
+    was built without it. Erring toward calling something a repeat is the
+    safe direction: the cost is one honest answer instead of one more try.
+    """
+    return {key: plan.get(key) for key in
+            ("modification", "format", "language", "artifact_id",
+             "clarify_question") if plan.get(key)}
+
+
+
+
+def tool_registry_max_steps() -> int:
+    """The CONTEXTUAL look-up budget (the tool loop's own default)."""
+    from . import tool_registry
+    return tool_registry.MAX_TOOL_STEPS
+
+
+_TRANSLATION_DIRECTIVE = {
+    "ar": ("Rewrite the report below in Modern Standard Arabic (الفصحى). Keep the "
+           "SAME markdown structure and section order, with Arabic headings. "
+           "Person names, camera names, timestamps, identifiers and numbers must "
+           "remain EXACTLY as written — do not translate or transliterate them, "
+           "because an operator uses those strings to find the camera or person. "
+           "Output only the rewritten report."),
+    "en": ("Rewrite the report below in English. Keep the SAME markdown structure "
+           "and section order. Person names, camera names, timestamps, identifiers "
+           "and numbers must remain EXACTLY as written. Output only the rewritten "
+           "report."),
+}
+
+# Bounded so a very long report cannot blow the model's context or the budget.
+_TRANSLATION_MAX_CHARS = 40_000
+
+
+def translate_document_text(source: str, language: str) -> str:
+    """Restate a report in `language`, preserving its structure.
+
+    Module-level and stateless because both the graph node and the API layer
+    need it — the node for an inline narrative, the route for a stored
+    document. Returns the ORIGINAL text if translation fails: an untranslated
+    report is a disappointment, an empty one is a data loss.
+    """
+    text = (source or "").strip()
+    if not text:
+        return ""
+    directive = _TRANSLATION_DIRECTIVE.get(language, _TRANSLATION_DIRECTIVE["en"])
+    truncated = text[:_TRANSLATION_MAX_CHARS]
+    try:
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content="You are a precise technical translator. You do "
+                                  "not summarise, add, or omit anything."),
+            HumanMessage(content=directive + "\n\n---\n" + truncated),
+        ])
+        llm = create_llm(TaskType.EXPLANATION)
+        translated = (prompt | llm | StrOutputParser()).invoke({})
+        translated = (translated or "").strip()
+        if len(translated) < max(40, len(truncated) // 10):
+            logger.warning("[TRANSLATE] output implausibly short (%d chars from %d); "
+                           "keeping the original", len(translated), len(truncated))
+            return text
+        return translated
+    except Exception as e:
+        logger.error("[TRANSLATE] translation failed, returning the original: %s", e)
+        return text
 
 
 class SQLAgentTools:
@@ -159,6 +256,7 @@ class SQLAgentTools:
                 logger.warning(f"[SECURITY] User ID not available in conversation_memory - will be handled by API route")
             
             state["security_block_user"] = True
+            state["security_block_actor"] = "user"
             state["security_block_reason"] = block_reason
             # Store user_id in state if available for API route to use
             if user_id:
@@ -191,228 +289,803 @@ class SQLAgentTools:
         return state
 
     def fix_language(self, state: AgentState) -> AgentState:
+        """STEP 1: decide the REPORT language. Nothing else.
+
+        This used to also send the user's message to a model to "fix grammar
+        and spelling" before the agent read it. That rewrite is gone:
+
+          * it ran BEFORE any reasoning, so it decided something outside the
+            ReAct cycle;
+          * it could only lose fidelity — it cannot add information the user
+            did not give, so its best case was a no-op and its worst case a
+            changed name or a dropped constraint ("track Joey and give me
+            report in Arabic" arrived as "Track Joey and give me the report
+            in Arabic");
+          * it was guarded by seven NEVER rules and a word-count revert,
+            which is what a step that damages its input looks like;
+          * it was redundant. `correct_name_typos` fixes names
+            deterministically, and the loop's `resolve_person` handles a
+            misspelling by asking the DATABASE rather than guessing.
+
+        The agent now reads exactly what the user typed, one model call
+        sooner.
         """
-        STEP 1: Language Normalization
-        Correct grammar, spelling, and clarity.
-        """
-        logger.info(f"[STEP_1] Language normalization - Input: {state['original_input'][:100]}")
-        logger.info("\n" + "="*60)
-        logger.info("🔧 STEP 1: LANGUAGE NORMALIZATION")
-        logger.debug("="*60)
-        logger.info(f"📥 Original Input: {state['original_input']}")
+        original = state.get("original_input") or ""
+        logger.info("[STEP_1] Language check - Input: %s", original[:100])
 
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content="""You are a language correction assistant.
-Your task is to fix ONLY grammar and spelling errors in the user's input.
+        # Which language the FINAL report is written in. Deterministic:
+        # Arabic script in the input, or an explicit ask for Arabic, means the
+        # user reads Arabic — the SQL pipeline itself keeps working in English.
+        wants_arabic = (
+            any("\u0600" <= ch <= "\u06FF" for ch in original)
+            or "in arabic" in original.lower()
+            or "\u0628\u0627\u0644\u0639\u0631\u0628\u064a\u0629" in original
+            or "\u0628\u0627\u0644\u0639\u0631\u0628\u064a" in original
+        )
+        state["response_language"] = "ar" if wants_arabic else "en"
+        if wants_arabic:
+            logger.info("[STEP_1] Arabic output requested — the final report "
+                        "will be in Arabic")
 
-STRICT RULES:
-- NEVER add new words or information that wasn't in the original
-- NEVER expand abbreviations or add assumed context
-- NEVER add last names, titles, or any assumed information
-- If a name is given (like "Joey"), keep it exactly as "Joey" - do NOT add surnames
-- Only fix actual typos and grammar errors
-- If the input is already clear, return it EXACTLY as-is
-- Return ONLY the corrected text, nothing else
-
-Example:
-- "track joey" → "Track Joey" (only capitalize, don't add anything)
-- "show me usres" → "Show me users" (fix typo only)
-- "whre is john" → "Where is John" (fix typo and capitalize)"""),
-            HumanMessage(content=f"Fix this input (DO NOT add any new words): {state['original_input']}")
-        ])
-
-        chain = prompt | self.llm | StrOutputParser()
-
-        try:
-            normalized = chain.invoke({})
-            normalized = normalized.strip()
-
-            # Safety check: if LLM added significantly more words, revert to original
-            original_words = len(state['original_input'].split())
-            normalized_words = len(normalized.split())
-
-            if normalized_words > original_words + 1:  # Allow max 1 extra word (for minor fixes)
-                logger.warning(f"⚠️ LLM added words! Reverting to original.")
-                logger.info(f"   Original: '{state['original_input']}' ({original_words} words)")
-                logger.info(f"   Normalized: '{normalized}' ({normalized_words} words)")
-                state["normalized_input"] = state["original_input"]
-            else:
-                state["normalized_input"] = normalized
-
-            logger.info(f"📤 Normalized Input: {state['normalized_input']}")
-            logger.debug(f"[STEP_1] Normalized: {state['normalized_input']}")
-        except Exception as e:
-            state["normalized_input"] = state["original_input"]
-            state["error"] = f"Language normalization error: {str(e)}"
-            logger.error(f"[STEP_1] Language normalization failed: {str(e)}", exc_info=True)
-            logger.error(f"❌ Error: {state['error']}")
-
+        # The user's own words, unaltered.
+        state["normalized_input"] = original
         return state
 
-    def correct_name_typos(self, state: AgentState) -> AgentState:
-        """
-        STEP 1.5: Name Correction & Typo Handling
-        Check for typos in person names and suggest corrections from database.
-        """
-        logger.info("[STEP_1.5] Starting name correction and typo handling")
-        logger.info("\n" + "="*60)
-        logger.info("🔍 STEP 1.5: NAME CORRECTION & TYPO HANDLING")
-        logger.debug("="*60)
 
-        normalized = state.get("normalized_input", "")
-        
-        # Extract potential person names from the query
-        # Look for patterns like "Track X", "Where is X", "Find X", etc.
-        name_patterns = [
-            r'(?:track|find|where is|locate|show|who is)\s+([A-Z][a-z]+)',
-            r'(?:track|find|where is|locate|show|who is)\s+([a-z]+)',
-        ]
-        
-        potential_names = []
-        for pattern in name_patterns:
-            matches = re.findall(pattern, normalized, re.IGNORECASE)
-            potential_names.extend(matches)
-        
-        if not potential_names:
-            logger.debug("[STEP_1.5] No person names detected in query")
-            logger.info("✅ No person names detected in query")
-            return state
-        
-        logger.info(f"[STEP_1.5] Detected potential names: {potential_names}")
-        logger.info(f"🔍 Detected potential names: {potential_names}")
-        
-        # Get all known names from database
+    # `intent` is the LEGACY vocabulary, kept populated so downstream readers
+    # and older tests keep working. Document actions map to CHAT here for
+    # that compatibility — which is exactly why routing must NOT use this map.
+    _ACTION_TO_INTENT = {
+        "chat": "CHAT",
+        "clarify": "CHAT",
+        "query_database": "SQL_QUERY",
+        "modify_previous_query": "SQL_QUERY",
+        "generate_document": "CHAT",
+        "translate_artifact": "CHAT",
+    }
+
+    # The graph node each action actually runs on. Kept separate from the
+    # intent map above: while generate_document routed to chat_response,
+    # "make that a PDF" was answered by the chat model — fluent text about a
+    # document that did not exist. Routing and the audit line use THIS.
+    _ACTION_TO_NODE = {
+        "chat": "chat_response",
+        "clarify": "chat_response",
+        "query_database": "check_schema",
+        "modify_previous_query": "check_schema",
+        "generate_document": "render_artifact",
+        "translate_artifact": "translate_artifact",
+    }
+
+    def plan_action(self, state: AgentState) -> AgentState:
+        """STEP 2: Decide what the user is asking for.
+
+        Replaces the binary CHAT/SQL_QUERY classifier at the same graph seam,
+        in three stages that keep authority in Python:
+
+          1. Python resolves what this turn could refer to (working memory +
+             the caller's own artifacts) into a closed candidate set.
+          2. The LLM chooses an action from that set — intent only.
+          3. Python re-validates the choice and downgrades anything whose
+             precondition is missing to `clarify`.
+
+        `intent` and `intent_confidence` are still written, so every
+        downstream node and every existing test sees the state it expects.
+        On any planner failure this falls back to the verbatim previous
+        classifier — except for requests that are clearly ABOUT state we
+        hold, which become a question rather than small talk.
+        """
+        user_text = state.get("normalized_input") or state.get("original_input") or ""
+        # Did this message ANSWER the question we asked last turn? Decided
+        # in Python against the STORED candidate list, so a selection resumes
+        # the original task instead of arriving as an unanchored fragment
+        # ("Ali Abbass" after "Which Ali?").
         try:
-            logger.debug("[STEP_1.5] Querying database for known names")
-            conn = self.db.get_connection()
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT DISTINCT name
-                    FROM faces
-                    WHERE name IS NOT NULL AND name != ''
-                    ORDER BY name
-                    LIMIT 500
-                """)
-                known_names = [row[0] for row in cur.fetchall()]
-            conn.close()
-            
-            logger.info(f"[STEP_1.5] Found {len(known_names)} known names in database")
-            logger.info(f"📋 Found {len(known_names)} known names in database")
-            
-            corrections = {}
-            for potential_name in potential_names:
-                potential_name_lower = potential_name.lower()
-                best_match = None
-                best_similarity = 0.0
-                
-                # Find best matching name
-                for known_name in known_names:
-                    similarity = SequenceMatcher(None, potential_name_lower, known_name.lower()).ratio()
-                    if similarity > best_similarity and similarity >= 0.6:  # 60% similarity threshold
-                        best_similarity = similarity
-                        best_match = known_name
-                
-                if best_match and best_match.lower() != potential_name_lower:
-                    corrections[potential_name] = best_match
-                    logger.info(f"   ✏️ '{potential_name}' → '{best_match}' (similarity: {best_similarity:.2f})")
-            
-            # Apply corrections
-            if corrections:
-                corrected_input = normalized
-                for old_name, new_name in corrections.items():
-                    # Case-insensitive replacement
-                    corrected_input = re.sub(
-                        re.escape(old_name),
-                        new_name,
-                        corrected_input,
-                        flags=re.IGNORECASE
-                    )
-                
-                state["normalized_input"] = corrected_input
-                state["name_corrections"] = corrections
-                logger.info(f"[STEP_1.5] Applied name corrections: {corrections}")
-                logger.info(f"✅ Applied corrections: {corrections}")
-                logger.info(f"📤 Corrected input: {corrected_input}")
-                
-                # Add correction notice to response context
-                correction_notice = f"Note: Corrected name(s): {', '.join([f'{old} → {new}' for old, new in corrections.items()])}"
-                state["name_correction_notice"] = correction_notice
-            else:
-                logger.debug("[STEP_1.5] No corrections needed - names match database")
-                logger.info("✅ No corrections needed - names match database")
-                
+            from .. import dialogue_state as _ds
+
+            chosen = _ds.match_candidate(
+                (state.get("working_context") or {}).get("dialogue_state") or {},
+                user_text)
         except Exception as e:
-            logger.warning(f"[STEP_1.5] Error checking names: {str(e)}", exc_info=True)
-            logger.warning(f"⚠️ Error checking names: {e}")
-            # Continue with original input if name check fails
-            # This is not critical, so we don't set an error state
-        
-        return state
+            logger.warning("[REACT] clarification match failed: %s", e)
+            chosen = None
+        if chosen:
+            state["resolved_entities"] = [{
+                "tool": "pending_clarification",
+                "raw_text": user_text,
+                "identity_id": chosen.get("identity_id"),
+                "canonical_name": chosen.get("display_name")}]
+            state["clarification_answered"] = True
+            logger.info("[REACT] clarification answered subject=%s",
+                        chosen.get("display_name"))
 
-    def classify_intent(self, state: AgentState) -> AgentState:
-        """
-        STEP 2: Intent Classification
-        Classify as CHAT, SQL_QUERY, or HYBRID.
-        """
-        logger.info(f"[STEP_2] Classifying intent for: {state['normalized_input'][:100]}")
-        logger.info("\n" + "="*60)
-        logger.info("🎯 STEP 2: INTENT CLASSIFICATION")
-        logger.debug("="*60)
-        logger.info(f"📥 Input to classify: {state['normalized_input']}")
+        # What THIS TURN has already established. Re-entering the loop for a
+        # second action used to start from nothing, so the agent could resolve
+        # a person and then immediately not know who they were.
+        prior_observations = state.get("observations") or []
 
-        prompt = ChatPromptTemplate.from_messages([
-            SystemMessage(content="""You are an intent classifier for a SQL database assistant.
+        candidates = planner.resolve_candidates(
+            state.get("working_context"), state.get("artifact_index"), user_text)
+        state["planner_candidates"] = candidates
 
-Classify the user's intent as one of:
-- CHAT: General conversation, explanations, or questions not requiring database access
-- SQL_QUERY: Requires querying the database to answer
-- HYBRID: Needs both explanation and database query
+        # MODE FIRST, chosen deterministically from the conversation's shape.
+        # FAST is deliberately hard to reach: misreading a follow-up as a
+        # fresh question is the expensive mistake, an extra model call is the
+        # cheap one. The model never picks its own budget.
+        from .. import reasoning
+        mode = reasoning.select_mode(candidates, user_text)
+        state["reasoning_mode"] = mode
+        state.setdefault("replan_count", 0)
+        state.setdefault("execution_retries", 0)
+        state.setdefault("reasoning_steps_used", 0)
+        state.setdefault("failed_action_fingerprints", [])
 
-Respond with ONLY a JSON object in this exact format:
-{"intent": "CHAT" or "SQL_QUERY" or "HYBRID", "confidence": 0.0 to 1.0}
-
-IMPORTANT: Any mention of a person's name with verbs like "track", "find", "locate", "show", "where is"
-should be classified as SQL_QUERY because it requires searching the database.
-
-Examples:
-- "What is SQL?" → {"intent": "CHAT", "confidence": 0.95}
-- "Show me all users" → {"intent": "SQL_QUERY", "confidence": 0.95}
-- "Explain what customers we have" → {"intent": "HYBRID", "confidence": 0.85}
-- "Track Joey" → {"intent": "SQL_QUERY", "confidence": 0.95}
-- "Where is John" → {"intent": "SQL_QUERY", "confidence": 0.95}
-- "Find person named Sarah" → {"intent": "SQL_QUERY", "confidence": 0.95}
-- "Who was detected today" → {"intent": "SQL_QUERY", "confidence": 0.95}"""),
-            HumanMessage(content=f"Classify this: {state['normalized_input']}")
-        ])
-
-        chain = prompt | self.llm | StrOutputParser()
-
+        plan = None
+        resolution = "planner"
         try:
-            logger.info("[STEP_2] 🤖 Calling LLM for intent detection...")
-            logger.debug(f"[STEP_2] Intent prompt being sent to LLM: {prompt.messages[-1].content[:500]}...")
-            result = chain.invoke({})
-            logger.info(f"[STEP_2] ✅ LLM intent response received ({len(result)} chars)")
-            logger.info(f"[STEP_2] 📝 LLM INTENT RESPONSE:\n{result}\n{'='*80}")
-            logger.info(f"🤖 LLM Raw Response: {result}")
-            # Parse JSON from response
-            json_match = re.search(r'\{[^}]+\}', result)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                state["intent"] = parsed.get("intent", "CHAT")
-                state["intent_confidence"] = float(parsed.get("confidence", 0.5))
-                logger.info(f"📤 Intent: {state['intent']} (confidence: {state['intent_confidence']})")
+            # The rolling summary is a DERIVED CACHE: rebuilt whenever it is
+            # stale, corrupt or version-incompatible, never trusted blind and
+            # never consulted for exact values. It is the lowest-priority
+            # section in the envelope, so it yields before the authoritative
+            # state does.
+            summary_text = None
+            try:
+                from .. import dialogue_state as ds
+                context = state.get("working_context") or {}
+                cached = context.get("conversation_summary")
+                recent = self._recent_turn_texts(limit=8)
+                dialogue = ds.migrate_state(context.get("dialogue_state"))
+                if ds.needs_rebuild(cached, turn_count=len(recent),
+                                    context_version=int(
+                                        dialogue.get("context_version") or 0)):
+                    cached = ds.build_summary(recent, dialogue)
+                    if self.conversation_memory:
+                        self.conversation_memory.update_working_context(
+                            conversation_summary=cached)
+                summary_text = (cached or {}).get("text")
+            except Exception as summary_error:
+                logger.info("[SUMMARY] skipped: %s", summary_error)
+
+            context_block = planner.build_planner_context(
+                candidates, conversation_summary=summary_text)
+
+            # TOOL LOOP FIRST. It may perform read-only look-ups before
+            # committing, which is what stops the agent guessing at camera
+            # ids and misspelled names. It returns None whenever it does not
+            # commit to an action, and the single-shot planner below then
+            # runs exactly as it did before tools existed.
+            try:
+                from . import agent_loop
+
+                # The loop runs on EVERY turn. It used to be skipped in FAST
+                # mode, which meant the cheapest turns never reasoned at all
+                # and fell straight through to the single-shot planner — the
+                # opposite of deciding from the moment the prompt arrives.
+                #
+                # The mode now sets the BUDGET, not whether to think:
+                #   FAST        nothing to refer to, so one step is enough
+                #   CONTEXTUAL  the default room for a look-up then an action
+                #   MULTI_STEP  a compound request may need several look-ups
+                if mode == reasoning.ReasoningMode.FAST:
+                    step_budget = 1
+                elif mode == reasoning.ReasoningMode.MULTI_STEP:
+                    step_budget = int(settings.SQL_AGENT_MAX_REASONING_STEPS)
+                else:
+                    step_budget = tool_registry_max_steps()
+                tool_call, tool_trace, turn_is_a_request = agent_loop.run_tool_loop(
+                    self.llm,
+                    user_text=user_text,
+                    context_block=context_block,
+                    db=self.db,
+                    dialogue_state=(state.get("working_context") or {}).get(
+                        "dialogue_state"),
+                    artifact_index=state.get("artifact_index") or [],
+                    identity_index=state.get("identity_index") or [],
+                    max_steps=max(1, step_budget),
+                    prior_observations=prior_observations)
+                state["reasoning_steps_used"] = (
+                    int(state.get("reasoning_steps_used") or 0) + len(tool_trace))
+                state["tool_trace"] = tool_trace
+                # APPEND, never replace: a later action in the same turn
+                # must still see what the earlier ones found.
+                observations = list(state.get("observations") or [])
+                for e in tool_trace:
+                    if e.get("observation"):
+                        observations.append({
+                            "sequence": len(observations) + 1,
+                            **e["observation"]})
+                    elif e.get("tool") and "ok" in e:
+                        observations.append({
+                            "sequence": len(observations) + 1,
+                            "tool": e["tool"],
+                            "status": "ok" if e["ok"] else "error",
+                            "signature": e.get("signature")})
+                state["observations"] = observations[-_MAX_TURN_OBSERVATIONS:]
+
+                state["resolved_entities"] = list(
+                    state.get("resolved_entities") or []) + [
+                    e["resolved_entity"] for e in tool_trace
+                    if e.get("resolved_entity")]
+                for e in tool_trace:
+                    if e.get("committed") and e.get("signature"):
+                        # Kept so a later action in the same turn can tell
+                        # what has already been done, not merely that
+                        # something was.
+                        state["committed_signature"] = e["signature"]
+                    if e.get("clarification_candidates"):
+                        state["clarification_candidates"] =                             e["clarification_candidates"]
+                # Judged once, by a model call already paid for. Discarding it
+                # and letting the narrative re-guess from the transcript is
+                # how "hi" got answered with a surveillance summary.
+                state["turn_is_a_request"] = turn_is_a_request
+                if tool_call:
+                    planned = agent_loop.action_to_planned(tool_call, candidates)
+                    if planned:
+                        state["planned_action"] = planned
+                        state["intent"] = self._ACTION_TO_INTENT.get(
+                            planned.get("action"), "CHAT")
+                        state["intent_confidence"] = planned.get("confidence", 0.9)
+                        if planned.get("action") == "clarify":
+                            state["clarify_question"] = planned.get(
+                                "clarify_question")
+                        if planned.get("language"):
+                            state["response_language"] = planned["language"]
+                        logger.info(planner.audit_line(
+                            user_id=state.get("user_id"),
+                            conversation_id=state.get("conversation_id"),
+                            plan=planner.PlannedAction(**{
+                                k: v for k, v in planned.items()
+                                if k in planner.PlannedAction.__slots__}),
+                            executed=self._ACTION_TO_NODE.get(
+                                planned.get("action"), state["intent"]),
+                            resolution=f"tools:{len(tool_trace)}/{mode}",
+                            artifact_id=planned.get("artifact_id"),
+                            result_id=(candidates.get("last_result") or {}).get(
+                                "history_id")))
+                        return state
+            except (TypeError, AttributeError, NameError, KeyError) as bug:
+                # A CODE fault, not a model one. This catch-all previously
+                # reported every failure as "unavailable, using the planner",
+                # which reads like an expected condition — so a tuple-unpack
+                # error silently discarded a correct loop decision and let the
+                # planner override it for a whole round of testing. Programming
+                # errors get a traceback and ERROR level; the turn still
+                # degrades to the planner rather than failing the user.
+                logger.error("[TOOL_LOOP] BUG in the loop, falling back to the "
+                             "planner: %s", bug, exc_info=True)
+            except Exception as tool_error:
+                logger.warning("[TOOL_LOOP] unavailable, using the planner: %s",
+                               tool_error)
+            prompt = ChatPromptTemplate.from_messages([
+                SystemMessage(content=planner.PLANNER_SYSTEM_PROMPT),
+                HumanMessage(content=(
+                    self._context_section(state)
+                    + "Conversation state:\n" + context_block
+                    + f"\n\nRequest: {user_text}\n\nJSON:"))
+            ])
+            self._trace_envelope("plan_action", prompt)
+            raw = (prompt | self.sql_llm | StrOutputParser()).invoke({})
+            # DEBUG ONLY. If a model prepends prose to its JSON, that prose
+            # is its reasoning, and a production log is not a place for it.
+            if settings.DEBUG:
+                logger.debug("[STEP_2] planner raw response: %s", str(raw)[:300])
             else:
+                logger.info("[STEP_2] planner replied (%d chars)", len(str(raw)))
+            plan = planner.validate_plan(planner.extract_json_object(raw), candidates)
+        except Exception as e:
+            logger.error("[STEP_2] planner failed: %s", e, exc_info=True)
+
+        if plan is None:
+            plan = planner.decide_on_failure(user_text, candidates)
+            resolution = ("failed->clarify" if plan else "failed->legacy") + f"/{mode}"
+
+        if plan is None:
+            # Both the loop and the planner declined. There used to be a
+            # third decision here — `classify_intent`, a binary CHAT vs
+            # SQL_QUERY call with no tools, no candidate set and no dialogue
+            # state. It was the weakest of the three and ran LAST, so it
+            # overrode better-informed decisions: one captured turn shows the
+            # planner deciding and then the classifier deciding again.
+            #
+            # Answering is the safe residual. A request that was clearly
+            # ABOUT held state has already become a clarification above
+            # (`decide_on_failure`), so what reaches here is an ordinary
+            # message that two better-informed stages could not turn into an
+            # action.
+            # ...but only for a message that ASKED for nothing. A data
+            # request that reaches here has been abandoned, and answering it
+            # conversationally reports success for work never done.
+            if state.get("turn_is_a_request"):
+                from .. import reasoning
+
+                logger.info("[REACT] terminal=%s reason=no_action_chosen",
+                            reasoning.MAX_ITERATIONS)
+                state["terminal_state"] = reasoning.MAX_ITERATIONS
+                state["planned_action"] = {"action": "chat",
+                                           "source": "exhausted"}
                 state["intent"] = "CHAT"
-                state["intent_confidence"] = 0.5
-                logger.warning(f"⚠️ Could not parse JSON, defaulting to CHAT")
-        except Exception as e:
-            state["intent"] = "CHAT"
-            state["intent_confidence"] = 0.5
-            state["error"] = f"Intent classification error: {str(e)}"
-            logger.error(f"[STEP_2] Intent classification failed: {str(e)}", exc_info=True)
-            logger.error(f"❌ Error: {state['error']}")
+                state["reasoning_exhausted"] = True
+                observability.observe_planner_action("chat", "exhausted")
+                return state
 
+            logger.info("[STEP_2] no action chosen; answering directly")
+            state["planned_action"] = {"action": "chat", "source": "fallback"}
+            observability.observe_planner_action("chat", "fallback")
+            state["intent"] = "CHAT"
+            state["terminal_state"] = None
+            return state
+
+        state["planned_action"] = plan.as_dict()
+        observability.observe_planner_action(plan.action, plan.source)
+        state["intent"] = self._ACTION_TO_INTENT.get(plan.action, "CHAT")
+        state["intent_confidence"] = plan.confidence
+        if plan.action == "clarify":
+            state["clarify_question"] = plan.clarify_question
+        if plan.language:
+            state["response_language"] = plan.language
+
+        # `executed` names the NODE this turn will run, not the legacy intent:
+        # document actions map onto CHAT for compatibility, so logging the
+        # intent would record every translation as a chat turn.
+        executed = self._ACTION_TO_NODE.get(plan.action, state["intent"])
+        logger.info(planner.audit_line(
+            user_id=state.get("user_id"), conversation_id=state.get("conversation_id"),
+            plan=plan, executed=executed,
+            resolution=(resolution if "/" in resolution
+                        else f"{resolution}/{mode}"),
+            artifact_id=plan.artifact_id,
+            result_id=(candidates.get("last_result") or {}).get("history_id")))
         return state
+
+    def observe_and_replan(self, state: AgentState) -> AgentState:
+        """OBSERVE what the action produced; decide whether to correct course.
+
+        Bounded and deterministic:
+          * the Observation is built in Python from state — the model
+            contributes nothing to it;
+          * `decide_next` applies a fixed taxonomy and the budgets;
+          * a re-plan makes ONE model call, and its proposal is re-validated
+            through the same dispatcher path as any other action;
+          * a proposal identical to one that already failed this turn is
+            refused, so re-planning is corrective rather than repetitive.
+
+        Never raises: a failure here degrades to answering, which is exactly
+        what the graph did before this node existed.
+        """
+        from .. import reasoning
+
+        observation = reasoning.check_invariants(reasoning.build_observation(state))
+        state["observation"] = observation
+
+        decision = reasoning.decide_next(
+            observation,
+            mode=state.get("reasoning_mode") or reasoning.ReasoningMode.CONTEXTUAL,
+            replan_count=int(state.get("replan_count") or 0),
+            execution_retries=int(state.get("execution_retries") or 0),
+            max_replans=int(settings.SQL_AGENT_MAX_REPLANS),
+            max_execution_retries=int(settings.SQL_AGENT_MAX_EXECUTION_RETRIES))
+        state["reasoning_decision"] = decision
+
+        try:
+            next_action = self._act_on_decision(state, observation, decision)
+        except Exception as e:
+            logger.error("[REASONING] observe/replan failed: %s", e, exc_info=True)
+            next_action = "chat_response"
+            state["reasoning_decision"] = {**decision,
+                                           "decision": reasoning.ANSWER}
+
+        state["reasoning_next"] = next_action
+        logger.info(reasoning.reasoning_trace(
+            conversation_id=state.get("conversation_id"),
+            turn_id=state.get("query_history_id"),
+            mode=state.get("reasoning_mode"),
+            observation=observation, decision=state["reasoning_decision"],
+            next_action=next_action,
+            replan_count=int(state.get("replan_count") or 0)))
+        return state
+
+    def _act_on_decision(self, state: AgentState, observation: dict,
+                         decision: dict) -> str:
+        """Carry out one decision. Returns the node the router should enter."""
+        from .. import reasoning
+
+        verdict = decision["decision"]
+
+        if verdict == reasoning.RETRY_EXECUTION:
+            # Infrastructure only: the SAME SQL, on its own budget. No model
+            # call, so a dropped connection cannot spend reasoning.
+            state["execution_retries"] = int(state.get("execution_retries") or 0) + 1
+            state["query_result"] = None
+            return "prepare_sql_for_execution"
+
+        if verdict == reasoning.RESOLVE_ENTITY:
+            return self._resolve_entity_and_route(state, observation)
+
+        if verdict == reasoning.CLARIFY:
+            state["clarify_question"] = self._clarify_question_for(
+                observation, state)
+            state["planned_action"] = {"action": "clarify", "source": "reasoning",
+                                       "confidence": 1.0}
+            return "chat_response"
+
+        if verdict == reasoning.REPLAN:
+            replanned = self._replan(state, observation, decision)
+            if not replanned:
+                # Nothing usable came back. Answer honestly rather than
+                # spending another step reproducing the same failure.
+                state["reasoning_decision"] = {**decision,
+                                               "decision": reasoning.ANSWER}
+                return "chat_response"
+
+            state["planned_action"] = replanned
+            state["replan_count"] = int(state.get("replan_count") or 0) + 1
+            state["reasoning_steps_used"] = int(
+                state.get("reasoning_steps_used") or 0) + 1
+            # A corrected action starts from a clean slate. Without this the
+            # stale INVALID status (or a stale failed result) would route the
+            # correction straight back here without it ever being tried.
+            state["sql_validation_status"] = "VALID"
+            state["sql_validation_error"] = None
+            state["sql_validation_warnings"] = []
+            state["query_result"] = None
+            if replanned.get("action") in ("query_database", "modify_previous_query"):
+                state["generated_sql"] = ""
+            if replanned.get("language"):
+                state["response_language"] = replanned["language"]
+            return self._ACTION_TO_NODE.get(replanned.get("action"),
+                                            "chat_response")
+
+        if verdict == reasoning.ANSWER and observation.get("success"):
+            # The action worked. Is the user's WHOLE request carried out, or
+            # was this one step of it? Only asked while budget remains, and it
+            # fails safe toward finishing.
+            from . import agent_loop
+
+            taken = int(state.get("actions_taken") or 0) + 1
+            state["actions_taken"] = taken
+            ceiling = int(settings.SQL_AGENT_MAX_ACTIONS_PER_TURN)
+
+            if taken < ceiling:
+                done_summary = (f"{observation.get('action')} "
+                                f"(rows={observation.get('row_count')}, "
+                                f"artifact={bool(observation.get('artifact_id'))})")
+                if not agent_loop.request_is_satisfied(
+                        self.llm, state.get("normalized_input") or "",
+                        done_summary):
+                    logger.info("[REASONING] request not yet complete after %s; "
+                                "acting again (%d/%d)",
+                                observation.get("action"), taken, ceiling)
+                    # A fresh action starts from a clean slate, exactly as a
+                    # correction does — otherwise the previous result routes
+                    # the next step straight back here.
+                    # Record the completed action as done, WITH its
+                    # signature, so the next one recognises a repeat rather
+                    # than re-running it.
+                    if state.get("committed_signature"):
+                        done = list(state.get("observations") or [])
+                        done.append({
+                            "sequence": len(done) + 1,
+                            "tool": observation.get("action"),
+                            "status": "ok",
+                            "summary": f"rows={observation.get('row_count')}",
+                            "signature": state["committed_signature"]})
+                        state["observations"] = done[-_MAX_TURN_OBSERVATIONS:]
+
+                    # HAND THE RESULT ON before wiping the per-action state.
+                    # The next action re-enters a fresh loop, and the context
+                    # it builds reads `last_result` from the working context -
+                    # which was only ever written at END of turn. So action two
+                    # opened with `last_result=n`, could not see the rows action
+                    # one had just fetched, and simply ran the query again:
+                    # "track joey and give me the report in arabic" queried
+                    # twice and reported never.
+                    #
+                    # A bounded REFERENCE, the same one the end of the turn
+                    # records - row count and question, never the rows.
+                    try:
+                        finished = state.get("query_result") or {}
+                        rows = finished.get("rows") or []
+                        if finished.get("success") and rows and self.conversation_memory:
+                            carried = dict(state.get("working_context") or {})
+                            carried["last_result"] = (
+                                self.conversation_memory.build_result_reference(
+                                    rows=rows,
+                                    sql=state.get("generated_sql"),
+                                    purpose=state.get("sql_purpose"),
+                                    history_id=state.get("query_history_id"),
+                                    question=state.get("normalized_input")))
+                            carried["last_action"] = "query_database"
+                            state["working_context"] = carried
+                    except Exception as e:
+                        logger.warning("[REASONING] could not carry the result "
+                                       "to the next action: %s", e)
+
+                    state["planned_action"] = None
+                    state["query_result"] = None
+                    state["generated_sql"] = ""
+                    state["sql_validation_status"] = "VALID"
+                    return "plan_action"
+
+            # The action WORKED and the request is finished, so hand the turn
+            # back to its normal narration path.
+            #
+            # This used to fall through to chat_response, which was correct
+            # while only FAILURES reached the observer. Raising the action
+            # ceiling above 1 started routing SUCCESSES here too, and the chat
+            # node is never given the result rows - so `track joey` retrieved
+            # 3 real detections and answered "Joey has 1 query pattern
+            # tracked", and on another run "there are no tracking records for
+            # him". Both were invented, because the narrator could not see the
+            # data it was describing.
+            if observation.get("action") in ("query_database",
+                                             "modify_previous_query"):
+                return "enrich_co_appearance"
+
+        return "chat_response"
+
+
+    @staticmethod
+    def _clarify_question_for(observation: dict, state: AgentState) -> str:
+        """One short question, in the language the user is speaking.
+
+        Asking beats guessing at somebody's identity — and the question has
+        to reach them in their own language, which the hardcoded English
+        failure strings this node replaces never did.
+
+        Keyed off whether a name is actually in play, not off the error code.
+        A name that resolved to nobody and a query that found nothing for
+        that name are different facts, and saying the accurate one is what
+        makes the question answerable.
+        """
+        from .. import reasoning
+
+        arabic = (state.get("response_language") or "en") == "ar"
+        entity = observation.get("unresolved_entity")
+        unmatched = (observation.get("error_type")
+                     == reasoning.ErrorType.EMPTY_RESULT)
+
+        if entity:
+            if arabic:
+                if unmatched:
+                    return ("لم أجد أي "
+                            "سجلات باسم "
+                            "“" + str(entity) + "”. "
+                            "هل هذا هو "
+                            "الاسم المسجل "
+                            "في النظام؟")
+                return ("لم أتمكن من "
+                        "تحديد “" + str(entity) + "”. "
+                        "هل يمكنك "
+                        "كتابة الاسم "
+                        "كما هو مسجل؟")
+            if unmatched:
+                return (f"I found no records for {entity!r}. Is that the name "
+                        f"as it is enrolled?")
+            return (f"I could not identify {entity!r}. Could you give the "
+                    f"name as it is enrolled?")
+
+        if observation.get("error_type") == reasoning.ErrorType.ENTITY_UNRESOLVED:
+            if arabic:
+                return ("لم أتعرف على "
+                        "هذا الشخص. "
+                        "ما الاسم "
+                        "المسجل؟")
+            return "I could not identify that person. What name is enrolled?"
+
+        if arabic:
+            return ("هل يمكنك "
+                    "توضيح ما "
+                    "تريده بالضبط؟")
+        return "Could you tell me a little more about what you need?"
+
+    @staticmethod
+    def _correction_hint(state) -> str:
+        """What the LAST attempt got wrong, for a corrective regeneration.
+
+        Empty on a first attempt, so the prompt is unchanged for every normal
+        turn. On a re-plan it is the difference between self-correction and
+        rolling the dice again on identical inputs: without it, regenerating
+        from the same `normalized_input` and the same schema most often
+        reproduces the same broken query.
+
+        Carries the rejected SQL and the validator's reason — machine output,
+        both of them. No model prose, and nothing from the result set.
+        """
+        hint = state.get("sql_correction_hint") or {}
+        if not hint:
+            return ""
+        parts = ["\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Correct it."]
+        if hint.get("sql"):
+            parts.append(f"Rejected SQL:\n{hint['sql']}")
+        if hint.get("reason"):
+            parts.append(f"Why it was rejected: {hint['reason']}")
+        parts.append("Produce a DIFFERENT query that fixes that problem.")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _attach_correction_hint(state: AgentState, observation: dict) -> None:
+        """Record what the rejected attempt got wrong, for the regeneration.
+
+        Only for query failures, and only from machine output: the SQL the
+        validator refused and the reason it gave. Nothing from the result
+        set, nothing the model wrote about itself.
+        """
+        from .. import reasoning
+
+        if observation.get("error_type") not in (
+                reasoning.ErrorType.SQL_INVALID,
+                reasoning.ErrorType.SQL_GENERATION_ERROR,
+                # The DATABASE's complaint is the most precise correction
+                # signal available - it names the column and the types.
+                reasoning.ErrorType.SQL_EXECUTION_ERROR_CORRECTABLE):
+            return
+        reason = (observation.get("sanitized_detail")
+                  or state.get("sql_validation_error") or "")
+        state["sql_correction_hint"] = {
+            "sql": (state.get("generated_sql") or "")[:600],
+            "reason": str(reason)[:200],
+        }
+
+    def _resolve_entity_and_route(self, state: AgentState,
+                                  observation: dict) -> str:
+        """Look up the person the empty query filtered on, and act on it.
+
+        Python, not a model call: which of the three things an empty result
+        means is a matter of fact, and one look-up settles it. Attempted at
+        most once per turn.
+        """
+        from .. import reasoning
+        from . import tool_executors as tx
+
+        needle = observation.get("unresolved_entity") or ""
+        state["entity_resolution_attempted"] = True
+
+        result = tx.execute_read_only(
+            "resolve_person", {"name": needle}, db=self.db,
+            identity_index=state.get("identity_index") or [])
+        status = result.get("status")
+        logger.info("[REACT] entity_resolution name=%r status=%s", needle,
+                    status)
+
+        if status == "ambiguous":
+            candidates = result.get("candidates") or []
+            state["clarification_candidates"] = candidates
+            names = ", ".join(c.get("display_name", "") for c in candidates)
+            state["clarify_question"] = f"Which one did you mean: {names}?"
+            state["planned_action"] = {"action": "clarify",
+                                       "source": "entity_resolution",
+                                       "confidence": 1.0}
+            state["terminal_state"] = reasoning.CLARIFY
+            return "chat_response"
+
+        if status != "resolved":
+            state["entity_not_found"] = needle
+            state["terminal_state"] = reasoning.NOT_FOUND
+            state["planned_action"] = {"action": "chat",
+                                       "source": "entity_resolution",
+                                       "confidence": 1.0}
+            return "chat_response"
+
+        identity = result.get("identity") or {}
+        canonical = identity.get("display_name") or ""
+        state["resolved_entities"] = list(
+            state.get("resolved_entities") or []) + [{
+                "tool": "resolve_person", "raw_text": needle,
+                "identity_id": identity.get("identity_id"),
+                "canonical_name": canonical}]
+
+        if reasoning.would_rerun_help(needle, canonical):
+            # A genuine misspelling: the filter never could have matched, so
+            # the query is worth running again with the stored spelling.
+            state["sql_correction_hint"] = {
+                "sql": (state.get("generated_sql") or "")[:600],
+                "reason": (f"the filter used {needle!r}, but this person is "
+                           f"stored as {canonical!r} - use that exactly")}
+            state["generated_sql"] = ""
+            state["query_result"] = None
+            state["sql_validation_status"] = "VALID"
+            # Deliberately NOT charged to replan_count: that counter has
+            # exactly one writer (a contract test pins it) and it bounds
+            # MODEL re-plans. This is a deterministic correction with no
+            # model call, already bounded to once per turn by
+            # entity_resolution_attempted - the same reasoning that keeps
+            # execution retries off the reasoning budget.
+
+            logger.info("[REACT] re-querying with the stored spelling %r",
+                        canonical)
+            return "check_schema"
+
+        # The filter WOULD have matched this person, so zero rows is a fact
+        # about the DATA, not about the query: they exist and have nothing
+        # recorded. "No matching records" hides that difference.
+        state["entity_without_data"] = canonical
+        state["terminal_state"] = reasoning.FINAL
+        state["planned_action"] = {"action": "chat",
+                                   "source": "entity_resolution",
+                                   "confidence": 1.0}
+        return "chat_response"
+
+    def _replan(self, state: AgentState, observation: dict,
+                decision: dict) -> Optional[dict]:
+        """ONE corrective reasoning call. Returns a validated action, or None.
+
+        The prompt carries the previous action, the factual Observation and
+        the failure reason, and forbids re-proposing what already failed.
+        That prohibition is then ENFORCED in Python by fingerprint: a model
+        under pressure will otherwise cheerfully repeat itself and spend the
+        whole budget reproducing one error.
+        """
+        from .. import reasoning
+        from . import agent_loop, tool_registry
+
+        candidates = state.get("planner_candidates") or {}
+        previous = state.get("planned_action") or {}
+        fingerprints = list(state.get("failed_action_fingerprints") or [])
+        failed = reasoning.action_fingerprint(previous.get("action"),
+                                              _plan_arguments(previous))
+        if failed not in fingerprints:
+            fingerprints.append(failed)
+        state["failed_action_fingerprints"] = fingerprints
+
+        # Attach what went wrong BEFORE asking for a correction, so a repeat
+        # of the same action is a genuinely different attempt rather than the
+        # same dice roll — see `_correction_hint`.
+        self._attach_correction_hint(state, observation)
+
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=agent_loop.TOOL_SYSTEM_PROMPT),
+            HumanMessage(content=(
+                self._context_section(state)
+                + planner.build_planner_context(candidates)
+                + "\nThe previous attempt FAILED and must be corrected.\n"
+                + f"- what was tried: {previous.get('action')}\n"
+                + f"- why it failed: {decision.get('reason')}\n"
+                + f"- rows returned: {observation.get('row_count')}\n\n"
+                + "Choose a DIFFERENT tool, or the same tool with different "
+                + "arguments, that avoids that failure. Do not repeat the "
+                + "call that just failed.\n\n"
+                + tool_registry.render_tools_for_prompt() + "\n\n"
+                + f"User's request: {state.get('normalized_input') or ''}\n\n"
+                + "Respond with ONLY the JSON tool call:"))
+        ])
+        self._trace_envelope("replan", prompt)
+
+        try:
+            raw = (prompt | self.llm | StrOutputParser()).invoke({})
+        except Exception as e:
+            logger.warning("[REASONING] replan model call failed: %s", e)
+            return None
+
+        call = tool_registry.parse_tool_response(raw)
+        if not call or not call.get("name"):
+            logger.info("[REASONING] replan produced no parsable tool call")
+            return None
+        try:
+            arguments = tool_registry.validate_call(call["name"],
+                                                    call.get("arguments"))
+        except tool_registry.ToolCallRejected as rejection:
+            logger.info("[REASONING] replan proposal rejected: %s", rejection)
+            return None
+
+        planned = agent_loop.action_to_planned(
+            {"name": call["name"], "arguments": arguments}, candidates)
+        if not planned:
+            return None
+
+        # Compare like with like. Fingerprinting the tool CALL against a
+        # stored PLAN never matched: `action_to_planned` discards
+        # `query_database`\'s question argument (the graph regenerates from
+        # `normalized_input` regardless), so the two shapes differed even for
+        # a literal repeat. Both sides are now taken from the validated plan.
+        repeat = reasoning.action_fingerprint(planned.get("action"),
+                                              _plan_arguments(planned))
+        if repeat in fingerprints and not _has_new_information(state, planned):
+            logger.info("[REASONING] replan repeated a failed action (%s) with "
+                        "nothing new to go on; refusing", planned.get("action"))
+            return None
+
+        state["failed_action_fingerprints"] = fingerprints + [repeat]
+        return planned
 
     def check_schema(self, state: AgentState) -> AgentState:
         """
@@ -567,15 +1240,26 @@ Query Generation Rules:
 5. Optimize for clarity and performance
 6. Learn from the reference examples but adapt to the specific question
 7. If the request cannot be fulfilled with the schema, explain why
+8. LITERALS ARE COPIED, NEVER TRANSLATED. A person's name, a camera name or
+   any other value you search for must appear in the SQL EXACTLY as the user
+   wrote it — same script, same spelling. The data is stored as it was
+   enrolled, so a translated or transliterated value matches nothing and the
+   user is told their query has no records when it has many.
+9. A request for the ANSWER in another language ("in Arabic", "بالعربية")
+   changes only how the report is written afterwards. It never changes the
+   query, the column names, or the values you filter on. Ignore it here.
 
 Respond with ONLY a JSON object:
 {{"sql": "YOUR SQL QUERY HERE", "purpose": "Brief explanation of what the query does"}}
 
 If no query is possible:
 {{"sql": "", "purpose": "Explanation of why no query can be generated"}}"""),
-            HumanMessage(content=f"Generate SQL for: {state['normalized_input']}")
+            HumanMessage(content=(
+                f"Generate SQL for: {state['normalized_input']}"
+                + self._correction_hint(state)))
         ])
 
+        self._trace_envelope("generate_sql", prompt)
         chain = prompt | self.sql_llm | StrOutputParser()
 
         try:
@@ -607,6 +1291,7 @@ If no query is possible:
                     if user_id:
                         logger.error(f"[SECURITY] ⚠️ LAYER 0: Marking user ID {user_id} for blocking - Forbidden SQL in generated query")
                         state["security_block_user"] = True
+                        state["security_block_actor"] = "model"
                         state["security_block_reason"] = f"Forbidden SQL detected in generated query: {validation['reason']}. SQL: {generated_sql[:200]}"
                     
                     # Set error state
@@ -814,6 +1499,7 @@ Provide the corrected SQL:""")
             if user_id:
                 logger.error(f"[SECURITY] ⚠️ LAYER 2: Marking user ID {user_id} for blocking - Early validation failed: {validation['reason']}")
                 state["security_block_user"] = True
+                state["security_block_actor"] = "model"
                 state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
                 state["security_block_reason"] = f"Attempted forbidden SQL operation: {validation['reason']}. Query: {generated_sql[:200]}"
             else:
@@ -846,6 +1532,7 @@ Provide the corrected SQL:""")
                 if user_id:
                     logger.error(f"[SECURITY] ⚠️ LAYER 3: Marking user ID {user_id} for blocking - Post-cleanup validation failed: {final_validation['reason']}")
                     state["security_block_user"] = True
+                    state["security_block_actor"] = "model"
                     state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
                     state["security_block_reason"] = f"Attempted forbidden SQL operation after cleanup: {final_validation['reason']}. Query: {prepared['sql'][:200]}"
                 else:
@@ -916,12 +1603,40 @@ Provide the corrected SQL:""")
                 logger.error(f"[STEP_5] Query execution failed: {error}")
                 logger.error(f"❌ Query failed: {error}")
                 
-                # SECURITY LAYER 4: Mark user for blocking (will be handled in API route)
-                if "Security:" in error or "forbidden" in error.lower() or "read-only" in error.lower():
+                # SECURITY LAYER 4: Mark user for blocking (handled in the API route).
+                #
+                # Enforce on the guard's CODE, never on its prose. Every AST
+                # denial reason begins "Security: ", so the old substring test
+                # treated a model that emitted `SELECT statement."}` — from the
+                # user typing "hello" — exactly like `DELETE FROM users`:
+                # CRITICAL audit entry, account marked for blocking, 403
+                # (observed live 2026-08-30). A malformed query is a mistake to
+                # correct; a forbidden operation is an attempt to refuse. Only
+                # the second is a security event, and drowning it in false
+                # positives is how real ones get missed.
+                #
+                # `is_enforceable` fails closed on an unknown code, and the
+                # prose test below is retained for the regex gate (Layer 2),
+                # which returns no code.
+                error_code = result.get("error_code")
+                if error_code:
+                    enforce = sql_security.is_enforceable(error_code)
+                    if not enforce:
+                        logger.info(
+                            "[SECURITY] Layer 4: denial code %s is not an "
+                            "enforceable violation; treated as a correctable "
+                            "query failure", error_code)
+                else:
+                    enforce = ("Security:" in error or "forbidden" in error.lower()
+                               or "read-only" in error.lower())
+
+                if enforce:
                     user_id = getattr(self.conversation_memory, 'user_id', None)
                     if user_id:
                         logger.error(f"[SECURITY] ⚠️ LAYER 4: Marking user ID {user_id} for blocking - Execution validation failed: {error}")
                         state["security_block_user"] = True
+                        state["security_block_actor"] = "model"
+                        state["security_reason_code"] = error_code or "FORBIDDEN_SQL_ATTEMPT"
                         state["security_block_reason"] = f"Attempted forbidden SQL operation during execution: {error}. Query: {state['generated_sql'][:200]}"
                     else:
                         logger.warning(f"[SECURITY] Execution validation failed but no user_id available: {error}")
@@ -936,6 +1651,385 @@ Provide the corrected SQL:""")
             logger.error(f"❌ Exception: {str(e)}")
 
         return state
+
+
+    def _recent_turn_texts(self, limit: int = 8):
+        """Recent raw turn texts, for summary rebuilds. Never fatal."""
+        try:
+            messages = self.conversation_memory.get_recent_messages(limit=limit) or []
+            return [str(getattr(m, "content", "") or "")[:300] for m in messages]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _trace_envelope(node: str, prompt) -> None:
+        """Sanitized per-call context-envelope trace, for development only.
+
+        Proves what each model call actually RECEIVED — a memory object that
+        is populated but never consumed is equivalent to no memory, and only
+        the final prompt can settle that. Logs section PRESENCE and sizes,
+        never the content: prompts hold surveillance data.
+
+        Enabled by SQL_AGENT_TRACE_CONTEXT=1 (development flag; off is free).
+        """
+        if not settings.SQL_AGENT_TRACE_CONTEXT:
+            return
+        try:
+            texts = [getattr(m, "content", "") or "" for m in prompt.messages]
+            joined = "\n".join(str(t) for t in texts)
+            sections = {
+                "prior_turns": "[prior turns" in joined,
+                "durable_memory": "[durable memory" in joined,
+                "conversation_state": "Conversation state:" in joined,
+                "schema": "Database schema" in joined or "DATABASE SCHEMA" in joined,
+                "language_directive": "OUTPUT LANGUAGE" in joined,
+            }
+            logger.info("[CONTEXT_ENVELOPE] node=%s messages=%d chars=%d %s",
+                        node, len(texts), len(joined),
+                        " ".join(f"{k}={'Y' if v else 'n'}"
+                                 for k, v in sections.items()))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _context_section(state) -> str:
+        """The prior-turns block for prompts, or "" when there is none.
+
+        Memory was loaded and injected into state on every query, but only
+        the SQL-generation prompt ever read it — so intent classification
+        routed follow-ups like "and yesterday?" to the contextless CHAT
+        branch, and every answer was written as if the conversation had just
+        begun. One shared builder keeps the five prompts from drifting apart
+        again.
+        """
+        context = (state.get("conversation_context") or "").strip()
+        if not context:
+            return ""
+        return (
+            "\n[prior turns - internal context for resolving references like "
+            "\"that person\", \"the same camera\", \"and yesterday?\". Never "
+            "quote, echo, or use this bracketed label in the answer]\n"
+            + context + "\n[end of prior turns]\n")
+
+    #: What each failure CATEGORY tells the user, per language. The key is a
+    #: closed enum this codebase owns, so nothing from the database driver can
+    #: reach a reply through here — there is no filter to get wrong.
+    #:
+    #: The first attempt at this used the Observation's `sanitized_detail`,
+    #: which only flattens and clips: `column "cam" does not exist LINE 1:
+    #: SELECT cam FROM detections` came through nearly whole. The detail stays
+    #: in the log, where the operator who needs it can see it and the person
+    #: the query is ABOUT cannot.
+    _FAILURE_PHRASES = {
+        "sql_execution_error_correctable": {
+            "en": ("I could not build a query that the database would accept "
+                   "for that. Could you rephrase it, or ask for one thing at "
+                   "a time?"),
+            "ar": ("\u0644\u0645 \u0623\u062a\u0645\u0643\u0646 \u0645\u0646 "
+                   "\u0628\u0646\u0627\u0621 \u0627\u0633\u062a\u0639\u0644\u0627\u0645 "
+                   "\u0635\u0627\u0644\u062d \u0644\u0647\u0630\u0627 \u0627\u0644\u0637\u0644\u0628. "
+                   "\u0647\u0644 \u064a\u0645\u0643\u0646\u0643 \u0625\u0639\u0627\u062f\u0629 "
+                   "\u0635\u064a\u0627\u063a\u062a\u0647\u061f"),
+        },
+        "sql_invalid": {
+            "en": "I could not build a valid query for that. Could you rephrase it?",
+            "ar": "\u0644\u0645 \u0623\u062a\u0645\u0643\u0646 \u0645\u0646 "
+                  "\u0628\u0646\u0627\u0621 \u0627\u0633\u062a\u0639\u0644\u0627\u0645 "
+                  "\u0635\u0627\u0644\u062d. \u0647\u0644 \u064a\u0645\u0643\u0646\u0643 "
+                  "\u0625\u0639\u0627\u062f\u0629 \u0635\u064a\u0627\u063a\u0629 "
+                  "\u0627\u0644\u0633\u0624\u0627\u0644\u061f",
+        },
+        "sql_generation_error": {
+            "en": "I ran out of time building a query for that. A simpler "
+                  "question may work.",
+            "ar": "\u0627\u0633\u062a\u063a\u0631\u0642 \u0625\u0639\u062f\u0627\u062f "
+                  "\u0627\u0644\u0627\u0633\u062a\u0639\u0644\u0627\u0645 "
+                  "\u0648\u0642\u062a\u064b\u0627 \u0637\u0648\u064a\u0644\u064b\u0627. "
+                  "\u062c\u0631\u0651\u0628 \u0633\u0624\u0627\u0644\u064b\u0627 "
+                  "\u0623\u0628\u0633\u0637.",
+        },
+        "sql_forbidden": {
+            "en": "That operation is not permitted — I can only read data.",
+            "ar": "\u0647\u0630\u0627 \u0627\u0644\u0625\u062c\u0631\u0627\u0621 "
+                  "\u063a\u064a\u0631 \u0645\u0633\u0645\u0648\u062d \u0628\u0647 "
+                  "\u2014 \u064a\u0645\u0643\u0646\u0646\u064a "
+                  "\u0642\u0631\u0627\u0621\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a "
+                  "\u0641\u0642\u0637.",
+        },
+        "sql_execution_error_transient": {
+            "en": "The database was briefly unavailable. Please try again.",
+            "ar": "\u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a "
+                  "\u063a\u064a\u0631 \u0645\u062a\u0627\u062d\u0629 "
+                  "\u0645\u0624\u0642\u062a\u064b\u0627. "
+                  "\u064a\u0631\u062c\u0649 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629 "
+                  "\u0645\u0631\u0629 \u0623\u062e\u0631\u0649.",
+        },
+        "sql_execution_error_permanent": {
+            "en": "That question could not be answered from the data as it is "
+                  "stored. Could you ask it differently?",
+            "ar": "\u062a\u0639\u0630\u0631\u062a \u0627\u0644\u0625\u062c\u0627\u0628\u0629 "
+                  "\u0639\u0646 \u0647\u0630\u0627 \u0627\u0644\u0633\u0624\u0627\u0644 "
+                  "\u0645\u0646 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a "
+                  "\u0627\u0644\u0645\u062a\u0627\u062d\u0629. \u0647\u0644 "
+                  "\u064a\u0645\u0643\u0646\u0643 \u0637\u0631\u062d\u0647 "
+                  "\u0628\u0637\u0631\u064a\u0642\u0629 \u0623\u062e\u0631\u0649\u061f",
+        },
+        "artifact_missing": {
+            "en": "I could not find that document any more.",
+            "ar": "\u0644\u0645 \u0623\u0639\u062f \u0623\u062c\u062f "
+                  "\u0630\u0644\u0643 \u0627\u0644\u0645\u0633\u062a\u0646\u062f.",
+        },
+        "artifact_forbidden": {
+            "en": "That document is not available to you.",
+            "ar": "\u0647\u0630\u0627 \u0627\u0644\u0645\u0633\u062a\u0646\u062f "
+                  "\u063a\u064a\u0631 \u0645\u062a\u0627\u062d \u0644\u0643.",
+        },
+        "invariant_violation": {
+            "en": "Something went wrong on my side, so I do not have a "
+                  "reliable answer for you.",
+            "ar": "\u062d\u062f\u062b \u062e\u0637\u0623 \u0644\u062f\u064a\u0651\u060c "
+                  "\u0648\u0644\u0627 \u0623\u0645\u0644\u0643 "
+                  "\u0625\u062c\u0627\u0628\u0629 \u0645\u0648\u062b\u0648\u0642\u0629.",
+        },
+    }
+
+    _FAILURE_DEFAULT = {
+        "en": "I could not complete that request.",
+        "ar": "\u0644\u0645 \u0623\u062a\u0645\u0643\u0646 \u0645\u0646 "
+              "\u0625\u062a\u0645\u0627\u0645 \u0647\u0630\u0627 "
+              "\u0627\u0644\u0637\u0644\u0628.",
+    }
+
+    @classmethod
+    def _failure_narration(cls, state: AgentState) -> str:
+        """A failure the user can act on, with no copy of our schema in it.
+
+        Driven by the Observation's error CATEGORY, which is a closed enum —
+        so no database text can reach the reply through this path, whatever
+        the driver said. The category is what tells the user whether to
+        rephrase, retry, or stop, which is the actionable part; the detail
+        goes to the log for the operator.
+        """
+        from .. import reasoning
+
+        observation = state.get("observation") or {}
+        error_type = observation.get("error_type")
+        if not error_type:
+            try:
+                error_type = reasoning.build_observation(state).get("error_type")
+            except Exception:
+                error_type = None
+
+        language = "ar" if (state.get("response_language") or "en") == "ar" else "en"
+        phrases = cls._FAILURE_PHRASES.get(error_type) or cls._FAILURE_DEFAULT
+        # A category with no phrase yet falls back rather than saying nothing.
+        return phrases.get(language) or cls._FAILURE_DEFAULT[language]
+
+    @staticmethod
+    def _empty_narration(state: AgentState) -> str:
+        """No rows is an ANSWER, and it is given in the language asked.
+
+        Worded as a result rather than a failure: "how many detections
+        yesterday" answered with none is correct. The case where zero rows is
+        suspicious — a task narrowed to a named person — is caught earlier by
+        the reasoning layer, which asks which person is meant.
+        """
+        # Zero rows for a NAMED person means one of two quite different
+        # things, and the look-up has already settled which. Reporting both
+        # as "no matching records" hides exactly the distinction the user
+        # needs: whether the person is unknown to the system, or known and
+        # simply never seen.
+        arabic = (state.get("response_language") or "en") == "ar"
+
+        known = state.get("entity_without_data")
+        if known:
+            if arabic:
+                return (f"{known} مسجل في "
+                        f"النظام، "
+                        f"لكن لا توجد "
+                        f"عمليات رصد "
+                        f"مسجلة له.")
+            return (f"{known} is enrolled, but has no detections recorded "
+                    f"yet — no camera has seen them.")
+
+        missing = state.get("entity_not_found")
+        if missing:
+            if arabic:
+                return (f"لا يوجد "
+                        f"شخص مسجل "
+                        f"باسم «{missing}».")
+            return (f"No person named “{missing}” is enrolled, so "
+                    f"there is nothing to track.")
+
+        if (state.get("response_language") or "en") == "ar":
+            return ("\u0644\u0627 \u062a\u0648\u062c\u062f "
+                    "\u0633\u062c\u0644\u0627\u062a "
+                    "\u0645\u0637\u0627\u0628\u0642\u0629 "
+                    "\u0644\u0647\u0630\u0627 \u0627\u0644\u0628\u062d\u062b.")
+        return "I searched the database and found no matching records."
+
+    @staticmethod
+    def _grounding_section(state) -> str:
+        """What THIS turn actually did, as facts the narrative may not invent.
+
+        Built from the Observation — derived in Python from state — so the
+        narration cannot be argued into claiming an action that never ran.
+        The prior-turns block alone was enough to produce "I've deleted every
+        detection row from the database" after a request that was refused
+        (observed live 2026-08-30); this is the block that makes that
+        impossible to say honestly.
+        """
+        from .. import reasoning
+
+        facts = []
+        observation = state.get("observation") or {}
+        result = state.get("query_result") or {}
+
+        if observation.get("error_type") == reasoning.ErrorType.SQL_FORBIDDEN:
+            facts.append("The request was REFUSED by the security policy. "
+                         "Nothing was executed and nothing was changed.")
+        elif result.get("success"):
+            facts.append(f"One read-only query ran and returned "
+                         f"{result.get('row_count', 0)} rows.")
+        elif observation.get("error_type"):
+            facts.append("No query was completed for this message. "
+                         f"Reason: {observation.get('sanitized_detail') or 'it failed'}.")
+        else:
+            facts.append("No database query was run for this message.")
+
+        # Documents, explicitly. The block used to speak only about DATA, so
+        # a turn that produced no document left the question open and the
+        # model answered it from the transcript: "thanks" was told "I've
+        # prepared the security intelligence report about Joey as a PDF" when
+        # no artifact existed.
+        if state.get("artifact_payload") or state.get("committed_artifact_id"):
+            facts.append("A document WAS produced for this message.")
+        else:
+            facts.append("NO document was produced for this message. Do not "
+                         "say you have prepared, generated or attached one, "
+                         "and do not offer a download.")
+
+        facts.append("No data was created, modified or deleted — this "
+                     "assistant can only read.")
+
+        return ("\n[FACTS about this turn - the ONLY actions you may describe "
+                "as having happened]\n"
+                + "\n".join(f"- {f}" for f in facts)
+                + "\n[end of facts]\n\n")
+
+    @staticmethod
+    def _language_directive(state) -> str:
+        """The output-language instruction for response prompts.
+
+        Arabic reports keep the structure: Arabic headings and prose in Modern
+        Standard Arabic, but person names, camera names, timestamps and numbers
+        stay EXACTLY as they appear in the data — transliterating a camera name
+        would break the operator's ability to find that camera.
+        """
+        if (state.get("response_language") or "en") != "ar":
+            # Explicit for English too. With prior Arabic turns in the
+            # conversation context and no directive, the model mimicked the
+            # dominant context language — an English question after an Arabic
+            # report came back in Arabic. The language follows THIS question,
+            # not the transcript.
+            return ("OUTPUT LANGUAGE: English (the user asked this question in "
+                    "English; earlier turns in other languages do not change that).")
+        return (
+            "OUTPUT LANGUAGE: Write the ENTIRE report in Modern Standard Arabic "
+            "(\u0627\u0644\u0641\u0635\u062d\u0649). Keep the same markdown section structure with Arabic "
+            "headings. Person names, camera names, timestamps and numbers must "
+            "remain EXACTLY as they appear in the data (do not translate or "
+            "transliterate them). Confidence stays as percentages.")
+
+    def enrich_co_appearance(self, state: AgentState) -> dict:
+        """Who else was seen at the same camera around the tracked person.
+
+        Deterministic, not LLM-driven: one bounded self-join per report,
+        through the same AST-guarded read-only executor as every other query.
+        The narrative node then RECEIVES facts; asking the model to find
+        co-appearances would invite it to invent them.
+
+        Never fails the run - a tracking report without co-appearances is
+        degraded, not broken.
+        """
+        try:
+            result = state.get("query_result") or {}
+            rows = result.get("rows") or []
+            if not rows:
+                return {"co_appearances": []}
+            first = rows[0]
+            looks_tracking = (
+                any(k in first for k in ("camera_name", "pipeline_id", "camera"))
+                and any(k in first for k in ("timestamp", "time"))
+                and any(k in first for k in ("name", "person_name"))
+            )
+            if not looks_tracking:
+                return {"co_appearances": []}
+
+            subject = str(first.get("name") or first.get("person_name") or "").strip()
+            if not subject:
+                return {"co_appearances": []}
+            # The name came out of the database, but it still becomes a SQL
+            # literal here - escape it, and refuse anything degenerate.
+            if len(subject) > 120:
+                return {"co_appearances": []}
+            escaped = subject.replace("'", "''")
+
+            sql = f"""SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name,
+       f2.name AS person,
+       d2.timestamp AS seen_at,
+       d1.timestamp AS subject_seen_at
+FROM faces f1
+JOIN detections d1 ON f1.detection_id = d1.id
+JOIN detections d2 ON d2.pipeline_id = d1.pipeline_id
+JOIN faces f2 ON f2.detection_id = d2.id
+JOIN pipelines p ON d1.pipeline_id = p.pipeline_id
+WHERE LOWER(f1.name) = LOWER('{escaped}')
+  AND f2.name IS NOT NULL
+  AND LOWER(f2.name) != LOWER('{escaped}')
+  AND LOWER(f2.name) NOT LIKE 'unknown%'
+  AND LOWER(f2.name) NOT LIKE 'person_%'
+  AND d2.timestamp BETWEEN d1.timestamp - INTERVAL '5 minutes'
+                       AND d1.timestamp + INTERVAL '5 minutes'
+ORDER BY d1.timestamp ASC
+LIMIT 200"""
+            outcome = self.db.execute_query(sql)
+            if not outcome.get("success"):
+                logger.warning("[CO_APPEAR] enrichment query refused/failed: %s",
+                               outcome.get("error", "?"))
+                return {"co_appearances": []}
+
+            # Collapse bursts: one entry per (camera, person, subject-minute),
+            # so ten frames of the same encounter read as one observation.
+            seen = set()
+            entries = []
+            for row in outcome.get("rows") or []:
+                subject_at = str(row.get("subject_seen_at") or "")[:16]  # to the minute
+                key = (row.get("camera_name"), str(row.get("person") or "").lower(), subject_at)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append({
+                    "camera_name": row.get("camera_name"),
+                    "person": row.get("person"),
+                    "seen_at": str(row.get("seen_at") or "")[:19],
+                    "subject_seen_at": str(row.get("subject_seen_at") or "")[:19],
+                })
+                if len(entries) >= 25:
+                    break
+            logger.info("[CO_APPEAR] %d co-appearance observation(s) for '%s'",
+                        len(entries), subject)
+            return {"co_appearances": entries}
+        except (TypeError, AttributeError, NameError, KeyError, IndexError) as bug:
+            # A CODE fault. This used to log only `type(e).__name__`, so a
+            # broken enrichment silently returned nothing and the report was
+            # quietly poorer with no way to find out why.
+            logger.error("[CO_APPEAR] BUG in enrichment, returning none: %s",
+                         bug, exc_info=True)
+            return {"co_appearances": []}
+        except Exception as e:
+            logger.warning("[CO_APPEAR] enrichment skipped: %s", e)
+            return {"co_appearances": []}
 
     def generate_story_response(self, state: AgentState) -> AgentState:
         """
@@ -957,22 +2051,26 @@ Provide the corrected SQL:""")
                 SystemMessage(content="""You are a helpful database assistant.
 Answer the user's question in a friendly, professional manner.
 Do not expose internal workings or SQL queries."""),
-                HumanMessage(content=state["normalized_input"])
+                HumanMessage(content=(
+                    self._context_section(state)
+                    + state["normalized_input"]
+                    + (("\n\n" + self._language_directive(state))
+                       if self._language_directive(state) else "")
+                ))
             ])
         else:
             # SQL-based response
             query_result = state.get("query_result", {})
 
             if not query_result.get("success"):
-                error_msg = query_result.get("error", "Unknown error occurred")
-                state["final_response"] = f"I encountered an issue while trying to retrieve that information: {error_msg}"
+                state["final_response"] = self._failure_narration(state)
                 return state
 
             rows = query_result.get("rows", [])
             row_count = query_result.get("row_count", 0)
 
             if row_count == 0:
-                state["final_response"] = "I searched the database but found no matching records for your query."
+                state["final_response"] = self._empty_narration(state)
                 return state
 
             # Check if this is a person tracking query (has camera_name/pipeline_id and timestamp)
@@ -994,111 +2092,76 @@ Do not expose internal workings or SQL queries."""),
             if is_tracking_query:
                 # Extract actual statistics from data
                 actual_stats = self._extract_tracking_stats(rows)
+
+                # Deterministic enrichment computed by enrich_co_appearance —
+                # the model is told about co-appearances, never asked to find them.
+                co_rows = state.get('co_appearances') or []
+                language_directive = self._language_directive(state)
+                co_appearance_block = (
+                    json.dumps(co_rows, indent=2, default=str)
+                    if co_rows else '(none found in the window)'
+)
                 
                 # Natural Narrative Surveillance Intelligence Report prompt
                 prompt = ChatPromptTemplate.from_messages([
-                    SystemMessage(content="""You are an elite Surveillance Intelligence Analyst crafting compelling, detailed intelligence narratives from a Security Intelligence System. Your reports read like gripping surveillance intelligence stories that bring the data to life.
+                    SystemMessage(content="""You are a Security Intelligence Analyst in the SECURITY INTELLIGENCE SECTION, producing organized tracking reports from surveillance data.
 
-CRITICAL DATA USAGE RULES:
-- You MUST use ONLY the actual data provided in the "Detection Results" section
-- You MUST extract camera names, timestamps, and locations EXACTLY as they appear in the data
-- NEVER invent or create fake camera names like "Camera A", "Camera B", "Main Entrance", etc.
-- NEVER use placeholder values like [X], [Y], [duration], [location], [time]
-- ALWAYS use the exact camera/pipeline names from the data (e.g., "MD5AL_3EIN_7LWE", "IT-DIR-MD5AL")
-- ALWAYS use actual timestamps from the data in the exact format provided
-- ALWAYS use the ACTUAL PERSON'S NAME from the data - NEVER use "subject" or "the subject"
-- ALWAYS calculate real statistics from the actual data provided
-- If a field is missing in the data, state "Data not available" rather than inventing values
+CRITICAL DATA RULES (violating any of these makes the report worthless):
+- Use ONLY the data provided in the Detection Results and Co-Appearance sections
+- camera_name values are real, human-readable camera names (e.g. "Main Entrance", "Parking Lot") - use them EXACTLY as given, never invent one
+- If a camera_name looks like a raw identifier (letters-and-digits with dashes), still use it verbatim and refer to it as an unnamed camera
+- Never print a pipeline_id when a camera_name is present
+- Use the person's actual name throughout - NEVER "subject" or "the subject"
+- Timestamps: trim to seconds (13:04:26, not 13:04:26.625798)
+- Confidence: always as a percentage with one decimal (62.6%)
+- Never use placeholders like [X] or [location]; never invent statistics
 
-REPORT STYLE - Natural Intelligence Narrative:
-- Write as a compelling surveillance intelligence story, like a professional intelligence briefing
-- Use natural, flowing English that reads like a narrative story
-- Write in first-person or third-person narrative style (e.g., "Ross was detected..." not "The subject was detected...")
-- Use the person's actual name throughout the entire report - NEVER refer to them as "subject" or "the subject"
-- Create vivid, detailed descriptions that paint a picture of the surveillance activity
-- Use descriptive language that makes the intelligence come alive
-- Include rich details about timing, locations, movements, and patterns
-- Write with the style of an elite intelligence analyst telling a story
+REPORT STRUCTURE - follow it exactly, with these markdown headings:
 
-REPORT STRUCTURE - Natural Narrative Format:
-Write a flowing narrative report that includes:
+# SECURITY INTELLIGENCE REPORT - <PERSON'S NAME IN CAPS>
+*Prepared by: Security Intelligence Section*
 
-1. OPENING: Start with a compelling opening that introduces the person by name and sets the scene
-   Example: "Intelligence tracking for Ross reveals a detailed surveillance pattern across multiple detection points..."
+## 1. Executive Summary
+Three to four sentences: who was tracked, over what time window, across how
+many cameras, and the single most significant finding.
 
-2. CHRONOLOGICAL NARRATIVE: Tell the story chronologically, weaving together:
-   - Exact timestamps and camera locations
-   - The person's name (not "subject")
-   - Detailed descriptions of each detection
-   - Movement patterns and time between detections
-   - Confidence levels and what they indicate
-   Example: "At 12:12:48, Ross was first detected at camera MD5AL_3EIN_7LWE with a confidence level of 42.3%. The detection occurred..."
+## 2. Timeline of Movements
+A chronological entry per detection, formatted as:
+**HH:MM:SS - <camera name>** - one sentence: what was observed and the
+confidence (e.g. "detected with a 62.6% confidence match").
+When the Co-Appearance Observations list someone at the same camera within
+the window of that detection, add on the next line:
+> Also present within the same window: NAME (HH:MM:SS)
+Group entries under a date subheading when the data spans multiple days.
 
-3. MOVEMENT ANALYSIS: Describe the movement pattern as a story:
-   - Where Ross started
-   - How Ross moved between locations
-   - Time spent at each location
-   - Any patterns or anomalies observed
-   Example: "Ross's movement pattern shows..."
+## 3. Movement Analysis
+The route as a short narrative: which camera to which camera, time between
+them, dwell periods, and any gap worth noting.
 
-4. STATISTICAL INSIGHTS: Weave statistics naturally into the narrative:
-   - Total detections
-   - Unique locations visited
-   - Average confidence levels
-   - Time spans and durations
-   - Present these as part of the story, not as a separate table
+## 4. Co-Appearance Analysis
+Who else appeared alongside the tracked person, at which cameras, and how
+often, drawn ONLY from the Co-Appearance Observations. Repeated
+co-appearance with the same person deserves explicit mention as a possible
+association - in careful language ("appeared alongside", "was present at
+the same camera within N minutes"), never as an accusation. If the
+observations list is empty, state in one sentence that no other identified
+person was detected within the window and omit speculation.
 
-5. KEY INTELLIGENCE: Highlight important observations naturally:
-   - Notable behaviors or patterns
-   - Unusual activities
-   - Significant time gaps or movements
-   - Confidence level variations
+## 5. Statistical Summary
+A short bullet list: total detections, unique cameras, most frequent
+camera (by name), first and last detection with dates, average confidence,
+confidence range.
 
-6. ASSESSMENT: Provide intelligence assessment in narrative form:
-   - What the patterns suggest
-   - Potential significance
-   - Any concerns or notable aspects
+## 6. Assessment & Recommendations
+Two short paragraphs: what the pattern indicates, and concrete next
+surveillance steps.
 
-7. RECOMMENDATIONS: Conclude with actionable intelligence recommendations in natural language
-
-LANGUAGE STYLE:
-- Natural, flowing English - like telling a story
-- Use the person's name throughout (Ross, Joey, etc.) - NEVER "subject" or "the subject"
-- Descriptive and vivid - paint a picture with words
-- Professional but engaging - like an elite intelligence analyst
-- Include specific details: exact times, camera names, confidence levels
-- Use varied sentence structure for readability
-- Create a sense of narrative flow and progression
-- Write as a compelling story, not structured sections or tables
-
-EXAMPLE NARRATIVE STYLE:
-Write as a flowing narrative story. Here's an example:
-
-"Intelligence tracking for Ross reveals a detailed surveillance pattern across our detection network. At precisely 12:12:48, Ross was first detected at camera MD5AL_3EIN_7LWE with a confidence match of 42.3%. This initial detection marked the beginning of our surveillance window for Ross's activities.
-
-The detection occurred at camera MD5AL_3EIN_7LWE, where Ross appeared with a moderate confidence level of 42.3%. This single detection point provides limited movement data, as Ross was observed only once during the surveillance period. The detection suggests Ross was present at this specific location at that exact moment in time.
-
-Analysis of the detection pattern shows that Ross maintained a stationary position at camera MD5AL_3EIN_7LWE, with no subsequent movements detected across our surveillance network. The single detection point indicates Ross was present for a brief moment, with a confidence level that suggests a positive match to our facial recognition database.
-
-Statistical analysis reveals that Ross was detected once across our entire surveillance network, appearing at a single detection point (MD5AL_3EIN_7LWE) with an average confidence level of 42.3%. The detection occurred on 2026-01-01 at 12:12:48, representing the first and only recorded appearance of Ross during this surveillance period.
-
-Key intelligence observations indicate that Ross's appearance was isolated to a single location, with no movement patterns detected between multiple cameras. The moderate confidence level of 42.3% suggests a reasonable match, though additional detections would strengthen the identification confidence.
-
-Based on this single detection point, our intelligence assessment indicates limited actionable intelligence. Without multiple detection points or movement patterns, we cannot determine Ross's complete route, dwell times, or behavioral patterns. Further surveillance and monitoring are recommended to gather additional intelligence on Ross's activities and potential connections to other surveillance targets.
-
-Recommendations include continued monitoring of camera MD5AL_3EIN_7LWE and expansion of surveillance coverage to adjacent detection points to capture any future appearances by Ross. Enhanced monitoring protocols should be implemented to increase the likelihood of multiple detection points, which would provide more comprehensive intelligence on Ross's movement patterns and activities."
-
-CRITICAL RULES:
-- ALWAYS use the person's actual name (Ross, Joey, etc.) - NEVER "subject" or "the subject"
-- Write as a flowing narrative story, NOT structured sections or tables
-- Include rich details and vivid descriptions
-- Pair every timestamp with the exact camera name from data
-- Use natural English - like telling a compelling story
-- Calculate real statistics and weave them naturally into the narrative
-- Never use tables, structured formats, or formal report sections
-- Make it engaging and compelling like an elite intelligence analyst's narrative report"""),
+STYLE: professional, precise, readable. Organized sections - not one wall
+of prose, not repetitive sentence templates. Each timeline entry should
+read differently; do not repeat the same sentence pattern for every
+detection."""),
                     HumanMessage(content=f"""User asked: {state['normalized_input']}
-
+{self._context_section(state)}
 Query purpose: {state.get('sql_purpose', 'Track person movement')}
 
 ACTUAL DETECTION RESULTS ({row_count} total detections):
@@ -1107,27 +2170,12 @@ ACTUAL DETECTION RESULTS ({row_count} total detections):
 EXTRACTED STATISTICS FROM ACTUAL DATA:
 {actual_stats}
 
-Generate a compelling, natural narrative-style SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual data provided above. 
+CO-APPEARANCE OBSERVATIONS (other identified people at the same camera within +/-5 minutes of the tracked person; computed from the database, not to be invented or extended):
+{co_appearance_block}
 
-CRITICAL REQUIREMENTS:
-- Use the ACTUAL PERSON'S NAME from the data throughout the entire report - NEVER use "subject" or "the subject"
-- Write in natural, flowing English like telling a story
-- Extract camera names EXACTLY as they appear in the data (look for camera_name, pipeline_id fields)
-- Use timestamps EXACTLY as they appear in the data
-- ALWAYS pair every time mention with the camera name: "At 12:12:48 at camera MD5AL_3EIN_7LWE, Ross was detected..."
-- Write chronologically, weaving together timestamps, locations, and the person's name naturally
-- Include rich details and vivid descriptions that bring the surveillance activity to life
-- Calculate real statistics from the actual data and weave them naturally into the narrative
-- Do NOT invent or create fake camera names or locations
-- Do NOT use tables or structured formats - write as a flowing narrative story
-- Include all actual detections in chronological order with camera names
-- Provide detailed analysis based on the actual movement patterns in the data
-- Make every time reference clear by including the camera location
-- Write like an elite intelligence analyst telling a compelling surveillance story
-- Use descriptive language: "Ross appeared at camera MD5AL_3EIN_7LWE at precisely 12:12:48..."
-- Include confidence levels naturally: "with a confidence match of 42.3%"
-- Describe movements vividly: "Ross moved from camera X to camera Y, covering the distance in..."
-- Format the report for easy reading with clear sections and consistent time/camera pairing""")
+{language_directive}
+
+Generate the SECURITY INTELLIGENCE REPORT following the exact structure from your instructions, using ONLY the data above.""")
                 ])
             else:
                 # Professional Surveillance Intelligence Report for general queries
@@ -1189,11 +2237,13 @@ CRITICAL RULES:
 - ALWAYS structure as an advanced intelligence briefing
 - Include quantitative analysis and statistical insights from the actual data"""),
                     HumanMessage(content=f"""User asked: {state['normalized_input']}
-
+{self._context_section(state)}
 Query purpose: {state.get('sql_purpose', 'Data retrieval')}
 
 ACTUAL RESULTS ({row_count} total rows):
 {results_preview}
+
+{self._language_directive(state)}
 
 Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual data provided above.
 - Extract all values EXACTLY as they appear in the data
@@ -1204,6 +2254,7 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
 - Provide advanced analysis based on the actual patterns in the data""")
                 ])
 
+        self._trace_envelope("generate_story_response", prompt)
         chain = prompt | self.llm | StrOutputParser()
 
         try:
@@ -1409,20 +2460,420 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         
         return formatted_stats
 
+    # ------------------------------------------------------------------
+    # Documents
+    # ------------------------------------------------------------------
+
+    _CONFIRMATION = {
+        "en": "I've prepared **{title}** as a {fmt}. You can download it below.",
+        "ar": "لقد أعددت **{title}** بصيغة {fmt}. يمكنك تنزيله أدناه.",
+    }
+
+    def _document_source_text(self, state: AgentState) -> str:
+        """What to put in the document.
+
+        Preference order: the narrative just written for this user, then the
+        previous answer in this conversation, then a plain summary of the last
+        result. The narrative is read back from conversation memory rather
+        than copied into working memory — it is already stored there once, and
+        storing report text a second time would widen the surveillance data's
+        footprint for no gain.
+        """
+        current = (state.get("final_response") or "").strip()
+        if current:
+            return current
+
+        # Only reuse the previous narrative if the turn that wrote it actually
+        # produced something. Length was the old test — over 40 characters —
+        # which cannot tell a report from an apology, so an apology is what it
+        # rendered: a PDF whose entire body was "I couldn't reach that report
+        # to translate it", delivered as a finished report (observed live).
+        working = state.get("working_context") or {}
+        reportable = working.get("last_narrative_reportable")
+        if reportable is False:
+            logger.info("[RENDER] the last turn produced no result; not "
+                        "rendering its narrative as a document")
+        else:
+            try:
+                for message in reversed(
+                        self.conversation_memory.get_recent_messages(limit=8) or []):
+                    if message.__class__.__name__ == "AIMessage":
+                        text = (getattr(message, "content", "") or "").strip()
+                        if len(text) > 40:
+                            return text
+            except (TypeError, AttributeError, NameError, KeyError) as bug:
+                # A CODE fault choosing what goes INTO a document. Loud.
+                logger.error("[RENDER] BUG reading the previous narrative: %s",
+                             bug, exc_info=True)
+            except Exception as e:
+                logger.warning("[RENDER] could not read the previous narrative: %s", e)
+
+        result = (state.get("working_context") or {}).get("last_result") or {}
+        if result.get("row_count"):
+            columns = ", ".join(result.get("columns") or [])
+            return (f"Query summary\n\nQuestion: {result.get('purpose') or 'n/a'}\n"
+                    f"Rows returned: {result.get('row_count')}\n"
+                    f"Columns: {columns or 'n/a'}")
+        return ""
+
+    #: The example text in the SQL-generation prompt. A model that echoes the
+    #: template instead of describing its query put this on a real document:
+    #: "I have prepared **Brief explanation of what the query does** as a PDF".
+    #: Matched exactly against OUR OWN template string — not a guess about
+    #: what a bad title looks like.
+    _PROMPT_PLACEHOLDERS = frozenset({
+        "brief explanation of what the query does",
+        "your sql query here",
+        "explanation of why no query can be generated",
+    })
+
+    @classmethod
+    def _usable_title(cls, candidate) -> str:
+        """A title, or "" when the candidate is prompt scaffolding.
+
+        Truncation stops at a WORD boundary. A hard slice produced
+        "...ordered chronologically for story gene" on a real document, which
+        reads as a bug to whoever opens the file.
+        """
+        text = " ".join(str(candidate or "").split())
+        if not text or text.lower() in cls._PROMPT_PLACEHOLDERS:
+            return ""
+        if len(text) <= 120:
+            return text
+        clipped = text[:120].rsplit(" ", 1)[0].rstrip(",;:-")
+        return (clipped or text[:120]) + "..."
+
+    def render_artifact(self, state: AgentState) -> AgentState:
+        """STEP: render what we already have as a document.
+
+        Renders BYTES only. Persisting them needs the database, and graph
+        nodes are synchronous, so the API layer commits the artifact through
+        the same `render_and_register` the HTTP export uses — one persistence
+        path, not two.
+        """
+        plan = state.get("planned_action") or {}
+        fmt = plan.get("format") or "pdf"
+        language = plan.get("language") or state.get("response_language") or "en"
+        content = self._document_source_text(state)
+
+        if not content:
+            state["final_response"] = (
+                "I don't have anything to put in a document yet. "
+                "What would you like me to report on?")
+            logger.info("[RENDER] nothing to render; asked for a subject instead")
+            return state
+
+        # Name the document after what is IN it. `last_query` alone titled a
+        # report with whatever the user last typed, which after a failed turn
+        # is unrelated to the contents — hence a camera report delivered as
+        # "i am just saying hi".
+        working_context = state.get("working_context") or {}
+        last_result = working_context.get("last_result") or {}
+        # Title the document after the QUESTION THAT PRODUCED ITS CONTENTS,
+        # which travels with the result itself.
+        #
+        # The two obvious candidates are both wrong. `last_query` is "the last
+        # thing typed": after track Joey -> hi -> make that a PDF it titled a
+        # surveillance report "hi". `sql_purpose` is written FOR the SQL
+        # generator and reads like it ("Track all detections of a person named
+        # Joey including which camera detected them, ordered chronologically
+        # for story gene"). They stay as fallbacks for results recorded before
+        # the question was stored.
+        title = (self._usable_title(last_result.get("question"))
+                 or self._usable_title(last_result.get("purpose"))
+                 or self._usable_title(working_context.get("last_query"))
+                 or "Intelligence Report")
+
+        try:
+            from ..services import export_builders
+
+            class _Request:
+                pass
+
+            request = _Request()
+            request.content = content
+            request.title = title
+            request.timestamp = ""
+            safe_title, safe_content, safe_date = export_builders.sanitize_export(request)
+
+            if fmt == "word":
+                payload = export_builders.build_word_bytes(
+                    safe_title, content, safe_date, "Agent")
+            else:
+                fmt = "pdf"
+                payload = export_builders.build_pdf_bytes(
+                    safe_title, safe_content, safe_date, "Agent")
+
+            state["artifact_payload"] = {
+                "bytes": payload,
+                "type": fmt,
+                "title": safe_title,
+                "language": language,
+                # Lineage for a later translation: the text the document was
+                # rendered FROM, so translating never means parsing a PDF.
+                "source_content": content,
+                "source_sql": (state.get("generated_sql")
+                               or ((state.get("working_context") or {})
+                                   .get("last_result") or {}).get("sql")),
+                "source_result_id": ((state.get("working_context") or {})
+                                     .get("last_result") or {}).get("history_id"),
+                # Only when this document is genuinely DERIVED from another.
+                # Recording a parent that was merely the newest document
+                # would put a relationship in the lineage that never existed.
+                "parent_artifact_id": (plan.get("artifact_id")
+                                       if plan.get("target") == "artifact" else None),
+            }
+            template = self._CONFIRMATION.get(language, self._CONFIRMATION["en"])
+            state["final_response"] = template.format(
+                title=safe_title, fmt=("Word document" if fmt == "word" else "PDF"))
+            logger.info("[RENDER] rendered %s (%d bytes, lang=%s)",
+                        fmt, len(payload), language)
+        except Exception as e:
+            logger.error("[RENDER] document rendering failed: %s", e, exc_info=True)
+            state["final_response"] = (
+                "I couldn't build that document. The report text is above — "
+                "please try again, or ask for a different format.")
+        return state
+
+    def modify_sql(self, state: AgentState) -> AgentState:
+        """STEP 4 (alternate): re-run the previous question under a new filter.
+
+        PROVENANCE FIRST. When the user's reference resolved to a document
+        ("same report but only camera 3"), the base query is THAT document's
+        originating SQL — not whatever ran most recently. Those differ exactly
+        when it matters: generate a report, run an unrelated query, then say
+        "same report but camera 3". Binding to recency would silently modify
+        the unrelated query and return a confident answer to a question nobody
+        asked.
+
+        The rewritten SQL then enters `validate_and_fix_sql` like any other,
+        so it passes the same AST authorization guard. A "modification" that
+        tries to smuggle a write is refused there, not here.
+        """
+        plan = state.get("planned_action") or {}
+        modification = plan.get("modification") or state.get("normalized_input") or ""
+        artifact_id = plan.get("artifact_id")
+        last_result = (state.get("working_context") or {}).get("last_result") or {}
+
+        base_sql, provenance = None, "none"
+        if artifact_id:
+            base_sql = (state.get("artifact_sql_index") or {}).get(str(artifact_id))
+            if base_sql:
+                provenance = f"artifact:{artifact_id}"
+        if not base_sql:
+            base_sql = last_result.get("sql")
+            provenance = "last_result" if base_sql else "none"
+
+        if not base_sql:
+            state["error"] = "No previous query to modify"
+            state["final_response"] = (
+                "I don't have a previous query to adjust. "
+                "Could you ask the full question?")
+            state["generated_sql"] = ""
+            logger.info("[MODIFY_SQL] nothing to modify")
+            observability.observe_provenance("none")
+            return state
+
+        logger.info("[MODIFY_SQL] base query from %s; change: %s",
+                    provenance, str(modification)[:120])
+        state["sql_base_provenance"] = provenance
+        observability.observe_provenance(provenance.split(":", 1)[0])
+
+        # The SAME JSON envelope generate_sql asks for, because the SAME
+        # parser consumes it. Asking for bare SQL here made every response
+        # unparseable, and the fallback below then quietly re-ran the
+        # unmodified query.
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=(
+                "You adjust an existing PostgreSQL SELECT query.\n\n"
+                "Apply ONLY the change the user asks for. Keep every other "
+                "part of the query — the same tables, joins, columns and "
+                "ordering — so the result stays comparable to the original.\n"
+                "It must remain a single read-only SELECT.\n\n"
+                "Respond with ONLY a JSON object:\n"
+                '{{"sql": "<the adjusted query>", "purpose": "<one line>"}}')),
+            HumanMessage(content=(
+                # The conversation context is included so a reference INSIDE
+                # the delta ("only the person we discussed") can resolve.
+                # Every other LLM node already received it; this one did not,
+                # and a modification was interpreted with no memory at all.
+                self._context_section(state)
+                + f"Database schema:\n{state.get('schema_description', '')}\n\n"
+                f"Existing query:\n{base_sql}\n\n"
+                f"Requested change: {modification}\n\nJSON:"))
+        ])
+
+        try:
+            self._trace_envelope("modify_sql", prompt)
+            raw = (prompt | create_sql_llm(TaskType.SQL_MODIFICATION)
+                   | StrOutputParser()).invoke({})
+            # .invoke(), not a direct call: this is a StructuredTool.
+            prepared = prepare_sql_from_llm_response.invoke(raw)
+            if not prepared.get("success") or not prepared.get("sql"):
+                raise ValueError(prepared.get("error") or "no SQL in the response")
+
+            adjusted = prepared["sql"]
+
+            # SECURITY LAYER 0, identical to generate_sql. The downstream AST
+            # guard would also refuse this, but a modification must not be the
+            # one path into the database that skips the immediate check.
+            validation = self.db._validate_query(adjusted)
+            if not validation["is_safe"]:
+                logger.error("[SECURITY] LAYER 0: forbidden SQL from a query "
+                             "modification: %s", validation["reason"])
+                user_id = getattr(self.conversation_memory, "user_id", None)
+                if user_id:
+                    state["security_block_user"] = True
+                    state["security_block_actor"] = "model"
+                    state["security_block_reason"] = (
+                        f"Forbidden SQL detected in modified query: "
+                        f"{validation['reason']}. SQL: {adjusted[:200]}")
+                state["generated_sql"] = ""
+                state["sql_purpose"] = (
+                    f"SECURITY VIOLATION: {validation['reason']}. This system "
+                    f"is read-only and cannot execute data modification "
+                    f"operations.")
+                return state
+
+            state["generated_sql"] = adjusted
+            state["sql_purpose"] = (prepared.get("purpose")
+                                    or f"{last_result.get('purpose') or 'previous query'} "
+                                       f"({str(modification)[:80]})")
+            state["sql_was_modified"] = (adjusted.strip() != (base_sql or "").strip())
+            logger.info("[MODIFY_SQL] adjusted SQL (changed=%s): %s",
+                        state["sql_was_modified"], adjusted[:200])
+        except Exception as e:
+            logger.error("[MODIFY_SQL] failed: %s", e, exc_info=True)
+            # Fall back to the ORIGINAL query rather than to nothing: the user
+            # sees the unmodified result, which is wrong-but-visible, instead
+            # of an error with no data. It is recorded as NOT modified so the
+            # difference is visible in the logs and to tests.
+            state["generated_sql"] = base_sql
+            state["sql_was_modified"] = False
+            state["error"] = f"Could not apply the change: {e}"
+        return state
+
+    def translate_artifact(self, state: AgentState) -> AgentState:
+        """STEP: restate an existing document in another language.
+
+        This node DECIDES; the API layer EXECUTES. Translating needs the
+        artifact's stored `source_content`, and reading that means an
+        ownership-checked database call, which a synchronous graph node
+        cannot make. Rather than let a node open its own event loop against a
+        pool bound to another one, it publishes a request and the async layer
+        resolves the id against the database, translates, re-renders and
+        registers the result with its parent recorded.
+
+        Translation works from `source_content` — the narrative the document
+        was rendered from — so it is text in, text out. A PDF is never parsed
+        back, which is both unreliable and how Arabic shaping gets destroyed.
+        """
+        plan = state.get("planned_action") or {}
+        language = plan.get("language") or "en"
+        artifact_id = plan.get("artifact_id")
+
+        if not artifact_id:
+            # Nothing rendered, but there IS a narrative: translate the text
+            # itself and answer inline. No document, no artifact.
+            source = self._document_source_text(state)
+            if not source:
+                state["final_response"] = (
+                    "I don't have a previous report to translate. "
+                    "What would you like me to report on?")
+                return state
+            state["final_response"] = translate_document_text(source, language)
+            state["response_language"] = language
+            logger.info("[TRANSLATE] translated the last narrative inline (lang=%s)",
+                        language)
+            return state
+
+        state["translation_request"] = {"artifact_id": artifact_id, "language": language,
+                                        "format": plan.get("format") or "pdf"}
+        # Replaced by the API layer on success. If that fails, this is what the
+        # user sees — it must not claim a document exists.
+        state["final_response"] = (
+            "I couldn't reach that report to translate it. "
+            "Please try asking for it again.")
+        logger.info("[TRANSLATE] requested translation of %s to %s",
+                    artifact_id, language)
+        return state
+
+    #: Said when a real request ran out of bounded reasoning. Both languages
+    #: because the failure must be as readable as the success - the older
+    #: failure paths were hardcoded English regardless of the turn.
+    _EXHAUSTED_NARRATION = {
+        "ar": ("لم أتمكن من إكمال هذا الطلب ضمن خطوات المعالجة المسموح بها. "
+               "يرجى إعادة صياغة السؤال أو تبسيطه."),
+        "en": ("I could not complete this request within the allowed "
+               "reasoning steps. Please try rephrasing it, or asking for "
+               "one thing at a time."),
+    }
+
     def handle_chat(self, state: AgentState) -> AgentState:
         """Handle pure chat responses without SQL."""
+        # A look-up already SETTLED this turn: the person is enrolled with
+        # nothing recorded, or is not enrolled at all. Both are facts, and
+        # stating them is the whole point of having resolved the name -
+        # handing them to the narration model instead produced answers that
+        # contradicted the look-up. Deterministic, and one fewer model call.
+        if state.get("entity_without_data") or state.get("entity_not_found"):
+            state["final_response"] = self._empty_narration(state)
+            logger.info("[REACT] terminal=%s answered from the look-up",
+                        state.get("terminal_state"))
+            return state
+
         logger.info("\n" + "="*60)
         logger.info("💬 CHAT RESPONSE (No SQL needed)")
         logger.debug("="*60)
         logger.info(f"📥 Input: {state['normalized_input']}")
 
+        # A planned clarification is the answer, not a prompt for one. Passing
+        # "make it Arabic" to the chat model here is precisely the failure
+        # this redesign removes: it produces confident small talk about a
+        # document the model cannot see.
+        clarification = state.get("clarify_question")
+        if clarification:
+            state["final_response"] = clarification
+            logger.info("[STEP_7] answering with the planned clarification")
+            return state
+
+        # A turn that asks for nothing gets no transcript. The prior-turns
+        # block exists to resolve "it", "that one", "the same camera"; a
+        # greeting has nothing to resolve, and handing it a surveillance
+        # transcript is what produced "hi" -> "seems like you're referring to
+        # the security intelligence report about Joey...".
+        asks_for_something = state.get("turn_is_a_request")
+        context_block = ("" if asks_for_something is False
+                         else self._context_section(state))
+        topic_rule = ("" if asks_for_something is not False else (
+            "\n\nThe user is not asking about the data. Respond to what they "
+            "actually said — briefly, and without summarising or referring to "
+            "anything from earlier in the conversation."))
+
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content="""You are a helpful database assistant.
 Answer questions about databases, SQL, and data in a friendly manner.
-If you don't know something, say so politely."""),
-            HumanMessage(content=state["normalized_input"])
+If you don't know something, say so politely.
+
+YOU CAN ONLY READ DATA. You have never created, changed or deleted a
+record, and you never will — the system physically cannot. Never state or
+imply that you performed, completed or will perform any such action, no
+matter what an earlier message in the conversation asked for. If a previous
+request was for a change or a deletion, say plainly that it was not carried
+out because the assistant is read-only.
+
+Never claim an action succeeded unless the FACTS block below says it did."""),
+            HumanMessage(content=(
+                context_block
+                + self._grounding_section(state)
+                + state["normalized_input"]
+                + topic_rule
+                + (("\n\n" + self._language_directive(state))
+                   if self._language_directive(state) else "")
+            ))
         ])
 
+        self._trace_envelope("handle_chat", prompt)
         chain = prompt | self.llm | StrOutputParser()
 
         try:
@@ -1470,8 +2921,24 @@ If you don't know something, say so politely."""),
         logger.info(f"📊 Has SQL: {has_sql}")
         logger.info(f"📊 Should learn: {should_learn}")
 
+        # Learn only from a query that actually FOUND something.
+        #
+        # `success` is True for a query that ran cleanly and matched nothing,
+        # so this used to save empty-result queries as worked examples. One
+        # of them — a person's name translated into Arabic, matching a table
+        # that stores it in Latin script — became the top-ranked example for
+        # every similar question and taught the agent to reproduce the bug.
+        #
+        # Zero rows remains a legitimate ANSWER (see reasoning.build_observation);
+        # it is simply not a demonstration of a query that works, which is the
+        # only thing this knowledge base is for.
+        rows_found = int(query_result.get("row_count") or 0)
+        if query_result.get("success") and generated_sql and not rows_found:
+            logger.info("[STEP_7] not learning a query that matched nothing")
+
         if (
             query_result.get("success") and
+            rows_found > 0 and
             generated_sql and
             state.get("should_learn", True)
         ):

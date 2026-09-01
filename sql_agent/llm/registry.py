@@ -20,7 +20,8 @@ from .base import Capability, DataSensitivity, ModelSpec, TaskType
 logger = logging.getLogger(__name__)
 
 # Tasks that need a model good at SQL, in preference order.
-_SQL_TASKS = frozenset({TaskType.SQL_GENERATION, TaskType.SQL_REPAIR})
+_SQL_TASKS = frozenset({TaskType.SQL_GENERATION, TaskType.SQL_MODIFICATION,
+                        TaskType.SQL_REPAIR})
 
 
 class ModelRegistry:
@@ -134,12 +135,68 @@ def build_default_registry(cfg) -> ModelRegistry:
             timeout_seconds=float(cfg.ollama_timeout),
         ))
 
-    # SQL work prefers the specialist and falls back to the general model.
+    # ---- development-only hosted provider (NVIDIA NIM) --------------------
+    #
+    # `cfg.is_production` is the gate, not the API key: a key present in a
+    # production environment registers NOTHING, so the router cannot select a
+    # model that would send schema and question text off-box. The production
+    # config guard independently fails the boot when LLM_DEV_PROVIDER is set,
+    # and the flag is SECURITY_CRITICAL so it cannot arrive via the admin
+    # settings API. Three layers, none trusting the others.
+    #
+    # In development the NIM specs are registered at RESTRICTED and preferred
+    # over Ollama: a development database holds development data, and the
+    # whole point of the provider is to compare generated SQL against a
+    # stronger model. Ollama stays registered as the fallback, so the agent
+    # keeps answering when the endpoint or key is misbehaving.
+    nim_enabled = (
+        not getattr(cfg, "is_production", True)
+        and str(getattr(cfg, "llm_dev_provider", "") or "").strip().lower() == "nim"
+        and bool(str(getattr(cfg, "nim_api_key", "") or "").strip())
+    )
+    nim_general = nim_sql = None
+    if nim_enabled:
+        nim_general = cfg.nim_model
+        nim_sql = cfg.nim_sql_model or cfg.nim_model
+        registry.register(ModelSpec(
+            provider="nim",
+            model_id=nim_general,
+            display_name=f"{nim_general} (NIM, development)",
+            capabilities=general_caps,
+            context_tokens=32768,
+            max_sensitivity=DataSensitivity.RESTRICTED,  # dev data only; see above
+            timeout_seconds=float(cfg.nim_timeout),
+        ))
+        if nim_sql != nim_general:
+            registry.register(ModelSpec(
+                provider="nim",
+                model_id=nim_sql,
+                display_name=f"{nim_sql} (NIM SQL specialist, development)",
+                capabilities=general_caps,
+                context_tokens=32768,
+                max_sensitivity=DataSensitivity.RESTRICTED,
+                timeout_seconds=float(cfg.nim_timeout),
+            ))
+
+    # SQL work prefers the specialist and falls back to the general model;
+    # with NIM enabled the hosted models come first and Ollama remains the
+    # local fallback.
+    sql_order = [sql_id, general_id]
+    chat_order = [general_id]
+    if nim_enabled:
+        sql_order = [nim_sql, nim_general] + sql_order
+        chat_order = [nim_general] + chat_order
+    # First occurrence wins: when the specialist IS the general model the
+    # naive lists repeat an id, and a repeated id would yield the same spec
+    # twice in route()'s candidates.
+    sql_order = list(dict.fromkeys(sql_order))
+    chat_order = list(dict.fromkeys(chat_order))
+
     for task in _SQL_TASKS:
-        registry.prefer(task, [sql_id, general_id])
+        registry.prefer(task, sql_order)
 
     for task in (TaskType.CHAT, TaskType.INTENT, TaskType.NORMALIZE,
                  TaskType.EXPLANATION):
-        registry.prefer(task, [general_id])
+        registry.prefer(task, chat_order)
 
     return registry

@@ -307,14 +307,52 @@ def test_public_factories_still_exist():
 
 
 def test_real_registry_prefers_the_sql_specialist():
+    """SQL generation goes to the SQL model, and always keeps a local fallback.
+
+    This used to assert the Ollama specialist was routed FIRST, full stop.
+    That stopped being true when the development-only NIM provider was added:
+    in development NIM deliberately leads, so the assertion failed in the dev
+    container for a configuration that is working as designed.
+
+    The invariant it was reaching for survives, and is checked more strictly
+    here than before:
+
+      * whatever leads, the local SQL specialist must still be routed, so
+        losing the remote provider degrades to a local model rather than to
+        no SQL generation at all;
+      * among the LOCAL models the specialist must outrank the generic chat
+        model — the ordering the original assertion was really about;
+      * a remote model may lead ONLY when a dev provider is configured.
+        Production has none (it is refused at boot), so there the specialist
+        leads exactly as it always did.
+    """
     from sql_agent.config import config
     from sql_agent.llm import build_default_registry
 
     reg = build_default_registry(config)
     routed = reg.route(TaskType.SQL_GENERATION)
-    if config.ollama_sql_model and config.ollama_sql_model != config.ollama_model:
-        assert routed[0].model_id == config.ollama_sql_model
-        assert config.ollama_model in [m.model_id for m in routed], "no fallback"
+    assert routed, "SQL generation has no route at all"
+
+    if not (config.ollama_sql_model and config.ollama_sql_model != config.ollama_model):
+        return          # no distinct specialist configured; nothing to order
+
+    ids = [m.model_id for m in routed]
+    assert config.ollama_sql_model in ids, "the local SQL specialist is not routed"
+    assert config.ollama_model in ids, "no fallback"
+    assert ids.index(config.ollama_sql_model) < ids.index(config.ollama_model), \
+        "the generic chat model outranks the SQL specialist"
+
+    local = [m for m in routed if getattr(m, "provider", None) == "ollama"]
+    assert local and local[0].model_id == config.ollama_sql_model
+
+    dev_provider = getattr(config, "llm_dev_provider", None)
+    leader = routed[0]
+    if getattr(leader, "provider", None) != "ollama":
+        assert dev_provider, (
+            f"a remote model ({leader.model_id}) leads SQL generation with no "
+            f"development provider configured — production must never do this")
+    else:
+        assert leader.model_id == config.ollama_sql_model
 
 
 def test_real_registry_treats_local_models_as_restricted_capable():

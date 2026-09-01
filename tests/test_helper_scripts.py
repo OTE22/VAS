@@ -82,23 +82,93 @@ def test_no_script_uses_the_compose_v1_binary():
         "these use the legacy docker-compose v1 binary:\n  " + "\n  ".join(offenders))
 
 
+def _compose_files():
+    return sorted((REPO / "docker").glob("docker-compose*.yml"))
+
+
+def _compose_project_names():
+    """Project names declared by a compose file's top-level `name:` key."""
+    names = set()
+    for path in _compose_files():
+        match = re.search(r"^name:[ \t]*(\S+)", _text(path), re.M)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def _declared_volume_names():
+    """`{project}_{volume}` for every volume a compose file declares.
+
+    Parsed from the TOP-LEVEL `volumes:` block (column 0), so the per-service
+    `volumes:` lists — which are mounts, not declarations — are not collected.
+    """
+    live = set()
+    for path in _compose_files():
+        text = _text(path)
+        project = re.search(r"^name:[ \t]*(\S+)", text, re.M)
+        if not project:
+            continue
+        inside = False
+        for line in text.splitlines():
+            if re.match(r"^volumes:", line):
+                inside = True
+                continue
+            if inside:
+                if line.strip() and not line.startswith(" "):
+                    inside = False
+                    continue
+                key = re.match(r"^  ([A-Za-z0-9_.-]+):", line)
+                if key:
+                    live.add(f"{project.group(1)}_{key.group(1)}")
+    return live
+
+
+def _application_defined_names():
+    """`face_detector_*` identifiers the application itself defines.
+
+    These are Prometheus metric names (face_detector_cuda_available and the
+    rest). They share the prefix with the volume namespace but are neither
+    volumes nor renameable — a script that reads /metrics must spell them
+    exactly as the application exports them.
+    """
+    names = set()
+    for path in (REPO / "backend").rglob("*.py"):
+        names.update(re.findall(r"face_detector_[a-z_]+", _text(path)))
+    return names
+
+
 def test_no_script_hardcodes_a_stale_or_orphaned_volume_name():
     """Volumes are namespaced by the compose project. `face_detector_*` is the
     ORPHANED prefix from an older layout; the live ones are
     `face_detector_dev_*` / `face_detector_prod_*`. A script naming the old
-    prefix silently operates on a volume nothing mounts."""
-    stale = re.compile(r"face_detector_(?!dev_|prod_)[a-z_]+|docker_(?:postgres|redis|chromadb|face_database)_\w*")
+    prefix silently operates on a volume nothing mounts.
+
+    Three different things carry that prefix: declared volumes, the compose
+    project names themselves, and the Prometheus metric names the application
+    exports. Matching the prefix alone cannot tell them apart, so each token is
+    checked against what actually exists. That is stricter than a prefix rule
+    in both directions: a `face_detector_dev_*` name that no compose file
+    declares is now caught too, where the old pattern waved it through.
+    """
+    legitimate = (
+        _compose_project_names()
+        | _declared_volume_names()
+        | _application_defined_names()
+    )
+    candidate = re.compile(
+        r"face_detector_[a-z_]+|docker_(?:postgres|redis|chromadb|face_database)_\w*")
     offenders = []
     for path in _scripts():
         for number, line in enumerate(_text(path).splitlines(), 1):
             if line.lstrip().startswith(("#", "REM", "::")):
                 continue
-            match = stale.search(line)
-            if match:
-                offenders.append(
-                    f"{path.relative_to(REPO)}:{number}: {match.group(0)}")
+            for match in candidate.finditer(line):
+                token = match.group(0)
+                if token in legitimate:
+                    continue
+                offenders.append(f"{path.relative_to(REPO)}:{number}: {token}")
     assert not offenders, (
-        "these name a volume from a superseded project layout:\n  "
+        "these name a volume that no compose file declares:\n  "
         + "\n  ".join(offenders))
 
 

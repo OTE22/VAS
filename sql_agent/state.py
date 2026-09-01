@@ -4,7 +4,7 @@ Agent State Module
 Defines the state structure for the SQL Intelligence Agent.
 """
 
-from typing import TypedDict, Literal, Annotated, Optional, List, Dict
+from typing import Any, TypedDict, Literal, Annotated, Optional, List, Dict
 from langgraph.graph.message import add_messages
 
 
@@ -76,3 +76,150 @@ class AgentState(TypedDict):
     # Owner of this turn. Scopes knowledge-base retrieval and learning so
     # one user's stored questions cannot reach another user's prompt.
     user_id: Optional[int]
+
+    # Token-streaming callback installed by SQLAgent.query_stream. This key
+    # existed as a plain dict entry for a long time WITHOUT being declared
+    # here, so LangGraph dropped it at the first node boundary (see the
+    # sql_generation_timed_out comment above for the rule) — story_response
+    # always saw None, silently fell back to invoke(), and the "stream" the
+    # client received was the finished report cut into 50-char slices.
+    streaming_callback: Optional[Any]
+
+    # Output language for the FINAL narrative ('en' or 'ar'). Detected
+    # deterministically from the original input in fix_language — Arabic
+    # script, or an explicit request like 'in Arabic' — never by asking
+    # the LLM what language it thinks it saw.
+    response_language: Optional[str]
+
+    # --- Planning (STEP 2) ---------------------------------------------
+    # EVERY key below must stay declared. LangGraph merges each node's return
+    # against this schema and silently DROPS anything it does not find here —
+    # the trap that made streaming_callback and sql_generation_timed_out look
+    # like deep bugs. A dropped planned_action would route every document
+    # request to chat with no error anywhere.
+    #
+    # What the planner decided, already validated by the dispatcher.
+    planned_action: Optional[Dict]
+    # The closed set of things this turn may refer to, built in Python from
+    # working memory and the caller's own artifacts. The planner chooses from
+    # it; it never adds to it.
+    planner_candidates: Optional[Dict]
+    # Durable working memory, read from the session file at request time.
+    working_context: Optional[Dict]
+    # The caller's recent artifacts (id/type/title/language only — never
+    # content), pre-fetched in the route so graph nodes stay synchronous.
+    artifact_index: Optional[List[Dict]]
+    # Enrolled people this caller may resolve a name against. Declared
+    # here because LangGraph SILENTLY DROPS undeclared keys — the trap
+    # this codebase has hit repeatedly.
+    identity_index: Optional[List[Dict]]
+    # People THIS turn actually resolved, newest last. The structured
+    # subject is committed from here, so it does not depend on prose.
+    resolved_entities: Optional[List[Dict]]
+    # Candidates offered by an ambiguous look-up this turn, and whether this
+    # turn ANSWERED a question asked earlier. LangGraph drops undeclared keys.
+    clarification_candidates: Optional[List[Dict]]
+    clarification_answered: Optional[bool]
+    # THE canonical observation record for this turn, in order. It survives
+    # graph re-entry, which is the whole point: without it a second action
+    # starts blind. Bounded entries only - never rows, SQL or documents.
+    observations: Optional[List[Dict]]
+    # Which of reasoning.TERMINAL_STATES this turn ended in.
+    terminal_state: Optional[str]
+    # Set when bounded reasoning ran out on a real request, so the answer can
+    # say so instead of changing the subject.
+    reasoning_exhausted: Optional[bool]
+    # Entity resolution after an empty result: attempted once per turn, and
+    # its two honest outcomes.
+    entity_resolution_attempted: Optional[bool]
+    entity_without_data: Optional[str]
+    entity_not_found: Optional[str]
+    # The (tool, args) signature of the action this turn committed to, so a
+    # second action can recognise a repeat of it.
+    committed_signature: Optional[List]
+    # Set when the planner could not act safely; the chat node answers with
+    # this question instead of inventing a reply.
+    clarify_question: Optional[str]
+    # Conversation this turn belongs to, for the audit line.
+    conversation_id: Optional[str]
+    # A rendered document waiting to be persisted: {bytes, type, title,
+    # language, source_content, source_sql, source_result_id}. Graph nodes are
+    # synchronous and registration needs the database, so the node renders and
+    # the API layer commits — through the same render_and_register the HTTP
+    # export uses, so there is only ever one persistence path.
+    artifact_payload: Optional[Dict]
+    # The canonical dialogue state (sql_agent/dialogue_state.py): what the
+    # user is currently trying to accomplish — active task, filters,
+    # references, each with provenance. Loaded from working_context; committed
+    # back ONLY through application-validated deltas, never by a model.
+    dialogue_state: Optional[Dict]
+    # --- Bounded reasoning (PLAN -> ACT -> OBSERVE -> REPLAN -> ANSWER) --
+    # FAST | CONTEXTUAL | MULTI_STEP, chosen deterministically in Python from
+    # the conversation's shape (sql_agent/reasoning.py) — never by the model.
+    reasoning_mode: Optional[str]
+    # Steps spent this turn: tool look-ups AND re-plans share this budget.
+    reasoning_steps_used: Optional[int]
+    # Corrective re-plans so far. The graph's routing function reads this to
+    # guarantee termination, so the bound does not depend on model behaviour.
+    replan_count: Optional[int]
+    # Retries of the SAME SQL after a TRANSIENT database error. A separate
+    # budget: infrastructure trouble must not consume reasoning.
+    execution_retries: Optional[int]
+    # The bounded, factual account of what the last action produced. Enums,
+    # counts and ids only — never rows, SQL, narrative or model prose.
+    observation: Optional[Dict]
+    # Fingerprints of actions that already failed this turn, so a re-plan is
+    # corrective rather than a repeat of the same failing call.
+    failed_action_fingerprints: Optional[List[str]]
+    # What the LAST rejected attempt got wrong, fed back into generate_sql
+    # so a retry is corrective rather than the same dice roll on the same
+    # inputs: {sql, reason}. Machine output only — never model prose.
+    sql_correction_hint: Optional[Dict]
+    # What observe_and_replan decided: {decision, reason, error_type}. The
+    # routing function reads it, so it MUST be declared — an undeclared key
+    # is silently dropped by LangGraph and the router would see nothing.
+    reasoning_decision: Optional[Dict]
+    # The node observe_and_replan chose. Recorded so a test can assert the
+    # decision without re-deriving it from the trace text.
+    reasoning_next: Optional[str]
+    # A short operational summary of the goal, for the audit line. Capped
+    # hard: an action summary, deliberately NOT a place for reasoning text.
+    reasoning_goal: Optional[str]
+    # Whether this turn ASKS for anything, judged once by
+    # `agent_loop.asked_for_an_action`. None when it was never needed (the
+    # model went straight to answering). The chat node reads it to decide
+    # whether the prior-turns block is relevant at all.
+    turn_is_a_request: Optional[bool]
+    # Actions taken this turn while pursuing the request. The graph's router
+    # reads it, so the ceiling is arithmetic rather than a matter of the model
+    # choosing to stop. Incremented in exactly one place.
+    actions_taken: Optional[int]
+    # The id of the persisted user_query_history row for this turn. Read in
+    # agent.py but historically UNDECLARED — exactly the LangGraph
+    # drops-undeclared-keys trap that has bitten this file three times.
+    query_history_id: Optional[int]
+
+    # Which tools the agent used to reach this turn's decision, for
+    # the audit line: [{tool, ok|rejected|committed}, ...].
+    tool_trace: Optional[List[Dict]]
+    # A translation the node decided on but cannot perform: reading the stored
+    # source text is an ownership-checked database call, so the async API
+    # layer resolves the id, translates, re-renders and registers the result.
+    translation_request: Optional[Dict]
+    # {artifact_id: source_sql} for this caller's recent documents, so
+    # "same report but camera 3" modifies the query that report came FROM
+    # rather than whatever ran most recently. Owner-scoped at the query.
+    artifact_sql_index: Optional[Dict]
+    # Where modify_sql took its base query from, for the audit line.
+    sql_base_provenance: Optional[str]
+    # True only when the rewritten query actually DIFFERS from the base. A
+    # failed rewrite falls back to the original, and without this flag that
+    # is indistinguishable from a successful one — which is exactly how a
+    # broken modification passed its gate once.
+    sql_was_modified: Optional[bool]
+
+    # Co-appearance enrichment for tracking narratives: who else was seen at
+    # the same camera within the window around each of the subject's
+    # detections. Computed deterministically by enrich_co_appearance (never
+    # by the LLM), keyed per passage.
+    co_appearances: Optional[List[Dict]]

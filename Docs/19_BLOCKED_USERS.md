@@ -25,6 +25,43 @@ When a user attempts a forbidden operation, the security system detects it at mu
 - **Layer 1**: Pre-execution SQL validation
 - **Layer 2**: Response content analysis
 
+### 1b. What does NOT count as an attempt
+
+A denial is not automatically an attack, and treating it as one is not a
+"safe default" — it blocks real accounts for typing ordinary things, and it
+buries genuine attempts in false positives.
+
+Observed live on 2026-08-30: a user typed **"hello"**, the model emitted the
+malformed fragment `SELECT statement."}`, sqlglot raised `TokenError`, and the
+AST guard denied it with code `PARSE_ERROR`. Because every guard denial reason
+begins with the literal prefix `Security: `, the enforcement gate matched it,
+logged CRITICAL, marked the account for blocking and returned 403 — for a
+greeting.
+
+Enforcement now keys off the guard's **classified code**, not its wording.
+The sets live in `sql_agent/security/sql_guard.py`, beside the `_deny` calls
+that emit them:
+
+| Set | Codes | Blocks? |
+|---|---|---|
+| `ENFORCEABLE_CODES` | `READ_ONLY_VIOLATION`, `TABLE_NOT_ALLOWED`, `SYSTEM_SCHEMA`, `FORBIDDEN_FUNCTION`, `MULTIPLE_STATEMENTS`, `UNSUPPORTED_STATEMENT`, `EXPLAIN_NOT_ALLOWED` | **Yes** — unchanged |
+| `MALFORMED_CODES` | `PARSE_ERROR`, `EMPTY`, `TOO_COMPLEX` | No — a mistake to correct |
+| `INFRASTRUCTURE_CODES` | `PARSER_UNAVAILABLE` | No — our dependency, not the user |
+
+Two properties keep this honest:
+
+- **`is_enforceable` fails closed.** An unrecognised code is treated as a
+  security event until someone classifies it deliberately.
+- **A test asserts every emitted code is classified**
+  (`tests/test_reasoning_graph.py::test_every_guard_denial_code_is_deliberately_classified`).
+  Add a new `_deny(...)` without classifying it and that test fails — which is
+  the point, because silently enforcing on an unclassified code is exactly how
+  a greeting became a security incident.
+
+Denials that carry no code (the legacy regex gate) still fall back to the
+prose test, so nothing was weakened: a `DELETE` reaching that layer still
+blocks.
+
 ### 2. Blocking Process
 When malicious intent is detected:
 
@@ -78,6 +115,17 @@ WHERE blocked_reason IS NOT NULL;
 2. Find the blocked user (shows red "BLOCKED" badge)
 3. Click "Unblock" button
 4. User is unblocked via `/api/users/{user_id}/unblock` endpoint
+
+> **Two different badges, two different states.** The same cell can also show an
+> amber **MUST CHANGE PASSWORD** badge, which is *not* a block:
+>
+> | Badge | Column | Can log in? | Meaning |
+> |---|---|---|---|
+> | **BLOCKED** (red) | `is_active=false` + `blocked_reason` | No | Blocked for a security violation; unblock as above |
+> | **MUST CHANGE PASSWORD** (amber) | `must_change_password=true` | Yes | Still holds a password an admin chose; every other endpoint 403s until the user changes it at `/change-password` |
+>
+> An operator told "this account does not work" should check which one it is —
+> unblocking will not help the second, and only the user can resolve it.
 
 ### Via API
 ```python

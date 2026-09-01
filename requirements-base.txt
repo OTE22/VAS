@@ -147,6 +147,13 @@ tqdm>=4.66.0               # progress bars for the tile download script
 # Document export
 # ---------------------------------------------------------------------------
 reportlab
+# Arabic PDF export: reportlab does no complex text layout, so Arabic
+# must be shaped (positional letter forms) and bidi-reordered before it
+# is drawn. Fonts: assets/fonts/Cairo-PDF.ttf (merged from the vendored
+# Cairo woff2 subsets - its cmap includes the presentation forms the
+# reshaper emits).
+arabic-reshaper
+python-bidi
 python-docx
 requests
 

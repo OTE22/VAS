@@ -64,7 +64,7 @@ echo.
 
 REM Check 4: Test GPU access in Docker
 echo 4. Testing GPU access in Docker...
-docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi >nul 2>&1
+docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi >nul 2>&1
 if %errorlevel% == 0 (
     echo    ✅ GPU accessible in Docker containers
     echo    📊 Test container can see GPU

@@ -11,6 +11,110 @@ prints a secret value.
 
 ---
 
+## Automated path — `deploy.sh`
+
+> **Deploying the DEVELOPMENT stack instead?** That is `./deploy.sh dev` — a
+> guided bring-up (stages D1–D6: prerequisites, weight verification, compose
+> validation, SQL-agent LLM report, start, readiness) needing only Docker and
+> the two weight files. No root, no secrets, no TLS; seeded credentials,
+> rotation off, `/docs` on. This runbook's numbered sections apply to
+> **production only**. The two stacks never share data and cannot run on one
+> host (both want ports 80/443).
+
+Every numbered section below is now performed by one command:
+
+```bash
+sudo ./deploy.sh --public-origin=https://face-detector.internal
+```
+
+That runs install → start → health and prints a stage table ending in
+`DEPLOY RESULT: PASS` or `FAIL at stage NN`. It is an **orchestrator**: it
+runs the same scripts this runbook documents, in the same order, and
+re-implements none of them. The manual sections remain the reference for what
+each step means and the break-glass path when a stage has to be done by hand.
+
+**What it will not do.** It never installs or upgrades the NVIDIA kernel
+driver (that needs a reboot and a site decision). It never overwrites an
+existing secret, certificate, verified model weight, database or named volume.
+`validate` and `--dry-run` change nothing — no package, secret, certificate,
+configuration file, container or volume (`validate` writes only its own run log
+under `logs/deploy/`; `--dry-run` writes not even that). Data survives restart,
+redeploy, upgrade, rollback and uninstall; only `--purge-data`, behind its own
+typed confirmation, destroys anything.
+
+### Stage → manual section
+
+| Stage | Does | Manual section |
+|---|---|---|
+| 01 preflight | OS/WSL2, CPU, RAM, disk, arch, ports 80/443 | §1 |
+| 02 host prerequisites | Docker Engine + compose ≥ 2.24, NVIDIA toolkit; detects the driver | §1 |
+| 03 workspace | directories, `webhook_integration` network, ownership | §1 |
+| 04 secrets | `scripts/setup/generate-secrets.sh` | §2 |
+| 05 TLS | `scripts/tls/make-internal-ca.sh`; verifies the CN covers `PUBLIC_ORIGIN` | §3 |
+| 06 configuration | writes `PUBLIC_ORIGIN` and the **derived** `MIGRATIONS_EXPECTED_HEAD` to `docker/.env` | §5 |
+| 07 GPU detection | inventories cards, allocates them, generates and verifies the overlay | §6.6 |
+| 08 model weights | sha256 of every runtime weight against `weights/WEIGHTS_MANIFEST.json`, fail-closed | §1.1 |
+| 09 compose validation | `docker compose config -q` on the exact stack about to start | §5 |
+| 10 build | `compose build`, image tagged from `git describe` | §5 |
+| 11 database roles | `db/roles.sql`, then proves `fr_app` connects and is refused `CREATE ROLE`; reports whether the database is empty (fresh install) or already holds data | §4 |
+| 12 start services | ordered start; waits for `migrate` to exit 0, then for every healthcheck | §5 |
+| 13 LLM models | ollama model presence | §1.1 |
+| 14 health and acceptance | the whole of §6, plus real SCRFD + ArcFace inference | §6 |
+
+### Subcommands
+
+```
+sudo ./deploy.sh install     provision only, do not start
+     ./deploy.sh validate    read-only readiness check (mutates nothing)
+sudo ./deploy.sh start | stop | restart
+     ./deploy.sh status | health | logs [service]
+     ./deploy.sh gpu-test | model-check | model-manifest
+sudo ./deploy.sh backup | restore <stamp> | upgrade
+sudo ./deploy.sh uninstall [--remove-images] [--purge-data]
+     ./deploy.sh --self-test unit-tests the script's own logic
+```
+
+Useful flags: `--dry-run`, `--yes`, `--offline`, `--cpu`, `--gpu-ids=0,1`,
+`--public-origin=`, `--deploy-package=<dir>`.
+
+### Fresh installation
+
+A first install on a clean host needs no data step at all: the postgres volume
+is created empty and the `migrate` job builds the whole schema from
+`alembic/versions/` up to the pinned head. There is no dump to import and no
+seed to run. Stage 11 confirms it with `database state: EMPTY — this is a fresh
+installation`.
+
+The case worth knowing about is a **redeploy onto a host whose named volumes
+survived** — after an aborted first attempt, for instance. deploy.sh preserves
+data by design, so the stack would come up healthy on the *old* database and
+nothing would otherwise say so. Stage 11 reports the table count, schema
+revision and user-account count it found, and warns. To genuinely start empty:
+
+```bash
+sudo ./deploy.sh uninstall --purge-data      # typed confirmation required
+sudo ./deploy.sh --public-origin=https://<your-host>
+```
+
+Which one a deployment took is recorded in `.deployment/state.json` as
+`database_state`, so `deploy.sh status` can answer it after the fact.
+
+### What still needs a human
+
+The hostname (`--public-origin`), installing the NVIDIA kernel driver,
+distributing `certs/internal-ca.crt` to client machines, exchanging the webhook
+key with the VMS, and shipping the offline assets (model weights, map archives,
+ollama models). Everything else is automatic.
+
+### State and logs
+
+`.deployment/state.json` records the deployed version, configuration
+fingerprint (key names only — never values), GPU assignment, model manifest
+digest, migration head, last successful deployment and last health result. A
+failed run names the exact stage and keeps its log under `logs/deploy/`.
+
+---
+
 ## 0. What changed, and why it matters
 
 The repository shipped the placeholder JWT signing key
@@ -370,6 +474,41 @@ docker compose -f docker/docker-compose.prod.yml run --rm \
 echo "exit=$?"     # 78
 ```
 
+### 6.5b The password gate holds
+
+A seeded credential must not be usable for anything but replacing itself. Sign
+in as the bootstrap admin, then try a gated endpoint with the token it gave you:
+
+```bash
+BASE=https://face-detector.internal
+CA="--cacert certs/internal-ca.crt"
+
+curl -fsS $CA -X POST "$BASE/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"admin\",\"password\":\"$(cat secrets/bootstrap_admin_password)\"}" \
+  > /tmp/login.json
+
+python3 -c "import json; d=json.load(open('/tmp/login.json')); \
+print('rotation_required:', d['rotation_required'], '| redirect:', d['redirect_url'])"
+# expected: rotation_required: True | redirect: /change-password
+
+TOKEN=$(python3 -c "import json; print(json.load(open('/tmp/login.json'))['access_token'])")
+
+curl -s -o /dev/null -w 'privileges: %{http_code}\n' $CA \
+  -H "Authorization: Bearer $TOKEN" "$BASE/api/auth/me/privileges"
+# expected: 403   (PASSWORD_ROTATION_REQUIRED — NOT 200)
+
+curl -s -o /dev/null -w 'me:          %{http_code}\n' $CA \
+  -H "Authorization: Bearer $TOKEN" "$BASE/api/auth/me"
+# expected: 200   (one of the four exemptions, so a client can see the state)
+
+rm -f /tmp/login.json      # it holds a bearer token
+```
+
+A `200` on the first of those means the gate is not applied and the deployment
+is still usable with the credential from the secret file. Change the password
+(§7) and re-run: the same call must then return 200.
+
 ### 6.6 GPU (GPU deployments only)
 
 Provider discovery alone is **not** acceptance. It reports what the build
@@ -429,8 +568,29 @@ The bootstrap administrator is created only when no administrator exists, with
 cat secrets/bootstrap_admin_password
 ```
 
-It is never written to logs. Change it immediately after first login, then
+It is never written to logs.
+
+**The change is enforced, not advisory.** Signing in with that password
+succeeds — you get a session — but every other endpoint answers
+`403 PASSWORD_ROTATION_REQUIRED` until the password is changed, and the browser
+is sent to `/change-password`. Only four things work in that state: reading your
+own identity, logging out, the change-password page, and the change itself. A
+script holding a valid token gets no further than the browser does.
+
+Changing it requires the current password, refuses reuse, applies the same
+strength policy used to assess the deployment seed (12+ characters, 6+
+distinct), and ends every other session for that account. Afterwards you can
 delete the secret file if you do not need to re-bootstrap.
+
+The same rule covers accounts an administrator creates or resets: the password
+an admin types is a hand-over credential, so the owner must replace it at first
+sign-in. The admin user list shows a **MUST CHANGE PASSWORD** badge until they
+do. An admin resetting their *own* password is exempt — otherwise it would be a
+loop with no exit.
+
+To deploy without this (not recommended outside development), set
+`BOOTSTRAP_ADMIN_REQUIRE_ROTATION=false`, which only affects the bootstrap
+admin; admin-created users are always required to rotate.
 
 ---
 

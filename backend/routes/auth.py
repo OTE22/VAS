@@ -8,7 +8,7 @@ import os
 import sys
 import time
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from fastapi.responses import JSONResponse
@@ -22,9 +22,15 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from db_connection import get_db
-from backend.auth.auth_service import AuthService, get_current_user, security
+from backend.auth.auth_service import (
+    AuthService,
+    get_current_user,
+    get_current_user_allow_pending_rotation,
+    security,
+)
 from backend.auth import auth_security
-from backend.auth.password import hash_password
+from backend.auth.password import hash_password, verify_password
+from backend.security.config_guard import assess_admin_password
 from db_models import User
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,12 @@ class LoginResponse(BaseModel):
     redirect_url: str
     access_token: Optional[str] = None
     token_type: Optional[str] = None
+    # True when this account still carries a seeded or admin-assigned password.
+    # The session is real, but every gated endpoint answers 403 until the
+    # password is changed, so the client is sent to /change-password.
+    # Named for the REQUIREMENT, not the column: the login body must not
+    # contain the substring "password" (see test_login_response_is_minimal).
+    rotation_required: bool = False
 
 
 class UserInfo(BaseModel):
@@ -78,6 +90,22 @@ class UserInfo(BaseModel):
     # authoritative copy is the top-level one.
     permissions: list[str] = []
     permissions_version: int = 1
+    # Lets the shared navbar bootstrap push a pending user to /change-password
+    # on any page. The server already blocks the APIs; this only spares the
+    # user a screen full of failed requests.
+    rotation_required: bool = False
+
+
+class ChangePasswordRequest(BaseModel):
+    """Self-service password change.
+
+    The current password is required even though the caller already holds a
+    valid session: the session may be the seeded credential itself, and
+    possession of a cookie must not be enough to take permanent ownership of
+    an account. Same length caps as LoginRequest.
+    """
+    current_password: str = Field(..., min_length=1, max_length=auth_security.MAX_PASSWORD_LENGTH)
+    new_password: str = Field(..., min_length=1, max_length=auth_security.MAX_PASSWORD_LENGTH)
 
 
 class NavbarLink(BaseModel):
@@ -251,7 +279,12 @@ async def login(credentials: LoginRequest, request: Request, response: Response,
         # attacker cannot lock the real user out by burning their counter.
         await auth_security.clear_failures(username, ip)
 
-        redirect_url = auth_security.redirect_for_role(user.role)
+        # A pending rotation does not fail the login — the credential WAS
+        # correct, and the user needs the session to be able to change it.
+        # It redirects instead, and get_current_user refuses everything else.
+        rotation_required = bool(getattr(user, "must_change_password", False))
+        redirect_url = ("/change-password" if rotation_required
+                        else auth_security.redirect_for_role(user.role))
         browser_client = _is_browser_client(request)
 
         login_response = LoginResponse(
@@ -265,11 +298,13 @@ async def login(credentials: LoginRequest, request: Request, response: Response,
             # Browser clients get NO token in the body — cookie only.
             access_token=None if browser_client else access_token,
             token_type=None if browser_client else "bearer",
+            rotation_required=rotation_required,
         )
 
         auth_security.audit("login", result="success", request_id=request_id,
                             user_id=user.id, ip=ip, username=username,
                             client="browser" if browser_client else "api",
+                            rotation_required=rotation_required,
                             duration_ms=int((time.time() - start_time) * 1000))
         auth_security.record_metric("attempt", result="success")
         auth_security.record_metric("duration", seconds=time.time() - start_time)
@@ -294,8 +329,15 @@ async def login(credentials: LoginRequest, request: Request, response: Response,
 
 
 @router.get("/api/auth/me", response_model=UserInfo)
-async def get_current_user_info(response: Response, current_user: User = Depends(get_current_user)):
-    """Get current user information (never cached)."""
+async def get_current_user_info(
+    response: Response,
+    current_user: User = Depends(get_current_user_allow_pending_rotation),
+):
+    """Get current user information (never cached).
+
+    Readable with a rotation pending: the shared navbar bootstrap calls this on
+    every page, and it is what tells the client to go to /change-password.
+    """
     from backend.auth.capabilities import resolve_effective_authorization
 
     response.headers["Cache-Control"] = "no-store"
@@ -311,6 +353,7 @@ async def get_current_user_info(response: Response, current_user: User = Depends
         is_active=current_user.is_active,
         permissions=authz.permission_codes,
         permissions_version=authz.permissions_version,
+        rotation_required=bool(getattr(current_user, "must_change_password", False)),
     )
 
 
@@ -532,8 +575,15 @@ async def get_user_privileges(
 
 
 @router.post("/api/auth/logout")
-async def logout(request: Request, response: Response, current_user: User = Depends(get_current_user)):
+async def logout(
+    request: Request,
+    response: Response,
+    current_user: User = Depends(get_current_user_allow_pending_rotation),
+):
     """End the session for real.
+
+    Allowed with a rotation pending — refusing to let someone log out of an
+    account they have not yet taken ownership of would be absurd.
 
     The presented token's `jti` is added to the revocation denylist until its
     natural expiry, so the old credential cannot be replayed even if it was
@@ -577,4 +627,159 @@ async def logout(request: Request, response: Response, current_user: User = Depe
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return {"success": True, "message": "Logged out successfully"}
+
+
+def require_auth_csrf(request: Request):
+    """CSRF defense-in-depth for cookie-authenticated self-service auth writes.
+
+    Same policy as require_user_admin_csrf in backend/routes/users.py: a
+    SameSite cookie plus a custom header a cross-site form cannot set. Bearer
+    clients are exempt, because the browser will not attach a bearer token
+    cross-site.
+    """
+    if request.headers.get("authorization"):
+        return
+    if request.headers.get("x-requested-with", "").lower() != "xmlhttprequest":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF check failed: X-Requested-With header required",
+        )
+
+
+@router.post("/api/auth/change-password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    response: Response,
+    _csrf: None = Depends(require_auth_csrf),
+    current_user: User = Depends(get_current_user_allow_pending_rotation),
+    db: AsyncSession = Depends(get_db),
+):
+    """Change your own password, and take ownership of the account.
+
+    Reachable while a rotation is pending — it is the one action such a user
+    must be able to perform. On success the seeded or admin-assigned credential
+    is gone, `must_change_password` is cleared, and `password_changed_at` is
+    stamped, which invalidates every OTHER session for this user (see the
+    freshness check in get_current_user_allow_pending_rotation). The caller
+    keeps working: their old token is revoked and a fresh one is issued here.
+
+    The CURRENT password is required. Without it, anyone who obtained the
+    session — including whoever handed over the seeded credential — could
+    silently make the account permanently theirs.
+    """
+    request_id = getattr(request.state, "request_id", "-")
+    ip = auth_security.client_ip(request)
+    username = current_user.username
+
+    def _fail(status_code: int, code: str, message: str, **extra):
+        reference_id = auth_security.new_reference_id()
+        auth_security.audit("change_password", result="failure", request_id=request_id,
+                            failure_code=code, user_id=current_user.id, ip=ip,
+                            reference_id=reference_id)
+        return _auth_json_error(status_code, code, message, reference_id,
+                                retryable=False, **extra)
+
+    # Brute-forcing the current password here would bypass the login throttle.
+    decision = await auth_security.check_rate_limits(username, ip)
+    if not decision.allowed:
+        reference_id = auth_security.new_reference_id()
+        auth_security.audit("change_password", result="rate_limited", request_id=request_id,
+                            failure_code="RATE_LIMITED", user_id=current_user.id, ip=ip,
+                            reference_id=reference_id, scope=decision.scope)
+        return _auth_json_error(
+            429, "RATE_LIMITED",
+            "Too many attempts. Please wait and try again.",
+            reference_id, retryable=True,
+            headers={"Retry-After": str(max(1, decision.retry_after_seconds))},
+            retry_after_seconds=max(1, decision.retry_after_seconds))
+
+    import asyncio
+    loop = asyncio.get_running_loop()
+
+    # bcrypt is ~200-300ms of pure CPU — off the event loop, as everywhere else.
+    current_ok = await loop.run_in_executor(
+        None, verify_password, payload.current_password, current_user.password_hash
+    )
+    if not current_ok:
+        await auth_security.record_failure(username, ip)
+        return _fail(403, "INVALID_CURRENT_PASSWORD",
+                     "Your current password is incorrect.")
+
+    # Re-submitting the seeded credential would satisfy the flag while leaving
+    # the shared secret in place, which is the whole problem being solved.
+    if payload.new_password == payload.current_password:
+        return _fail(400, "PASSWORD_REUSED",
+                     "The new password must be different from your current one.")
+    reused = await loop.run_in_executor(
+        None, verify_password, payload.new_password, current_user.password_hash
+    )
+    if reused:
+        return _fail(400, "PASSWORD_REUSED",
+                     "The new password must be different from your current one.")
+
+    # One policy for every account, reusing the deployment-time assessment so
+    # a password accepted here could also have been accepted as the seed.
+    weaknesses = assess_admin_password(payload.new_password)
+    if weaknesses:
+        return _fail(400, "WEAK_PASSWORD",
+                     "That password is not strong enough: " + "; ".join(weaknesses))
+
+    try:
+        # bcrypt again — hashing is as expensive as verifying, same treatment.
+        current_user.password_hash = await loop.run_in_executor(
+            None, hash_password, payload.new_password
+        )
+        current_user.must_change_password = False
+        current_user.password_changed_at = datetime.utcnow()
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        reference_id = auth_security.new_reference_id()
+        logger.error("[AUTH] Password change failed reference_id=%s error=%s",
+                     reference_id, type(e).__name__, exc_info=True)
+        auth_security.audit("change_password", result="error", request_id=request_id,
+                            failure_code="PASSWORD_UPDATE_FAILED",
+                            user_id=current_user.id, ip=ip, reference_id=reference_id)
+        return _auth_json_error(500, "PASSWORD_UPDATE_FAILED",
+                                "Could not change the password. Please try again.",
+                                reference_id, retryable=True)
+
+    # Revoke the token that performed the change; every other session is
+    # already dead by the password_changed_at freshness rule.
+    old_token = auth_security.read_auth_cookie(request)
+    if not old_token:
+        header = request.headers.get("authorization", "")
+        if header.lower().startswith("bearer "):
+            old_token = header[7:].strip()
+    if old_token:
+        old_payload = AuthService.decode_token(old_token, verify_revocation=False) or {}
+        jti = old_payload.get("jti")
+        expires_at = old_payload.get("exp")
+        if jti:
+            ttl = max(1, int(expires_at - time.time())) if expires_at else 3600
+            await auth_security.revoke_token(jti, ttl)
+
+    # Issue a fresh session so the user is not bounced back to sign-in.
+    access_token = AuthService.create_access_token(
+        data={"sub": str(current_user.id), "username": current_user.username,
+              "role": current_user.role}
+    )
+    cookie = auth_security.cookie_settings()
+    response.set_cookie(value=access_token, **cookie)
+    browser_client = _is_browser_client(request)
+
+    await auth_security.clear_failures(username, ip)
+    auth_security.audit("change_password", result="success", request_id=request_id,
+                        user_id=current_user.id, ip=ip,
+                        client="browser" if browser_client else "api")
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return {
+        "success": True,
+        "redirect_url": auth_security.redirect_for_role(current_user.role),
+        "access_token": None if browser_client else access_token,
+        "token_type": None if browser_client else "bearer",
+    }
 

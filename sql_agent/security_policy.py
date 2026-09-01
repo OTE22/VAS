@@ -209,7 +209,8 @@ def _is_exempt(user) -> tuple:
 async def apply_security_policy(*, user, decision: SecurityDecision,
                                 transport: str, query: str = "",
                                 execution_time_ms: float = 0.0,
-                                session_id=None) -> PolicyOutcome:
+                                session_id=None,
+                                attributable: bool = True) -> PolicyOutcome:
     """The one entry point. Every transport calls this and serializes the result.
 
     Returns a PolicyOutcome; raises nothing that a caller must interpret.
@@ -245,6 +246,21 @@ async def apply_security_policy(*, user, decision: SecurityDecision,
             outcome=OUTCOME_DENIED, message=_DENIED_MESSAGE,
             reference_id=reference_id, reason_code=reason_code,
             exempt=True, metadata={"exempt_reason": why},
+        )
+
+    if not attributable:
+        # The guard refused SQL the MODEL wrote. Denied and audited exactly as
+        # before, but no violation is recorded: blocking an account is a
+        # statement about a PERSON, and a user who asked an ordinary question
+        # did nothing. Same shape as the exempt branch above.
+        logger.warning(
+            "[SECURITY] outcome=QUERY_DENIED attributable=no user_id=%s "
+            "reason_code=%s transport=%s reference_id=%s "
+            "note=model-generated SQL; denied and audited, account not marked",
+            user_id, reason_code, transport, reference_id)
+        return PolicyOutcome(
+            outcome=OUTCOME_DENIED, message=_DENIED_MESSAGE,
+            reference_id=reference_id, reason_code=reason_code,
         )
 
     violations = await record_violation(user_id)

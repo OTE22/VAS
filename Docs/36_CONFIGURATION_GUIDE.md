@@ -204,10 +204,39 @@ Controls authentication and security:
 | `JWT_ALGORITHM` | `HS256` | JWT algorithm |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | Token expiration time (24 hours) |
 
+#### Bootstrap administrator
+
+Used once, when no **active administrator** exists. The password is never
+logged.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `BOOTSTRAP_ADMIN_ENABLED` | `true` | Allow creating the first administrator when none exists |
+| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | Username for that account |
+| `BOOTSTRAP_ADMIN_EMAIL` | `admin@example.com` | Email for that account |
+| `BOOTSTRAP_ADMIN_PASSWORD` | *(empty)* | Inline password. Prefer the file below |
+| `BOOTSTRAP_ADMIN_PASSWORD_FILE` | *(empty)* | Path to a Docker secret holding it — **the preferred form**; it wins if both are set |
+| `BOOTSTRAP_ADMIN_REQUIRE_ROTATION` | `true` | Force that account to change its password at first login |
+
+**About `BOOTSTRAP_ADMIN_REQUIRE_ROTATION`:**
+
+- It applies to the **bootstrap account only**. Users an administrator creates
+  or resets are *always* required to rotate, whatever this is set to.
+- `docker/docker-compose.prod.yml` hardcodes it `"true"`, so in production it is
+  not read from `.env` at all. The development CPU stack sets it `"false"`,
+  which is why `admin` / `admin123` is usable there without a rotation prompt.
+- It is security-critical, so it cannot be read or changed through the admin
+  settings API — only through configuration and a restart.
+
+When rotation applies, the account can sign in but nothing else: every gated
+endpoint returns `403 PASSWORD_ROTATION_REQUIRED` until the password is changed
+at `/change-password`. See [`61_DEPLOYMENT_RUNBOOK.md`](61_DEPLOYMENT_RUNBOOK.md) §7.
+
 **⚠️ Security Warning:**
 - Always change `JWT_SECRET_KEY` in production!
 - Use a strong, random secret key
 - Never commit secrets to version control
+- Supply the bootstrap password as a **file**, not an environment variable
 
 ### 4. Database Configuration
 

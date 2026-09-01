@@ -213,7 +213,19 @@ services:
       SQL_AGENT_DB_USER: fr_readonly
       SQL_AGENT_DB_PASSWORD: ${FR_READONLY_PASSWORD:-TestRo-8jT5nKd3Yc}
       SQL_AGENT_MAX_CONCURRENT: 2
+      # Dev runs on NIM (fast); Ollama here is only the emergency
+      # fallback. Kept at 300 so a degraded turn fails fast with a
+      # clarification instead of hanging the user for minutes — the 7B
+      # on CPU needs >120s PER CALL, so the fallback cannot finish a
+      # full turn either way. Production tunes its own value.
       SQL_AGENT_TOTAL_TIMEOUT: 300
+      # --- Bounded reasoning ------------------------------------------
+      # Separate budgets on purpose: a transient DB blip must not spend the
+      # turn's ability to think, and a confused model must not spend the
+      # budget on look-ups. Dev runs on NIM (fast), so 5 steps is cheap.
+      SQL_AGENT_MAX_REASONING_STEPS: 5
+      SQL_AGENT_MAX_REPLANS: 2
+      SQL_AGENT_MAX_EXECUTION_RETRIES: 1
       LOG_LEVEL: INFO
       LOG_DIR: /var/log/face-recognition
       # Sentence-transformer / HuggingFace model cache. Declared here so the
@@ -221,6 +233,9 @@ services:
       # find. Identical across cpu/gpu/prod; docker-entrypoint.sh creates it,
       # chowns it to appuser, and refuses to start if it is not writable.
       HF_HOME: /home/appuser/.cache/huggingface
+      # tqdm progress bars ("Loading weights", "Batches") are terminal UI;
+      # in a container they only shred the logs.
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
       # Explicit origins, not a wildcard: a wildcard forces credentialed CORS
       # off, and '["*"]' previously parsed as one malformed literal origin.
       CORS_ORIGINS: "http://localhost,http://localhost:8000,http://127.0.0.1,http://127.0.0.1:8000"
@@ -232,7 +247,52 @@ services:
       OLLAMA_MODEL: qwen2.5:1.5b
       OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
       OLLAMA_TEMPERATURE: "0.1"
-      OLLAMA_TIMEOUT: "120"
+      # Per-call ceiling sized for the 7B on CPU (a planner-sized prompt
+      # measures >120s here). See SQL_AGENT_TOTAL_TIMEOUT above.
+      OLLAMA_TIMEOUT: "300"
+      # Development-only hosted LLM for the SQL agent (NVIDIA NIM, free tier
+      # at build.nvidia.com). Off by default; enable by setting BOTH in
+      # docker/.env:
+      #   LLM_DEV_PROVIDER=nim
+      #   NVIDIA_NIM_API_KEY=nvapi-...
+      # Ollama remains the fallback. Production REFUSES this configuration at
+      # boot (config guard, exit 78) — do not copy these lines to a prod file.
+      LLM_DEV_PROVIDER: ${LLM_DEV_PROVIDER:-}
+      NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY:-}
+      # NVIDIA-BUILT, chosen on measurement rather than branding.
+      # Probed against the real system prompt and the real 11 tool specs,
+      # 3 runs x 3 decisions, 4s spacing to separate throttling from
+      # incapability:
+      #   nvidia/nemotron-3.5-lightning-30b-a3b   9/9  0 err  9 native  6.8s
+      #   meta/llama-3.2-11b-vision-instruct      9/9  0 err  9 native  2.6s
+      #   nvidia/nemotron-3-ultra-550b-a55b       8/9  0 err  9 native  7.9s
+      #   nvidia/nemotron-3-super-120b-a12b       4/6  3 err  4 native  5.2s
+      #   nvidia/nemotron-3-nano-30b-a3b          0 native tool calls
+      # Equal accuracy to the incumbent, ~2.6x the latency per call. Several
+      # catalogue models 404 ("Not found for account") — listed is not the
+      # same as enabled. Re-run the probe before changing this.
+      NVIDIA_NIM_MODEL: ${NVIDIA_NIM_MODEL:-meta/llama-3.2-11b-vision-instruct}
+      # openai/gpt-oss-120b stopped responding on this account
+      # (2026-08-30: connects and authenticates, then hangs — measured
+      # 150s+ with no response, while llama-3.2-11b answers the same
+      # prompt in ~1.3s). It was the planner AND SQL model, so every
+      # turn burned its whole budget before degrading to the CPU
+      # fallback. Re-probe periodically; of the candidates tried
+      # (llama-3.3-70b, qwen2.5-coder-32b, llama-3.1-70b, mixtral-8x22b,
+      # phi-3.5-mini) only this one is invocable here.
+      # NVIDIA-BUILT, chosen on measurement rather than branding.
+      # Probed against the real system prompt and the real 11 tool specs,
+      # 3 runs x 3 decisions, 4s spacing to separate throttling from
+      # incapability:
+      #   nvidia/nemotron-3.5-lightning-30b-a3b   9/9  0 err  9 native  6.8s
+      #   meta/llama-3.2-11b-vision-instruct      9/9  0 err  9 native  2.6s
+      #   nvidia/nemotron-3-ultra-550b-a55b       8/9  0 err  9 native  7.9s
+      #   nvidia/nemotron-3-super-120b-a12b       4/6  3 err  4 native  5.2s
+      #   nvidia/nemotron-3-nano-30b-a3b          0 native tool calls
+      # Equal accuracy to the incumbent, ~2.6x the latency per call. Several
+      # catalogue models 404 ("Not found for account") — listed is not the
+      # same as enabled. Re-run the probe before changing this.
+      NVIDIA_NIM_SQL_MODEL: ${NVIDIA_NIM_SQL_MODEL:-meta/llama-3.2-11b-vision-instruct}
       CHROMADB_PATH: /app/sql_agent/chromadb_data
       CHROMA_COLLECTION_NAME: sql_knowledge_base
       RAG_TOP_K: "5"
@@ -248,6 +308,11 @@ services:
       - ../storage:/app/storage  # Unified storage: faces/ for known faces, {pipeline_id}/ for detected faces
       - face_database_data:/app/database
       - chromadb_cache:/home/appuser/.cache/chroma
+      # HF_HOME points here (line ~223), but without a volume the
+      # sentence-transformers model was re-downloaded from huggingface.co on
+      # the first chat after EVERY container recreation — ~90 MB and ~10s of
+      # request-path latency, gone each time. Prod already has this volume.
+      - hf_cache_data:/home/appuser/.cache/huggingface
       - ../:/app
       - ../logs:/var/log/face-recognition
     # Expose ports internally only (nginx will proxy)
@@ -463,6 +528,10 @@ volumes:
   face_database_data:
     driver: local
   chromadb_cache:
+    driver: local
+  # sentence-transformers / HF Hub cache (HF_HOME). One ~90 MB download that
+  # must outlive container recreation — see the mount on the api service.
+  hf_cache_data:
     driver: local
   prometheus_dev_data:
     driver: local

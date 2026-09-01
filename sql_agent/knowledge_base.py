@@ -34,7 +34,7 @@ class SQLKnowledgeBase:
         },
         {
             "question": "Track Joey",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -44,7 +44,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Where is Joey",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -99,7 +99,7 @@ ORDER BY hour DESC LIMIT 24""",
             "sql": """SELECT p.pipeline_id, COUNT(d.id) as detection_count
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
-GROUP BY p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
 ORDER BY detection_count DESC""",
             "purpose": "Count detections per pipeline"
         },
@@ -192,7 +192,7 @@ ORDER BY timestamp DESC LIMIT 50""",
         },
         {
             "question": "Which camera detected Joey",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.similarity
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -202,18 +202,18 @@ ORDER BY d.timestamp DESC""",
         },
         {
             "question": "Show all cameras that detected someone",
-            "sql": """SELECT DISTINCT p.pipeline_id as camera_name, f.name, COUNT(*) as detection_count
+            "sql": """SELECT DISTINCT COALESCE(p.location_name, p.pipeline_id) as camera_name, f.name, COUNT(*) as detection_count
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE f.name IS NOT NULL
-GROUP BY p.pipeline_id, f.name
+GROUP BY p.pipeline_id, p.location_name, f.name
 ORDER BY detection_count DESC""",
             "purpose": "List all cameras and the people they detected"
         },
         {
             "question": "Track person movement across cameras",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -223,19 +223,19 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Which camera is most active",
-            "sql": """SELECT p.pipeline_id as camera_name, COUNT(d.id) as total_detections,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name, COUNT(d.id) as total_detections,
     COUNT(DISTINCT f.name) as unique_people,
     MAX(d.timestamp) as last_detection
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
 LEFT JOIN faces f ON d.id = f.detection_id
-GROUP BY p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
 ORDER BY total_detections DESC""",
             "purpose": "Compare camera activity and find the most active camera"
         },
         {
             "question": "Show detections by camera in the last hour",
-            "sql": """SELECT p.pipeline_id as camera_name, f.name, d.timestamp, f.similarity
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name, f.name, d.timestamp, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -245,7 +245,7 @@ ORDER BY d.timestamp DESC""",
         },
         {
             "question": "Find which cameras detected a person today ",
-            "sql": """SELECT DISTINCT p.pipeline_id as camera_name,
+            "sql": """SELECT DISTINCT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     MIN(d.timestamp) as first_seen,
     MAX(d.timestamp) as last_seen,
     COUNT(*) as times_detected
@@ -254,13 +254,13 @@ JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE LOWER(f.name) LIKE LOWER('%{name}%')
     AND DATE(d.timestamp) = CURRENT_DATE
-GROUP BY p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
 ORDER BY first_seen ASC""",
             "purpose": "Show which cameras saw a person today and when"
         },
         {
             "question": "Compare camera detection rates",
-            "sql": """SELECT p.pipeline_id as camera_name,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     COUNT(DISTINCT DATE(d.timestamp)) as active_days,
     COUNT(d.id) as total_detections,
     COUNT(DISTINCT f.name) as unique_people,
@@ -269,13 +269,13 @@ FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
 LEFT JOIN faces f ON d.id = f.detection_id
 WHERE p.is_active = true
-GROUP BY p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
 ORDER BY total_detections DESC""",
             "purpose": "Analyze and compare detection rates across all cameras"
         },
         {
             "question": "Show person's path through cameras",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp,
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp,
     LAG(p.pipeline_id) OVER (PARTITION BY f.name ORDER BY d.timestamp) as previous_camera,
     d.timestamp - LAG(d.timestamp) OVER (PARTITION BY f.name ORDER BY d.timestamp) as time_since_last
 FROM faces f
@@ -287,13 +287,13 @@ ORDER BY d.timestamp DESC LIMIT 20""",
         },
         {
             "question": "Which cameras have not detected anyone recently",
-            "sql": """SELECT p.pipeline_id as camera_name,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     p.is_active,
     MAX(d.timestamp) as last_detection,
     NOW() - MAX(d.timestamp) as time_since_last_detection
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
-GROUP BY p.pipeline_id, p.is_active
+GROUP BY p.pipeline_id, p.location_name, p.is_active
 HAVING MAX(d.timestamp) < NOW() - INTERVAL '1 hour' OR MAX(d.timestamp) IS NULL
 ORDER BY last_detection DESC NULLS LAST""",
             "purpose": "Find inactive or idle cameras"
@@ -311,7 +311,7 @@ ORDER BY d.timestamp DESC LIMIT 50""",
         # ========== SURVEILLANCE & TRACKING EXAMPLES ==========
         {
             "question": "Track Monica",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -321,7 +321,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Ross",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -331,7 +331,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Rachel",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -341,7 +341,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Chandler",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -351,7 +351,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Track Phoebe",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, f.similarity, d.timestamp, f.face_image_path
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity, d.timestamp, f.face_image_path
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -374,7 +374,7 @@ ORDER BY detection_count DESC""",
         },
         {
             "question": "Show person's complete journey today",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp,
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp,
     LAG(p.pipeline_id) OVER (PARTITION BY f.name ORDER BY d.timestamp) as previous_camera,
     d.timestamp - LAG(d.timestamp) OVER (PARTITION BY f.name ORDER BY d.timestamp) as time_between
 FROM faces f
@@ -405,14 +405,14 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE f.name IS NOT NULL
-GROUP BY f.name, p.pipeline_id, f.similarity, d.timestamp
+GROUP BY f.name, p.pipeline_id, p.location_name, f.similarity, d.timestamp
 HAVING d.timestamp = (SELECT MAX(d2.timestamp) FROM detections d2 JOIN faces f2 ON d2.id = f2.detection_id WHERE f2.name = f.name)
 ORDER BY last_seen DESC""",
             "purpose": "Find the most recent camera location for each person"
         },
         {
             "question": "Track person between specific time range",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.similarity
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -424,7 +424,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Find suspicious activity multiple detections same person short time",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, COUNT(*) as rapid_detections,
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, COUNT(*) as rapid_detections,
     MIN(d.timestamp) as first_detection, MAX(d.timestamp) as last_detection,
     MAX(d.timestamp) - MIN(d.timestamp) as time_span
 FROM faces f
@@ -432,7 +432,7 @@ JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE f.name IS NOT NULL
     AND d.timestamp > NOW() - INTERVAL '1 hour'
-GROUP BY f.name, p.pipeline_id
+GROUP BY f.name, p.pipeline_id, p.location_name
 HAVING COUNT(*) > 5 AND MAX(d.timestamp) - MIN(d.timestamp) < INTERVAL '10 minutes'
 ORDER BY rapid_detections DESC""",
             "purpose": "Detect suspicious rapid repeated detections of same person"
@@ -445,7 +445,7 @@ JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE d.timestamp > NOW() - INTERVAL '15 minutes'
     AND f.name IS NOT NULL
-GROUP BY f.name, p.pipeline_id
+GROUP BY f.name, p.pipeline_id, p.location_name
 ORDER BY last_seen DESC""",
             "purpose": "List people detected in the last 15 minutes (currently present)"
         },
@@ -465,21 +465,21 @@ ORDER BY last_detection DESC""",
         },
         {
             "question": "Show camera coverage gaps",
-            "sql": """SELECT p.pipeline_id as camera_name,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     MAX(d.timestamp) as last_detection,
     NOW() - MAX(d.timestamp) as time_since_detection,
     COUNT(d.id) as total_detections_today
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id AND DATE(d.timestamp) = CURRENT_DATE
 WHERE p.is_active = true
-GROUP BY p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
 HAVING MAX(d.timestamp) < NOW() - INTERVAL '30 minutes' OR MAX(d.timestamp) IS NULL
 ORDER BY time_since_detection DESC NULLS FIRST""",
             "purpose": "Identify cameras with no recent activity (potential issues)"
         },
         {
             "question": "Track person's path with dwell time at each camera",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name,
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name,
     MIN(d.timestamp) as arrival_time,
     MAX(d.timestamp) as departure_time,
     MAX(d.timestamp) - MIN(d.timestamp) as dwell_time,
@@ -489,13 +489,13 @@ JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE LOWER(f.name) LIKE LOWER('%{name}%')
     AND DATE(d.timestamp) = CURRENT_DATE
-GROUP BY f.name, p.pipeline_id
+GROUP BY f.name, p.pipeline_id, p.location_name
 ORDER BY arrival_time ASC""",
             "purpose": "Show how long a person spent at each camera location"
         },
         {
             "question": "Find people detected at same time same camera",
-            "sql": """SELECT DISTINCT p1.pipeline_id as camera_name, 
+            "sql": """SELECT DISTINCT COALESCE(p1.location_name, p1.pipeline_id) as camera_name, 
     d1.timestamp as detection_time,
     f1.name as person1,
     f2.name as person2,
@@ -517,7 +517,7 @@ ORDER BY d1.timestamp DESC""",
         },
         {
             "question": "Find two specific people detected together at same camera with time window",
-            "sql": """SELECT p1.pipeline_id as camera_name, 
+            "sql": """SELECT COALESCE(p1.location_name, p1.pipeline_id) as camera_name, 
     d1.timestamp as person1_timestamp,
     d2.timestamp as person2_timestamp,
     f1.name as person1_name,
@@ -538,7 +538,7 @@ ORDER BY d1.timestamp DESC""",
         },
         {
             "question": "Find Ross and Joey detected together at same camera",
-            "sql": """SELECT p1.pipeline_id as camera_name, 
+            "sql": """SELECT COALESCE(p1.location_name, p1.pipeline_id) as camera_name, 
     d1.timestamp as ross_timestamp,
     d2.timestamp as joey_timestamp,
     ABS(EXTRACT(EPOCH FROM (d1.timestamp - d2.timestamp))) as time_difference_seconds
@@ -570,7 +570,7 @@ ORDER BY d.timestamp DESC LIMIT 50""",
         },
         {
             "question": "Show detections with low confidence scores",
-            "sql": """SELECT f.name, f.similarity, p.pipeline_id as camera_name, d.timestamp
+            "sql": """SELECT f.name, f.similarity, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -580,7 +580,7 @@ ORDER BY d.timestamp DESC LIMIT 100""",
         },
         {
             "question": "Get detections from yesterday",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.similarity
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -590,7 +590,7 @@ ORDER BY d.timestamp DESC""",
         },
         {
             "question": "Show detections from last week",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.similarity
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -629,7 +629,7 @@ ORDER BY hour_of_day""",
         },
         {
             "question": "Show average detection rate per camera",
-            "sql": """SELECT p.pipeline_id as camera_name,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     COUNT(d.id) as total_detections,
     COUNT(DISTINCT DATE(d.timestamp)) as active_days,
     ROUND(COUNT(d.id)::numeric / NULLIF(COUNT(DISTINCT DATE(d.timestamp)), 0), 2) as avg_per_day,
@@ -638,7 +638,7 @@ FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
 LEFT JOIN faces f ON d.id = f.detection_id
 WHERE p.is_active = true
-GROUP BY p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
 ORDER BY total_detections DESC""",
             "purpose": "Calculate average detection statistics per camera"
         },
@@ -659,7 +659,7 @@ ORDER BY detection_count DESC""",
         },
         {
             "question": "Show detection timeline for person",
-            "sql": """SELECT d.timestamp, p.pipeline_id as camera_name, f.similarity,
+            "sql": """SELECT d.timestamp, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity,
     d.timestamp - LAG(d.timestamp) OVER (ORDER BY d.timestamp) as time_since_previous
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
@@ -670,12 +670,12 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Find cameras with no detections today",
-            "sql": """SELECT p.pipeline_id as camera_name, p.is_active,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name, p.is_active,
     MAX(d.timestamp) as last_detection_ever
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id AND DATE(d.timestamp) = CURRENT_DATE
 WHERE p.is_active = true
-GROUP BY p.pipeline_id, p.is_active
+GROUP BY p.pipeline_id, p.location_name, p.is_active
 HAVING COUNT(d.id) = 0
 ORDER BY p.pipeline_id""",
             "purpose": "Identify active cameras with no detections today"
@@ -697,7 +697,7 @@ LIMIT 20""",
         },
         {
             "question": "Track person with time gaps between detections",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp,
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp,
     d.timestamp - LAG(d.timestamp) OVER (PARTITION BY f.name ORDER BY d.timestamp) as gap_duration
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
@@ -709,7 +709,7 @@ ORDER BY d.timestamp ASC""",
         },
         {
             "question": "Find duplicate detections same person same time",
-            "sql": """SELECT f.name, d.timestamp, p.pipeline_id as camera_name, COUNT(*) as duplicate_count
+            "sql": """SELECT f.name, d.timestamp, COALESCE(p.location_name, p.pipeline_id) as camera_name, COUNT(*) as duplicate_count
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -735,7 +735,7 @@ ORDER BY hour DESC""",
         },
         {
             "question": "Find detections during specific hours",
-            "sql": """SELECT f.name, p.pipeline_id as camera_name, d.timestamp, f.similarity
+            "sql": """SELECT f.name, COALESCE(p.location_name, p.pipeline_id) as camera_name, d.timestamp, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -760,7 +760,7 @@ GROUP BY f.name""",
         },
         {
             "question": "Find unrecognized faces from last hour",
-            "sql": """SELECT d.id, d.timestamp, p.pipeline_id as camera_name, f.similarity
+            "sql": """SELECT d.id, d.timestamp, COALESCE(p.location_name, p.pipeline_id) as camera_name, f.similarity
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
@@ -771,7 +771,7 @@ ORDER BY d.timestamp DESC""",
         },
         {
             "question": "Show camera activity heatmap",
-            "sql": """SELECT p.pipeline_id as camera_name,
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     EXTRACT(HOUR FROM d.timestamp) as hour,
     COUNT(*) as detections
 FROM pipelines p

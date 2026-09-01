@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-25T06:16:44Z",
+  "generated_by": "deploy.sh model-manifest",
+  "note": "Fail-closed reference for the runtime DL weights. A file that has never been measured is not usable. The recogniser filename is the embedding-version stamp: renaming or swapping it invalidates comparability with every stored embedding.",
+  "weights": [
+    {
+      "name": "scrfd_10g_detection",
+      "filename": "det_10g.onnx",
+      "bytes": "16923827",
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "consumer": "face_recognition",
+      "runtime": "onnxruntime",
+      "setting": "DETECTION_MODEL",
+      "mount": "/app/weights/det_10g.onnx (read-only)",
+      "gpu_capable": "true"
+    },
+    {
+      "name": "arcface_w600k_r50_recognition",
+      "filename": "w600k_r50.onnx",
+      "bytes": "174383860",
+      "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+      "consumer": "face_recognition",
+      "runtime": "onnxruntime",
+      "setting": "RECOGNITION_MODEL",
+      "mount": "/app/weights/w600k_r50.onnx (read-only)",
+      "gpu_capable": "true"
+    }
+  ],
+  "ollama_models": [
+    "qwen2.5:1.5b",
+    "hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M"
+  ],
+  "auto_downloaded_at_first_run": [
+    "chromadb all-MiniLM-L6-v2 ONNX (volume chromadb_cache)",
+    "sentence-transformers/all-MiniLM-L6-v2 (volume hf_cache_data)"
+  ],
+  "not_in_this_system": "object detection / LPR / vehicle / VLM weight files - person boxes are supplied by the external VMS over webhooks",
+  "map_archives": "map-data/production/*.mbtiles, verified separately by scripts/map_data/production_gate.py"
+}

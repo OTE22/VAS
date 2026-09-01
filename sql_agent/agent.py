@@ -5,6 +5,7 @@ Main SQL Intelligence Agent class.
 """
 
 import logging
+from datetime import datetime
 from typing import List, Dict, Optional
 
 from .config import config
@@ -58,7 +59,96 @@ class SQLIntelligenceAgent:
         self.agent = create_sql_agent(conversation_memory=self.conversation_memory)
         self.db = DatabaseManager(config)
         self.kb = SQLKnowledgeBase(config)
+        # The caller's recent documents, refreshed by the API layer before
+        # each turn. Ids, titles and languages only — never content, and never
+        # another user's, because the query that fills it is owner-scoped.
+        self._artifact_index = []
+        self._identity_index = []
+        # {artifact_id: source_sql}, for provenance-first query modification.
+        self._artifact_sql_index = {}
+        # A short block of the user's stored memories, supplied by the API
+        # layer (reading them needs the database) and appended to the
+        # conversation context every prompt already consumes.
+        self._durable_memory = ""
+        # Work the graph decided on but could not perform: rendering is
+        # synchronous, persisting is not. Both transports leave it here and
+        # the API layer takes it, so neither has its own persistence path.
+        self._pending_document = {}
         logger.info("SQL Intelligence Agent initialized successfully")
+
+    def set_artifact_index(self, artifacts) -> None:
+        """Give the next turn the documents it may refer to.
+
+        Called from the async API layer, which can query the database; graph
+        nodes are synchronous and cannot. The agent instance is per-user and
+        each turn holds that user's lock, so this cannot leak across users.
+        """
+        self._artifact_index = list(artifacts or [])
+
+    def set_identity_index(self, identities) -> None:
+        """Give the next turn the enrolled people it may resolve names to.
+
+        `identities` is deliberately outside the SQL guard's allowlist, so
+        this cannot be queried from inside the graph — and should not be:
+        keeping it out of the allowlist is what stops the model reading the
+        table directly. Same path, and same per-user safety, as the artifact
+        index above.
+        """
+        self._identity_index = list(identities or [])
+
+    def set_artifact_sql_index(self, mapping) -> None:
+        """Base queries for the caller's documents, keyed by artifact id."""
+        self._artifact_sql_index = dict(mapping or {})
+
+    def set_durable_memory(self, text: str) -> None:
+        """Stored memories to carry into this turn's prompts."""
+        self._durable_memory = text or ""
+
+    def _finish_turn(self, user_input: str, final_response: str,
+                     state: dict) -> bool:
+        """Everything a completed streaming turn owes, in one place.
+
+        `stream_query` can finish in two ways — the streamed response, or the
+        invoke fallback when the stream carried none — and each used to do its
+        own bookkeeping. They drifted: the fallback recorded the reply and
+        nothing else, so a document it rendered was silently dropped (the SSE
+        route persists an artifact only when `has_document` is set), working
+        memory never learned what the turn produced, and no dialogue-state
+        delta was committed.
+
+        That is why the SSE acceptance test failed about half the time while
+        the model chose `generate_document` correctly every single time.
+
+        Returns whether there is document work for the API layer to finish.
+        The payload itself travels on the INSTANCE, never through an event:
+        it is raw PDF bytes, which cannot be serialised into SSE and must not
+        be sent to the client anyway.
+        """
+        state = state or {}
+        self.conversation_memory.add_ai_message(final_response)
+        self._record_working_context(user_input, state)
+        self._commit_tool_result_deltas(user_input, state)
+        return self._stash_pending_document(state)
+
+    def _stash_pending_document(self, state: dict) -> bool:
+        """Hold document work for the API layer. True if there is any."""
+        state = state or {}
+        pending = {}
+        if state.get("artifact_payload"):
+            pending["artifact_payload"] = state["artifact_payload"]
+        if state.get("translation_request"):
+            pending["translation_request"] = state["translation_request"]
+        self._pending_document = pending
+        return bool(pending)
+
+    def take_pending_document(self) -> dict:
+        """Return the pending document work and clear it.
+
+        Cleared on read so a turn that produces no document cannot inherit the
+        previous turn's payload and register it a second time.
+        """
+        pending, self._pending_document = self._pending_document, {}
+        return pending
 
     def _create_initial_state(self, user_input: str, should_learn: bool = True) -> AgentState:
         """Create the initial state for the agent."""
@@ -88,8 +178,187 @@ class SQLIntelligenceAgent:
             "conversation_context": "",
             "name_corrections": None,
             "security_block_user": None,
-            "security_block_reason": None
+            "security_block_reason": None,
+            # Working memory is read from the SESSION FILE, not from this
+            # instance's attributes: after a restart or an LRU eviction this
+            # object is new but the file still knows what the last report was.
+            "working_context": self._load_working_context(),
+            "dialogue_state": self._load_dialogue_state(),
+            # Set by the API layer through set_artifact_index() before the
+            # turn runs: graph nodes are synchronous and this needs the
+            # database, so it cannot be fetched from inside the graph.
+            "artifact_index": list(self._artifact_index or []),
+            "artifact_sql_index": dict(self._artifact_sql_index or {}),
+            "identity_index": list(self._identity_index or []),
+            "planned_action": None,
+            "planner_candidates": None,
+            "clarify_question": None,
+            "conversation_id": None,
         }
+
+    def _load_working_context(self) -> dict:
+        """The durable working context, reloaded from disk. Never fatal."""
+        try:
+            if self.conversation_memory:
+                return self.conversation_memory.get_working_context(reload=True)
+        except Exception as e:
+            logger.warning("[SQL_AGENT] could not load working context: %s", e)
+        return {}
+
+    def _load_dialogue_state(self) -> dict:
+        """The canonical dialogue state, migrated forward. Never fatal."""
+        from . import dialogue_state as ds
+        try:
+            context = self._load_working_context()
+            return ds.migrate_state(context.get("dialogue_state"))
+        except Exception as e:
+            logger.warning("[SQL_AGENT] could not load dialogue state: %s", e)
+            return ds.empty_state()
+
+    def _commit_tool_result_deltas(self, user_input: str, state: dict) -> None:
+        """Application-committed state transitions from VALIDATED results.
+
+        THE authority rule, applied to memory: the model proposes meaning,
+        the application commits state — and these commits happen only after
+        a tool actually did what the turn claimed. A successful query updates
+        the active task; each commit goes through apply_delta, so it can
+        change exactly one field and bump context_version, and the per-turn
+        trace records before → delta → after. Never fatal: losing a state
+        transition must not fail the turn that earned it.
+        """
+        from . import dialogue_state as ds
+        try:
+            previous = ds.migrate_state(
+                (self.conversation_memory.get_working_context() or {})
+                .get("dialogue_state"))
+            current = previous
+            turn_id = f"h{state.get('query_history_id') or ''}-" \
+                      f"{datetime.utcnow().strftime('%H%M%S')}"
+            committed_delta = None
+
+            result = state.get("query_result") or {}
+
+            # The MODEL'S proposed delta first — but only when the action it
+            # was proposed alongside actually SUCCEEDED. "No, camera 4" only
+            # updates state once the camera-4 query ran; a proposal whose
+            # action failed taught us nothing and commits nothing.
+            plan = state.get("planned_action") or {}
+            proposed = plan.get("state_delta")
+            if proposed and result.get("success"):
+                try:
+                    current = ds.apply_delta(current, proposed, turn_id=turn_id)
+                    committed_delta = proposed
+                except ds.DeltaRejected as rejection:
+                    logger.info("[DIALOGUE_STATE] proposed delta rejected: %s",
+                                rejection)
+
+            # The question we just asked, so next turn can recognise its
+            # ANSWER. Written on the clarify path, where no query runs — which
+            # is exactly why the success-gated commits wrote nothing and an
+            # open question left no trace at all.
+            action = (state.get("planned_action") or {}).get("action")
+            offered = state.get("clarification_candidates") or []
+            if action == "clarify" and offered:
+                try:
+                    current = ds.apply_delta(current, {
+                        "operation": "REPLACE",
+                        "field": "pending_clarification",
+                        "proposed_value": {
+                            "type": "person_resolution",
+                            "original_intent": state.get("intent") or "SQL_QUERY",
+                            "original_query": str(user_input)[:200],
+                            "field": "person",
+                            "candidates": offered},
+                        "source": "tool_result"}, turn_id=turn_id)
+                except ds.DeltaRejected as rejection:
+                    logger.info("[DIALOGUE_STATE] clarification not stored: %s",
+                                rejection)
+            elif ds.get_value(current, "pending_clarification"):
+                # Any turn that did something ELSE retires the question: an
+                # answer resolves it, and a new subject, a new intent or an
+                # explicit cancellation all make it obsolete. Structural, so
+                # no phrase has to be recognised for a request to move on.
+                try:
+                    current = ds.apply_delta(current, {
+                        "operation": "REMOVE",
+                        "field": "pending_clarification",
+                        "source": "user_correction"}, turn_id=turn_id)
+                    logger.info("[REACT] pending clarification cleared "
+                                "action=%s", action)
+                except ds.DeltaRejected:
+                    pass
+
+            # THE SUBJECT of this turn, committed whether or not a query
+            # ran. The old code wrote the subject only inside `active_task`
+            # prose, and only on a successful query, so a turn that ended in
+            # a question left the PREVIOUS person in place — "track ali"
+            # answered about Joey.
+            subject = None
+            for entry in (state.get("resolved_entities") or []):
+                if (entry or {}).get("canonical_name"):
+                    subject = entry
+            if subject:
+                canonical = subject["canonical_name"]
+                held = ds.get_value(current, "referenced_entity") or []
+                if canonical not in held:
+                    try:
+                        current = ds.apply_delta(current, {
+                            "operation": "REPLACE",
+                            "field": "referenced_entity",
+                            "proposed_value": [canonical],
+                            # Same rank as any earlier explicit statement, and
+                            # equal rank wins, so a subject committed once can
+                            # never pin the conversation to one person.
+                            "source": "user_correction"}, turn_id=turn_id)
+                        committed_delta = committed_delta or {
+                            "operation": "REPLACE",
+                            "field": "referenced_entity",
+                            "proposed_value": [canonical]}
+                        logger.info(
+                            "[STATE] subject replaced old=%s new=%s "
+                            "source=current_turn", held or None, canonical)
+                        # The task sentence describes the OLD job. Left alone
+                        # it is re-injected next turn under a header reading
+                        # "authoritative".
+                        if ds.get_value(current, "active_task"):
+                            current = ds.apply_delta(current, {
+                                "operation": "REMOVE", "field": "active_task",
+                                "source": "user_correction"}, turn_id=turn_id)
+                    except ds.DeltaRejected as rejection:
+                        logger.info("[DIALOGUE_STATE] subject delta rejected: "
+                                    "%s", rejection)
+
+            if result.get("success") and state.get("sql_purpose"):
+                delta = {"operation": "REPLACE", "field": "active_task",
+                         "proposed_value": str(state["sql_purpose"])[:200],
+                         "source": "tool_result"}
+                try:
+                    current = ds.apply_delta(current, delta, turn_id=turn_id)
+                    committed_delta = committed_delta or delta
+                except ds.DeltaRejected as rejection:
+                    logger.info("[DIALOGUE_STATE] delta rejected: %s", rejection)
+
+            if state.get("response_language"):
+                delta = {"operation": "REPLACE", "field": "output_language",
+                         "proposed_value": state["response_language"],
+                         "source": "tool_result"}
+                try:
+                    current = ds.apply_delta(current, delta, turn_id=turn_id)
+                except ds.DeltaRejected:
+                    pass
+
+            if current is not previous:
+                self.conversation_memory.update_working_context(
+                    dialogue_state=current)
+            logger.info(ds.transition_trace(
+                conversation_id=self.conversation_memory.current_session_id,
+                turn_id=turn_id, previous_state=previous,
+                resulting_state=current,
+                resolved_references={"artifact": (state.get("planned_action") or {}).get("artifact_id")},
+                planned_action=(state.get("planned_action") or {}).get("action"),
+                delta=committed_delta))
+        except Exception as e:
+            logger.warning("[SQL_AGENT] dialogue-state commit skipped: %s", e)
 
     def query(self, user_input: str, learn: bool = True):
         """
@@ -104,17 +373,19 @@ class SQLIntelligenceAgent:
         """
         logger.info(f"[SQL_AGENT] Processing query: {user_input[:100]}...")
         
-        # Add user message to conversation memory
+        # Context is read BEFORE the current question is appended:
+        # get_conversation_context(limit=N) counts from the end of the
+        # transcript, so appending first meant the question itself consumed a
+        # slot and the window held barely one prior turn.
+        conversation_context = self.conversation_memory.get_conversation_context(limit=6)
         self.conversation_memory.add_user_message(user_input)
         logger.debug(f"[SQL_AGENT] Added user message to conversation memory")
-        
-        # Get conversation context
-        conversation_context = self.conversation_memory.get_conversation_context(limit=3)
         if conversation_context:
             logger.debug(f"[SQL_AGENT] Conversation context retrieved ({len(conversation_context)} chars)")
         
         initial_state = self._create_initial_state(user_input, should_learn=learn)
-        initial_state["conversation_context"] = conversation_context
+        initial_state["conversation_context"] = (
+            conversation_context + self._durable_memory)
 
         # Run the agent
         try:
@@ -151,9 +422,20 @@ class SQLIntelligenceAgent:
             
             # Add AI response to conversation memory
             self.conversation_memory.add_ai_message(response)
+            self._record_working_context(user_input, result)
+            self._commit_tool_result_deltas(user_input, result)
             logger.info(f"[SQL_AGENT] ✅ Query processed successfully (response length: {len(response)} chars)")
             logger.debug(f"[SQL_AGENT] Response preview: {response[:200]}...")
-            
+
+            # Work the API layer has to finish has to REACH it. A rendered
+            # document needs persisting and a translation request needs an
+            # ownership-checked read — both need the database, which only the
+            # async layer can await. The route already accepts a
+            # (response, state) tuple, so this reuses that shape rather than
+            # inventing a second return contract.
+            if self._stash_pending_document(result):
+                return response, result
+
             return response
         except Exception as e:
             logger.error(f"[SQL_AGENT] Error processing query: {str(e)}", exc_info=True)
@@ -178,15 +460,20 @@ class SQLIntelligenceAgent:
         logger.info(f"[SQL_AGENT] Processing query (streaming): {user_input[:100]}...")
         
         try:
-            # Add user message to conversation memory
+            # Context BEFORE appending the current question — same reasoning
+            # as in query() above.
+            conversation_context = self.conversation_memory.get_conversation_context(limit=6)
             self.conversation_memory.add_user_message(user_input)
             yield {"type": "status", "message": "Processing query...", "step": "start"}
-            
-            # Get conversation context
-            conversation_context = self.conversation_memory.get_conversation_context(limit=3)
+
             initial_state = self._create_initial_state(user_input, should_learn=learn)
-            initial_state["conversation_context"] = conversation_context
-            
+            # Durable memory travels on BOTH transports. This line lacking
+            # `+ self._durable_memory` while query() had it meant stored
+            # memories reached only the non-streaming path — the browser,
+            # which streams, never saw them.
+            initial_state["conversation_context"] = (
+                conversation_context + self._durable_memory)
+
             # Set up streaming callback for word-by-word generation
             # Use a queue-like structure to collect words that need to be yielded
             word_queue = []
@@ -253,11 +540,6 @@ class SQLIntelligenceAgent:
                                 break
                         elif node_name == "fix_language":
                             yield {"type": "status", "message": "Normalizing language...", "step": "normalize"}
-                        elif node_name == "correct_name_typos":
-                            yield {"type": "status", "message": "Checking name corrections...", "step": "name_check"}
-                        elif node_name == "classify_intent":
-                            intent = node_output.get("intent", "UNKNOWN")
-                            yield {"type": "status", "message": f"Intent classified: {intent}", "step": "classify"}
                         elif node_name == "check_schema":
                             yield {"type": "status", "message": "Loading database schema...", "step": "schema"}
                         elif node_name == "retrieve_examples":
@@ -274,7 +556,30 @@ class SQLIntelligenceAgent:
                                 row_count = result.get("row_count", 0)
                                 yield {"type": "status", "message": f"Query executed: {row_count} rows returned", "step": "execute"}
                             else:
-                                yield {"type": "error", "message": f"SQL Error: {result.get('error', 'Unknown error')}", "step": "execute"}
+                                # The DRIVER's text names columns, types and
+                                # the query itself. The REST path has always
+                                # narrated failures from the error CATEGORY;
+                                # this event interpolated the raw string, so
+                                # the same failure was sanitized over one
+                                # transport and verbatim over the other.
+                                from .tools.agent_tools import SQLAgentTools
+
+                                detail = str(result.get("error") or "")
+                                logger.warning("[STREAM] query failed: %s",
+                                               detail[:300])
+                                yield {
+                                    "type": "error",
+                                    "message": SQLAgentTools._failure_narration({
+                                        "query_result": result,
+                                        "generated_sql": node_output.get(
+                                            "generated_sql"),
+                                        "planned_action": {
+                                            "action": "query_database"},
+                                        "response_language": (
+                                            node_output.get("response_language")
+                                            or "en"),
+                                    }),
+                                    "step": "execute"}
                         elif node_name == "story_response":
                             # When story_response node runs, it streams word-by-word via callback
                             # Yield any remaining queued words
@@ -323,10 +628,11 @@ class SQLIntelligenceAgent:
             
             # Add AI response to conversation memory
             if final_response:
-                self.conversation_memory.add_ai_message(final_response)
                 logger.info(f"[SQL_AGENT] Streaming query completed successfully (response length: {len(final_response)} chars)")
+                has_document = self._finish_turn(
+                    user_input, final_response, accumulated_state)
                 # Include the response in completion message for API route to capture
-                yield {"type": "complete", "message": "Query completed successfully", "step": "done", "response": final_response, "response_length": len(final_response), "success": True}
+                yield {"type": "complete", "message": "Query completed successfully", "step": "done", "response": final_response, "response_length": len(final_response), "success": True, "has_document": has_document}
             else:
                 # Last resort: use invoke to get the final response
                 logger.warning("[SQL_AGENT] Final response not found in stream, trying invoke as fallback")
@@ -334,14 +640,23 @@ class SQLIntelligenceAgent:
                     result = self.agent.invoke(initial_state)
                     final_response = result.get("final_response", "")
                     if final_response:
-                        self.conversation_memory.add_ai_message(final_response)
                         logger.info(f"[SQL_AGENT] Final response retrieved via invoke ({len(final_response)} chars)")
+                        # The SAME completion work as the primary path. This
+                        # branch used to do only add_ai_message, so a turn
+                        # that fell back rendered its document and then threw
+                        # it away: `has_document` was absent, and that flag is
+                        # the only thing the SSE route looks at before
+                        # persisting and emitting an artifact. Working context
+                        # and the dialogue-state deltas were dropped too, so
+                        # the next turn could not say "it".
+                        has_document = self._finish_turn(
+                            user_input, final_response, result)
                         # Stream the complete response
                         chunk_size = 50
                         for i in range(0, len(final_response), chunk_size):
                             chunk_text = final_response[i:i+chunk_size]
                             yield {"type": "content", "content": chunk_text, "step": "response"}
-                        yield {"type": "complete", "message": "Query completed successfully", "step": "done", "response_length": len(final_response), "success": True}
+                        yield {"type": "complete", "message": "Query completed successfully", "step": "done", "response": final_response, "response_length": len(final_response), "success": True, "has_document": has_document}
                     else:
                         logger.error("[SQL_AGENT] No final_response found even after invoke fallback")
                         yield {"type": "error", "message": "No response generated", "step": "error"}
@@ -362,6 +677,59 @@ class SQLIntelligenceAgent:
             # Always yield completion to close stream properly
             yield {"type": "complete", "message": "Stream ended with error", "step": "done", "success": False}
 
+    def _record_working_context(self, user_input: str, state: dict) -> None:
+        """Persist what this turn produced, so the NEXT turn can say "it".
+
+        Written through to the session file immediately (the file, not this
+        instance, is what survives a restart). Never fatal: losing the memory
+        of a turn must not fail the turn itself.
+        """
+        try:
+            state = state or {}
+            fields = {"last_query": (user_input or "")[:500]}
+
+            result = state.get("query_result") or {}
+            rows = result.get("rows") or []
+            if result.get("success") and rows:
+                fields["last_result"] = self.conversation_memory.build_result_reference(
+                    rows=rows,
+                    sql=state.get("generated_sql"),
+                    purpose=state.get("sql_purpose"),
+                    history_id=state.get("query_history_id"),
+                    question=user_input,
+                )
+                fields["last_action"] = "query_database"
+
+            # Is the narrative this turn produced worth putting IN a document?
+            #
+            # Only if the turn actually produced data or a document. Without
+            # this, "generate a PDF" after a failed turn rendered the failure
+            # NOTICE as the report — observed live, a PDF whose entire body
+            # was "I couldn't reach that report to translate it." presented as
+            # a finished intelligence report.
+            #
+            # A boolean, deliberately, not the text: the narrative is already
+            # stored once in conversation memory, and copying surveillance
+            # prose somewhere else to answer this question is a bad trade.
+            observation = state.get("observation") or {}
+            produced_data = bool(result.get("success") and rows)
+            produced_document = bool(state.get("artifact_payload")
+                                     or state.get("committed_artifact_id"))
+            failed = observation.get("success") is False
+            fields["last_narrative_reportable"] = bool(
+                (produced_data or produced_document) and not failed)
+            if state.get("response_language"):
+                fields["response_language"] = state["response_language"]
+
+            self.conversation_memory.update_working_context(**fields)
+        except Exception as e:
+            logger.warning("[SQL_AGENT] Could not record working context: %s", e)
+            try:
+                from . import observability
+                observability.observe_memory_failure("working_context_write")
+            except Exception:
+                pass
+
     def query_with_details(self, user_input: str, learn: bool = False) -> dict:
         """
         Process a query and return full details (for debugging).
@@ -374,6 +742,11 @@ class SQLIntelligenceAgent:
             Complete state dictionary with all intermediate results
         """
         initial_state = self._create_initial_state(user_input, should_learn=learn)
+        # This entry point silently ran memoryless while query()/query_stream()
+        # carried context — same agent, different answers depending on which
+        # method a caller happened to use.
+        initial_state["conversation_context"] = \
+            self.conversation_memory.get_conversation_context(limit=6)
 
         try:
             return self.agent.invoke(initial_state)

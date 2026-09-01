@@ -8,8 +8,12 @@
 (function () {
     'use strict';
 
-    // Don't run on signin page
-    if (window.location.pathname === '/signin' || window.location.pathname.startsWith('/signin')) {
+    // Don't run on signin page, nor on the change-password page: both are
+    // outside the navigated application, and change-password is the one page a
+    // user with a pending rotation is allowed to be on — loading a navbar there
+    // would fire gated requests that all answer 403.
+    if (window.location.pathname === '/signin' || window.location.pathname.startsWith('/signin') ||
+        window.location.pathname === '/change-password') {
         return;
     }
 
@@ -68,7 +72,17 @@
     }
 
     window.getAuthMe = window.getAuthMe || function (force) {
-        return _authFetch('__authMePromise', '/api/auth/me', force);
+        return _authFetch('__authMePromise', '/api/auth/me', force).then(function (me) {
+            // A pending password rotation makes every gated endpoint answer 403,
+            // so the page the user landed on cannot render anything useful.
+            // Send them to the one page that works. This is a courtesy, not the
+            // enforcement — the server refuses regardless of what runs here.
+            if (me && me.rotation_required &&
+                window.location.pathname !== '/change-password') {
+                window.location.assign('/change-password');
+            }
+            return me;
+        });
     };
     window.getAuthPrivileges = window.getAuthPrivileges || function (force) {
         return _authFetch('__authPrivilegesPromise', '/api/auth/me/privileges', force);

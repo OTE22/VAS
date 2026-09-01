@@ -51,6 +51,24 @@ def get_gateway():
                 default_temperature=config.ollama_temperature,
             )
         }
+        # The registry is the authority on whether the development-only NIM
+        # provider exists here (it registers nothing in production). Keying
+        # the adapter off the registry keeps the two impossible to disagree:
+        # no spec, no adapter; spec present, adapter present.
+        if any(spec.provider == "nim" for spec in registry.all()):
+            from .nim_provider import NIMProvider
+
+            providers["nim"] = NIMProvider(
+                base_url=config.nim_base_url,
+                api_key=config.nim_api_key,
+                default_temperature=config.ollama_temperature,
+            )
+            logger.warning(
+                "[LLM] DEVELOPMENT provider enabled: NVIDIA NIM at %s — "
+                "SQL-agent prompts (schema + user questions) leave this host. "
+                "Production refuses this configuration at boot.",
+                config.nim_base_url,
+            )
         _gateway = LLMGateway(registry, providers)
         logger.info(
             "[LLM] Gateway ready: %d model(s), providers=%s",

@@ -7,8 +7,15 @@ Most API endpoints require authentication using JWT (JSON Web Token) Bearer toke
 ## Quick Start
 
 1. **Login** to get a token
-2. **Use the token** in API requests
-3. **Token expires** after 24 hours (default) - login again when needed
+2. **Check `rotation_required`** in the login response. If it is `true`, the
+   token is real but works on almost nothing — see
+   [Password rotation](#password-rotation-403-password_rotation_required)
+   below and call `POST /api/auth/change-password` first
+3. **Use the token** in API requests
+4. **Token expires** after 24 hours (default) - login again when needed
+
+A token is also refused (401) if the account's password changed after the token
+was issued. That is deliberate: changing a password ends every other session.
 
 ---
 
@@ -29,17 +36,33 @@ Most API endpoints require authentication using JWT (JSON Web Token) Bearer toke
 **Response:**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer",
+  "success": true,
   "user": {
     "id": 1,
     "username": "admin",
-    "email": "admin@example.com",
-    "role": "admin",
-    "is_active": true
-  }
+    "role": "admin"
+  },
+  "redirect_url": "/home",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "bearer",
+  "rotation_required": false
 }
 ```
+
+Three things about that body are easy to get wrong:
+
+- **`user` carries only `id`, `username` and `role`.** No email, no permissions,
+  no account flags — the login response is deliberately minimal. Use
+  `GET /api/auth/me` for the rest.
+- **Browser clients get `access_token: null`.** If you send
+  `X-Requested-With: XMLHttpRequest`, the credential is returned *only* as an
+  HttpOnly cookie and both `access_token` and `token_type` are `null`. Omit that
+  header and you get a bearer token in the body, which is what scripts want.
+  Code like `data.access_token.substring(0, 50)` will throw for a browser-style
+  client.
+- **`rotation_required: true` means the session is gated.** `redirect_url` is
+  then `"/change-password"`, and every endpoint outside the four listed below
+  answers `403`.
 
 **This is the standard and recommended way to get tokens.**
 
@@ -334,14 +357,31 @@ curl -X GET "http://localhost/api/auth/me" \
   "id": 1,
   "username": "admin",
   "email": "admin@example.com",
-  "role": "admin"
+  "full_name": "System Administrator",
+  "role": "admin",
+  "can_use_chatbot": true,
+  "is_active": true,
+  "permissions": ["..."],
+  "permissions_version": 1,
+  "rotation_required": false
 }
 ```
+
+`/api/auth/me` is one of the few endpoints that answers while a rotation is
+pending, which makes it the way to *discover* that state: if
+`rotation_required` is `true`, stop and change the password.
 
 **Invalid/expired token response:**
 ```json
 {
   "detail": "Invalid authentication credentials"
+}
+```
+
+**Token issued before the password changed (401):**
+```json
+{
+  "detail": "Password was changed. Please log in again."
 }
 ```
 
@@ -388,6 +428,9 @@ os.environ['ACCESS_TOKEN'] = token
 - Token format incorrect (missing "Bearer" prefix)
 - Token expired
 - Token invalid
+- **The account's password changed after this token was issued** — the detail
+  reads `"Password was changed. Please log in again."` A password change ends
+  every session except the one that performed it
 
 **Solutions:**
 1. Check you're including the Authorization header
@@ -416,6 +459,79 @@ Authorization: Bearer: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...  # Extra colon
 1. Login with an admin account
 2. Contact system administrator to grant admin access
 3. Check user account status
+
+### Issue 2b: 403 on *everything*, including endpoints you are allowed to use
+
+<a id="password-rotation-403-password_rotation_required"></a>
+
+**Symptom:** login returns 200, and every subsequent call returns 403 —
+including ones your role plainly permits. A browser is redirected to
+`/change-password` instead of the page it asked for.
+
+**Response body:**
+```json
+{
+  "detail": {
+    "code": "PASSWORD_ROTATION_REQUIRED",
+    "message": "You must change your password before continuing.",
+    "redirect_url": "/change-password"
+  },
+  "status_code": 403
+}
+```
+
+> Note the shape: this code arrives as **`detail.code`**, not the
+> `detail.error_code` used by the platform's business errors.
+
+**Cause:** the account still holds a password somebody else chose — the
+deployment seed, or one an administrator typed when creating or resetting the
+account. It can authenticate, but it cannot act.
+
+**What still works while pending** (exactly four things):
+
+| Endpoint | Why it is exempt |
+|---|---|
+| `GET /api/auth/me` | so a client can discover the state |
+| `POST /api/auth/logout` | leaving must always be possible |
+| `POST /api/auth/change-password` | the action that resolves it |
+| `GET /change-password` | the page that performs it |
+
+**Solution:** change the password.
+
+```bash
+curl -X POST "http://localhost/api/auth/change-password" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN_HERE" \
+  -d '{"current_password": "the seeded one", "new_password": "at least 12 chars, 6+ distinct"}'
+```
+
+**Success (200):**
+```json
+{
+  "success": true,
+  "redirect_url": "/dashboard",
+  "access_token": "...new token...",
+  "token_type": "bearer"
+}
+```
+
+The token you presented is revoked and a fresh one is issued, so keep the one
+from this response. Every *other* session for the account is ended too.
+
+**Failures** use the auth error envelope
+`{"error": {"code", "message", "reference_id", "retryable"}}`:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `INVALID_CURRENT_PASSWORD` | 403 | `current_password` is wrong. Counts against the login throttle |
+| `PASSWORD_REUSED` | 400 | the new password equals the current one |
+| `WEAK_PASSWORD` | 400 | under 12 characters, fewer than 6 distinct, or a known default |
+| `RATE_LIMITED` | 429 | too many attempts; honour `Retry-After` |
+| `PASSWORD_UPDATE_FAILED` | 500 | the write failed; nothing changed |
+
+**Cookie clients must send `X-Requested-With: XMLHttpRequest`** (CSRF
+defence-in-depth). Bearer clients are exempt. nginx throttles this endpoint at
+the same 10 requests/minute as login, because it verifies a password.
 
 ### Issue 3: Token Works in Swagger but Not in cURL/Code
 
@@ -621,6 +737,14 @@ async function getSettings(token) {
 
 ## Generating Tokens for System Integration
 
+> **Minting a token directly does not bypass the rotation gate.** Calling
+> `AuthService.create_access_token` skips the login endpoint, so nothing tells
+> you the account is pending — but the gate lives in the request dependency, not
+> in token issuance, so every request made with that token still returns
+> `403 PASSWORD_ROTATION_REQUIRED`. If you are integrating a service account,
+> either change its password once through `/api/auth/change-password`, or create
+> it directly in the database where `must_change_password` defaults to false.
+
 ### Quick Token Generation
 
 **Using the utility script:**
@@ -785,10 +909,13 @@ settings = response.json()
 ## Summary
 
 1. **Generate token:** `POST /api/auth/login` with username/password
-2. **Use token:** Include `Authorization: Bearer <token>` header
-3. **Token expires:** After 24 hours (default), login again
-4. **Swagger UI:** Click "Authorize" button and enter `Bearer <token>`
-5. **System integration:** Use login endpoint or programmatic token generation
+2. **Check `rotation_required`:** if `true`, the token 403s on everything until
+   you call `POST /api/auth/change-password`
+3. **Use token:** Include `Authorization: Bearer <token>` header
+4. **Token expires:** After 24 hours (default), login again — and immediately
+   if that account's password is changed elsewhere
+5. **Swagger UI:** Click "Authorize" button and enter `Bearer <token>`
+6. **System integration:** Use login endpoint or programmatic token generation
 
 **Quick Reference:**
 ```bash
@@ -796,6 +923,12 @@ settings = response.json()
 curl -X POST "http://localhost/api/auth/login" \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "password"}'
+
+# If that answered "rotation_required": true, do this before anything else
+curl -X POST "http://localhost/api/auth/change-password" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"current_password": "password", "new_password": "a much better one"}'
 
 # Use token
 curl -X GET "http://localhost/api/settings" \

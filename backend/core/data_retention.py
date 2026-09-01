@@ -8,6 +8,7 @@ import os
 import sys
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 
 # Add parent directory to path
@@ -552,9 +553,88 @@ class DataRetentionManager:
             logger.warning(f"[RETENTION] search_history per-user cap failed: {e}")
             extra.setdefault("search_history_over_cap", 0)
 
+        extra.update(await self._cleanup_agent_artifacts(db, dry_run))
+
         if not dry_run:
             await db.commit()
         return extra
+
+    async def _cleanup_agent_artifacts(self, db, dry_run: bool) -> dict:
+        """Expire generated documents — the ROW and the FILE together.
+
+        Artifacts are rendered FROM detection data, so they inherit that data's
+        window: DATA_RETENTION_DAYS. Letting a report outlive the detections it
+        reports on would be a retention hole disguised as a convenience, and
+        the file is the leak — `source_content` on the row holds the same
+        narrative, which is why the row goes with it rather than being kept as
+        a tombstone.
+
+        Order is file-then-row, the reverse of registration. A file whose row
+        is already gone is unreachable by every route (the download path is
+        DB-driven), so a crash between the two leaves garbage, not exposure.
+        """
+        out = {"agent_artifacts_deleted": 0, "agent_artifact_files_deleted": 0,
+               "agent_artifact_parts_deleted": 0}
+        try:
+            async with db.begin_nested():
+                cutoff = datetime.utcnow() - timedelta(days=int(settings.DATA_RETENTION_DAYS))
+                rows = (await db.execute(sa_text(
+                    "SELECT id, storage_path FROM agent_artifacts WHERE created_at < :c"
+                ), {"c": cutoff})).fetchall()
+                if dry_run:
+                    out["agent_artifacts_deleted"] = len(rows)
+                    return out
+                if not rows:
+                    return out
+
+                artifacts_root = os.path.realpath(settings.ARTIFACTS_DIR)
+                paths = [os.path.join(artifacts_root, r[1]) for r in rows if r[1]]
+                loop = asyncio.get_event_loop()
+                # Reuses the shared deleter: it refuses anything resolving
+                # outside STORAGE_DIR, which ARTIFACTS_DIR lives under, so a
+                # tampered storage_path cannot make retention delete
+                # arbitrary files.
+                f_deleted, _freed, _missing, failures = await loop.run_in_executor(
+                    None, _delete_files_sync, paths, os.path.realpath(settings.FACES_DIR))
+                for failure in failures:
+                    logger.warning("[RETENTION] artifact file not removed: %s", failure)
+                out["agent_artifact_files_deleted"] = f_deleted
+
+                r = await db.execute(sa_text(
+                    "DELETE FROM agent_artifacts WHERE created_at < :c"), {"c": cutoff})
+                out["agent_artifacts_deleted"] = r.rowcount or 0
+        except Exception as e:
+            logger.warning(f"[RETENTION] agent_artifacts cleanup failed: {e}")
+
+        # Half-written renders in .incoming/ belong to a process that died
+        # mid-commit; nothing references them and nothing ever will.
+        try:
+            if not dry_run:
+                loop = asyncio.get_event_loop()
+                out["agent_artifact_parts_deleted"] = await loop.run_in_executor(
+                    None, self._cleanup_artifact_parts_sync)
+        except Exception as e:
+            logger.warning(f"[RETENTION] artifact .incoming sweep failed: {e}")
+        return out
+
+    def _cleanup_artifact_parts_sync(self) -> int:
+        """Remove .part files older than a day (blocking — call via executor)."""
+        temp_dir = settings.ARTIFACTS_TEMP_DIR
+        if not os.path.isdir(temp_dir):
+            return 0
+        removed = 0
+        stale_before = time.time() - 86400
+        for name in os.listdir(temp_dir):
+            if not name.endswith(".part"):
+                continue
+            path = os.path.join(temp_dir, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < stale_before:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+        return removed
 
     def _cleanup_empty_directories_sync(self):
         """Remove empty pipeline directories (blocking — call via executor)"""

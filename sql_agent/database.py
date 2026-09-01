@@ -59,7 +59,10 @@ class DatabaseManager:
                 "description": "Camera/pipeline configurations tracking which camera captured each detection",
                 "columns": [
                     {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "description": "Primary key"},
-                    {"column_name": "pipeline_id", "data_type": "varchar", "is_nullable": "NO", "description": "Camera/pipeline name (e.g., 'entrance_cam', 'lobby_cam') - identifies which camera made the detection"},
+                    {"column_name": "pipeline_id", "data_type": "varchar", "is_nullable": "NO", "description": "Opaque camera identifier (often a UUID) used as the join key to detections.pipeline_id. NOT human-readable — never show it to a user when location_name is available"},
+                    {"column_name": "location_name", "data_type": "varchar", "is_nullable": "YES", "description": "The HUMAN-READABLE camera name (e.g. 'Main Entrance', 'Parking Lot'). Reports must display COALESCE(location_name, pipeline_id) AS camera_name so a camera without a configured name still identifies itself"},
+                    {"column_name": "latitude", "data_type": "double precision", "is_nullable": "YES", "description": "Camera latitude (WGS84), when configured"},
+                    {"column_name": "longitude", "data_type": "double precision", "is_nullable": "YES", "description": "Camera longitude (WGS84), when configured"},
                     {"column_name": "is_active", "data_type": "boolean", "is_nullable": "NO", "description": "Whether this camera/pipeline is currently active"},
                     {"column_name": "created_at", "data_type": "timestamp", "is_nullable": "NO", "description": "When the camera/pipeline was created"},
                     {"column_name": "updated_at", "data_type": "timestamp", "is_nullable": "YES", "description": "Last update timestamp"},

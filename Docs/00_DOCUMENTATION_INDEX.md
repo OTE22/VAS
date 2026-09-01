@@ -51,6 +51,20 @@ per-request parameters on `GET /api/identities/{id}/map`. Setting them in
 `face_detector_dev`, production `face_detector_prod`. The GPU files are
 **overrides**, layered with a second `-f`, never run alone.
 
+**5. Password rotation is enforced, not advisory.** An account holding a
+password somebody else chose — the deployment seed, or one an administrator
+typed when creating or resetting the account — can sign in but can do nothing
+else. Login succeeds with `rotation_required: true` and
+`redirect_url: "/change-password"`; every other endpoint returns
+`403 PASSWORD_ROTATION_REQUIRED`. Only `GET /api/auth/me`,
+`POST /api/auth/logout`, `POST /api/auth/change-password` and
+`GET /change-password` work until the password is changed, and changing it ends
+every other session for that account. The authority is
+[`61_DEPLOYMENT_RUNBOOK.md`](61_DEPLOYMENT_RUNBOOK.md) §7; it supersedes the
+first-login instructions in **03** and **05**, which described the change as
+something to do afterwards through the admin panel — a route that is now closed
+to a pending account.
+
 ---
 
 ## ⚠️ API clients: start here (v6.0.0)
@@ -61,7 +75,9 @@ Conventions* and the **Migration Checklist (v5 → v6)**, plus the in-app
 tutorial (Admin → Tutorial), which always matches the running build.
 
 **Headlines:** cookie-authenticated mutations require an
-`X-Requested-With: XMLHttpRequest` header · expensive operations return
+`X-Requested-With: XMLHttpRequest` header · a login can succeed and still leave
+the session gated — check `rotation_required` and handle
+`403 PASSWORD_ROTATION_REQUIRED` · expensive operations return
 `202 + job_id` instead of blocking · model training produces a reviewable
 *candidate* rather than replacing the live model · watchlist deletion is
 reversible · the social-network graph is always bounded · generated map HTML
@@ -73,7 +89,7 @@ must be embedded in a sandboxed iframe.
 
 - **[01_QUICK_START.md](01_QUICK_START.md)** — fastest path to a running dev system
 - **[02_DOCKER_QUICK_START.md](02_DOCKER_QUICK_START.md)** — Docker quick start
-- **[03_ADMIN_SETUP_GUIDE.md](03_ADMIN_SETUP_GUIDE.md)** — creating admin users. ⚠️ its example password `admin123` is **rejected by the production config guard**
+- **[03_ADMIN_SETUP_GUIDE.md](03_ADMIN_SETUP_GUIDE.md)** — creating admin users, bootstrap admin, forced first-login password change. ⚠️ `admin123` is the **dev CPU stack only** and is rejected by the production config guard
 - **[04_SETUP_NVIDIA_DOCKER.md](04_SETUP_NVIDIA_DOCKER.md)** — GPU / NVIDIA container toolkit
 - **[05_MIGRATION_GUIDE.md](05_MIGRATION_GUIDE.md)** — database migrations
 
@@ -190,6 +206,7 @@ verification, settings — is documented **once**, in 46.
 - **[79_BACKGROUND_TASKS.md](79_BACKGROUND_TASKS.md)** — background job lifecycle, overlap protection and retention safety
 - **[80_ALEMBIC_IN_DOCKER.md](80_ALEMBIC_IN_DOCKER.md)** — running Alembic by hand inside the container
 - **[81_SQL_AGENT_QUERY_HISTORY.md](81_SQL_AGENT_QUERY_HISTORY.md)** — SQL agent query history, sessions and memory
+- **[90_AGENT_ARCHITECTURE.md](90_AGENT_ARCHITECTURE.md)** — how the agent decides what to do: planner vs dispatcher, artifacts and their lineage, the ownership boundary
 - **[82_RECOGNITION_LOGGING_WALKTHROUGH.md](82_RECOGNITION_LOGGING_WALKTHROUGH.md)** — logging walkthrough
 - **[71_IMAGE_INGESTION_WORKFLOW.md](71_IMAGE_INGESTION_WORKFLOW.md)** — the unified storage layout
 

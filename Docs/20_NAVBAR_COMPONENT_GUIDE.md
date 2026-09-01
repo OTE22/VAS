@@ -15,6 +15,14 @@ The JavaScript loader (`frontend/js/navbar-loader.js`) automatically:
 - Sets the active link based on the current page URL
 - Attaches logout functionality
 - Adds hover effects and interactions
+- Sends the user to `/change-password` if `GET /api/auth/me` answers
+  `rotation_required: true` — a courtesy, since every gated request on the
+  current page would answer 403 anyway; the server is what enforces it
+
+**It does not run at all on `/signin` or `/change-password`.** Both are outside
+the navigated application, and on the change-password page a navbar would fire
+`/api/auth/me/privileges`, which *is* gated and returns 403 during a pending
+rotation.
 
 ### 3. Usage in HTML Pages
 
@@ -73,6 +81,8 @@ To add or modify navbar links:
 - ✅ `frontend/admin/users.html`
 - ✅ `frontend/admin/pipelines.html`
 - ✅ `frontend/admin/audit.html`
+- ❌ `frontend/signin.html` — deliberately not (would interfere with login redirects)
+- ❌ `frontend/change-password.html` — deliberately not (see above)
 
 ## Technical Details
 

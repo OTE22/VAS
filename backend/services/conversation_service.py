@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 # Block types the API accepts from clients. The backfill and server-side
 # writers may use the full set; user-authored messages are text-only for now.
 _ALLOWED_CLIENT_BLOCK_TYPES = {"text"}
-_ALLOWED_BLOCK_TYPES = {"text", "sql", "result_table", "warning", "error", "citation"}
+# "artifact" carries only an id, title and download url — never the document
+# body or its source content. Adding a block type needs no migration by design
+# (see the Message model docstring); it does need to be listed here, because
+# _validate_blocks rejects anything unknown outright.
+_ALLOWED_BLOCK_TYPES = {"text", "sql", "result_table", "warning", "error",
+                        "citation", "artifact"}
 
 
 class ConversationAccessError(Exception):

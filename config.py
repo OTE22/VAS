@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # =====================================================
     ENVIRONMENT: str = Field(default="production")
     DEBUG: bool = Field(default=False)
+
+    # Development trace of the CONTEXT ENVELOPE each model call receives:
+    # section presence and sizes in the log, and full tool-argument values.
+    # Off in production — the values are the user's own words and the names of
+    # people under surveillance, which the audit rules keep out of logs.
+    SQL_AGENT_TRACE_CONTEXT: bool = Field(default=False)
     
     HOST: str = Field(default="0.0.0.0")
     PORT: int = Field(default=8000)
@@ -401,6 +407,44 @@ class Settings(BaseSettings):
     SQL_AGENT_MAX_CONCURRENT: int = Field(default=2)
     SQL_AGENT_TOTAL_TIMEOUT: int = Field(default=300)
 
+    # --- Bounded reasoning (PLAN -> ACT -> OBSERVE -> REPLAN -> ANSWER) ----
+    # Three SEPARATE budgets, deliberately. Collapsing them would mean a
+    # transient database blip could spend the turn's ability to think, and a
+    # confused model could spend the whole budget on look-ups.
+    # Defaults are the CONSERVATIVE ones because production does not override
+    # them: the prod compose sets no SQL-agent tuning, so whatever is written
+    # here is what a real deployment runs — on the local model, where each
+    # extra step is seconds of CPU. The dev compose raises them explicitly.
+    SQL_AGENT_MAX_REASONING_STEPS: int = Field(
+        default=8,
+        description="Total reasoning steps per turn (tool look-ups + re-plans). "
+                    "The upper bound on how long one turn may think.")
+    # How many ACTIONS one turn may take while pursuing the request.
+    #
+    # 1 (the default) is the single-action behaviour: act, observe, correct at
+    # most once, answer. Above 1 the agent may act again after a SUCCESSFUL
+    # action when the request is not yet carried out — "track Joey and send it
+    # as a PDF" in one turn instead of two.
+    #
+    # This is a hard ceiling read by the graph's router, so a confused model
+    # cannot spend more than this however it behaves. Each extra action costs
+    # a full action's latency, so raise it deliberately.
+    # A CEILING, not a target. A turn ends the moment it has enough to
+    # answer; typical requests still finish in one or two actions. This only
+    # makes "track Joey and send it as a PDF" possible in a single turn.
+    SQL_AGENT_MAX_ACTIONS_PER_TURN: int = Field(default=3)
+
+    SQL_AGENT_MAX_REPLANS: int = Field(
+        default=1,
+        description="Corrective re-plans after a failed action. Each needs a "
+                    "reason from the Observation; there is no blind retry. "
+                    "0 disables re-planning (failures answer honestly).")
+    SQL_AGENT_MAX_EXECUTION_RETRIES: int = Field(
+        default=1,
+        description="Retries of the SAME SQL after a TRANSIENT database error "
+                    "(dropped connection, pool timeout). Infrastructure, not "
+                    "reasoning: these never consume the re-plan budget.")
+
     # --- Credentials used to execute LLM-generated SQL ---------------------
     # Deliberately separate from the application's own database role. The AST
     # guard in sql_agent/security/sql_guard.py is application code and can have
@@ -646,6 +690,49 @@ class Settings(BaseSettings):
         os.replace on the same filesystem rather than a cross-device copy.
         """
         return os.path.join(self.FACES_DIR, ".incoming")
+
+    @property
+    def CONVERSATION_CACHE_DIR(self) -> str:
+        """Chat working memory: <STORAGE_DIR>/conversation_cache/user_<id>/
+
+        The session JSON files that remember "the last report", the working
+        context and the transcript. This used to default to a RELATIVE
+        "conversation_cache" resolved against the container's CWD — inside the
+        writable layer, with no volume behind it — so every
+        `--force-recreate` erased every user's conversational memory, and the
+        dev stack hid it because the repo bind-mount made the files look
+        persistent. Under STORAGE_DIR the existing storage volume covers it.
+
+        SINGLE-WORKER durability only. A shared filesystem fixes container
+        recreation, NOT distributed coordination: the per-file locks in
+        conversation_memory.py are process-local threading.Locks. If replicas
+        are ever enabled, working memory moves behind Redis/DB or a
+        distributed lock must protect these files (see Docs/90 and the
+        WORKERS guard in config_guard.py).
+        """
+        return os.path.join(self.STORAGE_DIR, "conversation_cache")
+
+    @property
+    def ARTIFACTS_DIR(self) -> str:
+        """Generated agent documents: <STORAGE_DIR>/artifacts/<uuid>.<ext>
+
+        Reports the SQL agent produced (PDF/Word). Never served by the generic
+        /storage route — that one authenticates but does not check ownership,
+        so a shared root would let any signed-in user read another user's
+        query output. Reached only through the artifact id, which resolves to
+        a row carrying the owner.
+        """
+        return os.path.join(self.STORAGE_DIR, "artifacts")
+
+    @property
+    def ARTIFACTS_TEMP_DIR(self) -> str:
+        """Staging for artifacts being rendered.
+
+        Inside artifacts/ for the same reason UPLOAD_TEMP_DIR is inside
+        faces/: the commit step is then an os.replace on one filesystem, so a
+        half-written PDF is never visible under its final name.
+        """
+        return os.path.join(self.ARTIFACTS_DIR, ".incoming")
 
     @property
     def PENDING_UPLOAD_DIR(self) -> str:
@@ -1377,6 +1464,45 @@ class Settings(BaseSettings):
     OLLAMA_TIMEOUT: int = Field(
         default=120
     )
+
+    # =====================================================
+    # Development-only hosted LLM (NVIDIA NIM) for the SQL Agent
+    # =====================================================
+    # Lets a developer point SQL generation at build.nvidia.com's free
+    # OpenAI-compatible endpoint to iterate on prompts and judge query quality
+    # against a stronger model than the local Ollama ones.
+    #
+    # DEVELOPMENT ONLY, fail-closed. This system queries biometric data, and a
+    # hosted endpoint means the schema and every question a user asks leave
+    # the box. Three independent layers keep it out of production:
+    #   1. the model registry refuses to register the provider when
+    #      settings.is_production (sql_agent/llm/registry.py),
+    #   2. the config guard fails a production boot (exit 78) when
+    #      LLM_DEV_PROVIDER is set — no acknowledgement escape,
+    #   3. LLM_DEV_PROVIDER is SECURITY_CRITICAL, so it cannot be persisted
+    #      through the admin settings API and applied at a later boot.
+    LLM_DEV_PROVIDER: str = Field(
+        default="",
+        description="Empty (default) = local Ollama only. 'nim' enables the "
+                    "NVIDIA NIM development provider — refused in production.")
+    NVIDIA_NIM_BASE_URL: str = Field(
+        default="https://integrate.api.nvidia.com/v1",
+        description="OpenAI-compatible base URL of the NIM endpoint")
+    NVIDIA_NIM_API_KEY: str = Field(
+        default="",
+        description="API key from build.nvidia.com (free tier). Never logged; "
+                    "redacted everywhere a setting is rendered.")
+    NVIDIA_NIM_MODEL: str = Field(
+        default="meta/llama-3.2-11b-vision-instruct",
+        description="NIM model for chat/intent tasks")
+    # Specialist for SQL generation only (falls back to NVIDIA_NIM_MODEL when
+    # empty) — mirrors the OLLAMA_MODEL / OLLAMA_SQL_MODEL split.
+    NVIDIA_NIM_SQL_MODEL: str = Field(
+        default="openai/gpt-oss-120b"
+    )
+    NVIDIA_NIM_TIMEOUT: int = Field(
+        default=60,
+        description="Per-attempt timeout in seconds for NIM calls")
 
     # =====================================================
     # SQL Agent Configuration

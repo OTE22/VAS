@@ -22,6 +22,10 @@ SECRET_SETTINGS = frozenset({
     "BOOTSTRAP_ADMIN_PASSWORD",
     "BOOTSTRAP_ADMIN_PASSWORD_FILE",
     "OLLAMA_API_KEY",
+    # Development-only NVIDIA NIM credential (build.nvidia.com). Free tier or
+    # not, a bearer key rendered into /api/settings or a config-guard report
+    # is a leaked credential.
+    "NVIDIA_NIM_API_KEY",
     # Distributed to every camera, so the least-protected secret in the
     # deployment — and the one most likely to end up pasted into a support
     # ticket if a report ever renders it.

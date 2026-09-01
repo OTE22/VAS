@@ -169,6 +169,10 @@ class UserResponse(BaseModel):
     created_at: str
     last_login: Optional[str]
     pipeline_ids: List[str]
+    # True while the account still carries an admin-assigned password. Shown in
+    # the admin UI so it is visible that the user has not yet signed in and
+    # taken ownership. Defaulted so older response builders keep working.
+    must_change_password: bool = False
 
 
 @router.post("/api/users", response_model=UserResponse)
@@ -254,7 +258,8 @@ async def create_user(
             blocked_at=user.blocked_at.isoformat() if user.blocked_at else None,
             created_at=user.created_at.isoformat(),
             last_login=user.last_login.isoformat() if user.last_login else None,
-            pipeline_ids=pipeline_ids
+            pipeline_ids=pipeline_ids,
+            must_change_password=bool(getattr(user, "must_change_password", False)),
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -290,7 +295,8 @@ async def list_users(
             blocked_at=user.blocked_at.isoformat() if user.blocked_at else None,
             created_at=user.created_at.isoformat(),
             last_login=user.last_login.isoformat() if user.last_login else None,
-            pipeline_ids=pipeline_ids
+            pipeline_ids=pipeline_ids,
+            must_change_password=bool(getattr(user, "must_change_password", False)),
         ))
     
     return result
@@ -327,7 +333,8 @@ async def get_user(
         blocked_at=user.blocked_at.isoformat() if user.blocked_at else None,
         created_at=user.created_at.isoformat(),
         last_login=user.last_login.isoformat() if user.last_login else None,
-        pipeline_ids=pipeline_ids
+        pipeline_ids=pipeline_ids,
+        must_change_password=bool(getattr(user, "must_change_password", False)),
     )
 
 
@@ -403,6 +410,11 @@ async def update_user(
             pipeline_ids=user_data.pipeline_ids,
             db=db,
             actor=current_user,
+            # An admin setting SOMEONE ELSE's password is handing over a
+            # credential they know, so the owner must replace it. An admin
+            # setting their own is choosing it, and forcing a second change
+            # immediately would just be a loop.
+            force_rotation=(user_id != current_user.id),
             context={
                 "request_id": request.headers.get("X-Request-ID"),
                 # nginx does not trust client-supplied X-Forwarded-For, so the
@@ -433,7 +445,8 @@ async def update_user(
             blocked_at=user.blocked_at.isoformat() if user.blocked_at else None,
             created_at=user.created_at.isoformat(),
             last_login=user.last_login.isoformat() if user.last_login else None,
-            pipeline_ids=pipeline_ids
+            pipeline_ids=pipeline_ids,
+            must_change_password=bool(getattr(user, "must_change_password", False)),
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -458,7 +471,12 @@ async def reset_password(
         db=db, target_user_id=user_id, action="given a password")
 
     try:
-        user = await UserService.reset_password(user_id, password_data.new_password, db)
+        # Same rule as update_user: resetting another account hands over a
+        # known credential and must be rotated; resetting your own does not.
+        user = await UserService.reset_password(
+            user_id, password_data.new_password, db,
+            force_rotation=(user_id != current_user.id),
+        )
         logger.info(f"[RESET_PASSWORD_ROUTE] ✅✅✅ Password reset successful for user: {user.username} (ID: {user.id})")
         return {"message": f"Password reset successfully for user {user.username}"}
     except ValueError as e:
@@ -634,7 +652,8 @@ async def unblock_user(
             blocked_at=user.blocked_at.isoformat() if user.blocked_at else None,
             created_at=user.created_at.isoformat(),
             last_login=user.last_login.isoformat() if user.last_login else None,
-            pipeline_ids=pipeline_ids
+            pipeline_ids=pipeline_ids,
+            must_change_password=bool(getattr(user, "must_change_password", False)),
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

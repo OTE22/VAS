@@ -395,6 +395,12 @@
         const messageContent = document.createElement('div');
         messageContent.className = isReport ? 'message-content report-message'
             : `message-content ${type === 'user' ? 'user' : 'assistant'}`;
+        // Bidi: an Arabic report rendered in an LTR container displays its
+        // words in scrambled order. dir="auto" + the unicode-bidi:plaintext
+        // rules in tracking.css make every paragraph resolve its own base
+        // direction, so Arabic prose flows RTL while camera names, numbers
+        // and English lines stay readable inside it.
+        messageContent.setAttribute('dir', 'auto');
 
         const messageText = document.createElement('div');
         messageText.className = 'message-text';
@@ -453,6 +459,33 @@
         return req;
     }
 
+    /**
+     * Append a download link for a document generated during a streamed turn.
+     * Same rule as the conversation renderer: the id is the only thing taken
+     * from the server, and the URL is rebuilt from it locally.
+     */
+    function appendArtifactLink(req, artifact) {
+        try {
+            const id = String((artifact && artifact.artifact_id) || '');
+            if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return;
+            const host = req && req.responseEl ? req.responseEl : null;
+            if (!host) return;
+            const wrap = document.createElement('div');
+            wrap.className = 'block-artifact';
+            const link = document.createElement('a');
+            link.className = 'artifact-download';
+            link.href = '/api/sql-agent/artifacts/' + encodeURIComponent(id);
+            link.rel = 'noopener noreferrer';
+            link.setAttribute('download', '');
+            link.textContent = String((artifact && artifact.title) || 'Report')
+                + '  (' + String((artifact && artifact.artifact_type) || 'file').toUpperCase() + ')';
+            wrap.appendChild(link);
+            host.appendChild(wrap);
+        } catch (e) {
+            /* a missing link must never break the stream */
+        }
+    }
+
     function appendRawContent(req, chunk) {
         if (!chunk) return;
         if (req.raw.length + chunk.length > MAX_RAW_RESPONSE_CHARS) {
@@ -472,7 +505,8 @@
         req.finalized = true;
         req.state = outcome;
 
-        if (req.typingEl) { req.typingEl.remove(); req.typingEl = null; }
+        if (req.patienceTimer) { clearTimeout(req.patienceTimer); req.patienceTimer = null; }
+        if (req.typingEl) { req.typingEl.remove(); req.typingEl = null; req.typingLabelEl = null; }
         try { req.controller.abort(); } catch (e) { /* ignore */ }
 
         if (req.responseEl) {
@@ -485,6 +519,7 @@
                     req.responseEl.appendChild(note);
                 }
                 if (req.raw.trim()) addResponseTools(req);
+                if (req.artifact) appendArtifactLink(req, req.artifact);
             } else if (outcome === 'cancelled') {
                 req.responseEl.textContent = 'Generation stopped.';
             } else if (outcome === 'interrupted') {
@@ -599,13 +634,30 @@
         const req = createRequest(query, conversationId);
         activeRequestId = req.id;
 
-        // Typing indicator + response container with PER-REQUEST ids
+        // Typing indicator + response container with PER-REQUEST ids.
+        // The status text is VISIBLE (ChatGPT-style "Thinking…"), not only an
+        // aria-label: the pipeline runs several LLM steps before the first
+        // content token, and a silent row of dots reads as "hung".
         const typing = document.createElement('div');
         typing.className = 'typing-indicator';
         typing.id = `typing-${req.id}`;
         for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('span'));
+        const typingLabel = document.createElement('em');
+        typingLabel.className = 'typing-label';
+        typingLabel.textContent = 'Thinking…';
+        typing.appendChild(typingLabel);
         messagesContainer.appendChild(typing);
         req.typingEl = typing;
+        req.typingLabelEl = typingLabel;
+        // Long pre-content waits get an honest patience message instead of the
+        // same three dots. Cleared the moment content arrives or the request
+        // finalizes (finalizeRequest removes typingEl, so the guard suffices).
+        req.patienceTimer = window.setTimeout(() => {
+            if (req.typingLabelEl && req.typingEl && !req.finalized) {
+                req.typingLabelEl.textContent =
+                    'Please be patient — we are processing your query…';
+            }
+        }, 15000);
 
         const responseEl = addMessage('assistant', '', true);
         if (responseEl) responseEl.id = `response-${req.id}`;
@@ -644,18 +696,28 @@
         req.lastEventAt = Date.now();
 
         switch (data.type) {
-            case 'status':
-                if (req.typingEl) req.typingEl.setAttribute('aria-label', String(data.message || ''));
+            case 'status': {
+                // Surface the pipeline stage visibly, ChatGPT-style, instead
+                // of hiding it in an aria-label nobody sees.
+                const msg = String(data.message || '');
+                if (req.typingEl) req.typingEl.setAttribute('aria-label', msg);
+                if (req.typingLabelEl && msg) req.typingLabelEl.textContent = msg;
                 req.state = 'streaming';
                 break;
+            }
             case 'heartbeat':
                 break; // liveness only
             case 'content':
                 req.state = 'streaming';
-                if (req.typingEl) { req.typingEl.remove(); req.typingEl = null; }
+                if (req.patienceTimer) { clearTimeout(req.patienceTimer); req.patienceTimer = null; }
+                if (req.typingEl) { req.typingEl.remove(); req.typingEl = null; req.typingLabelEl = null; }
                 appendRawContent(req, typeof data.content === 'string' ? data.content : '');
                 break;
             case 'complete': {
+                // Stash it; the link is appended in finalizeRequest, which
+                // re-renders responseEl from req.raw and would otherwise
+                // wipe anything added here.
+                if (data.artifact) req.artifact = data.artifact;
                 // The complete event may carry the authoritative full response
                 if (typeof data.response === 'string' && data.response.length > req.raw.length) {
                     req.raw = data.response.slice(0, MAX_RAW_RESPONSE_CHARS);
@@ -1386,7 +1448,13 @@
         } catch (e) { /* backend enforces auth regardless */ }
 
         checkSQLAgentHealth();
-        loadQueryHistory(1, false);
+        // Through refreshHistory(), NOT loadQueryHistory() directly: the
+        // conversations module owns the sidebar when it is loaded, and both
+        // modules render into the same #historyList / #historyEmpty nodes.
+        // Calling the legacy loader here raced conversations.js's own init —
+        // two concurrent fetches, last writer wins, and the sidebar showed
+        // flat query-history rows or conversation titles nondeterministically.
+        refreshHistory();
         updateConnectionStatus('connected', 'Ready');
     }
 

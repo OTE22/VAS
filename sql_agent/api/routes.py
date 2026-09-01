@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Optional, Dict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from io import BytesIO
@@ -133,6 +133,42 @@ def _get_user_lock(user_id: int) -> asyncio.Lock:
     return lock
 
 
+def _maybe_release_user_lock(user_id: int) -> bool:
+    """Reclaim a user's lock ONLY if nothing holds or awaits it.
+
+    Agent lifetime and lock lifetime are different concerns. The LRU used to
+    pop the lock together with the agent — but the agent lookup happens
+    BEFORE the lock is acquired on every transport, so with 11+ active users
+    a turn could be in flight holding lock L when its user was evicted; L was
+    dropped, the user's second tab got a fresh lock from _get_user_lock, and
+    two turns ran concurrently for one user. That concurrent read-merge-write
+    on the same session file is precisely what the lock exists to prevent.
+
+    A lock that is held, or that has waiters queued on it, therefore stays in
+    the dict no matter what happens to the agent; the next eviction of an
+    idle user reclaims it. `_waiters` is asyncio.Lock internals, so it is read
+    defensively — when in doubt, keeping a small lock object is always safer
+    than dropping a live one.
+    """
+    lock = _user_query_locks.get(user_id)
+    if lock is None:
+        return True
+    try:
+        waiters = getattr(lock, "_waiters", None)
+        busy = lock.locked() or bool(waiters)
+    except Exception:
+        busy = True
+    if busy:
+        logger.info(
+            "[SQL_AGENT_API] Keeping lock for evicted user_id=%s (held or "
+            "awaited); it will be reclaimed once idle", user_id)
+        observability.observe_eviction("lock_kept_busy")
+        return False
+    _user_query_locks.pop(user_id, None)
+    observability.observe_eviction("lock_reclaimed")
+    return True
+
+
 # user_id -> permissions_version the cached agent was built for. A cached agent
 # carries the user's scope (pipelines, features, conversation memory), so it must
 # not outlive the authorization it was built under.
@@ -200,8 +236,11 @@ def _get_or_create_user_agent(user_id: int, permissions_version: Optional[int] =
 
     while len(_user_agents) > _USER_AGENTS_MAX:
         evicted_id, _evicted = _user_agents.popitem(last=False)
-        _user_query_locks.pop(evicted_id, None)
+        # NOT _user_query_locks.pop(): a held or awaited lock must survive
+        # its agent's eviction (see _maybe_release_user_lock for the bug).
+        _maybe_release_user_lock(evicted_id)
         _user_agent_versions.pop(evicted_id, None)
+        observability.observe_eviction("agent")
         logger.info(f"[SQL_AGENT_API] Evicted LRU agent for user {evicted_id} (cap {_USER_AGENTS_MAX})")
 
     return agent
@@ -261,7 +300,24 @@ def _register_request(request_id: str, user_id, cancel_event: threading.Event) -
     if existing is not None:
         return False
     while len(_ACTIVE_REQUESTS) >= _MAX_TRACKED_REQUESTS:
-        _ACTIVE_REQUESTS.popitem(last=False)
+        # Evict TERMINAL entries first. Unconditionally popping the oldest
+        # could drop a STILL-RUNNING request past 300 tracked — its cancel
+        # endpoint then 404s and its request_id becomes replayable while the
+        # query is still executing. Only if every entry is running (300
+        # simultaneous queries — far beyond the semaphore) does the oldest
+        # running one go, with a log line.
+        evicted = None
+        for key, entry in _ACTIVE_REQUESTS.items():
+            if entry.get("status") != "running":
+                evicted = key
+                break
+        if evicted is not None:
+            _ACTIVE_REQUESTS.pop(evicted, None)
+        else:
+            dropped_id, _ = _ACTIVE_REQUESTS.popitem(last=False)
+            logger.warning(
+                "[SQL_AGENT_API] request registry full of RUNNING entries; "
+                "dropped %s — its cancel handle is gone", dropped_id)
     _ACTIVE_REQUESTS[request_id] = {
         "cancel_event": cancel_event,
         "user_id": user_id,
@@ -328,6 +384,9 @@ def require_sql_agent_csrf(request: Request):
 # — so on SSE and WebSocket no violation was ever recorded and no account was
 # ever blocked, while the user was told on every attempt that theirs had been.
 # ---------------------------------------------------------------------------
+from sql_agent.services import artifact_registry              # noqa: E402
+from sql_agent.tools.agent_tools import translate_document_text  # noqa: E402
+from sql_agent import observability                            # noqa: E402
 from sql_agent.security_policy import (                        # noqa: E402
     OUTCOME_BLOCKED,
     OUTCOME_ENFORCEMENT_FAILED,
@@ -345,7 +404,8 @@ _SECURITY_VIOLATION_THRESHOLD = 3          # kept for existing imports/tests
 async def _handle_security_denial(current_user, query: str, reason: str,
                                   execution_time_ms: float, session_id=None,
                                   transport: str = TRANSPORT_REST,
-                                  reason_code: str = REASON_FORBIDDEN_SQL) -> dict:
+                                  reason_code: str = REASON_FORBIDDEN_SQL,
+                                  actor: str = "user") -> dict:
     """Apply the policy and return the transport-agnostic error body.
 
     Thin by design: the decision belongs to security_policy.apply_security_policy
@@ -362,6 +422,9 @@ async def _handle_security_denial(current_user, query: str, reason: str,
         query=query,
         execution_time_ms=execution_time_ms,
         session_id=session_id,
+        # Only what the USER wrote can count against the user. Everything the
+        # SQL layers refuse was written by the model.
+        attributable=(actor == "user"),
     )
 
     body = _error_body(outcome.error_code, outcome.message, outcome.reference_id)
@@ -517,7 +580,7 @@ def _spawn_background(coro):
     return task
 
 
-async def await_persistence_despite_disconnect(coro, request_id: str) -> None:
+async def await_persistence_despite_disconnect(coro, request_id: str):
     """Run a persistence coroutine so a client disconnect cannot destroy it.
 
     Why this exists
@@ -543,7 +606,10 @@ async def await_persistence_despite_disconnect(coro, request_id: str) -> None:
     """
     task = _spawn_background(coro)
     try:
-        await asyncio.shield(task)
+        # shield() yields the task's OWN result, which this used to discard.
+        # Returning it lets a caller keep, for example, the history row id it
+        # just wrote; callers that ignore it are unaffected.
+        return await asyncio.shield(task)
     except asyncio.CancelledError:
         if not task.done():
             logger.info(
@@ -708,6 +774,12 @@ async def persist_query_history(
         sql_text = (metadata or {}).get("sql")
         if sql_text:
             assistant_blocks.append({"type": "sql", "sql": str(sql_text)})
+        artifact_block = (metadata or {}).get("artifact")
+        if artifact_block:
+            # Carries an id, a title and a URL — never the document body and
+            # never its source_content. Reading it still requires the
+            # ownership-checked download route.
+            assistant_blocks.append(dict(artifact_block, type="artifact"))
         if not assistant_blocks:
             assistant_blocks.append({"type": "text", "text": ""})
 
@@ -953,7 +1025,25 @@ async def sql_agent_query(
         
         logger.info(f"[SQL_AGENT_API] Processing query: {query[:100]}...")
         start_time = asyncio.get_event_loop().time()
-        
+
+        # Idempotency — the same contract SSE and WS have always had, which
+        # REST lacked: a client retry or double-click re-ran the whole
+        # pipeline, and if that turn produced a document it rendered and
+        # registered a SECOND artifact. A client that sends request_id gets
+        # exactly-once acceptance; one that doesn't gets a minted id and
+        # keeps today's behaviour.
+        rest_request_id = _normalize_request_id(request.get("request_id"))
+        rest_cancel_event = threading.Event()
+        if not _register_request(rest_request_id, getattr(current_user, "id", None),
+                                 rest_cancel_event):
+            return JSONResponse(
+                status_code=409,
+                content=_error_body(
+                    "DUPLICATE_REQUEST",
+                    "This request was already received and is being processed.",
+                ),
+            )
+
         # Get or create user-specific agent instance for persistent memory
         agent_instance = _sql_agent_instance
         user_id = None
@@ -990,6 +1080,10 @@ async def sql_agent_query(
                 try:
                     await asyncio.wait_for(_sql_agent_semaphore.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
                 except asyncio.TimeoutError:
+                    # Busy is retryable BY DESIGN, so the idempotency entry is
+                    # removed outright — keeping it would 409 the very retry
+                    # the message invites.
+                    _ACTIVE_REQUESTS.pop(rest_request_id, None)
                     return JSONResponse(
                         status_code=503,
                         content={"success": False, "error": _BUSY_MESSAGE, "response": None},
@@ -1002,6 +1096,9 @@ async def sql_agent_query(
                         await user_lock.acquire()
                         lock_acquired = True
                     logger.info(f"[SQL_AGENT_API] Starting query with {QUERY_TIMEOUT}s timeout: {query[:100]}...")
+                    # The shared lifecycle, inside the user's lock — the same
+                    # call SSE and WS make, so the transports cannot drift.
+                    await prepare_turn(agent_instance, current_user)
                     agent_result = await asyncio.wait_for(
                         run_in_threadpool(agent_instance.query, query),
                         timeout=QUERY_TIMEOUT
@@ -1012,6 +1109,7 @@ async def sql_agent_query(
                     _sql_agent_semaphore.release()
             except asyncio.TimeoutError:
                 logger.error(f"[SQL_AGENT_API] Query timeout after {QUERY_TIMEOUT} seconds: {query[:100]}")
+                _finish_request(rest_request_id, "failed")
                 return JSONResponse(
                     status_code=504,
                     content={
@@ -1047,10 +1145,14 @@ async def sql_agent_query(
                     transport=TRANSPORT_REST,
                     reason_code=result_dict.get("security_reason_code",
                                                 REASON_FORBIDDEN_SQL),
+                    # Defaults to "user" when absent, keeping the stricter
+                    # behaviour for any site that has not declared itself.
+                    actor=result_dict.get("security_block_actor", "user"),
                 )
                 security_violation_detected = True
                 # _client_body strips the internal _policy annotation; the client
                 # sees only error.code / message / reference_id.
+                _finish_request(rest_request_id, "failed")
                 return JSONResponse(status_code=403, content=_client_body(denial))
         except Exception as agent_error:
             logger.error(f"[SQL_AGENT_API] Agent execution error: {str(agent_error)}", exc_info=True)
@@ -1063,7 +1165,8 @@ async def sql_agent_query(
                 error_message = "Database connection error. Please try again later."
             else:
                 error_message = "The assistant could not process this query. Please try again."
-            
+
+            _finish_request(rest_request_id, "failed")
             return JSONResponse(
                 status_code=500,
                 content={
@@ -1126,6 +1229,7 @@ async def sql_agent_query(
             # Awaited (not fire-and-forget) so it reliably commits before this
             # request returns; the core insert is fast (embeddings run in the
             # background) so the added latency is negligible.
+            artifact_block = None
             if AUTH_AVAILABLE and current_user:
                 metadata = {}
                 if result_dict:
@@ -1137,29 +1241,38 @@ async def sql_agent_query(
                         result_data = result_dict.get("query_result", {})
                         if isinstance(result_data, dict):
                             metadata["row_count"] = result_data.get("row_count", 0)
+                    response, artifact_block = await complete_turn_document(
+                        agent_instance, current_user, response)
+                    if artifact_block:
+                        # Into the metadata so the conversation message gets an
+                        # artifact block, and onto the response body so the UI
+                        # can offer the download immediately.
+                        metadata["artifact"] = artifact_block
 
-                # Shielded: a client that aborts while this handler is finishing
-                # would otherwise cancel the save mid-commit and lose the row
-                # (see await_persistence_despite_disconnect).
-                await await_persistence_despite_disconnect(
-                    persist_query_history(
-                        user_id=current_user.id,
-                        query=query,
-                        response=response,
-                        session_id=session_id,
-                        success=True,
-                        processing_time_ms=execution_time_ms,
-                        metadata=metadata,
-                    ),
-                    "query-sync",
+                await finalize_turn(
+                    agent_instance,
+                    user_id=current_user.id,
+                    query=query,
+                    response=response,
+                    session_id=session_id,
+                    success=True,
+                    processing_time_ms=execution_time_ms,
+                    metadata=metadata,
+                    request_label="query-sync",
                 )
 
-        return {
+        body = {
             "success": True,
             "response": response,
             "session_id": session_id,
             "timestamp": datetime.utcnow().isoformat()
         }
+        if artifact_block:
+            # The id and a download URL — the document itself is fetched from
+            # the ownership-checked route, never inlined here.
+            body["artifact"] = artifact_block
+        _finish_request(rest_request_id, "completed")
+        return body
     
     except Exception as e:
         logger.error(f"[SQL_AGENT_API] Unexpected error: {str(e)}", exc_info=True)
@@ -1287,6 +1400,9 @@ async def sql_agent_query_stream(
 
         async def stream_query():
             final_response = None
+            # An artifact produced mid-stream, recorded on the conversation
+            # message alongside the narrative.
+            stream_artifact_block = None
             stream_start_time = asyncio.get_event_loop().time()
             stream_success = False
             completion_sent = False
@@ -1325,6 +1441,11 @@ async def sql_agent_query_stream(
                 if user_lock is not None:
                     await user_lock.acquire()
                     lock_acquired = True
+
+                # The shared lifecycle. This transport NOT calling it is how
+                # "same report but camera 3" silently bound to recency on the
+                # very transport the browser uses.
+                await prepare_turn(agent_instance, current_user)
 
                 # TRUE streaming: dedicated thread pumps updates into an asyncio
                 # queue; each update is forwarded to the client the moment the
@@ -1435,6 +1556,8 @@ async def sql_agent_query_stream(
                                     getattr(agent_instance, "conversation_memory", None),
                                     "current_session_id", None),
                                 transport=TRANSPORT_SSE,
+                                actor=update.get("security_block_actor",
+                                                 "user"),
                                 reason_code=update.get("security_reason_code",
                                                        REASON_FORBIDDEN_SQL),
                             )
@@ -1448,6 +1571,25 @@ async def sql_agent_query_stream(
                             completion_sent = True
                             stream_success = False
                             break
+
+                        # A document the graph rendered but could not persist:
+                        # finish it BEFORE the completion event is serialised,
+                        # so the client learns about it in the same event and
+                        # the conversation message records it. The payload
+                        # itself (raw bytes) never travels here — the agent
+                        # holds it and complete_turn_document takes it.
+                        if update.get("type") == "complete" and update.get("has_document"):
+                            update.pop("has_document", None)
+                            streamed_response, streamed_block = \
+                                await complete_turn_document(
+                                    agent_instance, current_user,
+                                    update.get("response") or final_response or "")
+                            if streamed_block:
+                                update["artifact"] = streamed_block
+                                stream_artifact_block = streamed_block
+                            if streamed_response:
+                                update["response"] = streamed_response
+                        update.pop("has_document", None)
 
                         # Format as SSE (request_id + sequence on every event)
                         yield evt(update)
@@ -1616,15 +1758,22 @@ async def sql_agent_query_stream(
                         except Exception as audit_error:
                             logger.error(f"[SQL_AGENT_API] Error logging audit: {audit_error}", exc_info=True)
                         try:
-                            await persist_query_history(
+                            # The shared lifecycle funnel. Already inside the
+                            # shielded _persist_outcome, so finalize_turn's own
+                            # shield is redundant here but harmless — one
+                            # funnel beats a bespoke persist per transport.
+                            await finalize_turn(
+                                agent_instance,
                                 user_id=stream_user_id,
                                 query=query,
                                 response=final_response,
                                 session_id=session_id,
                                 success=stream_success,
                                 processing_time_ms=stream_time_ms,
-                                metadata={},
+                                metadata=({"artifact": stream_artifact_block}
+                                          if stream_artifact_block else {}),
                                 conversation_id=stream_conversation_id,
+                                request_label=request_id,
                             )
                         except Exception as history_error:
                             logger.error(f"[SQL_AGENT_API] Error saving history: {history_error}", exc_info=True)
@@ -1890,6 +2039,11 @@ async def sql_agent_websocket(websocket: WebSocket):
                     await user_lock.acquire()
                     lock_acquired = True
 
+                # The shared lifecycle — same call as REST and SSE, so this
+                # transport can no longer drift (it used to skip the artifact
+                # index AND discard rendered documents).
+                await prepare_turn(agent_instance, current_user)
+
                 # TRUE streaming bridge: agent runs in its own thread, updates are
                 # forwarded as they arrive — the blocking generator is never
                 # iterated on the event loop.
@@ -1899,6 +2053,9 @@ async def sql_agent_websocket(websocket: WebSocket):
                 deadline = asyncio.get_event_loop().time() + SQL_AGENT_TOTAL_TIMEOUT
 
                 accumulated_response = ""
+                # A document completed during this turn, recorded on the
+                # conversation message alongside the narrative.
+                ws_artifact_block = None
                 query_success = False
                 last_heartbeat = asyncio.get_event_loop().time()
                 while True:
@@ -1944,6 +2101,7 @@ async def sql_agent_websocket(websocket: WebSocket):
                                 getattr(agent_instance, "conversation_memory", None),
                                 "current_session_id", None),
                             transport=TRANSPORT_WEBSOCKET,
+                            actor=update.get("security_block_actor", "user"),
                             reason_code=update.get("security_reason_code",
                                                    REASON_FORBIDDEN_SQL),
                         )
@@ -1966,6 +2124,22 @@ async def sql_agent_websocket(websocket: WebSocket):
                             await websocket.close(code=1008, reason="ACCOUNT_BLOCKED")
                             return
                         break
+
+                    # Finish pending document work BEFORE the completion event
+                    # is sent, so the client learns about the artifact in the
+                    # same frame. This transport used to skip this entirely —
+                    # a document rendered over WS sat in _pending_document and
+                    # was silently overwritten by the next turn.
+                    if update.get("type") == "complete" and update.get("has_document"):
+                        update.pop("has_document", None)
+                        ws_doc_response, ws_artifact_block = await complete_turn_document(
+                            agent_instance, current_user,
+                            update.get("response") or accumulated_response or "")
+                        if ws_artifact_block:
+                            update["artifact"] = ws_artifact_block
+                        if ws_doc_response:
+                            update["response"] = ws_doc_response
+                    update.pop("has_document", None)
 
                     await websocket.send_json(ws_evt(update))
 
@@ -1993,22 +2167,21 @@ async def sql_agent_websocket(websocket: WebSocket):
                         ws_session_id = agent_instance.conversation_memory.current_session_id
                     except Exception:
                         pass
-                    # Shielded: the client has already received the terminal WS
-                    # message at this point, so a socket close right now — the
-                    # normal "user got their answer and left" case — would
-                    # cancel this save mid-commit and lose the row.
-                    await await_persistence_despite_disconnect(
-                        persist_query_history(
-                            user_id=current_user.id,
-                            query=query,
-                            response=accumulated_response or None,
-                            session_id=ws_session_id,
-                            success=query_success,
-                            processing_time_ms=ws_time_ms,
-                            metadata={},
-                            conversation_id=ws_conversation_id,
-                        ),
-                        request_id,
+                    # The shared lifecycle funnel: shielded persist (the client
+                    # has its answer and often closes the socket right now) plus
+                    # the working-memory row pointer — same as REST and SSE.
+                    await finalize_turn(
+                        agent_instance,
+                        user_id=current_user.id,
+                        query=query,
+                        response=accumulated_response or None,
+                        session_id=ws_session_id,
+                        success=query_success,
+                        processing_time_ms=ws_time_ms,
+                        metadata=({"artifact": ws_artifact_block}
+                                  if ws_artifact_block else {}),
+                        conversation_id=ws_conversation_id,
+                        request_label=request_id,
                     )
 
             except WebSocketDisconnect:
@@ -2168,7 +2341,13 @@ async def sql_agent_new_session(
 
     try:
         agent_instance = _scoped_agent(current_user)
-        session_id = agent_instance.conversation_memory.start_session()
+        memory = agent_instance.conversation_memory
+        session_id = memory.start_session()
+        # start_session RELOADS the user's persistent session; on its own this
+        # endpoint therefore returned the same accumulated conversation and
+        # called it new. Clear it, so "new session" means what it says and a
+        # caller has some way to start over.
+        memory.reset_session()
         logger.info(f"[SQL_AGENT_API] New session created for user {_uid(current_user)}")
         return {
             "success": True,
@@ -2260,36 +2439,23 @@ async def sql_agent_load_session(
         raise HTTPException(status_code=500, detail="Could not load the session.")
 
 
-# Export Models — server-enforced size limits (Pydantic rejects oversize)
-class ExportRequest(BaseModel):
-    content: str  # validated in _sanitize_export below
-    title: str
-    timestamp: str
 
 
-_EXPORT_MAX_CONTENT_CHARS = 500_000
-_EXPORT_MAX_TITLE_CHARS = 200
-# Bounded concurrent document generation (reportlab/docx are CPU-bound)
-_export_semaphore = asyncio.Semaphore(4)
-
-
-def _sanitize_export(request: "ExportRequest"):
-    """Size limits + markup-injection prevention for document generation.
-
-    reportlab's Paragraph parses XML-ish markup — raw '<'/'&' from the model
-    or browser must be escaped BEFORE we selectively re-allow <b>/<i>.
-    Returns (safe_title, safe_content, safe_date) or raises 413/422.
-    """
-    from xml.sax.saxutils import escape as _xml_escape
-    if len(request.content) > _EXPORT_MAX_CONTENT_CHARS:
-        raise HTTPException(status_code=413, detail="Export content too large")
-    title = re.sub(r'[<>&\x00-\x1f]', '', request.title or 'Intelligence Report').strip()
-    title = title[:_EXPORT_MAX_TITLE_CHARS] or 'Intelligence Report'
-    content = _xml_escape(request.content)
-    # Safe date for the filename (never trust raw client timestamp strings)
-    safe_date = datetime.utcnow().strftime('%Y-%m-%d')
-    return title, content, safe_date
-
+# Export models and document rendering live in sql_agent/services/
+# export_builders.py: the agent's graph nodes render documents too, and
+# importing this module from a node would be a cycle (routes imports the
+# agent). The endpoints below are the HTTP boundary over that code — they
+# wrap the returned bytes in the same Response they always did.
+from sql_agent.services.export_builders import (   # noqa: E402
+    ExportRequest,
+    _ARABIC_CHAR,
+    _build_pdf_export,
+    _build_word_export,
+    _export_semaphore,
+    _sanitize_export,
+    detect_language,
+    render_and_register,
+)
 
 @router.post("/export/pdf")
 async def export_to_pdf(
@@ -2304,112 +2470,17 @@ async def export_to_pdf(
     logger.info("[EXPORT] format=pdf user_id=%s content_chars=%d",
                 current_user.id if current_user else None, len(request.content))
     async with _export_semaphore:
-        return await asyncio.wait_for(
+        pdf_bytes = await asyncio.wait_for(
             run_in_threadpool(_build_pdf_export, safe_title, safe_content, safe_date,
                               current_user.username if current_user else 'System'),
             timeout=60.0,
         )
+    return await _respond_with_export(
+        pdf_bytes, "pdf", safe_title, safe_date, request, current_user)
 
 
-def _build_pdf_export(safe_title: str, safe_content: str, safe_date: str, analyst: str):
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import letter, A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import inch
-        
-        # Create PDF in memory
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter, 
-                                rightMargin=72, leftMargin=72,
-                                topMargin=72, bottomMargin=72)
-        
-        # Container for PDF content
-        story = []
-        styles = getSampleStyleSheet()
-        
-        # Custom styles
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=18,
-            textColor=colors.HexColor('#00ff96'),
-            spaceAfter=30,
-            alignment=1  # Center
-        )
-        
-        header_style = ParagraphStyle(
-            'CustomHeader',
-            parent=styles['Heading2'],
-            fontSize=14,
-            textColor=colors.HexColor('#00ff96'),
-            spaceAfter=12
-        )
-        
-        body_style = ParagraphStyle(
-            'CustomBody',
-            parent=styles['Normal'],
-            fontSize=11,
-            textColor=colors.black,
-            leading=14,
-            spaceAfter=12
-        )
-        
-        # Add title
-        title = Paragraph(f"<b>INTELLIGENCE REPORT</b>", title_style)
-        story.append(title)
-        story.append(Spacer(1, 0.2*inch))
 
-        # Add metadata (all values pre-sanitized in _sanitize_export)
-        metadata = f"<b>Query:</b> {safe_title}<br/>"
-        metadata += f"<b>Generated:</b> {safe_date}<br/>"
-        metadata += f"<b>Analyst:</b> {re.sub(r'[<>&]', '', analyst)}"
-        story.append(Paragraph(metadata, body_style))
-        story.append(Spacer(1, 0.3*inch))
 
-        # Content arrives XML-escaped; re-allow ONLY escaped bold/italic markers
-        content = safe_content
-        content = content.replace('&lt;br&gt;', '\n').replace('&lt;br/&gt;', '\n')
-        content = re.sub(r'&lt;strong&gt;(.*?)&lt;/strong&gt;', r'<b>\1</b>', content)
-        content = re.sub(r'&lt;em&gt;(.*?)&lt;/em&gt;', r'<i>\1</i>', content)
-
-        # Split into paragraphs
-        paragraphs = content.split('\n\n')
-        for para in paragraphs:
-            if para.strip():
-                # Clean up the paragraph
-                para = para.strip().replace('\n', '<br/>')
-                story.append(Paragraph(para, body_style))
-                story.append(Spacer(1, 0.1*inch))
-        
-        # Build PDF
-        doc.build(story)
-        
-        # Get PDF bytes
-        buffer.seek(0)
-        pdf_bytes = buffer.getvalue()
-        buffer.close()
-        
-        # Return PDF as response — filename is server-built, never client input
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'attachment; filename="Intelligence_Report_{safe_date}.pdf"'
-            }
-        )
-    except ImportError:
-        logger.error("[EXPORT] reportlab not installed. Install with: pip install reportlab")
-        raise HTTPException(
-            status_code=500,
-            detail="PDF export is not available on this server."
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[EXPORT] PDF export error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to generate PDF")
 
 
 @router.post("/export/word")
@@ -2425,89 +2496,566 @@ async def export_to_word(
     logger.info("[EXPORT] format=word user_id=%s content_chars=%d",
                 current_user.id if current_user else None, len(request.content))
     async with _export_semaphore:
-        return await asyncio.wait_for(
+        word_bytes = await asyncio.wait_for(
             run_in_threadpool(_build_word_export, safe_title, request.content, safe_date,
                               current_user.username if current_user else 'System'),
             timeout=60.0,
         )
+    return await _respond_with_export(
+        word_bytes, "word", safe_title, safe_date, request, current_user)
 
 
-def _build_word_export(safe_title: str, raw_content: str, safe_date: str, analyst: str):
+_DURABLE_MEMORY_MAX_CHARS = 500
+
+
+# ---------------------------------------------------------------------------
+# THE TURN LIFECYCLE. One contract, three transports.
+#
+# REST, SSE and WebSocket each used to hand-roll their own pre/post-turn
+# sequence, and the sequences drifted: the artifact index and durable memory
+# were loaded only on REST — so on SSE (the transport the browser uses)
+# "same report but camera 3" silently bound to recency instead of lineage,
+# and WebSocket discarded rendered documents outright. The drift IS the bug
+# class; these functions are its fix. A transport may add framing around
+# them; it may not reimplement them.
+#
+#   prepare_turn()          before the graph runs, inside the user's lock
+#   complete_turn_document() at the transport's completion boundary
+#   finalize_turn()          after the terminal event has been sent
+# ---------------------------------------------------------------------------
+
+async def prepare_turn(agent_instance, current_user) -> None:
+    """Load everything a turn needs before the graph runs — every transport.
+
+    Owner-scoped artifact index + source-SQL map (what "the last report" may
+    refer to, and which query it came from), and the user's durable memories.
+    Authorization freshness stays transport-specific: REST checks via
+    dependency, the streams via check_authorization_fresh on their heartbeat.
+
+    Never fatal: a failed load costs reference resolution, not the turn.
+    """
+    await _refresh_artifact_index(agent_instance, current_user)
+    await _refresh_identity_index(agent_instance, current_user)
     try:
-        from docx import Document
-        from docx.shared import Inches, Pt, RGBColor
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        session_id = agent_instance.conversation_memory.current_session_id
+    except Exception:
+        session_id = None
+    agent_instance.set_durable_memory(
+        await _durable_memory_section(current_user, session_id))
 
-        # Create Word document
-        doc = Document()
-        
-        # Set document margins
-        sections = doc.sections
-        for section in sections:
-            section.top_margin = Inches(1)
-            section.bottom_margin = Inches(1)
-            section.left_margin = Inches(1)
-            section.right_margin = Inches(1)
-        
-        # Add title
-        title = doc.add_heading('INTELLIGENCE REPORT', 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        title_run = title.runs[0]
-        title_run.font.color.rgb = RGBColor(0, 255, 150)  # #00ff96
-        
-        # Add metadata (sanitized title, server date; docx runs are plain text)
-        doc.add_paragraph(f'Query: {safe_title}')
-        doc.add_paragraph(f'Generated: {safe_date}')
-        doc.add_paragraph(f'Analyst: {analyst}')
-        doc.add_paragraph()  # Empty line
 
-        # Add content
-        content = raw_content
-        # Clean HTML
-        content = re.sub(r'<br\s*/?>', '\n', content)
-        content = re.sub(r'<strong>(.*?)</strong>', r'\1', content)  # Remove strong tags
-        content = re.sub(r'<em>(.*?)</em>', r'\1', content)  # Remove em tags
-        content = re.sub(r'<[^>]+>', '', content)  # Remove remaining HTML tags
-        
-        # Split into paragraphs
-        paragraphs = content.split('\n\n')
-        for para in paragraphs:
-            if para.strip():
-                p = doc.add_paragraph(para.strip())
-                p.style.font.size = Pt(11)
-                p.style.font.name = 'Calibri'
-        
-        # Save to BytesIO
-        buffer = BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        word_bytes = buffer.getvalue()
-        buffer.close()
-        
-        # Return Word document — filename is server-built, never client input
-        return Response(
-            content=word_bytes,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": f'attachment; filename="Intelligence_Report_{safe_date}.docx"'
-            }
-        )
-    except ImportError:
-        logger.error("[EXPORT] python-docx not installed. Install with: pip install python-docx")
-        raise HTTPException(
-            status_code=500,
-            detail="Word export is not available on this server."
-        )
-    except HTTPException:
-        raise
+async def complete_turn_document(agent_instance, current_user, response_text,
+                                 conversation_id=None):
+    """Finish document work the graph left pending. Returns (text, block).
+
+    Runs at the transport's completion boundary — BEFORE the terminal event
+    is serialized on a stream, so the client learns about the document in the
+    same event — and must be called on every transport: a transport that
+    skips it discards rendered documents (WebSocket did exactly that).
+    """
+    return await _finish_pending_document(
+        agent_instance, current_user, response_text,
+        conversation_id=conversation_id)
+
+
+async def finalize_turn(agent_instance, *, user_id, query, response, session_id,
+                        success, processing_time_ms, metadata,
+                        conversation_id=None, request_label="turn") -> None:
+    """Persist the turn and let working memory point at it — every transport.
+
+    History is written through the disconnect shield (the client often hangs
+    up the moment it has its answer; the commit must survive that), and the
+    resulting row id is recorded into working_context.last_result so a later
+    "show me all of those" has a durable reference.
+    """
+    saved_history_id = await await_persistence_despite_disconnect(
+        persist_query_history(
+            user_id=user_id, query=query, response=response,
+            session_id=session_id, success=success,
+            processing_time_ms=processing_time_ms, metadata=metadata or {},
+            conversation_id=conversation_id,
+        ),
+        request_label,
+    )
+    # OFF THE EVENT LOOP. _remember_result_row_id writes the session file:
+    # read + fsync + os.replace, guarded by a threading.Lock that the agent's
+    # own stream THREAD also takes for its message saves. Calling it directly
+    # from async code makes the event loop wait on a lock held by a worker
+    # thread — which stalls every request in the process, including
+    # /health/live. Observed live 2026-08-30: six minutes of total silence,
+    # no logs, not even the loop-lag watchdog (it could not run either).
+    await run_in_threadpool(_remember_result_row_id, agent_instance,
+                            saved_history_id)
+
+
+async def _durable_memory_section(current_user, session_id) -> str:
+    """The user's stored memories, as a short block for the prompts.
+
+    `get_context_for_query` has existed and been maintained for a long time
+    with NO caller on the query path: memories were written on every turn and
+    read by nothing, so the agent forgot preferences it had explicitly
+    recorded. All five prompts already consume `conversation_context`, so
+    appending here needs no prompt changes at all.
+
+    Bounded hard. This text goes into every prompt, and an unbounded memory
+    list would crowd out the actual question on a small local model.
+    """
+    user_id = getattr(current_user, "id", None)
+    if user_id is None:
+        return ""
+    try:
+        async with db_manager.get_session() as db:
+            context = await user_query_history_service.get_context_for_query(
+                db, user_id=user_id, session_id=session_id,
+                recent_limit=0, memory_limit=6)
     except Exception as e:
-        logger.error(f"[EXPORT] Word export error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to generate Word document")
+        logger.warning("[MEMORY] durable memory unavailable: %s", e)
+        observability.observe_memory_failure("durable_memory_load")
+        return ""
+
+    memories = context.get("memories") or []
+    if not memories:
+        return ""
+    lines = []
+    for memory in memories:
+        entry = f"- {memory.get('key')}: {memory.get('value')}"
+        if len("\n".join(lines)) + len(entry) > _DURABLE_MEMORY_MAX_CHARS:
+            break
+        lines.append(entry)
+    if not lines:
+        return ""
+    return ("\n[durable memory - things this user told you earlier. Use them "
+            "only if relevant; never quote this label]\n" + "\n".join(lines)
+            + "\n[end of durable memory]\n")
+
+
+def _remember_result_row_id(agent_instance, history_id) -> None:
+    """Attach the history row id to the working context's last_result.
+
+    The preview in working memory is deliberately tiny; this is the pointer
+    back to the full result, which user_query_history already stores under the
+    conversation-data policy. Written after the fact because the row does not
+    exist until the turn has been persisted.
+
+    Never fatal: losing the pointer costs a future "show me all of those",
+    not this turn.
+    """
+    if agent_instance is None or history_id is None:
+        return
+    try:
+        memory = getattr(agent_instance, "conversation_memory", None)
+        if memory is None:
+            return
+        context = memory.get_working_context()
+        last_result = context.get("last_result")
+        if isinstance(last_result, dict) and last_result.get("history_id") is None:
+            memory.update_working_context(
+                last_result=dict(last_result, history_id=int(history_id)))
+    except Exception as e:
+        logger.warning("[MEMORY] could not record the result row id: %s", e)
+
+
+async def _refresh_identity_index(agent_instance, current_user) -> None:
+    """Hand the agent the enrolled people it may resolve a name against.
+
+    Root cause of "track ali" answering that Ali did not exist: the resolver's
+    only pool was `SELECT DISTINCT name FROM faces` — the DETECTION rows — so
+    a person who was enrolled but not yet detected was invisible.
+
+    Read through the ORM rather than the agent's SQL path because `identities`
+    is not in that path's table allowlist, and keeping it out is what stops
+    the model reading the table directly.
+
+    Never fatal: without the index the agent falls back to detected names,
+    which is the behaviour that shipped before this — a worse answer, not an
+    unsafe one.
+    """
+    if agent_instance is None:
+        return
+    try:
+        if getattr(current_user, "id", None) is None:
+            agent_instance.set_identity_index([])
+            return
+        from sqlalchemy import select
+
+        from db_models import Identity, IdentityStatus, IdentityType
+
+        async with db_manager.get_session() as db:
+            rows = await db.execute(
+                select(Identity.id, Identity.display_name)
+                .where(Identity.type == IdentityType.KNOWN,
+                       Identity.status == IdentityStatus.ACTIVE,
+                       Identity.display_name.isnot(None))
+                .order_by(Identity.display_name)
+                .limit(500))
+            agent_instance.set_identity_index(
+                [{"identity_id": str(identity_id), "display_name": display}
+                 for identity_id, display in rows.all() if display])
+    except Exception as e:
+        logger.warning("[IDENTITY] could not load the identity index: %s", e)
+        try:
+            agent_instance.set_identity_index([])
+        except Exception:
+            pass
+
+
+async def _refresh_artifact_index(agent_instance, current_user) -> None:
+    """Hand the agent the documents this caller may refer to.
+
+    Owner-scoped by the query itself, so the candidate set the planner sees
+    physically cannot contain another user's document. Never fatal: without
+    an index the agent simply cannot resolve "the last report", which is a
+    worse answer, not an unsafe one.
+    """
+    if agent_instance is None:
+        return
+    try:
+        user_id = getattr(current_user, "id", None)
+        if user_id is None:
+            agent_instance.set_artifact_index([])
+            agent_instance.set_artifact_sql_index({})
+            return
+        async with db_manager.get_session() as db:
+            agent_instance.set_artifact_index(
+                await artifact_registry.list_recent_artifacts(db, user_id, limit=3))
+            # Kept SEPARATE from the list above, which feeds a prompt and must
+            # stay free of SQL. This map only reaches the modification node.
+            agent_instance.set_artifact_sql_index(
+                await artifact_registry.get_artifact_source_sql(db, user_id, limit=3))
+    except Exception as e:
+        logger.warning("[ARTIFACT] could not load the artifact index: %s", e)
+        observability.observe_memory_failure("artifact_index_refresh")
+        try:
+            agent_instance.set_artifact_index([])
+            agent_instance.set_artifact_sql_index({})
+        except Exception:
+            pass
+
+
+async def _finish_pending_document(agent_instance, current_user, response_text,
+                                   conversation_id=None):
+    """Finish document work the graph left behind. Returns (text, block).
+
+    BOTH transports call this. The REST route and the streaming route used to
+    be a natural place for two divergent implementations — and the streaming
+    one simply did not exist, so on the transport the browser actually uses,
+    "make that a PDF" answered with a confirmation and no document.
+    """
+    pending = {}
+    try:
+        pending = agent_instance.take_pending_document() if agent_instance else {}
+    except Exception as e:
+        logger.warning("[ARTIFACT] could not read pending document work: %s", e)
+    if not pending:
+        return response_text, None
+
+    block = None
+    had_artifact_work = bool(pending.get("artifact_payload")
+                             or pending.get("translation_request"))
+    if pending.get("translation_request"):
+        translated, block = await _complete_translation(
+            pending["translation_request"], current_user,
+            agent_instance=agent_instance, conversation_id=conversation_id)
+        if translated:
+            response_text = translated
+    if pending.get("artifact_payload"):
+        block = await _persist_agent_artifact(
+            pending["artifact_payload"], current_user,
+            agent_instance=agent_instance, conversation_id=conversation_id)
+        if block is None:
+            # The node already wrote "you can download it below" — it had no
+            # way to know this would fail. Leaving that in place promises a
+            # link that is not there, which is worse than saying so.
+            response_text = (
+                "I built the document but couldn't save it, so there's no "
+                "download link. The report is above — ask me again and I'll "
+                "retry.")
+    if had_artifact_work:
+        observability.observe_document_completion(
+            "completed" if block else "failed")
+    return response_text, block
+
+
+async def _complete_translation(request: dict, current_user, agent_instance=None,
+                                conversation_id=None):
+    """Carry out a translation the graph decided on. Returns (text, block).
+
+    Ownership is re-checked HERE, against the database, even though the
+    planner could only choose from a candidate set this user owns. That set is
+    built from the same user_id, so this is defence in depth — but it is the
+    check that actually decides, and it is the reason a planner that somehow
+    named a foreign id gets a refusal rather than someone else's report.
+    """
+    artifact_id = (request or {}).get("artifact_id")
+    language = (request or {}).get("language") or "en"
+    user_id = getattr(current_user, "id", None)
+    if not artifact_id:
+        return None, None
+
+    try:
+        async with db_manager.get_session() as db:
+            artifact = await artifact_registry.get_owned_artifact(db, artifact_id, user_id)
+            if artifact is None:
+                logger.warning("[TRANSLATE] refused: artifact %s is not this user's",
+                               artifact_id)
+                return ("I couldn't find that report. It may have been removed.", None)
+            source = artifact.source_content
+            source_sql = artifact.source_sql
+            source_result_id = artifact.source_result_id
+            artifact_type = request.get("format") or artifact.type or "pdf"
+            title = artifact.title
+    except Exception as e:
+        logger.error("[TRANSLATE] could not load the artifact: %s", e)
+        return None, None
+
+    if not source:
+        # Older rows predate source_content. Regenerating is honest; parsing
+        # the PDF back would be unreliable and would destroy Arabic shaping.
+        return ("I have that report but not the text it was written from, so I "
+                "can't translate it directly. Ask me the question again and I'll "
+                "produce it in the language you want.", None)
+
+    translated = await run_in_threadpool(translate_document_text, source, language)
+
+    try:
+        from ..services import export_builders
+
+        class _Request:
+            pass
+
+        rendered_request = _Request()
+        rendered_request.content = translated
+        rendered_request.title = title
+        rendered_request.timestamp = ""
+        safe_title, safe_content, safe_date = export_builders.sanitize_export(
+            rendered_request)
+        if artifact_type == "word":
+            payload = await run_in_threadpool(
+                export_builders.build_word_bytes, safe_title, translated,
+                safe_date, "Agent")
+        else:
+            artifact_type = "pdf"
+            payload = await run_in_threadpool(
+                export_builders.build_pdf_bytes, safe_title, safe_content,
+                safe_date, "Agent")
+    except Exception as e:
+        logger.error("[TRANSLATE] re-render failed: %s", e, exc_info=True)
+        # The translation itself succeeded — hand it over as text rather than
+        # losing the work because a renderer failed.
+        return translated, None
+
+    block = await _persist_agent_artifact(
+        {"bytes": payload, "type": artifact_type, "title": title,
+         "language": language, "source_content": translated,
+         "source_sql": source_sql, "source_result_id": source_result_id,
+         # The translation IS derived from that document. This is the lineage
+         # that makes "same report but camera 3" resolvable afterwards.
+         "parent_artifact_id": artifact_id},
+        current_user, agent_instance=agent_instance, conversation_id=conversation_id)
+
+    confirmation = ("لقد أعددت **{t}** بالعربية. يمكنك تنزيله أدناه."
+                    if language == "ar"
+                    else "I've prepared **{t}** in English. You can download it below."
+                    ).format(t=title)
+    return (confirmation if block else translated), block
+
+
+async def _persist_agent_artifact(payload: dict, current_user, agent_instance=None,
+                                  conversation_id=None) -> Optional[dict]:
+    """Commit a document the agent rendered, and describe it for the client.
+
+    Graph nodes are synchronous, so the node produced bytes and this — the
+    async layer — writes them, through the SAME render_and_register the HTTP
+    export uses. Returns the block the UI needs, or None.
+
+    Failing here costs the user the download link, never the answer: the
+    narrative is already in the response.
+    """
+    if not payload or not payload.get("bytes"):
+        return None
+    user_id = getattr(current_user, "id", None)
+    try:
+        async with db_manager.get_session() as db:
+            artifact_id = await render_and_register(
+                db, payload=payload["bytes"], artifact_type=payload.get("type", "pdf"),
+                title=payload.get("title") or "Intelligence Report",
+                language=payload.get("language") or "en",
+                user_id=user_id,
+                created_by_username=getattr(current_user, "username", None) or "System",
+                conversation_id=conversation_id,
+                source_content=payload.get("source_content"),
+                source_sql=payload.get("source_sql"),
+                source_result_id=payload.get("source_result_id"),
+                parent_artifact_id=payload.get("parent_artifact_id"),
+            )
+        if not artifact_id:
+            return None
+    except Exception as e:
+        logger.warning("[ARTIFACT] agent document not persisted: %s", e)
+        return None
+
+    # Remember it, so the NEXT turn can say "translate the last report". This
+    # writes through to the session file: the file, not this process, is what
+    # answers after a restart.
+    def _record_artifact_state():
+        """Blocking session-file writes — runs in a THREAD, never on the loop.
+
+        Every call here does read + fsync + os.replace under a threading.Lock
+        that the agent's own stream thread also takes. On the event loop that
+        makes the whole process wait on a worker thread's lock; see the note
+        in finalize_turn for the live incident.
+        """
+        memory = agent_instance.conversation_memory
+        memory.update_working_context(
+            last_artifact_id=artifact_id, last_action="generate_document")
+        # Dialogue state: a registered document is a VALIDATED tool result —
+        # commit the reference through the delta door and snapshot the task,
+        # so "go back to the previous report" has a real branch point to
+        # restore. The application commits; the model only ever proposed.
+        try:
+            from sql_agent import dialogue_state as ds
+            current = ds.migrate_state(
+                (memory.get_working_context() or {}).get("dialogue_state"))
+            turn_id = f"artifact-{artifact_id[:8]}"
+            current = ds.apply_delta(current, {
+                "operation": "REFERENCE", "field": "referenced_artifact",
+                "proposed_value": artifact_id, "source": "tool_result",
+            }, turn_id=turn_id)
+            current = ds.snapshot_task(
+                current, turn_id=turn_id,
+                label=(payload.get("title") or "report")[:120])
+            memory.update_working_context(dialogue_state=current)
+        except Exception as state_error:
+            logger.info("[DIALOGUE_STATE] artifact commit skipped: %s",
+                        state_error)
+
+    try:
+        if agent_instance is not None and getattr(agent_instance,
+                                                  "conversation_memory", None):
+            await run_in_threadpool(_record_artifact_state)
+    except Exception as e:
+        logger.warning("[ARTIFACT] could not record last_artifact_id: %s", e)
+
+    return {
+        "type": "artifact",
+        "artifact_id": artifact_id,
+        "artifact_type": payload.get("type", "pdf"),
+        "title": payload.get("title") or "Intelligence Report",
+        "language": payload.get("language") or "en",
+        "url": f"/api/sql-agent/artifacts/{artifact_id}",
+    }
+
+
+_EXPORT_MEDIA_TYPES = {
+    "pdf": "application/pdf",
+    "word": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+_EXPORT_FILE_EXTENSIONS = {"pdf": "pdf", "word": "docx"}
+
+
+async def _respond_with_export(payload: bytes, artifact_type: str, safe_title: str,
+                               safe_date: str, request: "ExportRequest",
+                               current_user) -> Response:
+    """Serve the rendered document, and remember it if we can.
+
+    The Response is byte-for-byte what this endpoint has always returned —
+    same bytes, same media type, same server-built filename. The only
+    addition is an X-Artifact-Id header when the document was also persisted,
+    which is what later lets the agent resolve "make the last report Arabic".
+
+    Persistence is best-effort ON PURPOSE. The user asked for a document and
+    the document exists; failing the request because a row could not be
+    written would trade a working export for a bookkeeping error. When it
+    fails the header is simply absent — an export that is not an artifact is
+    honest, whereas a header naming a row that does not exist would not be.
+    """
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="Intelligence_Report_{safe_date}'
+            f'.{_EXPORT_FILE_EXTENSIONS[artifact_type]}"'),
+    }
+    try:
+        async with db_manager.get_session() as db:
+            artifact_id = await render_and_register(
+                db, payload=payload, artifact_type=artifact_type, title=safe_title,
+                language=detect_language(request.content),
+                # NOT _uid(): that returns a string for logging (and the
+                # literal "unknown" when absent). user_id is an integer FK.
+                user_id=getattr(current_user, "id", None),
+                created_by_username=getattr(current_user, "username", None) or "System",
+                source_query=None,
+                # The narrative the document was rendered FROM. It is lineage
+                # for a later translation, never something we serialize back.
+                source_content=request.content,
+            )
+        if artifact_id:
+            headers["X-Artifact-Id"] = artifact_id
+            # The browser cannot read a custom header on a download without
+            # being told which ones are exposed.
+            headers["Access-Control-Expose-Headers"] = "X-Artifact-Id"
+    except Exception as e:
+        logger.warning("[EXPORT] could not persist %s artifact: %s", artifact_type, e)
+
+    return Response(content=payload,
+                    media_type=_EXPORT_MEDIA_TYPES[artifact_type],
+                    headers=headers)
 
 
 # =====================================================
 # QUERY HISTORY ENDPOINTS
 # =====================================================
+
+@router.get("/artifacts/{artifact_id}")
+async def download_artifact(
+    artifact_id: str,
+    current_user: User = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+):
+    """Download a document the agent generated, by id.
+
+    Deliberately NOT served through /storage/{path}: that route authenticates
+    but performs no ownership check, so any signed-in user could read another
+    user's query output. Here the id resolves to a row that carries the owner,
+    and the path comes from that row — never from the caller.
+
+    Missing, soft-deleted and foreign artifacts all return the SAME 404 with
+    the same body. A distinguishable response would let one user enumerate
+    another user's report ids.
+    """
+    if not AUTH_AVAILABLE or not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    not_found = HTTPException(status_code=404, detail="Artifact not found")
+
+    async with db_manager.get_session() as db:
+        artifact = await artifact_registry.get_owned_artifact(
+            db, artifact_id, getattr(current_user, "id", None))
+        if artifact is None:
+            raise not_found
+        stored_type = artifact.type
+        stored_path = artifact.storage_path
+        stored_title = artifact.title
+
+    try:
+        full_path = artifact_registry._assert_inside_artifacts(
+            os.path.join(artifact_registry.artifacts_root(), stored_path))
+    except artifact_registry.ArtifactError:
+        logger.error("[ARTIFACT] stored path escapes the artifact root: id=%s", artifact_id)
+        raise not_found
+    if not os.path.isfile(full_path):
+        # The row outlived its file (manual deletion, restore gone wrong).
+        logger.warning("[ARTIFACT] row without a file: id=%s", artifact_id)
+        raise not_found
+
+    media_type = {"pdf": "application/pdf",
+                  "word": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  "report": "text/plain; charset=utf-8"}.get(stored_type, "application/octet-stream")
+    extension = {"pdf": ".pdf", "word": ".docx", "report": ".txt"}.get(stored_type, "")
+    # Filename is rebuilt from the stored title, stripped to a safe set — the
+    # title reached us from a model/user and must not steer the header.
+    safe_name = re.sub(r'[^A-Za-z0-9 ._-]', '', stored_title or "report").strip() or "report"
+    return FileResponse(path=full_path, media_type=media_type,
+                        filename=f"{safe_name[:80]}{extension}")
+
 
 @router.get("/history")
 async def get_query_history(
@@ -2584,7 +3132,9 @@ async def get_query_by_id(
     
     try:
         async with db_manager.get_session() as db:
-            query = await user_query_history_service.get_query_by_id(
+            # The explicitly scoped accessor: ownership is applied by the
+            # service, not asserted by this caller.
+            query = await user_query_history_service.get_query_by_id_for_user(
                 db=db,
                 query_id=query_id,
                 user_id=current_user.id

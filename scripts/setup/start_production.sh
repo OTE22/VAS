@@ -1,4 +1,38 @@
 #!/bin/bash
+#
+# DEPRECATED — superseded by ./deploy.sh
+# =====================================================================
+# Use:  sudo ./deploy.sh --public-origin=https://<your-host>
+#
+# This script predates the production stack and no longer matches it:
+#
+#   * it reads a repo-root `.env`, which the production compose project does
+#     not use at all (prod reads docker/.env plus the secrets/ files), so the
+#     configuration it prepares is silently ignored;
+#   * it calls `bash download.sh`, a path that no longer exists — weights are
+#     fetched by scripts/setup/download.sh and verified against
+#     weights/WEIGHTS_MANIFEST.json;
+#   * it starts a stack without generating secrets, issuing TLS certificates,
+#     creating the database roles, verifying model checksums or waiting for
+#     the `migrate` job — every one of which deploy.sh does and verifies.
+#
+# It is kept only because a site may have it in a systemd unit or a runbook of
+# its own. Running it against a production host is a mistake, so it now asks
+# to be told that on purpose.
+# =====================================================================
+
+if [ "${I_KNOW_THIS_IS_DEPRECATED:-0}" != "1" ]; then
+    cat >&2 <<'DEPRECATED'
+start_production.sh is deprecated and does not configure the production stack.
+
+  Use instead:  sudo ./deploy.sh --public-origin=https://<your-host>
+  Reference:    Docs/61_DEPLOYMENT_RUNBOOK.md
+
+To run this script anyway (it will not produce a correct production
+deployment):  I_KNOW_THIS_IS_DEPRECATED=1 bash scripts/setup/start_production.sh
+DEPRECATED
+    exit 2
+fi
 
 # Production Startup Script for Face Recognition Service
 # Handles 100+ concurrent requests, runs 24/7

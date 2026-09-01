@@ -644,8 +644,16 @@ def test_persistence_survives_cancellation_of_the_awaiting_task():
     run_on_shared_loop(scenario())
 
 
-def test_persistence_commits_to_the_database_despite_cancellation():
-    """Same, end-to-end: a REAL history row lands although the requester died."""
+def test_persistence_commits_to_the_database_despite_cancellation(chat_sandbox):
+    """Same, end-to-end: a REAL history row lands although the requester died.
+
+    chat_sandbox matters here specifically: persist_query_history dual-writes
+    into the conversation domain, and with session_id=None that path CREATES A
+    NEW CONVERSATION titled with the marker on every run. This test's original
+    cleanup deleted only the user_query_history row, so ten runs put ten
+    `cancel_survival_probe_query` threads in the admin's real sidebar. The
+    fixture removes everything the run created, whichever table it landed in.
+    """
     from sqlalchemy import text
     from db_connection import db_manager
     from sql_agent.api import routes

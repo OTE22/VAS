@@ -122,6 +122,11 @@ def test_login_response_is_minimal():
     dumped = json.dumps(body)
     for banned in ("password", "hash", "session_id", "blocked_reason", "email"):
         assert banned not in dumped.lower(), f"login response leaks '{banned}'"
+    # The rotation signal is a bare boolean and is named `rotation_required`
+    # precisely so it cannot carry the word "password" into this body. The
+    # regression admin does not need to rotate, so it must read False.
+    assert body.get("rotation_required") is False, \
+        "login must report rotation state, and this account should not need one"
 
 
 def test_backend_chooses_allowlisted_redirect():
@@ -297,7 +302,9 @@ def test_rate_limit_is_shared_state_not_frontend_only():
 def test_nginx_has_auth_specific_rate_limit():
     conf = _read(NGINX_PATH)
     assert "zone=auth_rate" in conf, "auth endpoints need their own nginx rate-limit zone"
-    assert "api/auth/(login|logout)" in conf
+    # change-password verifies the CURRENT password, so it is throttled with
+    # login rather than sitting outside the zone as an unlimited oracle.
+    assert "api/auth/(login|logout|change-password)" in conf
     assert 'add_header Cache-Control "no-store" always' in conf
 
 
@@ -535,7 +542,11 @@ def test_js_request_timeout_and_abort():
 def test_js_allowlists_redirect():
     src = _read(JS_PATH)
     assert "ALLOWED_REDIRECTS" in src
-    assert "new Set(['/home', '/dashboard'])" in src
+    # '/change-password' is a destination the backend picks for an account whose
+    # password is still the seeded or admin-assigned one. Missing from this set,
+    # safeRedirect() silently sends such a user to /dashboard instead, which
+    # then 403s them straight back.
+    assert "new Set(['/home', '/dashboard', '/change-password'])" in src
     assert "function safeRedirect" in src
     assert "data.redirect_url" in src, "the backend chooses the destination"
     assert "user.role === 'admin' ? '/home'" not in src, "frontend must not decide by role"

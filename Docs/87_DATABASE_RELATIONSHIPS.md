@@ -110,7 +110,7 @@ Format: purpose · PK · physical FKs (`→ parent.col`, delete rule) · logical
 
 ### Domain 4 — Users, auth & access
 
-**users** — accounts. PK `id`. No FKs out. `role` is a **String** (canonical values `admin|analyzer|user|observer` live in `backend/auth/capabilities.py`; only `observer|user|analyzer` are assignable via API). `is_active`, `can_use_chatbot`, `blocked_reason`, `blocked_at`, `permissions_version` (revocation channel for long-lived connections), `must_change_password`. Unique `username`, `email`. 26 child FKs. The `system` principal (`role='system'`, `is_active=false`, unusable hash) is a machine actor for audit rows.
+**users** — accounts. PK `id`. No FKs out. `role` is a **String** (canonical values `admin|analyzer|user|observer` live in `backend/auth/capabilities.py`; only `observer|user|analyzer` are assignable via API). `is_active`, `can_use_chatbot`, `blocked_reason`, `blocked_at`, `permissions_version` (revocation channel for long-lived connections), `must_change_password` (set on the bootstrap admin and on any account whose password an admin chose; gates every request until cleared), `password_changed_at` (stamped on every password write — any token whose `iat` predates it is refused 401, so changing a password ends that user's other sessions). Unique `username`, `email`. 26 child FKs. The `system` principal (`role='system'`, `is_active=false`, unusable hash) is a machine actor for audit rows.
 
 **deleted_users** — tombstone `user_id → username` written when an account is permanently deleted. PK `user_id` (the original `users.id`). **No FK in or out by design**; every `historical_*` column across the schema resolves against it. `deleted_by_user_id` LOGICAL.
 
@@ -383,6 +383,7 @@ users.role (String: admin|analyzer|user|observer)
    → canonical_role()  →  ROLE_CAPABILITIES (cumulative sets, in code — no permissions table)
    + can_use_chatbot   →  CHATBOT_USE / HISTORY_READ / HISTORY_DELETE
    − everything if !is_active
+   − everything if must_change_password  (403, before any capability is resolved)
    → EffectiveAuthorization(permissions_version)  → require_capability()
 
 parallel axis:  users ─── user_pipeline_access ─── pipelines   (admins bypass: all pipelines)
@@ -393,6 +394,8 @@ tenant axis:    organizations ─── workspaces ─── workspace_members(r
 * User↔pipeline is **many-to-many** through `user_pipeline_access` (surrogate PK, unique pair, `granted_at`).
 * Workspaces have **no owner column**; the only ownership signal is `workspace_members.role='admin'`. Deleting the last workspace admin is refused (409) unless a successor member is named.
 * `permissions_version` is bumped on every authorization change and on block/unblock/auto-block; long-lived SQL-agent connections re-read it and drop when it changes.
+* **Rotation is account state, like blocking.** `must_change_password=true` means the password was chosen by someone other than the owner (deployment seed, or an admin creating/resetting the account). It is checked in the one dependency every gated route builds on, *ahead* of the capability resolution above, so the refusal covers all of them at once. Four endpoints are exempt so the state is escapable: `GET /api/auth/me`, `POST /api/auth/logout`, `POST /api/auth/change-password`, `GET /change-password`. An admin resetting their **own** password does not set it.
+* **`password_changed_at` is a second revocation channel**, beside `permissions_version` and the Redis jti denylist: any token whose `iat` predates it is refused 401, so a password change ends every other session for that user. Being database-side, it keeps working when Redis is down — which matters, since a password change is often the response to a suspected compromise.
 * Blocking = `is_active=false, can_use_chatbot=false, blocked_reason, blocked_at` + a `user_authorization_audit_log` row (`user_blocked`) in the same transaction. Auto-block by the SQL agent goes through the same path.
 * Deletion writes a `deleted_users` tombstone and stamps `historical_user_id` across seven tables before the FKs go NULL; the account's memberships/sessions/memory/feedback/pipeline-access CASCADE.
 
@@ -780,6 +783,8 @@ erDiagram
         bool is_active
         bool can_use_chatbot
         int permissions_version "revocation channel"
+        bool must_change_password "gates every request until cleared"
+        datetime password_changed_at "second revocation channel: older tokens refused"
         datetime blocked_at
     }
     WORKSPACE_MEMBERS {

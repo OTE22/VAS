@@ -156,12 +156,17 @@ alembic upgrade head
 
 Once the tables are created:
 
-1. **Restart your application** - The default admin user will be created automatically on first startup
-2. **Sign in** with:
-   - Username: `admin`
-   - Password: `admin123`
-3. **Change the admin password** immediately in the admin panel
-4. **Create additional users** as needed
+1. **Restart your application** - one administrator is bootstrapped on startup
+   if no active admin exists
+2. **Sign in** with the username and the password from
+   `secrets/bootstrap_admin_password`. On the development CPU stack the
+   convenience credential is `admin` / `admin123`
+3. **Change the password** — you are redirected to `/change-password` and the
+   account cannot do anything else until you do. This is **not** done through
+   the admin panel: `/admin/users` is gated and will redirect you back. See
+   [`61_DEPLOYMENT_RUNBOOK.md`](61_DEPLOYMENT_RUNBOOK.md) §7
+4. **Create additional users** as needed — each must likewise change the
+   password you assign at their first sign-in
 
 ## Verification
 
