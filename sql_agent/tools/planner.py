@@ -89,6 +89,46 @@ class PlannedAction:
         return f"PlannedAction({self.action}, source={self.source})"
 
 
+# A small deterministic seam for commands whose domain intent is explicit.
+# This is deliberately not a general keyword classifier: only a complete,
+# self-contained imperative with a named subject qualifies. Contextual
+# references ("track him") and compound work ("track Ali and make a PDF")
+# still need the tool loop because they require resolution or several actions.
+_TRACK_PERSON_COMMAND = re.compile(
+    r"^\s*(?:please\s+)?track\s+(?:person\s+)?(?P<subject>.+?)\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_TRACK_SUBJECTS = frozenset({
+    "a person", "anyone", "her", "him", "it", "someone", "that person",
+    "them", "this person",
+})
+_COMPOUND_TRACK_WORDS = re.compile(r"\b(?:also|and|then)\b", re.IGNORECASE)
+
+
+def deterministic_request_plan(user_text: str) -> Optional[PlannedAction]:
+    """Recognise only unambiguous, self-contained domain commands.
+
+    A small tool-calling model may answer ``track Iron Man`` conversationally
+    even though the command is an exact database operation. Deterministic
+    routing is appropriate here because the verb, object and application
+    domain jointly remove ambiguity. The SQL pipeline still resolves the
+    person after an empty result and all generated SQL still crosses the AST
+    authorization gate.
+    """
+    match = _TRACK_PERSON_COMMAND.fullmatch(str(user_text or ""))
+    if not match:
+        return None
+
+    subject = match.group("subject").strip().strip("\"'\u201c\u201d\u2018\u2019")
+    folded = " ".join(subject.casefold().split())
+    if (not folded or folded in _CONTEXTUAL_TRACK_SUBJECTS
+            or _COMPOUND_TRACK_WORDS.search(subject)):
+        return None
+
+    return PlannedAction(
+        action="query_database", confidence=1.0, source="deterministic")
+
+
 # ------------------------------------------------------------ JSON recovery
 
 def extract_json_object(raw: str) -> Optional[dict]:
@@ -167,10 +207,29 @@ def resolve_candidates(working_context: Optional[dict],
             explicit = match
             break
 
+    # "Report" is deliberately not an artifact word. A database answer can
+    # itself be a report, and that is exactly what "make the report Arabic"
+    # means immediately after a query. Only concrete file vocabulary grants
+    # the planner permission to bind an otherwise unqualified request to a
+    # stored artifact. Conversely, an explicit reference to the response must
+    # keep pointing at the response even when a document was generated later.
+    lowered = (user_text or "").casefold()
+    explicit_document_reference = bool(re.search(
+        r"\b(?:document|file|pdf|word|docx)\b|(?:مستند|وثيقة|ملف|بي\s*دي\s*إف)",
+        lowered,
+    ))
+    explicit_response_reference = bool(re.search(
+        r"\b(?:response|answer|result|text|narrative)\b|"
+        r"(?:الرد|الإجابة|الاجابة|النتيجة|النص)",
+        lowered,
+    ))
+
     return {
         "artifacts": artifacts,
         "allowed_artifact_ids": allowed_ids,
         "explicit_artifact_id": explicit,
+        "explicit_document_reference": explicit_document_reference,
+        "explicit_response_reference": explicit_response_reference,
         "last_artifact_id": str(last_artifact_id) if last_artifact_id else None,
         "last_result": context.get("last_result"),
         "last_query": context.get("last_query"),
@@ -354,8 +413,9 @@ Choose exactly ONE action:
 - modify_previous_query: repeat the PREVIOUS question with a changed filter
   ("same but only camera 3", "same for yesterday").
 - generate_document: turn what was just produced into a file (PDF or Word).
-- translate_artifact: restate an EXISTING document in another language
-  ("make it Arabic", "the last report in English").
+- translate_artifact: translate either the latest response or an EXISTING
+  document. Use target=last_result with no artifact_id for a response; use
+  target=artifact only when the user refers to a stored file/document.
 - chat: greetings, thanks, questions about your own abilities.
 - clarify: the request refers to something that is not in the state below.
 
@@ -384,8 +444,8 @@ Examples:
 "how many people were detected yesterday" -> {"action": "query_database", "confidence": 0.95, "target": null, "artifact_id": null, "language": null, "format": null, "modification": null, "clarify_question": null}
 "track IRON MAN" -> {"action": "query_database", "confidence": 0.95, "target": null, "artifact_id": null, "language": null, "format": null, "modification": null, "clarify_question": null}
 "make that a PDF" -> {"action": "generate_document", "confidence": 0.9, "target": "last_result", "artifact_id": null, "language": null, "format": "pdf", "modification": null, "clarify_question": null}
-"make it Arabic" -> {"action": "translate_artifact", "confidence": 0.9, "target": "artifact", "artifact_id": "<id from state>", "language": "ar", "format": null, "modification": null, "clarify_question": null}
-"make the last report English" -> {"action": "translate_artifact", "confidence": 0.9, "target": "artifact", "artifact_id": "<id from state>", "language": "en", "format": null, "modification": null, "clarify_question": null}
+"make the previous response Arabic" -> {"action": "translate_artifact", "confidence": 0.9, "target": "last_result", "artifact_id": null, "language": "ar", "format": null, "modification": null, "clarify_question": null}
+"make the last PDF English" -> {"action": "translate_artifact", "confidence": 0.9, "target": "artifact", "artifact_id": "<id from state>", "language": "en", "format": null, "modification": null, "clarify_question": null}
 "same report but only for camera 3" -> {"action": "modify_previous_query", "confidence": 0.9, "target": "artifact", "artifact_id": "<id from state>", "language": null, "format": null, "modification": "only camera 3", "clarify_question": null}
 "thanks!" -> {"action": "chat", "confidence": 0.95, "target": null, "artifact_id": null, "language": null, "format": null, "modification": null, "clarify_question": null}
 "no, camera 4" -> {"action": "modify_previous_query", "confidence": 0.9, "target": "last_result", "artifact_id": null, "language": null, "format": null, "modification": "camera 4 instead of the previous camera", "clarify_question": null, "state_delta": {"operation": "REPLACE", "field": "active_camera", "proposed_value": [4], "source": "user_correction"}}
@@ -474,25 +534,48 @@ def apply_preconditions(plan: PlannedAction, candidates: dict) -> PlannedAction:
     to fail somewhere deeper; it becomes a question. This is also where an
     unqualified document reference is bound to a specific id, in Python.
     """
+    # The newest successful result is the authoritative source until a
+    # document-producing action supersedes it. A small model may still copy a
+    # stale artifact id from the candidate list for "make the report Arabic";
+    # remove that inferred id here. An id typed by the user, or concrete file
+    # language such as "PDF"/"Word document", remains an explicit artifact
+    # reference. "Previous response" always selects the response.
+    last_action = candidates.get("last_action")
+    latest_result_is_source = bool(candidates.get("last_result")) and (
+        candidates.get("explicit_response_reference")
+        or (
+            last_action not in ("generate_document", "translate_artifact")
+            and not candidates.get("explicit_document_reference")
+        )
+    )
+    if plan.action == "translate_artifact" and latest_result_is_source:
+        if not candidates.get("explicit_artifact_id"):
+            plan.artifact_id = None
+            plan.target = "last_result"
+
     # Bind an unqualified reference to a concrete document — but ONLY for the
     # actions that act on one. generate_document renders the current result or
     # narrative; giving it a default artifact would make every new document
     # claim the newest unrelated one as its parent, and lineage that records a
     # relationship which never existed is worse than no lineage.
-    if plan.action in ("translate_artifact",
-                       "modify_previous_query") and plan.artifact_id is None:
+    if (plan.action in ("translate_artifact", "modify_previous_query")
+            and plan.artifact_id is None
+            and not (plan.action == "translate_artifact"
+                     and latest_result_is_source)):
         plan.artifact_id = default_artifact_id(candidates)
 
     if plan.action == "translate_artifact":
         if not plan.artifact_id:
             if candidates.get("last_result") or candidates.get("last_query"):
-                # Nothing rendered yet, but there IS something to render:
-                # produce the document in the requested language instead of
-                # refusing on a technicality.
-                plan.action = "generate_document"
-                plan.format = plan.format or "pdf"
+                # The response itself is the source. Without an explicitly
+                # requested file format this stays an inline translation; a
+                # translation request must not manufacture a PDF/Word file.
+                # When a format WAS requested, render that translated source.
+                if plan.format:
+                    plan.action = "generate_document"
                 plan.language = plan.language or "ar"
-                plan.source += "+replanned"
+                plan.target = "last_result"
+                plan.source += "+latest-response"
             else:
                 plan.action = "clarify"
                 plan.clarify_question = plan.clarify_question or (

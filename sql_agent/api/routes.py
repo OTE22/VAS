@@ -423,7 +423,10 @@ def require_sql_agent_csrf(request: Request):
 # ever blocked, while the user was told on every attempt that theirs had been.
 # ---------------------------------------------------------------------------
 from sql_agent.services import artifact_registry              # noqa: E402
-from sql_agent.tools.agent_tools import translate_document_text  # noqa: E402
+from sql_agent.tools.agent_tools import (                       # noqa: E402
+    translate_document_text,
+    translation_failure_message,
+)
 from sql_agent import observability                            # noqa: E402
 from sql_agent.security_policy import (                        # noqa: E402
     OUTCOME_BLOCKED,
@@ -2910,6 +2913,9 @@ async def _finish_pending_document(agent_instance, current_user, response_text,
             agent_instance=agent_instance, conversation_id=conversation_id)
         if translated:
             response_text = translated
+        else:
+            response_text = translation_failure_message(
+                pending["translation_request"].get("language") or "en")
     if pending.get("artifact_payload"):
         block = await _persist_agent_artifact(
             pending["artifact_payload"], current_user,
@@ -2968,6 +2974,8 @@ async def _complete_translation(request: dict, current_user, agent_instance=None
                 "produce it in the language you want.", None)
 
     translated = await run_in_threadpool(translate_document_text, source, language)
+    if not translated:
+        return translation_failure_message(language), None
 
     try:
         from ..services import export_builders

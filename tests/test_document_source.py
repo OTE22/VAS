@@ -106,6 +106,75 @@ def test_this_turns_own_response_always_wins(monkeypatch):
     assert content == REAL_REPORT
 
 
+def test_last_result_retrieves_its_own_answer_past_a_failed_follow_up(monkeypatch):
+    """A failed translation must not hide the successful response before it."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    tools = _tools(monkeypatch, FAILURE_NOTICE)
+    tools.conversation_memory.get_recent_messages = lambda limit=12: [
+        HumanMessage(content="track Iron Man"),
+        AIMessage(content=REAL_REPORT),
+        HumanMessage(content="make the report Arabic"),
+        AIMessage(content=FAILURE_NOTICE),
+    ]
+    content = tools._document_source_text(_state(working_context={
+        "last_narrative_reportable": False,
+        "last_result": {"question": "track Iron Man", "row_count": 8},
+    }))
+
+    assert content == REAL_REPORT
+
+
+def test_a_failed_translation_is_never_returned_as_the_original(monkeypatch):
+    """An English source must never be packaged and labelled as Arabic."""
+    import sql_agent.tools.agent_tools as module
+
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("translator unavailable")
+
+    monkeypatch.setattr(module, "create_llm", _fail)
+
+    assert module.translate_document_text(REAL_REPORT, "ar") == ""
+    assert "لم يتم إنشاء" in module.translation_failure_message("ar")
+
+
+def test_arabic_document_translates_source_before_rendering(monkeypatch):
+    """The artifact language field must describe its body, not an intention."""
+    import sql_agent.tools.agent_tools as module
+
+    translated = "تقرير استخباراتي عن نتائج تتبع آيرون مان والكاميرات المرتبطة به."
+    monkeypatch.setattr(module, "translate_document_text",
+                        lambda content, language: translated)
+    tools = _tools(monkeypatch, REAL_REPORT)
+    out = tools.render_artifact(_state(
+        final_response=REAL_REPORT,
+        planned_action={"action": "generate_document", "format": "word",
+                        "language": "ar"},
+        working_context={"last_result": {"question": "track Iron Man",
+                                          "row_count": 8}},
+    ))
+
+    payload = out.get("artifact_payload") or {}
+    assert payload.get("language") == "ar"
+    assert payload.get("source_content") == translated
+    assert payload.get("type") == "word"
+
+
+def test_failed_document_translation_creates_no_mislabeled_artifact(monkeypatch):
+    import sql_agent.tools.agent_tools as module
+
+    monkeypatch.setattr(module, "translate_document_text", lambda *_args: "")
+    tools = _tools(monkeypatch, REAL_REPORT)
+    out = tools.render_artifact(_state(
+        final_response=REAL_REPORT,
+        planned_action={"action": "generate_document", "format": "word",
+                        "language": "ar"},
+    ))
+
+    assert not out.get("artifact_payload")
+    assert "لم يتم إنشاء" in out["final_response"]
+
+
 def test_with_nothing_reportable_the_user_is_asked_what_to_report_on(monkeypatch):
     """Refusing has to leave the user somewhere to go."""
     tools = _tools(monkeypatch, FAILURE_NOTICE)

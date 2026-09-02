@@ -80,6 +80,15 @@ DOCUMENT_STATE = {
     "artifact_payload": {"bytes": b"%PDF-1.4 fake", "type": "pdf"},
 }
 
+TRANSLATION_STATE = {
+    "final_response": "Preparing the translated report.",
+    "translation_request": {
+        "artifact_id": "11111111-1111-4111-8111-111111111111",
+        "language": "ar",
+        "format": "pdf",
+    },
+}
+
 
 # ------------------------------------------------------ the shared path
 
@@ -192,3 +201,23 @@ def test_a_turn_with_no_document_reports_none(monkeypatch):
 
     assert complete[-1].get("has_document") is False
     assert not agent._pending_document
+
+
+def test_translation_progress_is_never_streamed_as_the_final_answer(monkeypatch):
+    """The live failure appeared while the real translation was still running."""
+    agent = _agent_with(monkeypatch, [
+        {"translate_artifact": TRANSLATION_STATE},
+    ])
+
+    events = _drain(agent, "can you make teh report in arabic")
+    streamed = "".join(
+        event.get("content", "") for event in events
+        if event.get("type") == "content")
+    statuses = [event.get("message") for event in events
+                if event.get("type") == "status"]
+    complete = [event for event in events if event.get("type") == "complete"]
+
+    assert streamed == "", "provisional document text reached the browser"
+    assert "Translating report..." in statuses
+    assert complete[-1].get("has_document") is True
+    assert agent._pending_document.get("translation_request")

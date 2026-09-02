@@ -34,10 +34,11 @@ FOREIGN = "99999999-9999-4999-8999-999999999999"
 
 
 def candidates(*, artifacts=None, last_artifact_id=None, last_result=None,
-               last_query=None, text="", language="en"):
+               last_query=None, last_action=None, text="", language="en"):
     return planner.resolve_candidates(
         {"last_artifact_id": last_artifact_id, "last_result": last_result,
-         "last_query": last_query, "response_language": language},
+         "last_query": last_query, "last_action": last_action,
+         "response_language": language},
         artifacts, text)
 
 
@@ -151,6 +152,30 @@ def test_the_planner_cannot_supply_sql_or_a_path():
 
 # ------------------------------------------------- deterministic resolution
 
+@pytest.mark.parametrize("text", [
+    "track Iron Man",
+    "Track iron man!",
+    "please track person IRON MAN",
+])
+def test_a_self_contained_tracking_command_routes_without_model_guesswork(text):
+    plan = planner.deterministic_request_plan(text)
+
+    assert plan is not None
+    assert plan.action == "query_database"
+    assert plan.confidence == 1.0
+    assert plan.source == "deterministic"
+
+
+@pytest.mark.parametrize("text", [
+    "track",
+    "track him",
+    "track that person",
+    "track Iron Man and make a PDF",
+    "how do I track a person?",
+])
+def test_contextual_or_compound_tracking_stays_in_the_tool_loop(text):
+    assert planner.deterministic_request_plan(text) is None
+
 def test_an_id_the_user_typed_wins_but_only_if_it_is_theirs():
     cands = candidates(artifacts=index(ARTIFACT_A, ARTIFACT_B),
                        last_artifact_id=ARTIFACT_B,
@@ -192,18 +217,68 @@ def test_a_new_document_is_not_given_an_unrelated_parent():
     assert plan.artifact_id is None, (
         "a fresh document was bound to an unrelated artifact as its parent")
 
-    # The actions that DO act on a document still resolve one.
-    translate = planner.validate_plan({"action": "translate_artifact"}, cands)
+    # An action that EXPLICITLY acts on a document still resolves one. An
+    # unqualified translation now correctly prefers the latest query response.
+    document_cands = candidates(
+        artifacts=index(ARTIFACT_A), last_artifact_id=ARTIFACT_A,
+        last_result={"row_count": 4, "sql": "SELECT 1"},
+        last_action="generate_document", text="translate the document")
+    translate = planner.validate_plan(
+        {"action": "translate_artifact"}, document_cands)
     assert translate.artifact_id == ARTIFACT_A
 
 
-def test_translating_with_nothing_rendered_yet_generates_instead():
-    """There IS something to say — refusing on a technicality is unhelpful."""
+def test_translating_a_response_does_not_manufacture_a_document():
+    """A translation request without a file format returns translated text."""
     plan = planner.validate_plan(
         {"action": "translate_artifact", "language": "ar"},
         candidates(last_result={"row_count": 5, "sql": "SELECT 1"}))
-    assert plan.action == "generate_document"
-    assert plan.language == "ar" and plan.format == "pdf"
+    assert plan.action == "translate_artifact"
+    assert plan.target == "last_result"
+    assert plan.artifact_id is None and plan.language == "ar"
+
+
+def test_stale_artifact_is_not_substituted_for_the_latest_query_response():
+    """Observed live: an Iron Man response translated an older unrelated PDF."""
+    cands = candidates(
+        artifacts=index(ARTIFACT_A), last_artifact_id=ARTIFACT_A,
+        last_result={"row_count": 8, "sql": "SELECT 1",
+                     "question": "track Iron Man"},
+        last_action="query_database", text="make the report Arabic")
+    plan = planner.validate_plan(
+        {"action": "translate_artifact", "artifact_id": ARTIFACT_A,
+         "target": "artifact", "language": "ar"}, cands)
+
+    assert plan.action == "translate_artifact"
+    assert plan.target == "last_result"
+    assert plan.artifact_id is None
+
+
+def test_an_explicit_pdf_reference_still_selects_the_artifact():
+    cands = candidates(
+        artifacts=index(ARTIFACT_A), last_artifact_id=ARTIFACT_A,
+        last_result={"row_count": 8, "sql": "SELECT 1"},
+        last_action="query_database", text="translate the last PDF to Arabic")
+    plan = planner.validate_plan(
+        {"action": "translate_artifact", "artifact_id": ARTIFACT_A,
+         "target": "artifact", "language": "ar"}, cands)
+
+    assert plan.artifact_id == ARTIFACT_A
+    assert plan.target == "artifact"
+
+
+def test_previous_response_overrides_a_more_recent_document():
+    cands = candidates(
+        artifacts=index(ARTIFACT_A), last_artifact_id=ARTIFACT_A,
+        last_result={"row_count": 8, "sql": "SELECT 1"},
+        last_action="generate_document",
+        text="translate the previous response to Arabic")
+    plan = planner.validate_plan(
+        {"action": "translate_artifact", "artifact_id": ARTIFACT_A,
+         "target": "artifact", "language": "ar"}, cands)
+
+    assert plan.artifact_id is None
+    assert plan.target == "last_result"
 
 
 def test_translating_with_nothing_at_all_asks_a_question():

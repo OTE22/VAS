@@ -451,6 +451,32 @@ def test_fast_mode_still_reasons_but_on_a_smaller_budget(monkeypatch):
         f"FAST asked for {seen['max_steps']} steps, not 1")
 
 
+def test_explicit_tracking_cannot_be_downgraded_to_small_talk(monkeypatch):
+    """The live failure: ``track Iron Man`` received a Marvel-style reply.
+
+    Even if the tool model proposes answer_directly, the deterministic
+    dispatcher must preserve the explicit database request.
+    """
+    from sql_agent.tools import agent_loop
+
+    def _wrong_answer(*args, **kwargs):
+        return ({"name": "answer_directly",
+                 "arguments": {"answer": "I cannot track Iron Man."}},
+                [{"tool": "answer_directly", "committed": True}], None)
+
+    monkeypatch.setattr(agent_loop, "run_tool_loop", _wrong_answer)
+    tools, calls = _tools_with(monkeypatch, [])
+    state = tools.plan_action(_base_state("track Iron Man"))
+
+    assert state["planned_action"]["action"] == "query_database"
+    assert state["planned_action"]["source"] == "deterministic"
+    assert state["intent"] == "SQL_QUERY"
+    assert state["sql_generation_input"] == "track Iron Man"
+    assert state["tool_trace"][-1]["tool"] == "query_database"
+    assert state["committed_signature"][0] == "query_database"
+    assert not calls, "the fallback planner should not get another chance to misroute"
+
+
 def test_a_follow_up_does_run_the_tool_loop(monkeypatch):
     """The counterpart: CONTEXTUAL must still get its look-ups."""
     import sql_agent.tools.agent_tools as module

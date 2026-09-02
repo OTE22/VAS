@@ -163,14 +163,27 @@ _TRANSLATION_DIRECTIVE = {
 # Bounded so a very long report cannot blow the model's context or the budget.
 _TRANSLATION_MAX_CHARS = 40_000
 
+_TRANSLATION_FAILURE = {
+    "ar": ("تعذّر عليّ ترجمة التقرير الآن، ولم يتم إنشاء مستند مترجم. "
+           "يُرجى المحاولة مرة أخرى."),
+    "en": ("I couldn't translate that report, so no translated document was "
+           "created. Please try again."),
+}
+
+
+def translation_failure_message(language: str) -> str:
+    """A user-safe failure that never claims a translation exists."""
+    return _TRANSLATION_FAILURE.get(language, _TRANSLATION_FAILURE["en"])
+
 
 def translate_document_text(source: str, language: str) -> str:
     """Restate a report in `language`, preserving its structure.
 
     Module-level and stateless because both the graph node and the API layer
     need it — the node for an inline narrative, the route for a stored
-    document. Returns the ORIGINAL text if translation fails: an untranslated
-    report is a disappointment, an empty one is a data loss.
+    document. Returns an empty string if translation fails. Returning the
+    original here is unsafe: the caller would render it, label it Arabic, and
+    announce a translation that never happened.
     """
     text = (source or "").strip()
     if not text:
@@ -188,12 +201,12 @@ def translate_document_text(source: str, language: str) -> str:
         translated = (translated or "").strip()
         if len(translated) < max(40, len(truncated) // 10):
             logger.warning("[TRANSLATE] output implausibly short (%d chars from %d); "
-                           "keeping the original", len(translated), len(truncated))
-            return text
+                           "refusing the translation", len(translated), len(truncated))
+            return ""
         return translated
     except Exception as e:
-        logger.error("[TRANSLATE] translation failed, returning the original: %s", e)
-        return text
+        logger.error("[TRANSLATE] translation failed: %s", e)
+        return ""
 
 
 class SQLAgentTools:
@@ -416,6 +429,10 @@ class SQLAgentTools:
         candidates = planner.resolve_candidates(
             state.get("working_context"), state.get("artifact_index"), user_text)
         state["planner_candidates"] = candidates
+        # Exact, self-contained domain commands get a deterministic backstop.
+        # The model may still use the tool loop to resolve the person, but it
+        # may not turn an explicit "track <person>" request into small talk.
+        deterministic_plan = planner.deterministic_request_plan(user_text)
 
         # MODE FIRST, chosen deterministically from the conversation's shape.
         # FAST is deliberately hard to reach: misreading a follow-up as a
@@ -497,6 +514,29 @@ class SQLAgentTools:
                     known_request=True if state.get(
                         "clarification_answered") else None,
                     has_result=bool(candidates.get("last_result")))
+
+                deterministic_override = False
+                if (deterministic_plan and tool_call
+                        and tool_call.get("name") == "answer_directly"):
+                    # Normalize the trace as well as the plan. Otherwise a
+                    # later action would remember that answer_directly was
+                    # committed even though query_database actually ran.
+                    logger.info(
+                        "[REACT] replacing conversational answer with "
+                        "deterministic explicit-request route")
+                    arguments = {"question": user_text[:500]}
+                    signature = [
+                        "query_database", json.dumps(arguments, sort_keys=True)]
+                    tool_call = {
+                        "name": "query_database", "arguments": arguments}
+                    for entry in reversed(tool_trace):
+                        if entry.get("committed"):
+                            entry["tool"] = "query_database"
+                            entry["signature"] = signature
+                            break
+                    turn_is_a_request = True
+                    deterministic_override = True
+
                 state["reasoning_steps_used"] = (
                     int(state.get("reasoning_steps_used") or 0) + len(tool_trace))
                 state["tool_trace"] = tool_trace
@@ -535,6 +575,8 @@ class SQLAgentTools:
                 if tool_call:
                     planned = agent_loop.action_to_planned(tool_call, candidates)
                     if planned:
+                        if deterministic_override:
+                            planned = deterministic_plan.as_dict()
                         if (planned.get("action") == "query_database"
                                 and tool_call.get("name") == "query_database"):
                             paraphrase = str(
@@ -603,6 +645,15 @@ class SQLAgentTools:
             plan = planner.validate_plan(planner.extract_json_object(raw), candidates)
         except Exception as e:
             logger.error("[STEP_2] planner failed: %s", e, exc_info=True)
+
+        # A failed planner or a conversational classification cannot erase an
+        # explicit domain command. A genuine clarification produced after a
+        # person look-up remains intact, so ambiguous identities are never
+        # silently selected.
+        if deterministic_plan and (plan is None or plan.action == "chat"):
+            plan = deterministic_plan
+            resolution = f"deterministic/{mode}"
+            state["sql_generation_input"] = user_text[:500]
 
         if plan is None:
             plan = planner.decide_on_failure(user_text, candidates)
@@ -2461,25 +2512,52 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         # to translate it", delivered as a finished report (observed live).
         working = state.get("working_context") or {}
         reportable = working.get("last_narrative_reportable")
+        messages = []
+        try:
+            messages = list(
+                self.conversation_memory.get_recent_messages(limit=12) or [])
+        except (TypeError, AttributeError, NameError, KeyError) as bug:
+            # A CODE fault choosing what goes INTO a document. Loud.
+            logger.error("[RENDER] BUG reading the previous narrative: %s",
+                         bug, exc_info=True)
+        except Exception as e:
+            logger.warning("[RENDER] could not read the previous narrative: %s", e)
+
+        # Bind the prose to the query that produced last_result. This survives
+        # an unsuccessful translation turn in between: the global
+        # last_narrative_reportable flag describes that failed turn, not the
+        # earlier successful answer we are intentionally retrieving.
+        result = working.get("last_result") or {}
+        result_question = " ".join(str(result.get("question") or "").split()).casefold()
+        if result_question and result.get("row_count"):
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                if message.__class__.__name__ != "HumanMessage":
+                    continue
+                question = " ".join(
+                    str(getattr(message, "content", "") or "").split()).casefold()
+                if question != result_question:
+                    continue
+                for answer in messages[index + 1:]:
+                    if answer.__class__.__name__ == "HumanMessage":
+                        break
+                    if answer.__class__.__name__ == "AIMessage":
+                        text = (getattr(answer, "content", "") or "").strip()
+                        if len(text) > 40:
+                            logger.info(
+                                "[RENDER] source narrative matched to last_result question")
+                            return text
+
         if reportable is False:
             logger.info("[RENDER] the last turn produced no result; not "
                         "rendering its narrative as a document")
         else:
-            try:
-                for message in reversed(
-                        self.conversation_memory.get_recent_messages(limit=8) or []):
-                    if message.__class__.__name__ == "AIMessage":
-                        text = (getattr(message, "content", "") or "").strip()
-                        if len(text) > 40:
-                            return text
-            except (TypeError, AttributeError, NameError, KeyError) as bug:
-                # A CODE fault choosing what goes INTO a document. Loud.
-                logger.error("[RENDER] BUG reading the previous narrative: %s",
-                             bug, exc_info=True)
-            except Exception as e:
-                logger.warning("[RENDER] could not read the previous narrative: %s", e)
+            for message in reversed(messages):
+                if message.__class__.__name__ == "AIMessage":
+                    text = (getattr(message, "content", "") or "").strip()
+                    if len(text) > 40:
+                        return text
 
-        result = (state.get("working_context") or {}).get("last_result") or {}
         if result.get("row_count"):
             columns = ", ".join(result.get("columns") or [])
             return (f"Query summary\n\nQuestion: {result.get('purpose') or 'n/a'}\n"
@@ -2533,6 +2611,26 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                 "What would you like me to report on?")
             logger.info("[RENDER] nothing to render; asked for a subject instead")
             return state
+
+        # A language tag is metadata, not translation. Never package English
+        # prose and label the artifact Arabic (or vice versa). Detect the
+        # actual script of the selected source and translate before rendering.
+        letters = [char for char in content if char.isalpha()]
+        arabic_letters = sum("\u0600" <= char <= "\u06ff" for char in letters)
+        source_language = (
+            "ar" if letters and arabic_letters / len(letters) >= 0.20 else "en"
+        )
+        if language in ("ar", "en") and language != source_language:
+            translated = translate_document_text(content, language)
+            if not translated:
+                state["final_response"] = translation_failure_message(language)
+                state["response_language"] = language
+                logger.warning(
+                    "[RENDER] translation failed; no mislabeled artifact created")
+                return state
+            content = translated
+            logger.info("[RENDER] translated source %s -> %s before rendering",
+                        source_language, language)
 
         # Name the document after what is IN it. `last_query` alone titled a
         # report with whatever the user last typed, which after a failed turn
@@ -2733,19 +2831,23 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                     "I don't have a previous report to translate. "
                     "What would you like me to report on?")
                 return state
-            state["final_response"] = translate_document_text(source, language)
+            translated = translate_document_text(source, language)
+            state["final_response"] = (
+                translated or translation_failure_message(language))
             state["response_language"] = language
-            logger.info("[TRANSLATE] translated the last narrative inline (lang=%s)",
-                        language)
+            if translated:
+                logger.info(
+                    "[TRANSLATE] translated the last narrative inline (lang=%s)",
+                    language)
             return state
 
         state["translation_request"] = {"artifact_id": artifact_id, "language": language,
                                         "format": plan.get("format") or "pdf"}
-        # Replaced by the API layer on success. If that fails, this is what the
-        # user sees — it must not claim a document exists.
-        state["final_response"] = (
-            "I couldn't reach that report to translate it. "
-            "Please try asking for it again.")
+        # Internal progress text only. Streaming transports suppress document
+        # responses until the async layer has loaded, translated, rendered and
+        # persisted the artifact; exposing a speculative failure here caused
+        # users to stop translations that were still running successfully.
+        state["final_response"] = "Preparing the translated report."
         logger.info("[TRANSLATE] requested translation of %s to %s",
                     artifact_id, language)
         return state

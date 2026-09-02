@@ -654,6 +654,10 @@ class SQLIntelligenceAgent:
                                 logger.debug(f"[SQL_AGENT] Final response captured in stream ({len(final_response)} chars)")
                         elif node_name == "chat_response":
                             yield {"type": "status", "message": "Response ready.", "step": "response"}
+                        elif node_name == "render_artifact":
+                            yield {"type": "status", "message": "Preparing document...", "step": "document"}
+                        elif node_name == "translate_artifact":
+                            yield {"type": "status", "message": "Translating report...", "step": "document"}
                         elif node_name == "learn_from_query":
                             yield {"type": "status", "message": "Learning from query...", "step": "learn"}
                     
@@ -680,15 +684,23 @@ class SQLIntelligenceAgent:
                 yield word_queue.pop(0)
             
             # After stream completes, check accumulated_state for final_response
+            document_response_pending = bool(
+                accumulated_state.get("artifact_payload")
+                or accumulated_state.get("translation_request"))
             if not final_response:
                 final_response = accumulated_state.get("final_response", "")
                 if final_response:
                     logger.debug(f"[SQL_AGENT] Final response found in accumulated_state ({len(final_response)} chars)")
-                    # If we didn't stream word-by-word, stream in chunks as fallback
-                    chunk_size = 50
-                    for i in range(0, len(final_response), chunk_size):
-                        chunk_text = final_response[i:i+chunk_size]
-                        yield {"type": "content", "content": chunk_text, "step": "response"}
+                    # A document response is provisional until the async API
+                    # layer finishes persistence/translation. Its authoritative
+                    # text travels on the completion event. Streaming this value
+                    # early exposed a failure placeholder while translation was
+                    # still running and exposed success before a save could fail.
+                    if not document_response_pending:
+                        chunk_size = 50
+                        for i in range(0, len(final_response), chunk_size):
+                            chunk_text = final_response[i:i+chunk_size]
+                            yield {"type": "content", "content": chunk_text, "step": "response"}
             
             # Add AI response to conversation memory
             if final_response:
