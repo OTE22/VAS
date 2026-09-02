@@ -36,8 +36,8 @@ def create_sql_agent(conversation_memory=None) -> StateGraph:
     workflow = StateGraph(AgentState)
 
     # Add nodes
-    workflow.add_node("detect_malicious_intent", tools.detect_malicious_intent)  # STEP 0: Security scan FIRST
-    workflow.add_node("fix_language", tools.fix_language)
+    workflow.add_node("ingest_query", tools.ingest_query)
+    workflow.add_node("detect_malicious_intent", tools.detect_malicious_intent)
     workflow.add_node("plan_action", tools.plan_action)
     workflow.add_node("check_schema", tools.check_schema)
     workflow.add_node("retrieve_examples", tools.retrieve_examples)  # RAG retrieval
@@ -76,8 +76,18 @@ def create_sql_agent(conversation_memory=None) -> StateGraph:
         # No plan (planner unavailable, legacy fallback): classic behaviour.
         return "chat_response" if state.get("intent", "CHAT") == "CHAT" else "check_schema"
 
-    # Add edges - Security scan FIRST
-    workflow.add_edge(START, "detect_malicious_intent")
+    # A deterministic, non-semantic boundary is first. It preserves the raw
+    # request and creates the canonical form consumed by every later stage.
+    workflow.add_edge(START, "ingest_query")
+
+    def route_after_ingestion(state: AgentState) -> str:
+        return "reject" if state.get("input_normalization_error") else "continue"
+
+    workflow.add_conditional_edges(
+        "ingest_query",
+        route_after_ingestion,
+        {"reject": "chat_response", "continue": "detect_malicious_intent"},
+    )
     
     # Define routing function to check if user should be blocked
     def check_security_block(state: AgentState) -> str:
@@ -87,23 +97,16 @@ def create_sql_agent(conversation_memory=None) -> StateGraph:
             return "end_security_block"
         return "continue"
     
-    # Add conditional edge after security scan
+    # Add conditional edge after the security scan.
     workflow.add_conditional_edges(
         "detect_malicious_intent",
         check_security_block,
         {
             "end_security_block": END,  # Block user and end immediately
-            "continue": "fix_language"  # Continue normal processing
+            "continue": "plan_action"
         }
     )
     
-    # Straight from the language decision into the ReAct loop. There used to
-    # be a `correct_name_typos` node between them that matched an English
-    # phrasebook — (?:track|find|where is|locate|show|who is) — and rewrote
-    # the user's message with its guess. `resolve_person` does that job as a
-    # TOOL, inside the cycle, against the database, in any language.
-    workflow.add_edge("fix_language", "plan_action")
-
     # Conditional routing after planning
     workflow.add_conditional_edges(
         "plan_action",

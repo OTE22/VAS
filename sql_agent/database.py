@@ -4,7 +4,6 @@ Database Module
 PostgreSQL database management and operations.
 """
 
-import re
 import logging
 import time
 from typing import Optional
@@ -302,18 +301,6 @@ class DatabaseManager:
         # stops reading it.
         sql = verdict.sql or sql
 
-        # Layer 2: the original regex gate, retained as defence in depth. It is
-        # no longer the only thing between generated text and the database.
-        validation = self._validate_query(sql)
-        if not validation["is_safe"]:
-            logger.warning(f"[DB] Query validation failed: {validation['reason']}")
-            return {
-                "success": False,
-                "error": validation["reason"],
-                "rows": [],
-                "row_count": 0
-            }
-
         try:
             start_time = time.time()
             
@@ -349,132 +336,23 @@ class DatabaseManager:
                 "row_count": 0
             }
 
+    def validate_query(self, sql: str) -> dict:
+        """Apply the authoritative AST policy and return canonical SQL.
+
+        Older callers consume ``is_safe``/``reason``. New pipeline stages
+        also consume ``code`` and the exact canonical SQL that carries the
+        enforced row cap. There is intentionally no regex fallback.
+        """
+        verdict = validate_sql(sql, self.sql_policy)
+        return {
+            "is_safe": verdict.allowed,
+            "reason": verdict.reason or "Query is safe and read-only",
+            "code": verdict.code,
+            "sql": verdict.sql if verdict.allowed else "",
+            "tables": verdict.tables,
+            "statement_type": verdict.statement_type,
+        }
+
     def _validate_query(self, sql: str) -> dict:
-        """
-        Validate that a query is safe (read-only).
-        Only SELECT, WITH (CTE), and EXPLAIN queries are allowed.
-        All DML (INSERT, UPDATE, DELETE) and DDL (CREATE, DROP, ALTER, etc.) operations are blocked.
-        """
-        if not sql or not sql.strip():
-            return {
-                "is_safe": False,
-                "reason": "Empty query is not allowed"
-            }
-        
-        # Normalize the SQL for checking
-        sql_upper = sql.upper().strip()
-        
-        # Remove comments to avoid false positives
-        # Remove single-line comments (--)
-        sql_no_comments = re.sub(r'--.*', '', sql_upper)
-        # Remove multi-line comments (/* */)
-        sql_no_comments = re.sub(r'/\*.*?\*/', '', sql_no_comments, flags=re.DOTALL)
-
-        # List of forbidden DML operations (Data Manipulation Language)
-        forbidden_dml = [
-            (r'\bDELETE\b', 'DELETE'),
-            (r'\bUPDATE\b', 'UPDATE'),
-            (r'\bINSERT\b', 'INSERT'),
-            (r'\bMERGE\b', 'MERGE'),
-            (r'\bUPSERT\b', 'UPSERT'),
-            (r'\bREPLACE\b', 'REPLACE'),
-        ]
-        
-        # List of forbidden DDL operations (Data Definition Language)
-        forbidden_ddl = [
-            (r'\bDROP\b', 'DROP'),
-            (r'\bALTER\b', 'ALTER'),
-            (r'\bTRUNCATE\b', 'TRUNCATE'),
-            (r'\bCREATE\b', 'CREATE'),
-            (r'\bRENAME\b', 'RENAME'),
-        ]
-        
-        # List of forbidden security/permission operations
-        forbidden_security = [
-            (r'\bGRANT\b', 'GRANT'),
-            (r'\bREVOKE\b', 'REVOKE'),
-        ]
-        
-        # List of forbidden execution operations
-        forbidden_exec = [
-            (r'\bEXEC\b', 'EXEC'),
-            (r'\bEXECUTE\b', 'EXECUTE'),
-            (r'\bCALL\b', 'CALL'),
-        ]
-        
-        # List of forbidden transaction operations
-        forbidden_txn = [
-            (r'\bCOMMIT\b', 'COMMIT'),
-            (r'\bROLLBACK\b', 'ROLLBACK'),
-            (r'\bBEGIN\b', 'BEGIN'),
-            (r'\bSTART\s+TRANSACTION\b', 'START TRANSACTION'),
-        ]
-        
-        # List of forbidden copy/backup operations
-        forbidden_copy = [
-            (r'\bCOPY\b', 'COPY'),
-        ]
-        
-        # Combine all forbidden patterns
-        all_forbidden = (
-            forbidden_dml + forbidden_ddl + forbidden_security + 
-            forbidden_exec + forbidden_txn + forbidden_copy
-        )
-
-        # Check for forbidden operations (case-insensitive, anywhere in query)
-        # Use word boundaries to match SQL keywords, not identifiers
-        for pattern, operation in all_forbidden:
-            if re.search(pattern, sql_no_comments, re.IGNORECASE):
-                return {
-                    "is_safe": False,
-                    "reason": f"Security: {operation} operations are not allowed. This SQL agent is read-only and can only execute SELECT queries."
-                }
-        
-        # Additional strict check: Look for DELETE/UPDATE/INSERT as SQL statements
-        # This catches attempts to use them even after CTEs or in complex queries
-        # Check for DELETE/UPDATE/INSERT followed by FROM/SET/VALUES (SQL statement patterns)
-        dangerous_statement_patterns = [
-            (r'\bDELETE\s+FROM\b', 'DELETE statement'),
-            (r'\bDELETE\s+.*\s+WHERE\b', 'DELETE statement with WHERE'),
-            (r'\bUPDATE\s+\w+\s+SET\b', 'UPDATE statement'),
-            (r'\bINSERT\s+INTO\b', 'INSERT statement'),
-            (r'\bINSERT\s+.*\s+VALUES\b', 'INSERT statement with VALUES'),
-        ]
-        
-        for pattern, attack_type in dangerous_statement_patterns:
-            if re.search(pattern, sql_no_comments, re.IGNORECASE):
-                return {
-                    "is_safe": False,
-                    "reason": f"Security: {attack_type} detected. This SQL agent is read-only and cannot execute data modification operations."
-                }
-
-        # Must start with SELECT, WITH (CTE), or EXPLAIN
-        if not re.match(r'^\s*(SELECT|WITH|EXPLAIN)\b', sql_no_comments):
-            return {
-                "is_safe": False,
-                "reason": "Security: Only SELECT, WITH (CTE), and EXPLAIN queries are allowed. This SQL agent is read-only."
-            }
-        
-        # Additional check: Ensure no semicolon-separated multiple statements
-        # This prevents SQL injection via statement chaining
-        statements = [s.strip() for s in sql.split(';') if s.strip()]
-        if len(statements) > 1:
-            return {
-                "is_safe": False,
-                "reason": "Security: Multiple statements are not allowed. Only single SELECT queries are permitted."
-            }
-        
-        # Check for common SQL injection patterns
-        dangerous_patterns = [
-            (r';\s*(DELETE|UPDATE|INSERT|DROP|ALTER)', 'Statement chaining'),
-            (r'UNION\s+.*\s+(DELETE|UPDATE|INSERT|DROP|ALTER)', 'UNION-based injection'),
-        ]
-        
-        for pattern, attack_type in dangerous_patterns:
-            if re.search(pattern, sql_no_comments, re.IGNORECASE):
-                return {
-                    "is_safe": False,
-                    "reason": f"Security: Potential {attack_type} detected. Only SELECT queries are allowed."
-                }
-
-        return {"is_safe": True, "reason": "Query is safe and read-only"}
+        """Backward-compatible alias for older integrations and tests."""
+        return self.validate_query(sql)

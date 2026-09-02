@@ -242,10 +242,11 @@ def test_database_manager_builds_its_policy_from_the_known_schema():
     assert "users" not in db.sql_policy.allowed_tables
 
 
-def test_execute_query_consults_the_guard_before_the_regex_gate():
+def test_execute_query_uses_the_ast_guard_without_a_regex_gate():
     import inspect
 
     from sql_agent.database import DatabaseManager
 
     source = inspect.getsource(DatabaseManager.execute_query)
-    assert source.index("validate_sql") < source.index("_validate_query")
+    assert "validate_sql" in source
+    assert "_validate_query" not in source

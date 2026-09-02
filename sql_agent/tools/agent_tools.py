@@ -26,6 +26,7 @@ from .agent_loop import _MAX_TURN_OBSERVATIONS
 from .. import observability
 from ..security import sql_guard as sql_security
 from ..skills import resolver as skill_resolver
+from ..input_pipeline import QueryInputError, ingest_query as build_query_envelope
 
 # Setup logger for SQL Agent Tools
 logger = logging.getLogger(__name__)
@@ -208,11 +209,65 @@ class SQLAgentTools:
         self.kb = SQLKnowledgeBase(config)  # Knowledge Base for RAG
         self.conversation_memory = conversation_memory  # Conversation memory for context
 
+    def _validate_sql_policy(self, sql: str) -> dict:
+        """Use the public DB policy contract, with legacy test-double support."""
+        validator = getattr(self.db, "validate_query", None)
+        if validator is None:
+            validator = self.db._validate_query
+        return validator(sql)
+
+    def ingest_query(self, state: AgentState) -> AgentState:
+        """STAGE 0: create the canonical request envelope.
+
+        This is deterministic input handling, not semantic correction. The
+        raw request remains immutable for audit/history while every planner,
+        retriever, and generator consumes the same normalized value.
+        """
+        raw = state.get("original_input")
+        logger.info("[STAGE_0] Ingesting query (raw_chars=%d)",
+                    len(raw) if isinstance(raw, str) else 0)
+        try:
+            envelope = build_query_envelope(
+                raw, max_chars=int(settings.SQL_AGENT_MAX_QUERY_CHARS))
+        except QueryInputError as exc:
+            state["normalized_input"] = ""
+            state["security_normalized_input"] = ""
+            state["input_normalization_error"] = str(exc)
+            state["error"] = "INVALID_QUERY_INPUT"
+            state["final_response"] = str(exc)
+            state["query_result"] = {
+                "success": False,
+                "error": "INVALID_QUERY_INPUT",
+                "error_code": "INVALID_QUERY_INPUT",
+                "rows": [],
+                "row_count": 0,
+            }
+            logger.info("[STAGE_0] Query rejected by the input contract")
+            return state
+
+        state["normalized_input"] = envelope.normalized_text
+        state["security_normalized_input"] = envelope.security_text
+        state["input_language"] = envelope.input_language
+        state["response_language"] = envelope.response_language
+        state["input_normalization_error"] = None
+        logger.info(
+            "[STAGE_0] Query accepted (normalized_chars=%d input_language=%s "
+            "response_language=%s)",
+            len(envelope.normalized_text), envelope.input_language,
+            envelope.response_language)
+        return state
+
+    # Compatibility entry point for callers that invoked the old node
+    # directly. The graph intentionally uses the accurately named stage.
+    def fix_language(self, state: AgentState) -> AgentState:
+        return self.ingest_query(state)
+
     def detect_malicious_intent(self, state: AgentState) -> AgentState:
         """
-        STEP 0: Malicious Intent Detection
-        Scan user input for database alteration intent BEFORE any processing.
-        This is the FIRST security layer that catches malicious queries immediately.
+        STAGE 1: scan the canonical security view for explicit write intent.
+
+        Ingestion runs first so compatibility characters and zero-width
+        controls cannot make different stages see different verbs.
         """
         logger.info("[STEP_0] Security scan - input_chars=%d",
                     len(state.get("original_input") or ""))
@@ -220,7 +275,9 @@ class SQLAgentTools:
         logger.info("🛡️ STEP 0: SECURITY SCAN - MALICIOUS INTENT DETECTION")
         logger.debug("="*60)
         detected_operations = _detect_explicit_write_intent(
-            state.get("original_input") or "")
+            state.get("security_normalized_input")
+            or state.get("normalized_input")
+            or state.get("original_input") or "")
         for operation in detected_operations:
             logger.warning("[SECURITY] STEP 0 explicit write intent: %s",
                            operation)
@@ -283,50 +340,6 @@ class SQLAgentTools:
         logger.info(f"✅ Security scan passed - No malicious intent detected")
         logger.debug(f"[STEP_0] Security scan passed")
         return state
-
-    def fix_language(self, state: AgentState) -> AgentState:
-        """STEP 1: decide the REPORT language. Nothing else.
-
-        This used to also send the user's message to a model to "fix grammar
-        and spelling" before the agent read it. That rewrite is gone:
-
-          * it ran BEFORE any reasoning, so it decided something outside the
-            ReAct cycle;
-          * it could only lose fidelity — it cannot add information the user
-            did not give, so its best case was a no-op and its worst case a
-            changed name or a dropped constraint ("track Joey and give me
-            report in Arabic" arrived as "Track Joey and give me the report
-            in Arabic");
-          * it was guarded by seven NEVER rules and a word-count revert,
-            which is what a step that damages its input looks like;
-          * it was redundant. `correct_name_typos` fixes names
-            deterministically, and the loop's `resolve_person` handles a
-            misspelling by asking the DATABASE rather than guessing.
-
-        The agent now reads exactly what the user typed, one model call
-        sooner.
-        """
-        original = state.get("original_input") or ""
-        logger.info("[STEP_1] Language check (input_chars=%d)", len(original))
-
-        # Which language the FINAL report is written in. Deterministic:
-        # Arabic script in the input, or an explicit ask for Arabic, means the
-        # user reads Arabic — the SQL pipeline itself keeps working in English.
-        wants_arabic = (
-            any("\u0600" <= ch <= "\u06FF" for ch in original)
-            or "in arabic" in original.lower()
-            or "\u0628\u0627\u0644\u0639\u0631\u0628\u064a\u0629" in original
-            or "\u0628\u0627\u0644\u0639\u0631\u0628\u064a" in original
-        )
-        state["response_language"] = "ar" if wants_arabic else "en"
-        if wants_arabic:
-            logger.info("[STEP_1] Arabic output requested — the final report "
-                        "will be in Arabic")
-
-        # The user's own words, unaltered.
-        state["normalized_input"] = original
-        return state
-
 
     # `intent` is the LEGACY vocabulary, kept populated so downstream readers
     # and older tests keep working. Document actions map to CHAT here for
@@ -522,6 +535,15 @@ class SQLAgentTools:
                 if tool_call:
                     planned = agent_loop.action_to_planned(tool_call, candidates)
                     if planned:
+                        if (planned.get("action") == "query_database"
+                                and tool_call.get("name") == "query_database"):
+                            paraphrase = str(
+                                (tool_call.get("arguments") or {}).get(
+                                    "question") or "").strip()
+                            if paraphrase:
+                                # A planning aid, not a replacement for the
+                                # authoritative normalized request.
+                                state["sql_generation_input"] = paraphrase[:500]
                         state["planned_action"] = planned
                         state["intent"] = self._ACTION_TO_INTENT.get(
                             planned.get("action"), "CHAT")
@@ -1163,9 +1185,9 @@ class SQLAgentTools:
 
     def generate_sql(self, state: AgentState) -> AgentState:
         """
-        STEP 4: SQL Generation (RAG-enhanced)
-        Generate safe, optimized SQL queries using retrieved examples.
-        Uses the prepare_sql_from_llm_response tool to clean up the output.
+        STAGE 4: produce an untrusted SQL candidate using retrieved examples.
+
+        Extraction decodes the structured envelope but never rewrites SQL.
         """
         logger.info("[STEP_4] Generating SQL (query_chars=%d)",
                     len(state.get("normalized_input") or ""))
@@ -1261,7 +1283,13 @@ Respond with ONLY a JSON object:
 If no query is possible:
 {{"sql": "", "purpose": "Explanation of why no query can be generated"}}"""),
             HumanMessage(content=(
-                f"Generate SQL for: {state['normalized_input']}"
+                "Generate SQL for the AUTHORITATIVE USER REQUEST:\n"
+                f"{state['normalized_input']}\n"
+                + (("\nPLANNER PARAPHRASE (interpretation aid only; the "
+                    "authoritative request wins on any conflict):\n"
+                    f"{state['sql_generation_input']}\n")
+                   if state.get("sql_generation_input") else "")
+                + "\nGenerate SQL that satisfies the authoritative request."
                 + self._correction_hint(state)))
         ])
 
@@ -1282,45 +1310,16 @@ If no query is possible:
             prepared = prepare_sql_from_llm_response.invoke(result)
 
             if prepared["success"]:
-                generated_sql = prepared["sql"]
-                
-                # SECURITY LAYER 0: IMMEDIATE validation after SQL generation
-                validation = self.db._validate_query(generated_sql)
-                if not validation["is_safe"]:
-                    logger.error(f"[SECURITY] ⚠️ LAYER 0: Forbidden SQL detected immediately after generation: {validation['reason']}")
-                    logger.error("[SECURITY] Forbidden generated SQL "
-                                 "(chars=%d)", len(generated_sql))
-                    logger.error(f"🚨 SECURITY ALERT: {validation['reason']}")
-                    
-                    # Mark user for blocking
-                    user_id = getattr(self.conversation_memory, 'user_id', None)
-                    if user_id:
-                        logger.error(f"[SECURITY] ⚠️ LAYER 0: Marking user ID {user_id} for blocking - Forbidden SQL in generated query")
-                        state["security_block_user"] = True
-                        state["security_block_actor"] = "model"
-                        state["security_block_reason"] = (
-                            "Generated SQL was rejected by the read-only policy.")
-                    
-                    # Set error state
-                    state["generated_sql"] = ""
-                    state["sql_purpose"] = f"SECURITY VIOLATION: {validation['reason']}. This system is read-only and cannot execute data modification operations."
-                    state["query_result"] = {
-                        "success": False,
-                        "error": validation["reason"] + " Your account will be blocked. Please contact an administrator.",
-                        "rows": [],
-                        "row_count": 0
-                    }
-                    logger.error(f"[STEP_4] SQL generation blocked by security validation")
-                    logger.error(f"❌ SECURITY: Query blocked - {validation['reason']}")
-                    return state
-                
-                state["generated_sql"] = generated_sql
+                # Generation produces an UNTRUSTED candidate. It neither
+                # authorizes nor reformats it; every generation/modification
+                # path converges on validate_and_fix_sql next.
+                state["generated_sql"] = prepared["sql"]
+                state["validated_sql"] = ""
                 state["sql_purpose"] = prepared["purpose"]
-                logger.info(f"[STEP_4] SQL generated successfully (length: {len(generated_sql)} chars)")
+                logger.info("[STEP_4] SQL candidate extracted (length=%d)",
+                            len(state["generated_sql"]))
                 logger.debug(f"[STEP_4] Transformations: {prepared['transformations']}")
-                logger.info(f"✅ SQL prepared successfully!")
-                logger.info(f"📝 Transformations applied: {prepared['transformations']}")
-                logger.info("[STEP_4] SQL prepared (sql_chars=%d purpose_chars=%d)",
+                logger.info("[STEP_4] SQL candidate ready (sql_chars=%d purpose_chars=%d)",
                             len(state.get("generated_sql") or ""),
                             len(state.get("sql_purpose") or ""))
             else:
@@ -1355,9 +1354,10 @@ If no query is possible:
 
     def validate_and_fix_sql(self, state: AgentState) -> AgentState:
         """
-        STEP 4.5: SQL Validation and Error Fixing
-        Validates the generated SQL and fixes any errors before execution.
-        Uses LLM tool calling pattern to validate and correct SQL.
+        STAGE 5: parse, optionally repair, authorize, and canonicalize SQL.
+
+        Only malformed SQL is offered to the repair model. Every successful
+        path finishes at the same AST policy and stores its exact output.
         """
         logger.info("[STEP_4.5] Starting SQL validation")
         logger.info("\n" + "="*60)
@@ -1365,6 +1365,7 @@ If no query is possible:
         logger.debug("="*60)
 
         generated_sql = state.get("generated_sql", "")
+        state["validated_sql"] = ""
 
         if not generated_sql:
             logger.warning("[STEP_4.5] No SQL to validate")
@@ -1380,14 +1381,27 @@ If no query is possible:
         validation_result = validate_sql_query.invoke(generated_sql)
 
         if validation_result["is_valid"]:
-            logger.info("[STEP_4.5] SQL validation passed")
-            logger.info("✅ SQL passed validation")
+            # This is the ONE authorization/canonicalization seam. The AST
+            # policy checks statement type, table/function allowlists and
+            # complexity, then returns SQL with the enforced LIMIT.
+            policy_result = self._validate_sql_policy(generated_sql)
+            state["sql_validation_code"] = policy_result.get("code")
+            if not policy_result["is_safe"]:
+                state["sql_validation_status"] = "INVALID"
+                state["sql_validation_error"] = policy_result["reason"]
+                logger.warning("[STEP_4.5] SQL candidate denied (code=%s)",
+                               policy_result.get("code", "POLICY_REJECTED"))
+                return state
+
+            canonical_sql = policy_result.get("sql") or generated_sql
+            state["generated_sql"] = canonical_sql
+            state["validated_sql"] = canonical_sql
             state["sql_validation_status"] = "VALID"
             state["sql_fixes_applied"] = []
             state["sql_validation_warnings"] = validation_result.get("warnings", [])
-            if state["sql_validation_warnings"]:
-                logger.warning(f"[STEP_4.5] Validation warnings: {state['sql_validation_warnings']}")
-                logger.warning(f"⚠️ Warnings: {state['sql_validation_warnings']}")
+            state["sql_validation_error"] = None
+            logger.info("[STEP_4.5] SQL authorized and canonicalized "
+                        "(chars=%d)", len(canonical_sql))
             return state
 
         logger.warning(f"[STEP_4.5] Validation errors found: {validation_result['errors']}")
@@ -1453,18 +1467,29 @@ Provide the corrected SQL:""")
             if prepared["success"] and prepared["sql"]:
                 fixed_sql = prepared["sql"]
 
-                # Re-validate the fixed SQL
+                # Parse, then send the repaired candidate through the same
+                # AST authorization seam as a first-attempt candidate.
                 revalidation = validate_sql_query.invoke(fixed_sql)
 
                 if revalidation["is_valid"]:
-                    state["generated_sql"] = fixed_sql
-                    state["sql_validation_status"] = "FIXED"
-                    state["sql_fixes_applied"] = prepared["transformations"]
-                    logger.info(f"✅ SQL successfully fixed!")
-                    logger.info(f"📝 Transformations: {prepared['transformations']}")
-                    logger.info("[STEP_5] SQL fixed (chars=%d)", len(fixed_sql))
+                    policy_result = self._validate_sql_policy(fixed_sql)
+                    state["sql_validation_code"] = policy_result.get("code")
+                    if policy_result["is_safe"]:
+                        canonical_sql = policy_result.get("sql") or fixed_sql
+                        state["generated_sql"] = canonical_sql
+                        state["validated_sql"] = canonical_sql
+                        state["sql_validation_status"] = "FIXED"
+                        state["sql_fixes_applied"] = prepared["transformations"]
+                        state["sql_validation_error"] = None
+                        logger.info("[STEP_4.5] Repaired SQL authorized "
+                                    "(chars=%d)", len(canonical_sql))
+                    else:
+                        state["sql_validation_status"] = "INVALID"
+                        state["sql_validation_error"] = policy_result["reason"]
+                        logger.warning("[STEP_4.5] Repaired SQL denied "
+                                       "(code=%s)", policy_result.get("code"))
                 else:
-                    logger.warning(f"⚠️ Fixed SQL still has issues, keeping original")
+                    logger.warning("[STEP_4.5] Repaired SQL is still malformed")
                     state["sql_validation_status"] = "PARTIAL"
                     state["sql_validation_warnings"] = revalidation["errors"]
             else:
@@ -1480,93 +1505,31 @@ Provide the corrected SQL:""")
         return state
 
     def prepare_sql_for_execution(self, state: AgentState) -> AgentState:
+        """STAGE 5: assert that execution receives the authorized snapshot.
+
+        No cleanup is permitted after authorization. A transformation here
+        would make the checked SQL and the executed SQL different objects.
         """
-        STEP 4.6: Final SQL Preparation
-        Clean and prepare the SQL for safe execution.
-        Also performs early read-only validation.
-        """
-        logger.info("\n" + "="*60)
-        logger.info("📋 STEP 4.6: PREPARING SQL FOR EXECUTION")
-        logger.debug("="*60)
-
-        generated_sql = state.get("generated_sql", "")
-
-        if not generated_sql:
-            logger.error("❌ No SQL to prepare")
-            return state
-
-        # Early validation: Check if query is read-only before cleanup
-        validation = self.db._validate_query(generated_sql)
-        if not validation["is_safe"]:
-            logger.warning(f"[STEP_4.6] Early validation failed: {validation['reason']}")
-            logger.error(f"❌ Security validation failed: {validation['reason']}")
-            
-            # SECURITY LAYER 2: Mark user for blocking (will be handled in API route)
-            user_id = getattr(self.conversation_memory, 'user_id', None)
-            if user_id:
-                logger.error(f"[SECURITY] ⚠️ LAYER 2: Marking user ID {user_id} for blocking - Early validation failed: {validation['reason']}")
-                state["security_block_user"] = True
-                state["security_block_actor"] = "model"
-                state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
-                state["security_block_reason"] = (
-                    "Generated SQL was rejected by the read-only policy.")
-            else:
-                logger.warning(f"[SECURITY] Validation failed but no user_id available: {validation['reason']}")
-
-            # Refusal only. The policy layer states any account consequence.
+        canonical = state.get("validated_sql") or ""
+        if not canonical or canonical != (state.get("generated_sql") or ""):
+            logger.error("[STAGE_5] Refusing SQL that is absent or changed "
+                         "after authorization")
+            state["generated_sql"] = ""
             state["query_result"] = {
                 "success": False,
-                "error": validation["reason"],
+                "error": "SQL authorization state is missing or stale",
+                "error_code": "STALE_SQL_AUTHORIZATION",
                 "rows": [],
-                "row_count": 0
+                "row_count": 0,
             }
             return state
-
-        # Use the prepare_sql_from_llm_response tool for final cleanup
-        # (This ensures consistent formatting)
-        mock_json = json.dumps({"sql": generated_sql, "purpose": state.get("sql_purpose", "")})
-        prepared = prepare_sql_from_llm_response.invoke(mock_json)
-
-        if prepared["success"]:
-            state["generated_sql"] = prepared["sql"]
-            # Validate again after cleanup to ensure no malicious code was introduced
-            final_validation = self.db._validate_query(prepared["sql"])
-            if not final_validation["is_safe"]:
-                logger.warning(f"[STEP_4.6] Post-cleanup validation failed: {final_validation['reason']}")
-                logger.error(f"❌ Security validation failed after cleanup: {final_validation['reason']}")
-                
-                # SECURITY LAYER 3: Mark user for blocking (will be handled in API route)
-                user_id = getattr(self.conversation_memory, 'user_id', None)
-                if user_id:
-                    logger.error(f"[SECURITY] ⚠️ LAYER 3: Marking user ID {user_id} for blocking - Post-cleanup validation failed: {final_validation['reason']}")
-                    state["security_block_user"] = True
-                    state["security_block_actor"] = "model"
-                    state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
-                    state["security_block_reason"] = (
-                        "Prepared SQL was rejected by the read-only policy.")
-                else:
-                    logger.warning(f"[SECURITY] Post-cleanup validation failed but no user_id available: {final_validation['reason']}")
-
-                # Refusal only. The policy layer states any account consequence.
-                state["query_result"] = {
-                    "success": False,
-                    "error": final_validation["reason"],
-                    "rows": [],
-                    "row_count": 0
-                }
-                return state
-            logger.info(f"✅ SQL ready for execution (read-only validated)")
-            logger.info("[STEP_5] SQL ready for execution (chars=%d)",
-                        len(prepared.get("sql") or ""))
-        else:
-            logger.info(f"✅ SQL ready for execution (no additional cleanup needed)")
-
+        logger.info("[STAGE_5] Authorized SQL snapshot ready (chars=%d)",
+                    len(canonical))
         return state
 
     def execute_sql(self, state: AgentState) -> AgentState:
         """
-        STEP 5: SQL Execution
-        Execute the generated SQL safely.
+        STAGE 6: execute the exact canonical SQL authorized in stage 5.
         """
         logger.info("[STEP_5] Executing SQL query")
         logger.info("\n" + "="*60)
@@ -2721,28 +2684,10 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                 raise ValueError(prepared.get("error") or "no SQL in the response")
 
             adjusted = prepared["sql"]
-
-            # SECURITY LAYER 0, identical to generate_sql. The downstream AST
-            # guard would also refuse this, but a modification must not be the
-            # one path into the database that skips the immediate check.
-            validation = self.db._validate_query(adjusted)
-            if not validation["is_safe"]:
-                logger.error("[SECURITY] LAYER 0: forbidden SQL from a query "
-                             "modification: %s", validation["reason"])
-                user_id = getattr(self.conversation_memory, "user_id", None)
-                if user_id:
-                    state["security_block_user"] = True
-                    state["security_block_actor"] = "model"
-                    state["security_block_reason"] = (
-                        "Modified SQL was rejected by the read-only policy.")
-                state["generated_sql"] = ""
-                state["sql_purpose"] = (
-                    f"SECURITY VIOLATION: {validation['reason']}. This system "
-                    f"is read-only and cannot execute data modification "
-                    f"operations.")
-                return state
-
+            # Still untrusted. The graph sends modifications through the same
+            # validator as fresh generation; no branch gets private authority.
             state["generated_sql"] = adjusted
+            state["validated_sql"] = ""
             state["sql_purpose"] = (prepared.get("purpose")
                                     or f"{last_result.get('purpose') or 'previous query'} "
                                        f"({str(modification)[:80]})")
@@ -2751,11 +2696,11 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                         state["sql_was_modified"], len(adjusted))
         except Exception as e:
             logger.error("[MODIFY_SQL] failed: %s", e, exc_info=True)
-            # Fall back to the ORIGINAL query rather than to nothing: the user
-            # sees the unmodified result, which is wrong-but-visible, instead
-            # of an error with no data. It is recorded as NOT modified so the
-            # difference is visible in the logs and to tests.
-            state["generated_sql"] = base_sql
+            # Never execute the old query and present it as the requested
+            # modification. A visible failure is more truthful than valid but
+            # semantically stale data.
+            state["generated_sql"] = ""
+            state["validated_sql"] = ""
             state["sql_was_modified"] = False
             state["error"] = f"Could not apply the change: {e}"
         return state
@@ -2818,6 +2763,12 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
 
     def handle_chat(self, state: AgentState) -> AgentState:
         """Handle pure chat responses without SQL."""
+        if state.get("input_normalization_error"):
+            # Boundary errors are deterministic and complete. Do not send an
+            # invalid request to a model merely to paraphrase the validator.
+            state["final_response"] = state["input_normalization_error"]
+            return state
+
         # A look-up already SETTLED this turn: the person is enrolled with
         # nothing recorded, or is not enrolled at all. Both are facts, and
         # stating them is the whole point of having resolved the name -

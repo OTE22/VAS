@@ -134,16 +134,13 @@ def _request_value(request, name: str, default=None):
 
 def _bounded_query(raw) -> tuple:
     """Return ``(query, error)`` using one contract for all transports."""
-    if not isinstance(raw, str):
-        return "", "Query must be a string"
-    query = raw.strip()
-    if not query:
-        return "", "Query is required"
-    if len(query) > SQL_AGENT_MAX_QUERY_CHARS:
-        return "", (
-            f"Query is too long. Maximum length is "
-            f"{SQL_AGENT_MAX_QUERY_CHARS} characters.")
-    return query, None
+    from ..input_pipeline import QueryInputError, ingest_query
+
+    try:
+        envelope = ingest_query(raw, max_chars=SQL_AGENT_MAX_QUERY_CHARS)
+    except QueryInputError as exc:
+        return "", str(exc)
+    return envelope.normalized_text, None
 
 # The semaphore is sized once, at import — the concurrency cap is registered
 # api_restart for exactly that reason, and boot hydration now applies stored
@@ -495,8 +492,9 @@ def _client_body(body: dict) -> dict:
 class _StageTimer:
     """Per-stage timing for one agent run.
 
-    The agent already tags every update with a ``step`` (init, schema, rag,
-    generate_sql, validate, execute, response, ...), so stage names come from the
+    The agent already tags every update with a ``step`` (start, ingest,
+    security, plan, schema, rag, generate_sql, validate, authorize, execute,
+    response, learn), so stage names come from the
     agent itself rather than being guessed at this layer.
 
     This exists because the reported incident timed out after 300s with

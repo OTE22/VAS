@@ -58,12 +58,12 @@ def test_the_loop_is_the_entry_point(graph):
     fidelity.
     """
     edges = _edges(graph)
-    assert ("fix_language", "plan_action") in edges, (
-        "something sits between the language check and the loop again")
+    assert ("detect_malicious_intent", "plan_action") in edges, (
+        "something sits between the security gate and the loop again")
 
     # And whatever remains before it must not call a model.
     import sql_agent.tools.agent_tools as module
-    source = inspect.getsource(module.SQLAgentTools.fix_language)
+    source = inspect.getsource(module.SQLAgentTools.ingest_query)
     tree = ast.parse(textwrap.dedent(source))
     attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert "llm" not in attrs and "sql_llm" not in attrs, (
@@ -220,7 +220,8 @@ def test_a_repeat_of_a_failed_action_is_refused_in_python():
 def test_security_still_gates_the_entry(graph):
     """Reasoning was never allowed to be the first thing that runs."""
     edges = _edges(graph)
-    assert ("__start__", "detect_malicious_intent") in edges
+    assert ("__start__", "ingest_query") in edges
+    assert ("ingest_query", "detect_malicious_intent") in edges
     assert ("detect_malicious_intent", "__end__") in edges, (
         "the security node can no longer end a turn")
 

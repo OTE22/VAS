@@ -550,10 +550,9 @@ def test_a_reference_binds_to_lineage_not_to_what_ran_most_recently(token, clean
 def test_a_modification_cannot_smuggle_a_write(attack, token):
     """A modification is not a privileged path into the database.
 
-    The rewritten SQL passes Security Layer 0 in modify_sql (the same
-    immediate `_validate_query` generate_sql runs) and then the AST guard in
-    validate_and_fix_sql. What must never happen is a successful write, or a
-    200 that reports one.
+    The rewritten SQL remains an untrusted candidate until it reaches the
+    shared AST policy gate in validate_and_fix_sql. What must never happen is
+    a successful write, or a 200 that reports one.
 
     Run as ADMIN deliberately. Administrators are exempt from account blocking
     — denied and audited at higher severity, never locked out — so three

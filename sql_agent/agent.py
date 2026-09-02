@@ -188,17 +188,23 @@ class SQLIntelligenceAgent:
             "user_id": getattr(self.conversation_memory, "user_id", None),
             "original_input": user_input,
             "normalized_input": "",
+            "security_normalized_input": "",
+            "input_language": "en",
+            "input_normalization_error": None,
+            "sql_generation_input": None,
             "intent": "CHAT",
             "intent_confidence": 0.0,
             "schema_description": "",
             "retrieved_examples": [],
             "rag_context": "",
             "generated_sql": "",
+            "validated_sql": "",
             "sql_purpose": "",
             "sql_validation_status": "VALID",
             "sql_fixes_applied": [],
             "sql_validation_warnings": [],
             "sql_validation_error": None,
+            "sql_validation_code": None,
             "query_result": {},
             "final_response": "",
             "should_learn": should_learn,
@@ -208,6 +214,7 @@ class SQLIntelligenceAgent:
             "name_corrections": None,
             "security_block_user": None,
             "security_block_reason": None,
+            "security_block_actor": None,
             # Working memory is read from the SESSION FILE, not from this
             # instance's attributes: after a restart or an LRU eviction this
             # object is new but the file still knows what the last report was.
@@ -413,7 +420,8 @@ class SQLIntelligenceAgent:
         Returns:
             A human-readable narrative response, or tuple (response, result_dict) if security flags are set
         """
-        logger.info("[SQL_AGENT] Processing query (chars=%d)", len(user_input))
+        logger.info("[SQL_AGENT] Processing query (chars=%d)",
+                    len(user_input) if isinstance(user_input, str) else 0)
         
         # The current turn is committed as a user/assistant pair only after the
         # graph succeeds. A timeout or cancellation therefore cannot leave an
@@ -459,6 +467,11 @@ class SQLIntelligenceAgent:
                     result["security_block_user_id"] = user_id_from_state
                 # Return both response and result for API route to check
                 return response, result
+
+            if result.get("input_normalization_error"):
+                # Rejected boundary input is not a conversation turn and must
+                # not contaminate memory for the next valid request.
+                return response
             
             # Commit the completed turn together.
             self.conversation_memory.add_user_message(user_input)
@@ -502,7 +515,7 @@ class SQLIntelligenceAgent:
             Progress updates as the agent processes the query
         """
         logger.info("[SQL_AGENT] Processing streaming query (chars=%d)",
-                    len(user_input))
+                    len(user_input) if isinstance(user_input, str) else 0)
         
         try:
             # Commit only at successful completion, as one user/assistant pair.
@@ -581,18 +594,24 @@ class SQLIntelligenceAgent:
                                 yield _security_event(accumulated_state, block_reason)
                                 stream_ended_early = True
                                 break
-                        elif node_name == "fix_language":
-                            yield {"type": "status", "message": "Normalizing language...", "step": "normalize"}
+                            yield {"type": "status", "message": "Safety checks complete.", "step": "security"}
+                        elif node_name == "ingest_query":
+                            yield {"type": "status", "message": "Validating request...", "step": "ingest"}
+                        elif node_name == "plan_action":
+                            yield {"type": "status", "message": "Planning the request...", "step": "plan"}
                         elif node_name == "check_schema":
                             yield {"type": "status", "message": "Loading database schema...", "step": "schema"}
                         elif node_name == "retrieve_examples":
                             yield {"type": "status", "message": "Retrieving similar examples...", "step": "rag"}
                         elif node_name == "generate_sql":
-                            sql = node_output.get("generated_sql", "")
-                            if sql:
-                                yield {"type": "sql", "sql": sql[:200] + "..." if len(sql) > 200 else sql, "step": "generate_sql"}
+                            yield {"type": "status", "message": "Building a read-only query...", "step": "generate_sql"}
                         elif node_name == "validate_and_fix_sql":
-                            yield {"type": "status", "message": "Validating SQL query...", "step": "validate"}
+                            yield {"type": "status", "message": "Validating and authorizing SQL...", "step": "validate"}
+                            sql = node_output.get("validated_sql", "")
+                            if sql:
+                                yield {"type": "sql", "sql": sql[:200] + "..." if len(sql) > 200 else sql, "step": "validate"}
+                        elif node_name == "prepare_sql_for_execution":
+                            yield {"type": "status", "message": "Preparing the authorized query...", "step": "authorize"}
                         elif node_name == "execute_sql":
                             result = node_output.get("query_result", {})
                             if result.get("success"):
@@ -633,6 +652,8 @@ class SQLIntelligenceAgent:
                             final_response = node_output.get("final_response", "") or accumulated_state.get("final_response", "")
                             if final_response:
                                 logger.debug(f"[SQL_AGENT] Final response captured in stream ({len(final_response)} chars)")
+                        elif node_name == "chat_response":
+                            yield {"type": "status", "message": "Response ready.", "step": "response"}
                         elif node_name == "learn_from_query":
                             yield {"type": "status", "message": "Learning from query...", "step": "learn"}
                     
@@ -671,6 +692,12 @@ class SQLIntelligenceAgent:
             
             # Add AI response to conversation memory
             if final_response:
+                if accumulated_state.get("input_normalization_error"):
+                    yield {"type": "complete", "message": "Query rejected",
+                           "step": "done", "response": final_response,
+                           "response_length": len(final_response),
+                           "success": False, "has_document": False}
+                    return
                 logger.info(f"[SQL_AGENT] Streaming query completed successfully (response length: {len(final_response)} chars)")
                 has_document = self._finish_turn(
                     user_input, final_response, accumulated_state)

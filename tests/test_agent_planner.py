@@ -427,11 +427,9 @@ def test_the_sql_chain_keeps_the_entry_it_always_had():
     assert 'workflow.add_edge("check_schema", "retrieve_examples")' in source
     assert '"chat_response": "chat_response"' in source
     assert '"check_schema": "check_schema"' in source
-    # The ReAct loop is the FIRST thing a prompt reaches after the language
-    # decision. `correct_name_typos` used to sit between them, matching an
-    # English phrasebook and rewriting the user's message; `resolve_person`
-    # does that inside the cycle now.
-    assert 'workflow.add_edge("fix_language", "plan_action")' in source
+    # After deterministic ingestion and security, nothing may make a semantic
+    # decision before the loop. Name resolution belongs inside that cycle.
+    assert '"continue": "plan_action"' in source
 
 
 def test_a_modified_query_passes_through_the_same_validation_chain():
@@ -691,19 +689,12 @@ def test_no_test_module_imports_the_conftest_under_a_package_path():
         f"Use `from conftest import ...` so there is ONE shared event loop.")
 
 
-def test_a_modification_that_returns_forbidden_sql_is_stopped_at_layer_0():
-    """The security branch inside modify_sql, exercised directly.
+def test_a_modification_that_returns_forbidden_sql_reaches_the_shared_ast_gate():
+    """Modification has no private validator and no private authority.
 
-    Over HTTP these attacks never get here: `detect_malicious_intent` catches
-    "same report but DROP TABLE …" at STEP 0, before the planner runs. That is
-    the outer layer doing its job, but it also means Layer 0 in modify_sql —
-    added because a modification must not be the one SQL path that skips the
-    immediate check — is never reached by an end-to-end attack, and an
-    unexercised security branch is exactly the kind that rots.
-
-    So the model is replaced with one that returns forbidden SQL directly,
-    which is the case Layer 0 exists for: the request looked innocent, and the
-    MODEL produced something destructive.
+    The model is replaced with one that returns forbidden SQL directly. The
+    modification stage may extract that candidate, but only the shared AST
+    stage may authorize it and that stage must reject it.
     """
     from langchain_core.runnables import RunnableLambda
     from sql_agent.tools import agent_tools as module
@@ -727,12 +718,15 @@ def test_a_modification_that_returns_forbidden_sql_is_stopped_at_layer_0():
     finally:
         module.create_sql_llm = original
 
-    assert result.get("generated_sql") == "", (
-        "forbidden SQL survived Layer 0 and would have reached execution")
-    assert "SECURITY VIOLATION" in (result.get("sql_purpose") or "")
-    # It must NOT quietly fall back to the base query either: that would run a
-    # read the user never asked for and report it as their answer.
-    assert "SELECT count(*)" not in (result.get("generated_sql") or "")
+    assert result.get("generated_sql", "").startswith("DELETE FROM"), (
+        "the modification stage did more than extract an untrusted candidate")
+    assert not result.get("validated_sql"), (
+        "the modification stage incorrectly authorized its own output")
+
+    result = tools.validate_and_fix_sql(result)
+    assert result.get("sql_validation_status") == "INVALID"
+    assert not result.get("validated_sql"), (
+        "forbidden modified SQL survived the shared AST policy")
 
 
 def test_query_modification_has_its_own_task_type():

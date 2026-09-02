@@ -10,11 +10,16 @@ from langgraph.graph.message import add_messages
 
 class AgentState(TypedDict):
     """State for the SQL Intelligence Agent."""
-    # Input
+    # Stage 0: immutable request provenance. ``original_input`` is never used
+    # as model-ready text; normalization writes the two derived forms below.
     original_input: str
-
-    # Step 1: Language normalization
     normalized_input: str
+    security_normalized_input: str
+    input_language: Literal["en", "ar"]
+    input_normalization_error: Optional[str]
+    # Optional bounded paraphrase proposed by the planning loop for the SQL
+    # specialist. It supplements, never replaces, normalized_input.
+    sql_generation_input: Optional[str]
 
     # Step 2: Intent classification
     intent: Literal["CHAT", "SQL_QUERY", "HYBRID"]
@@ -29,6 +34,9 @@ class AgentState(TypedDict):
 
     # Step 4: SQL generation
     generated_sql: str
+    # Canonical SQL returned by the AST policy. Execution, history, learning,
+    # and follow-up modification must all use this exact value.
+    validated_sql: str
     sql_purpose: str
     # True when generation hit the model's time budget rather than producing
     # unusable output. Declared here because LangGraph merges node results
@@ -42,6 +50,7 @@ class AgentState(TypedDict):
     sql_fixes_applied: List[str]
     sql_validation_warnings: List[str]
     sql_validation_error: Optional[str]
+    sql_validation_code: Optional[str]
 
     # Step 5: SQL execution
     query_result: dict
@@ -72,6 +81,7 @@ class AgentState(TypedDict):
     # model prose, is what reaches blocked_reason and the audit trail.
     security_reason_code: Optional[str]
     security_block_reason: Optional[str]
+    security_block_actor: Optional[Literal["user", "model"]]
     security_block_user_id: Optional[int]  # User ID to block (if available)
     # Owner of this turn. Scopes knowledge-base retrieval and learning so
     # one user's stored questions cannot reach another user's prompt.
@@ -86,7 +96,7 @@ class AgentState(TypedDict):
     streaming_callback: Optional[Any]
 
     # Output language for the FINAL narrative ('en' or 'ar'). Detected
-    # deterministically from the original input in fix_language — Arabic
+    # deterministically during query ingestion — Arabic
     # script, or an explicit request like 'in Arabic' — never by asking
     # the LLM what language it thinks it saw.
     response_language: Optional[str]

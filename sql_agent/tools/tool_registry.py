@@ -124,10 +124,13 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
     specs.extend([
         _spec("query_database",
               "Answer a NEW question about the surveillance data. Give the "
-              "question in plain words; the system writes and runs the SQL "
-              "safely. Never write SQL yourself.",
+              "question as a concise English paraphrase for the SQL "
+              "specialist; preserve every constraint and copy person/camera "
+              "names exactly in the user's original script. The system "
+              "writes and runs SQL safely. Never write SQL yourself.",
               {"question": {"type": "string",
-                            "description": "the question in plain words"}},
+                            "description": "English paraphrase in plain words; "
+                                           "names and literal values unchanged"}},
               required=["question"]),
         _spec("modify_active_query",
               "Re-run the PREVIOUS question with something changed: a "
