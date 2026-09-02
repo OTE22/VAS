@@ -25,9 +25,56 @@ from . import planner
 from .agent_loop import _MAX_TURN_OBSERVATIONS
 from .. import observability
 from ..security import sql_guard as sql_security
+from ..skills import resolver as skill_resolver
 
 # Setup logger for SQL Agent Tools
 logger = logging.getLogger(__name__)
+
+
+# Stage 0 is an attribution control, not the database security boundary: three
+# attributed matches can restrict an account. Only explicit write requests may
+# reach that policy. Broad words such as "update" or "drop" are ordinary nouns
+# in analytical questions and must not be treated as attacks.
+_EXPLICIT_WRITE_PATTERNS = (
+    (r"\bdelete\s+from\b|\bdelete\s+(?:all|everything)\b|"
+     r"\bdelete\s+(?:all|every|the|these|those)\s+"
+     r"(?:rows?|records?|data|detections?|users?)\b", "DELETE operation"),
+    (r"\b(?:remove|clear|wipe|erase|purge)\s+(?:all|every|the|these|those)\s+"
+     r"(?:rows?|records?|data|detections?|users?|table|database)\b",
+     "DELETE operation"),
+    (r"\bupdate\s+[a-z_][\w.]*\s+set\b|\bupdate\s+(?:the\s+)?"
+     r"(?:row|record|table|database|user|detection)s?\b", "UPDATE operation"),
+    (r"\binsert\s+into\b|\badd\s+(?:a\s+)?(?:new\s+)?"
+     r"(?:row|record|user|detection)\s+(?:to|into)\b", "INSERT operation"),
+    (r"\bcreate\s+(?:a\s+)?(?:new\s+)?(?:row|record|table|database)\b",
+     "INSERT operation"),
+    (r"\balter\s+table\b|\bmodify\s+(?:the\s+)?table\b",
+     "ALTER TABLE operation"),
+    (r"\bdrop\s+(?:table|database|schema|view)\b|\btruncate(?:\s+table)?\s+"
+     r"[a-z_]", "DROP operation"),
+    (r"\bgrant\s+\w+\s+on\b|\brevoke\s+\w+\s+on\b",
+     "Permission modification"),
+    (r"\b(?:commit|rollback)(?:\s+transaction)?\s*;?\s*$|"
+     r"\bbegin\s+transaction\b", "Transaction control"),
+    (r"\bexec(?:ute)?\s*\(", "SQL execution attempt"),
+    # Arabic imperative/write forms paired with a data target. These are
+    # intentionally narrower than a language classifier: uncertain text is
+    # still protected by the generated-SQL AST guard without blaming a user.
+    (r"\b(?:احذف|إحذف|امسح|أمسح)\s+(?:كل|جميع|ال)?\s*"
+     r"(?:السجلات|البيانات|الصفوف|المستخدمين|الجدول|قاعدة\s+البيانات)\b",
+     "DELETE operation"),
+    (r"\b(?:حدّث|حدث|عدّل|عدل|غيّر|غير)\s+(?:ال)?"
+     r"(?:سجل|بيانات|صف|جدول|مستخدم)\b", "UPDATE operation"),
+    (r"\b(?:أضف|اضف|ادخل|أدخل)\s+(?:سجل|صف|مستخدم|بيانات)\b",
+     "INSERT operation"),
+)
+
+
+def _detect_explicit_write_intent(text: str) -> List[str]:
+    """Return deterministic operation labels for explicit write requests."""
+    normalized = " ".join(str(text or "").split()).lower()
+    return sorted({operation for pattern, operation in _EXPLICIT_WRITE_PATTERNS
+                   if re.search(pattern, normalized, re.IGNORECASE)})
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
@@ -167,81 +214,30 @@ class SQLAgentTools:
         Scan user input for database alteration intent BEFORE any processing.
         This is the FIRST security layer that catches malicious queries immediately.
         """
-        logger.info(f"[STEP_0] Security scan - Input: {state['original_input'][:100]}")
+        logger.info("[STEP_0] Security scan - input_chars=%d",
+                    len(state.get("original_input") or ""))
         logger.info("\n" + "="*60)
         logger.info("🛡️ STEP 0: SECURITY SCAN - MALICIOUS INTENT DETECTION")
         logger.debug("="*60)
-        logger.info(f"📥 Scanning input: {state['original_input']}")
-        
-        user_input_lower = state['original_input'].lower()
-        
-        # Patterns that indicate malicious intent (database alteration)
-        # Made more comprehensive to catch all variations
-        malicious_patterns = [
-            # DELETE operations - catch ANY mention of delete
-            (r'\bdelete\b', 'DELETE operation'),
-            (r'\bremove\s+(all|everything|records|data|from|database|table)\b', 'DELETE operation'),
-            (r'\bclear\s+(all|everything|table|database|data|records)\b', 'DELETE operation'),
-            (r'\bwipe\s+(out|all|everything|database|data)\b', 'DELETE operation'),
-            (r'\berase\s+(all|everything|database|data|records)\b', 'DELETE operation'),
-            (r'\bpurge\s+(all|everything|database|data|records)\b', 'DELETE operation'),
-            
-            # UPDATE operations - catch ANY mention of update/modify/change/edit
-            (r'\bupdate\b', 'UPDATE operation'),
-            (r'\bmodify\s+(all|everything|table|records|data|database)\b', 'UPDATE operation'),
-            (r'\bchange\s+(all|everything|table|records|data|database)\b', 'UPDATE operation'),
-            (r'\bedit\s+(all|everything|table|records|data|database)\b', 'UPDATE operation'),
-            (r'\breplace\s+(all|everything|table|records|data)\b', 'UPDATE operation'),
-            
-            # INSERT operations - catch ANY mention of insert/add/create
-            (r'\binsert\b', 'INSERT operation'),
-            (r'\badd\s+(new|fake|test|dummy|record|data)\s+(to|into)\s+(table|database)\b', 'INSERT operation'),
-            (r'\bcreate\s+(new|fake|test|dummy|record|data|row)\b', 'INSERT operation'),
-            
-            # ALTER operations - catch ANY mention of alter
-            (r'\balter\b', 'ALTER operation'),
-            (r'\balter\s+table\b', 'ALTER TABLE operation'),
-            (r'\bmodify\s+table\b', 'ALTER TABLE operation'),
-            (r'\bchange\s+table\b', 'ALTER TABLE operation'),
-            
-            # DROP/TRUNCATE operations
-            (r'\bdrop\b', 'DROP operation'),
-            (r'\btruncate\b', 'TRUNCATE operation'),
-            (r'\bdestroy\s+(table|database|all|everything)\b', 'DROP operation'),
-            
-            # SQL injection patterns
-            (r';\s*(delete|update|insert|drop|alter|truncate)', 'SQL injection attempt'),
-            (r'union\s+.*\s+(delete|update|insert|drop|alter)', 'SQL injection attempt'),
-            (r'exec\s*\(|execute\s*\(', 'SQL injection attempt'),
-            
-            # Permission modification
-            (r'\bgrant\b', 'Permission modification'),
-            (r'\brevoke\b', 'Permission modification'),
-            
-            # Transaction control
-            (r'\bcommit\b', 'Transaction control'),
-            (r'\brollback\b', 'Transaction control'),
-            (r'\bbegin\s+transaction\b', 'Transaction control'),
-        ]
-        
-        # Check for malicious patterns
-        detected_operations = []
-        for pattern, operation in malicious_patterns:
-            if re.search(pattern, user_input_lower, re.IGNORECASE):
-                detected_operations.append(operation)
-                logger.error(f"[SECURITY] ⚠️ STEP 0: Detected malicious intent - {operation}")
-                logger.error(f"[SECURITY] Pattern matched: {pattern}")
-                logger.error(f"[SECURITY] User input: {state['original_input']}")
+        detected_operations = _detect_explicit_write_intent(
+            state.get("original_input") or "")
+        for operation in detected_operations:
+            logger.warning("[SECURITY] STEP 0 explicit write intent: %s",
+                           operation)
         
         if detected_operations:
-            # CRITICAL: User attempted malicious operation - BLOCK IMMEDIATELY
+            # The operation is denied immediately. Account consequences are
+            # decided later by the centralized threshold policy.
             operations_str = ", ".join(set(detected_operations))
-            block_reason = f"Attempted database alteration operation detected in natural language query: {operations_str}. Query: {state['original_input'][:200]}"
+            block_reason = (
+                "Explicit database alteration request detected in the user's "
+                f"natural-language query: {operations_str}.")
             
-            logger.error(f"[SECURITY] 🚨 STEP 0: BLOCKING USER - Malicious intent detected: {operations_str}")
+            logger.warning("[SECURITY] STEP 0 denying explicit write request: %s",
+                           operations_str)
             logger.error(f"[SECURITY] Block reason: {block_reason}")
             
-            # Mark user for blocking
+            # Mark the turn for centralized policy review.
             # Try multiple ways to get user_id
             user_id = getattr(self.conversation_memory, 'user_id', None)
             if not user_id and hasattr(self.conversation_memory, 'user_id'):
@@ -249,7 +245,7 @@ class SQLAgentTools:
             
             # Always set security flags even if user_id is not available
             # The API route will handle the actual blocking when it receives these flags
-            logger.error(f"[SECURITY] ⚠️ STEP 0: Marking user for blocking - Malicious intent in natural language")
+            logger.warning("[SECURITY] STEP 0 marking turn for policy review")
             if user_id:
                 logger.error(f"[SECURITY] User ID available: {user_id}")
             else:
@@ -279,7 +275,7 @@ class SQLAgentTools:
             
             logger.error(f"🚨 SECURITY ALERT: Malicious intent detected!")
             logger.info(f"   Operations: {operations_str}")
-            logger.warning(f"   User will be blocked immediately")
+            logger.info("   Account action deferred to security policy")
             logger.info(f"   Processing stopped")
             
             return state
@@ -311,7 +307,7 @@ class SQLAgentTools:
         sooner.
         """
         original = state.get("original_input") or ""
-        logger.info("[STEP_1] Language check - Input: %s", original[:100])
+        logger.info("[STEP_1] Language check (input_chars=%d)", len(original))
 
         # Which language the FINAL report is written in. Deterministic:
         # Arabic script in the input, or an explicit ask for Arabic, means the
@@ -396,8 +392,8 @@ class SQLAgentTools:
                 "identity_id": chosen.get("identity_id"),
                 "canonical_name": chosen.get("display_name")}]
             state["clarification_answered"] = True
-            logger.info("[REACT] clarification answered subject=%s",
-                        chosen.get("display_name"))
+            logger.info("[REACT] clarification answered subject_present=%s",
+                        bool(chosen.get("display_name")))
 
         # What THIS TURN has already established. Re-entering the loop for a
         # second action used to start from nothing, so the agent could resolve
@@ -482,7 +478,12 @@ class SQLAgentTools:
                     artifact_index=state.get("artifact_index") or [],
                     identity_index=state.get("identity_index") or [],
                     max_steps=max(1, step_budget),
-                    prior_observations=prior_observations)
+                    prior_observations=prior_observations,
+                    # Deterministic: this message ANSWERS the question we
+                    # asked, so it continues that request by construction.
+                    known_request=True if state.get(
+                        "clarification_answered") else None,
+                    has_result=bool(candidates.get("last_result")))
                 state["reasoning_steps_used"] = (
                     int(state.get("reasoning_steps_used") or 0) + len(tool_trace))
                 state["tool_trace"] = tool_trace
@@ -556,19 +557,25 @@ class SQLAgentTools:
             except Exception as tool_error:
                 logger.warning("[TOOL_LOOP] unavailable, using the planner: %s",
                                tool_error)
+            planner_prompt = skill_resolver.compose(
+                planner.PLANNER_SYSTEM_PROMPT,
+                has_result=bool(candidates.get("last_result")),
+                has_documents=bool(state.get("artifact_index")),
+            )
             prompt = ChatPromptTemplate.from_messages([
-                SystemMessage(content=planner.PLANNER_SYSTEM_PROMPT),
+                SystemMessage(content=planner_prompt),
                 HumanMessage(content=(
                     self._context_section(state)
                     + "Conversation state:\n" + context_block
                     + f"\n\nRequest: {user_text}\n\nJSON:"))
             ])
             self._trace_envelope("plan_action", prompt)
-            raw = (prompt | self.sql_llm | StrOutputParser()).invoke({})
+            raw = (prompt | self.llm | StrOutputParser()).invoke({})
             # DEBUG ONLY. If a model prepends prose to its JSON, that prose
             # is its reasoning, and a production log is not a place for it.
             if settings.DEBUG:
-                logger.debug("[STEP_2] planner raw response: %s", str(raw)[:300])
+                logger.debug("[STEP_2] planner response received (chars=%d)",
+                             len(str(raw)))
             else:
                 logger.info("[STEP_2] planner replied (%d chars)", len(str(raw)))
             plan = planner.validate_plan(planner.extract_json_object(raw), candidates)
@@ -944,8 +951,8 @@ class SQLAgentTools:
             "resolve_person", {"name": needle}, db=self.db,
             identity_index=state.get("identity_index") or [])
         status = result.get("status")
-        logger.info("[REACT] entity_resolution name=%r status=%s", needle,
-                    status)
+        logger.info("[REACT] entity_resolution name_chars=%d status=%s",
+                    len(str(needle or "")), status)
 
         if status == "ambiguous":
             candidates = result.get("candidates") or []
@@ -991,8 +998,8 @@ class SQLAgentTools:
             # entity_resolution_attempted - the same reasoning that keeps
             # execution retries off the reasoning budget.
 
-            logger.info("[REACT] re-querying with the stored spelling %r",
-                        canonical)
+            logger.info("[REACT] re-querying with stored spelling "
+                        "(name_chars=%d)", len(str(canonical or "")))
             return "check_schema"
 
         # The filter WOULD have matched this person, so zero rows is a fact
@@ -1115,11 +1122,11 @@ class SQLAgentTools:
         STEP 3.5: RAG Retrieval
         Search knowledge base for similar questions and their SQL queries.
         """
-        logger.info(f"[STEP_3.5] RAG retrieval for: {state['normalized_input'][:100]}")
+        logger.info("[STEP_3.5] RAG retrieval (query_chars=%d)",
+                    len(state.get("normalized_input") or ""))
         logger.info("\n" + "="*60)
         logger.info("📚 STEP 3.5: RAG RETRIEVAL")
         logger.debug("="*60)
-        logger.info(f"🔍 Searching for: {state['normalized_input']}")
 
         try:
             # Search for similar questions
@@ -1138,10 +1145,9 @@ class SQLAgentTools:
 
             if examples:
                 logger.info(f"[STEP_3.5] Found {len(examples)} similar examples")
-                logger.info(f"✅ Found {len(examples)} similar examples:")
-                for i, ex in enumerate(examples, 1):
-                    logger.debug(f"[STEP_3.5] Example {i}: {ex['question']} (similarity: {ex['similarity']})")
-                    logger.info(f"   {i}. \"{ex['question']}\" (similarity: {ex['similarity']})")
+                logger.info("[STEP_3.5] Similar examples ready "
+                            "(top_similarities=%s)",
+                            [ex.get("similarity") for ex in examples[:3]])
             else:
                 logger.warning("[STEP_3.5] No similar examples found")
                 logger.warning("⚠️ No similar examples found")
@@ -1161,11 +1167,11 @@ class SQLAgentTools:
         Generate safe, optimized SQL queries using retrieved examples.
         Uses the prepare_sql_from_llm_response tool to clean up the output.
         """
-        logger.info(f"[STEP_4] Generating SQL for: {state['normalized_input'][:100]}")
+        logger.info("[STEP_4] Generating SQL (query_chars=%d)",
+                    len(state.get("normalized_input") or ""))
         logger.info("\n" + "="*60)
         logger.info("⚙️ STEP 4: SQL GENERATION")
         logger.debug("="*60)
-        logger.info(f"📥 Query to generate SQL for: {state['normalized_input']}")
 
         # Build RAG context
         rag_section = ""
@@ -1264,12 +1270,11 @@ If no query is possible:
 
         try:
             logger.info("[STEP_4] 🤖 Calling LLM for SQL generation...")
-            logger.debug(f"[STEP_4] Prompt being sent to LLM: {prompt.messages[-1].content[:500]}...")
             logger.info("🤖 Calling LLM for SQL generation...")
             result = chain.invoke({})
             logger.info(f"[STEP_4] ✅ LLM raw response received ({len(result)} chars)")
-            logger.info(f"[STEP_4] 📝 LLM RAW RESPONSE:\n{result}\n{'='*80}")
-            logger.info(f"🤖 LLM Raw Response:\n{result}")
+            logger.info("[STEP_4] LLM response received (chars=%d)",
+                        len(str(result)))
             logger.debug("-"*40)
 
             # Use the prepare_sql_from_llm_response tool to parse and clean the response
@@ -1283,7 +1288,8 @@ If no query is possible:
                 validation = self.db._validate_query(generated_sql)
                 if not validation["is_safe"]:
                     logger.error(f"[SECURITY] ⚠️ LAYER 0: Forbidden SQL detected immediately after generation: {validation['reason']}")
-                    logger.error(f"[SECURITY] Generated SQL: {generated_sql[:500]}")
+                    logger.error("[SECURITY] Forbidden generated SQL "
+                                 "(chars=%d)", len(generated_sql))
                     logger.error(f"🚨 SECURITY ALERT: {validation['reason']}")
                     
                     # Mark user for blocking
@@ -1292,7 +1298,8 @@ If no query is possible:
                         logger.error(f"[SECURITY] ⚠️ LAYER 0: Marking user ID {user_id} for blocking - Forbidden SQL in generated query")
                         state["security_block_user"] = True
                         state["security_block_actor"] = "model"
-                        state["security_block_reason"] = f"Forbidden SQL detected in generated query: {validation['reason']}. SQL: {generated_sql[:200]}"
+                        state["security_block_reason"] = (
+                            "Generated SQL was rejected by the read-only policy.")
                     
                     # Set error state
                     state["generated_sql"] = ""
@@ -1310,12 +1317,12 @@ If no query is possible:
                 state["generated_sql"] = generated_sql
                 state["sql_purpose"] = prepared["purpose"]
                 logger.info(f"[STEP_4] SQL generated successfully (length: {len(generated_sql)} chars)")
-                logger.debug(f"[STEP_4] Generated SQL: {generated_sql[:200]}...")
                 logger.debug(f"[STEP_4] Transformations: {prepared['transformations']}")
                 logger.info(f"✅ SQL prepared successfully!")
                 logger.info(f"📝 Transformations applied: {prepared['transformations']}")
-                logger.info(f"📤 Generated SQL:\n{state['generated_sql']}")
-                logger.info(f"📝 Purpose: {state['sql_purpose']}")
+                logger.info("[STEP_4] SQL prepared (sql_chars=%d purpose_chars=%d)",
+                            len(state.get("generated_sql") or ""),
+                            len(state.get("sql_purpose") or ""))
             else:
                 state["generated_sql"] = ""
                 state["sql_purpose"] = prepared["error"]
@@ -1341,7 +1348,8 @@ If no query is possible:
             else:
                 state["sql_purpose"] = f"SQL generation error: {str(e)}"
                 logger.error(f"[STEP_4] SQL generation exception: {str(e)}", exc_info=True)
-            logger.error(f"❌ Error: {state['sql_purpose']}")
+            logger.error("[STEP_4] SQL generation failed (reason_chars=%d)",
+                         len(state.get("sql_purpose") or ""))
 
         return state
 
@@ -1366,7 +1374,7 @@ If no query is possible:
             return state
 
         logger.debug(f"[STEP_4.5] Validating SQL ({len(generated_sql)} chars)")
-        logger.info(f"📥 SQL to validate:\n{generated_sql}")
+        logger.info("[STEP_5] Validating SQL (chars=%d)", len(generated_sql))
 
         # Use the validate_sql_query tool
         validation_result = validate_sql_query.invoke(generated_sql)
@@ -1434,11 +1442,10 @@ Provide the corrected SQL:""")
 
         try:
             logger.info("[STEP_5] 🤖 Calling LLM for SQL fix...")
-            logger.debug(f"[STEP_5] Fix prompt being sent to LLM: {fix_prompt.messages[-1].content[:500]}...")
             result = chain.invoke({})
             logger.info(f"[STEP_5] ✅ LLM fix response received ({len(result)} chars)")
-            logger.info(f"[STEP_5] 📝 LLM FIX RESPONSE:\n{result}\n{'='*80}")
-            logger.info(f"🤖 LLM Fix Response:\n{result}")
+            logger.info("[STEP_5] SQL-fix response received (chars=%d)",
+                        len(str(result)))
 
             # Use prepare_sql_from_llm_response to parse the fix response
             prepared = prepare_sql_from_llm_response.invoke(result)
@@ -1455,7 +1462,7 @@ Provide the corrected SQL:""")
                     state["sql_fixes_applied"] = prepared["transformations"]
                     logger.info(f"✅ SQL successfully fixed!")
                     logger.info(f"📝 Transformations: {prepared['transformations']}")
-                    logger.info(f"📤 Fixed SQL:\n{fixed_sql}")
+                    logger.info("[STEP_5] SQL fixed (chars=%d)", len(fixed_sql))
                 else:
                     logger.warning(f"⚠️ Fixed SQL still has issues, keeping original")
                     state["sql_validation_status"] = "PARTIAL"
@@ -1501,7 +1508,8 @@ Provide the corrected SQL:""")
                 state["security_block_user"] = True
                 state["security_block_actor"] = "model"
                 state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
-                state["security_block_reason"] = f"Attempted forbidden SQL operation: {validation['reason']}. Query: {generated_sql[:200]}"
+                state["security_block_reason"] = (
+                    "Generated SQL was rejected by the read-only policy.")
             else:
                 logger.warning(f"[SECURITY] Validation failed but no user_id available: {validation['reason']}")
 
@@ -1534,7 +1542,8 @@ Provide the corrected SQL:""")
                     state["security_block_user"] = True
                     state["security_block_actor"] = "model"
                     state["security_reason_code"] = "FORBIDDEN_SQL_ATTEMPT"
-                    state["security_block_reason"] = f"Attempted forbidden SQL operation after cleanup: {final_validation['reason']}. Query: {prepared['sql'][:200]}"
+                    state["security_block_reason"] = (
+                        "Prepared SQL was rejected by the read-only policy.")
                 else:
                     logger.warning(f"[SECURITY] Post-cleanup validation failed but no user_id available: {final_validation['reason']}")
 
@@ -1547,7 +1556,8 @@ Provide the corrected SQL:""")
                 }
                 return state
             logger.info(f"✅ SQL ready for execution (read-only validated)")
-            logger.info(f"📤 Final SQL:\n{prepared['sql']}")
+            logger.info("[STEP_5] SQL ready for execution (chars=%d)",
+                        len(prepared.get("sql") or ""))
         else:
             logger.info(f"✅ SQL ready for execution (no additional cleanup needed)")
 
@@ -1585,8 +1595,8 @@ Provide the corrected SQL:""")
             }
             return state
 
-        logger.debug(f"[STEP_5] Executing SQL: {state['generated_sql'][:200]}...")
-        logger.info(f"📤 Executing SQL:\n{state['generated_sql']}")
+        logger.info("[STEP_5] Executing validated SQL (chars=%d)",
+                    len(state.get("generated_sql") or ""))
 
         try:
             result = self.db.execute_query(state["generated_sql"])
@@ -1596,8 +1606,8 @@ Provide the corrected SQL:""")
                 logger.info(f"[STEP_5] Query executed successfully - {row_count} rows returned")
                 logger.info(f"✅ Query successful! Rows returned: {row_count}")
                 if result.get("rows"):
-                    logger.debug(f"[STEP_5] Sample data: {result['rows'][:3]}")
-                    logger.info(f"📊 Sample data: {result['rows'][:3]}")
+                    logger.debug("[STEP_5] Result rows available (count=%d)",
+                                 len(result["rows"]))
             else:
                 error = result.get('error', 'Unknown error')
                 logger.error(f"[STEP_5] Query execution failed: {error}")
@@ -1637,7 +1647,8 @@ Provide the corrected SQL:""")
                         state["security_block_user"] = True
                         state["security_block_actor"] = "model"
                         state["security_reason_code"] = error_code or "FORBIDDEN_SQL_ATTEMPT"
-                        state["security_block_reason"] = f"Attempted forbidden SQL operation during execution: {error}. Query: {state['generated_sql'][:200]}"
+                        state["security_block_reason"] = (
+                            "SQL execution was rejected by the read-only policy.")
                     else:
                         logger.warning(f"[SECURITY] Execution validation failed but no user_id available: {error}")
         except Exception as e:
@@ -2017,8 +2028,9 @@ LIMIT 200"""
                 })
                 if len(entries) >= 25:
                     break
-            logger.info("[CO_APPEAR] %d co-appearance observation(s) for '%s'",
-                        len(entries), subject)
+            logger.info("[CO_APPEAR] %d co-appearance observation(s) "
+                        "(subject_chars=%d)", len(entries),
+                        len(str(subject or "")))
             return {"co_appearances": entries}
         except (TypeError, AttributeError, NameError, KeyError, IndexError) as bug:
             # A CODE fault. This used to log only `type(e).__name__`, so a
@@ -2295,10 +2307,10 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             else:
                 # Non-streaming mode (original behavior)
                 logger.info("[STEP_6] 🤖 Calling LLM for story generation (non-streaming)...")
-                logger.debug(f"[STEP_6] Story prompt being sent to LLM: {prompt.messages[-1].content[:500]}...")
                 response = chain.invoke({})
                 logger.info(f"[STEP_6] ✅ LLM story response received ({len(response)} chars)")
-                logger.info(f"[STEP_6] 📝 LLM STORY RESPONSE:\n{response}\n{'='*80}")
+                logger.info("[STEP_6] Story response received (chars=%d)",
+                            len(str(response)))
                 response_text = response.strip()
                 
                 # Even in non-streaming mode, send the response via callback if available
@@ -2323,7 +2335,6 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             
             state["final_response"] = response_text
             logger.info(f"[STEP_6] Story response generated successfully ({len(state['final_response'])} chars)")
-            logger.debug(f"[STEP_6] Response preview: {state['final_response'][:200]}...")
             logger.info(f"✅ Final response generated ({len(state['final_response'])} chars)")
         except Exception as e:
             logger.error(f"[STEP_6] Story generation failed: {str(e)}", exc_info=True)
@@ -2333,11 +2344,8 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                 streaming_callback({"type": "error", "message": error_msg, "step": "error"})
             logger.error(f"❌ Error generating response: {str(e)}")
 
-        logger.info("\n" + "="*60)
-        logger.info("🏁 FINAL RESPONSE:")
-        logger.debug("="*60)
-        logger.info(state["final_response"])
-        logger.debug("="*60)
+        logger.info("[STEP_6] Final response ready (chars=%d)",
+                    len(state.get("final_response") or ""))
 
         return state
 
@@ -2674,8 +2682,8 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             observability.observe_provenance("none")
             return state
 
-        logger.info("[MODIFY_SQL] base query from %s; change: %s",
-                    provenance, str(modification)[:120])
+        logger.info("[MODIFY_SQL] base query from %s; change_chars=%d",
+                    provenance, len(str(modification)))
         state["sql_base_provenance"] = provenance
         observability.observe_provenance(provenance.split(":", 1)[0])
 
@@ -2726,8 +2734,7 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                     state["security_block_user"] = True
                     state["security_block_actor"] = "model"
                     state["security_block_reason"] = (
-                        f"Forbidden SQL detected in modified query: "
-                        f"{validation['reason']}. SQL: {adjusted[:200]}")
+                        "Modified SQL was rejected by the read-only policy.")
                 state["generated_sql"] = ""
                 state["sql_purpose"] = (
                     f"SECURITY VIOLATION: {validation['reason']}. This system "
@@ -2740,8 +2747,8 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                                     or f"{last_result.get('purpose') or 'previous query'} "
                                        f"({str(modification)[:80]})")
             state["sql_was_modified"] = (adjusted.strip() != (base_sql or "").strip())
-            logger.info("[MODIFY_SQL] adjusted SQL (changed=%s): %s",
-                        state["sql_was_modified"], adjusted[:200])
+            logger.info("[MODIFY_SQL] adjusted SQL changed=%s chars=%d",
+                        state["sql_was_modified"], len(adjusted))
         except Exception as e:
             logger.error("[MODIFY_SQL] failed: %s", e, exc_info=True)
             # Fall back to the ORIGINAL query rather than to nothing: the user
@@ -2825,7 +2832,8 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         logger.info("\n" + "="*60)
         logger.info("💬 CHAT RESPONSE (No SQL needed)")
         logger.debug("="*60)
-        logger.info(f"📥 Input: {state['normalized_input']}")
+        logger.info("[STEP_7] Chat input received (chars=%d)",
+                    len(state.get("normalized_input") or ""))
 
         # A planned clarification is the answer, not a prompt for one. Passing
         # "make it Arabic" to the chat model here is precisely the failure
@@ -2878,23 +2886,19 @@ Never claim an action succeeded unless the FACTS block below says it did."""),
 
         try:
             logger.info("[STEP_7] 🤖 Calling LLM for final response generation (chat mode)...")
-            logger.debug(f"[STEP_7] Final response prompt being sent to LLM: {prompt.messages[-1].content[:500]}...")
             response = chain.invoke({})
             logger.info(f"[STEP_7] ✅ LLM final response received ({len(response)} chars)")
-            logger.info(f"[STEP_7] 📝 LLM FINAL RESPONSE:\n{response}\n{'='*80}")
+            logger.info("[STEP_7] Chat response received (chars=%d)",
+                        len(str(response)))
             state["final_response"] = response.strip()
             logger.info(f"[STEP_7] ✅ Final response set in state ({len(state['final_response'])} chars)")
-            logger.info(f"[STEP_7] 📤 FINAL RESPONSE CONTENT:\n{state['final_response']}\n{'='*80}")
             logger.info(f"✅ Chat response generated")
         except Exception as e:
             state["final_response"] = f"I apologize, but I encountered an error: {str(e)}"
             logger.error(f"❌ Error: {str(e)}")
 
-        logger.info("\n" + "="*60)
-        logger.info("🏁 FINAL RESPONSE:")
-        logger.debug("="*60)
-        logger.info(state["final_response"])
-        logger.debug("="*60)
+        logger.info("[STEP_7] Final response ready (chars=%d)",
+                    len(state.get("final_response") or ""))
 
         return state
 
@@ -2958,7 +2962,9 @@ Never claim an action succeeded unless the FACTS block below says it did."""),
                         purpose=state.get("sql_purpose", ""),
                         user_id=state.get("user_id"),
                     )
-                    logger.info(f"[STEP_7] Learned new query pattern: {state['normalized_input'][:100]}")
+                    logger.info("[STEP_7] Learned new query pattern "
+                                "(query_chars=%d)",
+                                len(state.get("normalized_input") or ""))
                     logger.info("✅ Learned new query pattern!")
                 else:
                     similarity = existing[0].get('similarity', 0)

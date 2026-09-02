@@ -201,7 +201,7 @@ async def get_owned_artifact(db: AsyncSession, artifact_id, user_id: Optional[in
 
 
 async def get_artifact_source_sql(db: AsyncSession, user_id: Optional[int],
-                                  limit: int = 3) -> dict:
+                                  limit: int = 3, since=None) -> dict:
     """{artifact_id: source_sql} for this user's recent documents.
 
     Deliberately a SEPARATE call from list_recent_artifacts. That one feeds a
@@ -220,11 +220,18 @@ async def get_artifact_source_sql(db: AsyncSession, user_id: Optional[int],
                    AgentArtifact.source_sql.isnot(None))
             .order_by(AgentArtifact.created_at.desc())
             .limit(max(1, min(limit, 10))))
+    if since is not None:
+        # Scoped with the SAME boundary as the artifact list. This map is what
+        # modify_active_query EDITS, so leaving it unscoped would leave the
+        # reported bug in place while appearing to fix it: the request that
+        # answered about Joey inherited its filter from here.
+        stmt = stmt.where(AgentArtifact.created_at >= since)
     return {str(row[0]): row[1] for row in (await db.execute(stmt)).all()}
 
 
 async def list_recent_artifacts(db: AsyncSession, user_id: Optional[int],
-                                conversation_id=None, limit: int = 3) -> List[dict]:
+                                conversation_id=None, limit: int = 3,
+                                since=None) -> List[dict]:
     """Compact, owner-scoped candidates for the reference resolver.
 
     Deliberately NOT the full row: `source_content` and `source_sql` carry
@@ -244,6 +251,11 @@ async def list_recent_artifacts(db: AsyncSession, user_id: Optional[int],
     )
     if conversation_id is not None:
         stmt = stmt.where(AgentArtifact.conversation_id == conversation_id)
+    if since is not None:
+        # THE conversation boundary. Without it "the last report" reaches
+        # into a different conversation entirely - which is how a request
+        # about Iron Man was answered with a document about Joey.
+        stmt = stmt.where(AgentArtifact.created_at >= since)
     stmt = stmt.order_by(AgentArtifact.created_at.desc()).limit(max(1, min(limit, 10)))
 
     return [

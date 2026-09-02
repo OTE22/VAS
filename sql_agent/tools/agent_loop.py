@@ -32,6 +32,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from . import tool_registry as tr
 from . import tool_executors as tx
+from ..skills import resolver as skill_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +192,8 @@ Judge ONLY the message below, not the earlier conversation. A short message
 is not automatically NO — "only camera 3" asks for something."""
 
 
-def asked_for_an_action(llm, user_text: str) -> bool:
+def asked_for_an_action(llm, user_text: str, *,
+                        question_pending: bool = False) -> bool:
     """Did the user ask for anything at all, or is this a greeting?
 
     The reasoning layer checks whether an action SUCCEEDED; nothing checked
@@ -209,8 +211,18 @@ def asked_for_an_action(llm, user_text: str) -> bool:
     action, never break one.
     """
     try:
+        # A message answering a question the assistant ASKED is a request,
+        # however little it says on its own. Judged without that fact, every
+        # answer to every question looks like small talk - "yes" after "which
+        # one did you mean?" was refused an action and answered with a
+        # greeting.
+        situation = ("\n\nThe assistant asked the user a question on the "
+                     "previous turn and is waiting for the answer. A message "
+                     "that answers it CONTINUES that request."
+                     if question_pending else "")
+
         reply = llm.invoke([
-            SystemMessage(content=INTENT_FIT_PROMPT),
+            SystemMessage(content=INTENT_FIT_PROMPT + situation),
             HumanMessage(content=f"User's message: {user_text}"),
         ])
     except Exception as e:
@@ -344,6 +356,8 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                   artifact_index: Optional[List[dict]],
                   identity_index: Optional[List[dict]] = None,
                   prior_observations: Optional[List[dict]] = None,
+                  known_request: Optional[bool] = None,
+                  has_result: bool = False,
                   supports_native_tools: bool = True,
                   max_steps: int = tr.MAX_TOOL_STEPS
                   ) -> Tuple[Optional[Dict[str, Any]], List[dict], Optional[bool]]:
@@ -364,8 +378,13 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
     Never raises: a broken tool step degrades to "no action chosen", which the
     caller handles, rather than failing the turn.
     """
+    system_prompt = skill_resolver.compose(
+        TOOL_SYSTEM_PROMPT,
+        has_result=has_result,
+        has_documents=bool(artifact_index),
+    )
     messages = [
-        SystemMessage(content=TOOL_SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt),
         _user_message(user_text, context_block,
                       prompted=not supports_native_tools),
     ]
@@ -433,7 +452,13 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 seen.add(tuple(o["signature"]))
     # Computed lazily the first time an action is proposed, then reused: it
     # is a property of the user's message, not of the tool.
-    is_a_request = None
+    #
+    # Unless the caller already KNOWS. When Python has matched the message to
+    # a candidate the assistant offered, the message continues that request as
+    # a matter of fact - asking a model to judge it can only introduce error,
+    # and did: "seed_person_016" was matched to its candidate and then refused
+    # an action because, read alone, it asks for nothing.
+    is_a_request = known_request
 
     # THREE bounds, because they bound three different things.
     #
@@ -564,7 +589,11 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
             # turn — at most one extra call, and none at all when the model
             # goes straight to answer_directly.
             if is_a_request is None:
-                is_a_request = asked_for_an_action(llm, user_text)
+                is_a_request = asked_for_an_action(
+                    llm, user_text,
+                    question_pending=bool(
+                        ((dialogue_state or {}).get("fields") or {})
+                        .get("pending_clarification", {}).get("value")))
             if not is_a_request:
                 doing = _ACTION_DESCRIPTIONS.get(name, "do that")
                 logger.info("[TOOL_LOOP] refused %s: the user did not ask "

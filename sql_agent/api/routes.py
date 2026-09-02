@@ -15,7 +15,7 @@ from typing import Optional, Dict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from io import BytesIO
 import re
 
@@ -100,9 +100,50 @@ _sql_agent_available = False
 # same two numbers again — three declarations of each setting, any of which
 # could drift from config.py without anything noticing.
 from config import settings as _app_settings
+from sql_agent.agent import TurnCancelled
 
 SQL_AGENT_MAX_CONCURRENT = int(_app_settings.SQL_AGENT_MAX_CONCURRENT)
 SQL_AGENT_TOTAL_TIMEOUT = float(_app_settings.SQL_AGENT_TOTAL_TIMEOUT)
+SQL_AGENT_MAX_QUERY_CHARS = int(_app_settings.SQL_AGENT_MAX_QUERY_CHARS)
+
+
+class SQLAgentQueryRequest(BaseModel):
+    """Bounded request shared by the REST and SSE query endpoints."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    query: str = Field(min_length=1, max_length=SQL_AGENT_MAX_QUERY_CHARS)
+    request_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+
+    @field_validator("query")
+    @classmethod
+    def query_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("query must not be blank")
+        return value
+
+
+def _request_value(request, name: str, default=None):
+    """Read a field from a validated model or a direct-call test dictionary."""
+    if isinstance(request, dict):
+        return request.get(name, default)
+    return getattr(request, name, default)
+
+
+def _bounded_query(raw) -> tuple:
+    """Return ``(query, error)`` using one contract for all transports."""
+    if not isinstance(raw, str):
+        return "", "Query must be a string"
+    query = raw.strip()
+    if not query:
+        return "", "Query is required"
+    if len(query) > SQL_AGENT_MAX_QUERY_CHARS:
+        return "", (
+            f"Query is too long. Maximum length is "
+            f"{SQL_AGENT_MAX_QUERY_CHARS} characters.")
+    return query, None
 
 # The semaphore is sized once, at import — the concurrency cap is registered
 # api_restart for exactly that reason, and boot hydration now applies stored
@@ -538,13 +579,15 @@ class _StageTimer:
         )
 
 
-def _start_stream_thread(agent_instance, query: str, cancel_event: threading.Event, loop) -> asyncio.Queue:
+def _start_stream_thread(agent_instance, query: str,
+                         cancel_event: threading.Event, loop):
     """TRUE streaming bridge: a dedicated thread pumps the agent's blocking
     query_stream() generator into an asyncio.Queue item by item, so SSE/WS
     consumers can forward each update the moment it is produced (the previous
     implementation either collected the full list before the first byte, or —
     worse — iterated the blocking generator directly on the event loop)."""
     q: asyncio.Queue = asyncio.Queue()
+    worker_done = asyncio.Event()
 
     def _pump():
         try:
@@ -561,11 +604,12 @@ def _start_stream_thread(agent_instance, query: str, cancel_event: threading.Eve
         finally:
             try:
                 loop.call_soon_threadsafe(q.put_nowait, _STREAM_SENTINEL)
+                loop.call_soon_threadsafe(worker_done.set)
             except RuntimeError:
                 pass
 
     threading.Thread(target=_pump, name="sql-agent-stream", daemon=True).start()
-    return q
+    return q, worker_done
 
 # Holds strong references to fire-and-forget background tasks. The event loop only
 # keeps weak references, so without this a task can be garbage-collected mid-run.
@@ -578,6 +622,37 @@ def _spawn_background(coro):
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+async def _drain_cancelled_turn(worker_task, user_lock, request_id: str) -> None:
+    """Keep isolation resources until a cancelled worker actually exits."""
+    try:
+        await worker_task
+    except (TurnCancelled, asyncio.CancelledError):
+        pass
+    except Exception as exc:
+        logger.warning(
+            "[SQL_AGENT_API] request_id=%s cancelled worker ended with %s",
+            request_id, type(exc).__name__)
+    finally:
+        if user_lock is not None and user_lock.locked():
+            user_lock.release()
+        _sql_agent_semaphore.release()
+        logger.info("[SQL_AGENT_API] request_id=%s cancelled worker drained",
+                    request_id)
+
+
+async def _release_stream_resources_when_done(worker_done: asyncio.Event,
+                                              user_lock, release_semaphore: bool,
+                                              request_id: str) -> None:
+    """Release stream isolation only after its worker thread has stopped."""
+    await worker_done.wait()
+    if user_lock is not None and user_lock.locked():
+        user_lock.release()
+    if release_semaphore:
+        _sql_agent_semaphore.release()
+    logger.info("[SQL_AGENT_API] request_id=%s stream worker drained",
+                request_id)
 
 
 async def await_persistence_despite_disconnect(coro, request_id: str):
@@ -932,7 +1007,7 @@ async def block_user_for_forbidden_sql(user_id: int, username: str,
 
 @router.post("/query")
 async def sql_agent_query(
-    request: dict,
+    request: SQLAgentQueryRequest,
     current_user: User = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None
 ):
     """
@@ -951,7 +1026,9 @@ async def sql_agent_query(
         "success": true
     }
     """
-    logger.info(f"[SQL_AGENT_API] Query endpoint called. Request type: {type(request)}, Auth available: {AUTH_AVAILABLE}, Current user: {current_user.username if current_user else None}")
+    logger.info("[SQL_AGENT_API] Query endpoint called request_type=%s "
+                "auth_available=%s user_id=%s", type(request).__name__,
+                AUTH_AVAILABLE, _uid(current_user))
     
     if not _sql_agent_available:
         logger.warning("[SQL_AGENT_API] Query request received but SQL_AGENT_AVAILABLE is False")
@@ -997,10 +1074,16 @@ async def sql_agent_query(
                 "response": None
             }
         )
-    
+
+    # Set only after idempotency registration. The outer finally turns any
+    # otherwise-unhandled early return or exception into a terminal registry
+    # entry, so a request can never remain "running" after this coroutine has
+    # returned. Explicit completed/cancelled/failed outcomes below win because
+    # the finally only changes entries that are still running.
+    rest_request_id = None
     try:
         # Validate request format
-        if not isinstance(request, dict):
+        if not isinstance(request, (dict, SQLAgentQueryRequest)):
             logger.warning("[SQL_AGENT_API] Invalid request format - not a dict")
             return JSONResponse(
                 status_code=400,
@@ -1011,19 +1094,19 @@ async def sql_agent_query(
                 }
             )
         
-        query = request.get("query", "").strip()
-        if not query:
-            logger.warning("[SQL_AGENT_API] Empty query received")
+        query, query_error = _bounded_query(_request_value(request, "query"))
+        if query_error:
+            logger.warning("[SQL_AGENT_API] Invalid query rejected: %s", query_error)
             return JSONResponse(
                 status_code=400,
                 content={
                     "success": False,
-                    "error": "Query is required",
+                    "error": query_error,
                     "response": None
                 }
             )
         
-        logger.info(f"[SQL_AGENT_API] Processing query: {query[:100]}...")
+        logger.info("[SQL_AGENT_API] Processing query (chars=%d)", len(query))
         start_time = asyncio.get_event_loop().time()
 
         # Idempotency — the same contract SSE and WS have always had, which
@@ -1032,7 +1115,8 @@ async def sql_agent_query(
         # registered a SECOND artifact. A client that sends request_id gets
         # exactly-once acceptance; one that doesn't gets a minted id and
         # keeps today's behaviour.
-        rest_request_id = _normalize_request_id(request.get("request_id"))
+        rest_request_id = _normalize_request_id(
+            _request_value(request, "request_id"))
         rest_cancel_event = threading.Event()
         if not _register_request(rest_request_id, getattr(current_user, "id", None),
                                  rest_cancel_event):
@@ -1091,24 +1175,39 @@ async def sql_agent_query(
 
                 user_lock = _get_user_lock(user_id) if user_id else None
                 lock_acquired = False
+                resources_deferred = False
                 try:
                     if user_lock:
                         await user_lock.acquire()
                         lock_acquired = True
-                    logger.info(f"[SQL_AGENT_API] Starting query with {QUERY_TIMEOUT}s timeout: {query[:100]}...")
+                    logger.info("[SQL_AGENT_API] Starting query timeout=%ss chars=%d",
+                                QUERY_TIMEOUT, len(query))
                     # The shared lifecycle, inside the user's lock — the same
                     # call SSE and WS make, so the transports cannot drift.
                     await prepare_turn(agent_instance, current_user)
-                    agent_result = await asyncio.wait_for(
-                        run_in_threadpool(agent_instance.query, query),
-                        timeout=QUERY_TIMEOUT
-                    )
+                    worker_task = asyncio.create_task(run_in_threadpool(
+                        agent_instance.query, query, True, rest_cancel_event))
+                    try:
+                        # Shield the worker from wait_for cancellation. On a
+                        # timeout we signal it and keep the user's lock plus
+                        # the global slot until it reaches a graph boundary.
+                        agent_result = await asyncio.wait_for(
+                            asyncio.shield(worker_task), timeout=QUERY_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        rest_cancel_event.set()
+                        resources_deferred = True
+                        _spawn_background(_drain_cancelled_turn(
+                            worker_task, user_lock if lock_acquired else None,
+                            rest_request_id))
+                        raise
                 finally:
-                    if lock_acquired:
+                    if lock_acquired and not resources_deferred:
                         user_lock.release()
-                    _sql_agent_semaphore.release()
+                    if not resources_deferred:
+                        _sql_agent_semaphore.release()
             except asyncio.TimeoutError:
-                logger.error(f"[SQL_AGENT_API] Query timeout after {QUERY_TIMEOUT} seconds: {query[:100]}")
+                logger.error("[SQL_AGENT_API] Query timeout after %s seconds "
+                             "request_id=%s", QUERY_TIMEOUT, rest_request_id)
                 _finish_request(rest_request_id, "failed")
                 return JSONResponse(
                     status_code=504,
@@ -1154,6 +1253,15 @@ async def sql_agent_query(
                 # sees only error.code / message / reference_id.
                 _finish_request(rest_request_id, "failed")
                 return JSONResponse(status_code=403, content=_client_body(denial))
+        except TurnCancelled:
+            _finish_request(rest_request_id, "cancelled")
+            return JSONResponse(
+                status_code=409,
+                content=_error_body(
+                    "REQUEST_CANCELLED",
+                    "The request was cancelled before it completed.",
+                ),
+            )
         except Exception as agent_error:
             logger.error(f"[SQL_AGENT_API] Agent execution error: {str(agent_error)}", exc_info=True)
             error_message = str(agent_error)
@@ -1211,6 +1319,11 @@ async def sql_agent_query(
         # PRIVACY: log status + length only — never the response body
         logger.info(f"[SQL_AGENT_API] ✅ Query completed in {execution_time:.2f}s ({len(response)} chars)")
         
+        # Exists even when authentication is disabled. Previously it was
+        # initialized only inside the authenticated persistence branch and the
+        # successful unauthenticated path raised UnboundLocalError here.
+        artifact_block = None
+
         # Log successful query to audit log (only if no security violation was detected)
         # Security violations are logged in the security check blocks above
         if AUTH_AVAILABLE and current_user and not security_violation_detected:
@@ -1229,7 +1342,6 @@ async def sql_agent_query(
             # Awaited (not fire-and-forget) so it reliably commits before this
             # request returns; the core insert is fast (embeddings run in the
             # background) so the added latency is negligible.
-            artifact_block = None
             if AUTH_AVAILABLE and current_user:
                 metadata = {}
                 if result_dict:
@@ -1284,11 +1396,16 @@ async def sql_agent_query(
                 "response": None
             }
         )
+    finally:
+        if rest_request_id is not None:
+            entry = _ACTIVE_REQUESTS.get(rest_request_id)
+            if entry is not None and entry.get("status") == "running":
+                _finish_request(rest_request_id, "failed")
 
 
 @router.post("/query/stream")
 async def sql_agent_query_stream(
-    request: dict,
+    request: SQLAgentQueryRequest,
     http_request: Request,
     current_user: User = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
     db=Depends(get_db) if AUTH_AVAILABLE else None,
@@ -1311,8 +1428,9 @@ async def sql_agent_query_stream(
         return StreamingResponse(error_stream(), media_type="text/event-stream")
     
     try:
-        query = request.get("query", "").strip()
-        request_id = _normalize_request_id(request.get("request_id"))
+        query, query_error = _bounded_query(_request_value(request, "query"))
+        request_id = _normalize_request_id(
+            _request_value(request, "request_id"))
 
         def _single_event_stream(payload: dict):
             async def _stream():
@@ -1322,10 +1440,10 @@ async def sql_agent_query_stream(
                                      headers={"Cache-Control": "no-cache, no-transform",
                                               "X-Accel-Buffering": "no"})
 
-        if not query:
+        if query_error:
             return _single_event_stream({"type": "error",
                                          "error_code": "INVALID_REQUEST",
-                                         "message": "Query is required"})
+                                         "message": query_error})
 
         logger.info(f"[SQL_AGENT_API] request_id={request_id} streaming query ({len(query)} chars)")
 
@@ -1357,7 +1475,7 @@ async def sql_agent_query_stream(
         # deleted id is rejected up front instead of streaming a full answer
         # into a conversation the caller cannot read back.
         stream_conversation_id = None
-        raw_conversation_id = request.get("conversation_id")
+        raw_conversation_id = _request_value(request, "conversation_id")
         if raw_conversation_id and AUTH_AVAILABLE and current_user and db is not None:
             import uuid as _uuid_mod
             try:
@@ -1419,6 +1537,7 @@ async def sql_agent_query_stream(
             # request registry — POST /requests/{id}/cancel sets it server-side)
             sem_acquired = False
             lock_acquired = False
+            worker_done = None
             user_lock = _get_user_lock(stream_user_id) if stream_user_id is not None else None
             deadline = stream_start_time + SQL_AGENT_TOTAL_TIMEOUT
             was_cancelled = False
@@ -1450,7 +1569,7 @@ async def sql_agent_query_stream(
                 # TRUE streaming: dedicated thread pumps updates into an asyncio
                 # queue; each update is forwarded to the client the moment the
                 # agent produces it (first byte during generation, not after).
-                update_queue = _start_stream_thread(
+                update_queue, worker_done = _start_stream_thread(
                     agent_instance, query, cancel_event, asyncio.get_running_loop()
                 )
                 stages = _StageTimer(lambda: asyncio.get_event_loop().time())
@@ -1668,6 +1787,15 @@ async def sql_agent_query_stream(
                 _finish_request(request_id,
                                 "cancelled" if was_cancelled
                                 else ("completed" if stream_success else "failed"))
+                if worker_done is not None and not worker_done.is_set():
+                    _spawn_background(_release_stream_resources_when_done(
+                        worker_done,
+                        user_lock if lock_acquired else None,
+                        sem_acquired,
+                        request_id,
+                    ))
+                    lock_acquired = False
+                    sem_acquired = False
                 if lock_acquired and user_lock is not None:
                     try:
                         user_lock.release()
@@ -1805,8 +1933,12 @@ async def sql_agent_query_stream(
     
     except Exception as e:
         logger.error(f"[SQL_AGENT_API] Stream endpoint error: {str(e)}", exc_info=True)
+        # Exception targets are cleared when the except block exits. Capture
+        # the safe text now so the async generator does not later raise
+        # NameError while trying to report the original endpoint failure.
+        error_message = str(e)
         async def error_stream():
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
 
 
@@ -1969,7 +2101,7 @@ async def sql_agent_websocket(websocket: WebSocket):
             if msg_type != "query":
                 continue
 
-            query = (data.get("query") or "").strip()
+            query, query_error = _bounded_query(data.get("query"))
             # Optional explicit conversation target. UUID-validated here;
             # OWNERSHIP is enforced inside the conversation service, which
             # falls back to session placement on any access failure — so a
@@ -1990,10 +2122,10 @@ async def sql_agent_websocket(websocket: WebSocket):
                 seq += 1
                 return {**payload, "request_id": request_id, "sequence": seq}
 
-            if not query:
+            if query_error:
                 await websocket.send_json(ws_evt({"type": "error",
                                                   "error_code": "INVALID_REQUEST",
-                                                  "message": "Query is required"}))
+                                                  "message": query_error}))
                 continue
 
             if query.lower() in ["close", "exit", "quit"]:
@@ -2022,6 +2154,7 @@ async def sql_agent_websocket(websocket: WebSocket):
             was_cancelled = False
             query_success = False
             accumulated_response = ""
+            worker_done = None
             user_lock = _get_user_lock(current_user.id) if (AUTH_AVAILABLE and current_user) else None
             try:
                 # Concurrency cap shared with the HTTP endpoints
@@ -2047,7 +2180,7 @@ async def sql_agent_websocket(websocket: WebSocket):
                 # TRUE streaming bridge: agent runs in its own thread, updates are
                 # forwarded as they arrive — the blocking generator is never
                 # iterated on the event loop.
-                update_queue = _start_stream_thread(
+                update_queue, worker_done = _start_stream_thread(
                     agent_instance, query, cancel_event, asyncio.get_running_loop()
                 )
                 deadline = asyncio.get_event_loop().time() + SQL_AGENT_TOTAL_TIMEOUT
@@ -2198,6 +2331,15 @@ async def sql_agent_websocket(websocket: WebSocket):
                 _finish_request(request_id,
                                 "cancelled" if was_cancelled
                                 else ("completed" if query_success else "failed"))
+                if worker_done is not None and not worker_done.is_set():
+                    _spawn_background(_release_stream_resources_when_done(
+                        worker_done,
+                        user_lock if lock_acquired else None,
+                        sem_acquired,
+                        request_id,
+                    ))
+                    lock_acquired = False
+                    sem_acquired = False
                 if lock_acquired and user_lock is not None:
                     try:
                         user_lock.release()
@@ -2715,13 +2857,25 @@ async def _refresh_artifact_index(agent_instance, current_user) -> None:
             agent_instance.set_artifact_index([])
             agent_instance.set_artifact_sql_index({})
             return
+        # THE conversation boundary. Every artifact row has conversation_id
+        # NULL, so the column-based filter matches nothing; the session's
+        # created_at is rewritten by reset_session and works on all three
+        # transports. None means "cannot tell", which keeps today's
+        # behaviour rather than hiding everything.
+        try:
+            since = agent_instance.conversation_memory.session_started_at()
+        except Exception:
+            since = None
+
         async with db_manager.get_session() as db:
             agent_instance.set_artifact_index(
-                await artifact_registry.list_recent_artifacts(db, user_id, limit=3))
+                await artifact_registry.list_recent_artifacts(
+                    db, user_id, limit=3, since=since))
             # Kept SEPARATE from the list above, which feeds a prompt and must
             # stay free of SQL. This map only reaches the modification node.
             agent_instance.set_artifact_sql_index(
-                await artifact_registry.get_artifact_source_sql(db, user_id, limit=3))
+                await artifact_registry.get_artifact_source_sql(
+                    db, user_id, limit=3, since=since))
     except Exception as e:
         logger.warning("[ARTIFACT] could not load the artifact index: %s", e)
         observability.observe_memory_failure("artifact_index_refresh")

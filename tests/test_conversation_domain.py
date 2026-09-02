@@ -420,8 +420,10 @@ def test_every_history_session_has_a_conversation():
                 FROM user_query_history h
                 WHERE NOT EXISTS (
                     SELECT 1 FROM conversations c
-                    WHERE c.user_id = h.user_id
-                      AND COALESCE(c.legacy_session_id, '') = COALESCE(h.session_id, '')
+                    WHERE COALESCE(c.user_id, c.historical_user_id)
+                              IS NOT DISTINCT FROM
+                          COALESCE(h.user_id, h.historical_user_id)
+                      AND c.legacy_session_id IS NOT DISTINCT FROM h.session_id
                 )
             """))).scalar()
 

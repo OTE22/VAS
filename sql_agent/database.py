@@ -272,7 +272,7 @@ class DatabaseManager:
 
     def execute_query(self, sql: str) -> dict:
         """Execute a SQL query safely."""
-        logger.debug(f"[DB] Executing query ({len(sql)} chars): {sql[:200]}...")
+        logger.debug("[DB] Executing query (chars=%d)", len(sql))
         
         # Layer 1: AST validation. Authoritative, and fails closed.
         #

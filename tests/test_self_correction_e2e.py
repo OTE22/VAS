@@ -181,8 +181,22 @@ def test_invalid_sql_is_corrected_and_never_executed(scenario, monkeypatch):
     assert final.get("replan_count") == 1, (
         f"expected exactly one re-plan, got {final.get('replan_count')}")
 
+    # The turn RECOVERED, so the last observation is the successful retry -
+    # successful actions reach the observer now. What proves the agent
+    # NOTICED the invalid SQL is the correction hint that drove the re-plan:
+    # it carries the rejected query and the validator's reason, and is only
+    # ever set for a validation or correctable-execution failure.
+    hint = final.get("sql_correction_hint") or {}
+    assert hint.get("reason"), "nothing recorded why the first attempt failed"
+    # Whitespace-normalized: the rejected SQL is stored as the generator
+    # emitted it, with newlines. Comparing byte-for-byte asserts formatting,
+    # which is not what this test is about.
+    normalize = lambda text: " ".join((text or "").split())
+    assert normalize(BAD_SQL) in normalize(hint.get("sql")), (
+        "the correction hint did not carry the rejected query")
+
     observation = final.get("observation") or {}
-    assert observation.get("error_type") == r.ErrorType.SQL_INVALID
+    assert observation.get("success"), "the turn never recovered"
 
 
 def test_the_regeneration_is_told_what_was_wrong(scenario, monkeypatch):

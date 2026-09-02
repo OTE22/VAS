@@ -223,7 +223,11 @@ services:
       # Separate budgets on purpose: a transient DB blip must not spend the
       # turn's ability to think, and a confused model must not spend the
       # budget on look-ups. Dev runs on NIM (fast), so 5 steps is cheap.
-      SQL_AGENT_MAX_REASONING_STEPS: 5
+      # Must not be SMALLER than the config.py default, which is what a
+      # real deployment runs: the prod compose sets no SQL-agent tuning.
+      # Dev runs the FASTER model, so dev being the more constrained of
+      # the two is backwards - and was, at 5 against a default of 8.
+      SQL_AGENT_MAX_REASONING_STEPS: 8
       SQL_AGENT_MAX_REPLANS: 2
       SQL_AGENT_MAX_EXECUTION_RETRIES: 1
       LOG_LEVEL: INFO

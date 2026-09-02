@@ -111,6 +111,49 @@ def _shape_rtl(text: str) -> str:
     except Exception:
         return text
 
+#: Bold, then italic. Bold first so ** is consumed before a single * can
+#: match half of it. Both require a non-empty body on ONE line, so a stray
+#: asterisk ("5 * 3") stays literal instead of swallowing the rest.
+_MD_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
+_MD_ITALIC = re.compile(r"(?<!\*)\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)")
+_MD_CODE = re.compile(r"`([^`\n]+)`")
+_MD_HEADING = re.compile(r"^(#{1,6})\s*(.*)$")
+
+
+def _markdown_inline(text: str) -> str:
+    """Inline marks to reportlab tags.
+
+    Operates on ALREADY-ESCAPED text: the caller escapes '<' and '&' because
+    reportlab parses XML-ish markup, and that must not be undone here. Only
+    the <b>/<i> this function introduces are real tags.
+    """
+    text = _MD_BOLD.sub(r"<b>\1</b>", text)
+    text = _MD_ITALIC.sub(r"<i>\1</i>", text)
+    return _MD_CODE.sub(r"\1", text)
+
+
+def _markdown_block(line: str) -> tuple:
+    """(heading level, text) for one line, with the marker REMOVED.
+
+    Level 0 is body text. Quotes and list items keep their content and lose
+    their marker - a printed '>' or '-' is exactly what made the report look
+    unfinished.
+    """
+    raw = (line or "").strip()
+
+    heading = _MD_HEADING.match(raw)
+    if heading:
+        return len(heading.group(1)), _markdown_inline(heading.group(2).strip())
+
+    if raw.startswith(">"):
+        return 0, _markdown_inline(raw.lstrip(">").strip())
+
+    if raw[:2] in ("- ", "* ") or raw[:2] == "\u2022 ":
+        return 0, "\u2022 " + _markdown_inline(raw[2:].strip())
+
+    return 0, _markdown_inline(raw)
+
+
 def build_pdf_bytes(safe_title: str, safe_content: str, safe_date: str, analyst: str):
     try:
         from reportlab.lib import colors
@@ -204,17 +247,27 @@ def build_pdf_bytes(safe_title: str, safe_content: str, safe_date: str, analyst:
             if not para.strip():
                 continue
             raw = para.strip()
+            # Convert the MARKUP before anything else: the marker decides the
+            # style, and the marker itself must not reach the page.
+            blocks = [_markdown_block(line) for line in raw.split('\n')]
+            level = blocks[0][0] if blocks else 0
+
             if arabic_font and _ARABIC_CHAR.search(raw):
                 # Shaping is PER LINE: bidi reordering operates on a line, and
-                # a markdown heading marker or timestamp at line start must
-                # stay attached to its own line, not migrate across breaks.
-                shaped_lines = [_shape_rtl(line) for line in raw.split('\n')]
-                text = '<br/>'.join(shaped_lines)
-                is_heading = raw.lstrip().startswith('#')
-                story.append(Paragraph(text, rtl_header_style if is_heading
+                # a timestamp at line start must stay attached to its own
+                # line, not migrate across breaks.
+                text = '<br/>'.join(_shape_rtl(body) for _lvl, body in blocks)
+                story.append(Paragraph(text, rtl_header_style if level
                                        else rtl_body_style))
             else:
-                story.append(Paragraph(raw.replace('\n', '<br/>'), body_style))
+                text = '<br/>'.join(body for _lvl, body in blocks)
+                if level == 1:
+                    style = header_style
+                elif level >= 2:
+                    style = header_style
+                else:
+                    style = body_style
+                story.append(Paragraph(text, style))
             story.append(Spacer(1, 0.1*inch))
         
         # Build PDF

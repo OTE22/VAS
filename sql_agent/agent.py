@@ -25,6 +25,34 @@ _SECURITY_PLACEHOLDER = ("That operation is not permitted — the assistant can 
                          "only read data.")
 
 
+class TurnCancelled(RuntimeError):
+    """Raised after a cooperative cancellation reaches a graph boundary."""
+
+
+def _invoke_cancellable(graph, initial_state: dict, cancel_event=None) -> dict:
+    """Run the graph while making node boundaries cancellation points.
+
+    LangGraph nodes and the local model are synchronous, so an in-progress
+    model call cannot be interrupted safely. The returned state is committed
+    only after the whole graph finishes; a cancelled turn is discarded.
+    """
+    if cancel_event is None:
+        return graph.invoke(initial_state)
+    if cancel_event.is_set():
+        raise TurnCancelled("turn cancelled before execution")
+
+    accumulated = dict(initial_state)
+    for chunk in graph.stream(initial_state):
+        if cancel_event.is_set():
+            raise TurnCancelled("turn cancelled at graph boundary")
+        for node_output in chunk.values():
+            if isinstance(node_output, dict):
+                accumulated.update(node_output)
+    if cancel_event.is_set():
+        raise TurnCancelled("turn cancelled after execution")
+    return accumulated
+
+
 def _security_event(state: dict, reason: str) -> dict:
     """A DETECTION event: structured, and silent about account state.
 
@@ -125,6 +153,7 @@ class SQLIntelligenceAgent:
         be sent to the client anyway.
         """
         state = state or {}
+        self.conversation_memory.add_user_message(user_input)
         self.conversation_memory.add_ai_message(final_response)
         self._record_working_context(user_input, state)
         self._commit_tool_result_deltas(user_input, state)
@@ -189,7 +218,12 @@ class SQLIntelligenceAgent:
             # database, so it cannot be fetched from inside the graph.
             "artifact_index": list(self._artifact_index or []),
             "artifact_sql_index": dict(self._artifact_sql_index or {}),
-            "identity_index": list(self._identity_index or []),
+            # getattr, not attribute access: this index is optional
+            # CONTEXT, and an agent built without it must lose name
+            # resolution quality rather than the whole turn. Accessing
+            # it directly crashed every streaming turn for any agent
+            # constructed without __init__.
+            "identity_index": list(getattr(self, "_identity_index", None) or []),
             "planned_action": None,
             "planner_candidates": None,
             "clarify_question": None,
@@ -258,13 +292,18 @@ class SQLIntelligenceAgent:
             # open question left no trace at all.
             action = (state.get("planned_action") or {}).get("action")
             offered = state.get("clarification_candidates") or []
-            if action == "clarify" and offered:
+            # ANY question, not only a person-candidate one. Scoping this
+            # to candidates meant a question the model asked for any other
+            # reason vanished the moment it was asked, so the reply had
+            # nothing to attach to and arrived as an unanchored fragment.
+            if action == "clarify":
                 try:
                     current = ds.apply_delta(current, {
                         "operation": "REPLACE",
                         "field": "pending_clarification",
                         "proposed_value": {
-                            "type": "person_resolution",
+                            "type": ("person_resolution" if offered
+                                     else "open_question"),
                             "original_intent": state.get("intent") or "SQL_QUERY",
                             "original_query": str(user_input)[:200],
                             "field": "person",
@@ -350,17 +389,20 @@ class SQLIntelligenceAgent:
             if current is not previous:
                 self.conversation_memory.update_working_context(
                     dialogue_state=current)
-            logger.info(ds.transition_trace(
-                conversation_id=self.conversation_memory.current_session_id,
-                turn_id=turn_id, previous_state=previous,
-                resulting_state=current,
-                resolved_references={"artifact": (state.get("planned_action") or {}).get("artifact_id")},
-                planned_action=(state.get("planned_action") or {}).get("action"),
-                delta=committed_delta))
+            logger.info(
+                "[DIALOGUE_STATE] conversation=%s turn=%s context_version=%s->%s "
+                "action=%s changed_field=%s artifact_reference=%s",
+                self.conversation_memory.current_session_id,
+                turn_id,
+                previous.get("context_version"), current.get("context_version"),
+                (state.get("planned_action") or {}).get("action"),
+                committed_delta.get("field"),
+                bool((state.get("planned_action") or {}).get("artifact_id")),
+            )
         except Exception as e:
             logger.warning("[SQL_AGENT] dialogue-state commit skipped: %s", e)
 
-    def query(self, user_input: str, learn: bool = True):
+    def query(self, user_input: str, learn: bool = True, cancel_event=None):
         """
         Process a user query and return a human-friendly response.
 
@@ -371,15 +413,12 @@ class SQLIntelligenceAgent:
         Returns:
             A human-readable narrative response, or tuple (response, result_dict) if security flags are set
         """
-        logger.info(f"[SQL_AGENT] Processing query: {user_input[:100]}...")
+        logger.info("[SQL_AGENT] Processing query (chars=%d)", len(user_input))
         
-        # Context is read BEFORE the current question is appended:
-        # get_conversation_context(limit=N) counts from the end of the
-        # transcript, so appending first meant the question itself consumed a
-        # slot and the window held barely one prior turn.
+        # The current turn is committed as a user/assistant pair only after the
+        # graph succeeds. A timeout or cancellation therefore cannot leave an
+        # orphaned user message that contaminates the next turn's context.
         conversation_context = self.conversation_memory.get_conversation_context(limit=6)
-        self.conversation_memory.add_user_message(user_input)
-        logger.debug(f"[SQL_AGENT] Added user message to conversation memory")
         if conversation_context:
             logger.debug(f"[SQL_AGENT] Conversation context retrieved ({len(conversation_context)} chars)")
         
@@ -391,19 +430,20 @@ class SQLIntelligenceAgent:
         try:
             logger.info("[SQL_AGENT] 🔄 Invoking agent workflow...")
             logger.debug(f"[SQL_AGENT] Initial state keys: {list(initial_state.keys())}")
-            logger.debug(f"[SQL_AGENT] User input: {initial_state.get('original_input', 'N/A')}")
+            logger.debug("[SQL_AGENT] User input present=%s chars=%d",
+                         bool(initial_state.get("original_input")),
+                         len(initial_state.get("original_input") or ""))
             
-            result = self.agent.invoke(initial_state)
+            result = _invoke_cancellable(
+                self.agent, initial_state, cancel_event=cancel_event)
             
             logger.info(f"[SQL_AGENT] ✅ Agent workflow completed")
             logger.debug(f"[SQL_AGENT] Result keys: {list(result.keys())}")
             
             response = result.get("final_response", "I apologize, but I couldn't process your request.")
             
-            logger.info(f"[SQL_AGENT] 📤 FINAL RESPONSE FROM AGENT ({len(response)} chars):")
-            logger.info(f"[SQL_AGENT] {'='*80}")
-            logger.info(f"[SQL_AGENT] {response}")
-            logger.info(f"[SQL_AGENT] {'='*80}")
+            logger.info("[SQL_AGENT] Final response produced (chars=%d)",
+                        len(response))
             
             # A violation was DETECTED. The API route runs it through the policy
             # layer, which decides — and states — what happens to the account.
@@ -420,12 +460,12 @@ class SQLIntelligenceAgent:
                 # Return both response and result for API route to check
                 return response, result
             
-            # Add AI response to conversation memory
+            # Commit the completed turn together.
+            self.conversation_memory.add_user_message(user_input)
             self.conversation_memory.add_ai_message(response)
             self._record_working_context(user_input, result)
             self._commit_tool_result_deltas(user_input, result)
             logger.info(f"[SQL_AGENT] ✅ Query processed successfully (response length: {len(response)} chars)")
-            logger.debug(f"[SQL_AGENT] Response preview: {response[:200]}...")
 
             # Work the API layer has to finish has to REACH it. A rendered
             # document needs persisting and a translation request needs an
@@ -437,9 +477,13 @@ class SQLIntelligenceAgent:
                 return response, result
 
             return response
+        except TurnCancelled:
+            logger.info("[SQL_AGENT] Query cancelled before commit")
+            raise
         except Exception as e:
             logger.error(f"[SQL_AGENT] Error processing query: {str(e)}", exc_info=True)
             error_msg = f"I encountered an unexpected error: {str(e)}"
+            self.conversation_memory.add_user_message(user_input)
             self.conversation_memory.add_ai_message(error_msg)
             return error_msg
 
@@ -457,13 +501,12 @@ class SQLIntelligenceAgent:
         Yields:
             Progress updates as the agent processes the query
         """
-        logger.info(f"[SQL_AGENT] Processing query (streaming): {user_input[:100]}...")
+        logger.info("[SQL_AGENT] Processing streaming query (chars=%d)",
+                    len(user_input))
         
         try:
-            # Context BEFORE appending the current question — same reasoning
-            # as in query() above.
+            # Commit only at successful completion, as one user/assistant pair.
             conversation_context = self.conversation_memory.get_conversation_context(limit=6)
-            self.conversation_memory.add_user_message(user_input)
             yield {"type": "status", "message": "Processing query...", "step": "start"}
 
             initial_state = self._create_initial_state(user_input, should_learn=learn)
@@ -565,8 +608,8 @@ class SQLIntelligenceAgent:
                                 from .tools.agent_tools import SQLAgentTools
 
                                 detail = str(result.get("error") or "")
-                                logger.warning("[STREAM] query failed: %s",
-                                               detail[:300])
+                                logger.warning("[STREAM] query failed "
+                                               "(detail_chars=%d)", len(detail))
                                 yield {
                                     "type": "error",
                                     "message": SQLAgentTools._failure_narration({
@@ -670,6 +713,7 @@ class SQLIntelligenceAgent:
             logger.error(f"[SQL_AGENT] Error in streaming query: {str(e)}", exc_info=True)
             error_msg = f"I encountered an unexpected error: {str(e)}"
             try:
+                self.conversation_memory.add_user_message(user_input)
                 self.conversation_memory.add_ai_message(error_msg)
             except:
                 pass

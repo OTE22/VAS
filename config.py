@@ -406,6 +406,12 @@ class Settings(BaseSettings):
     # SQL agent isolation
     SQL_AGENT_MAX_CONCURRENT: int = Field(default=2)
     SQL_AGENT_TOTAL_TIMEOUT: int = Field(default=300)
+    SQL_AGENT_MAX_QUERY_CHARS: int = Field(
+        default=8000,
+        ge=256,
+        le=65536,
+        description="Maximum natural-language SQL-agent query length across "
+                    "REST, SSE and WebSocket transports.")
 
     # --- Bounded reasoning (PLAN -> ACT -> OBSERVE -> REPLAN -> ANSWER) ----
     # Three SEPARATE budgets, deliberately. Collapsing them would mean a

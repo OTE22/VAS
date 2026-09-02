@@ -77,7 +77,8 @@ class UserQueryHistoryService:
             UserQueryHistory instance
         """
         self.logger.info(f"[QUERY_HISTORY] 💾 Starting to save query to database (user_id={user_id}, session_id={session_id})")
-        self.logger.debug(f"[QUERY_HISTORY] Query preview: {query_text[:100]}...")
+        self.logger.debug("[QUERY_HISTORY] Query received (chars=%d)",
+                          len(query_text or ""))
         self.logger.debug(f"[QUERY_HISTORY] Response length: {len(response_text) if response_text else 0} chars")
         self.logger.debug(f"[QUERY_HISTORY] Success: {success}, Processing time: {processing_time_ms}ms")
         
@@ -630,7 +631,8 @@ class UserQueryHistoryService:
         Returns:
             Embedding vector or None if generation fails
         """
-        self.logger.info(f"[EMBEDDING] 🚀 Starting automatic embedding generation for query: {query_text[:100]}...")
+        self.logger.info("[EMBEDDING] Starting automatic embedding generation "
+                         "(query_chars=%d)", len(query_text or ""))
         
         try:
             # Step 1: import sentence-transformers — IN AN EXECUTOR.

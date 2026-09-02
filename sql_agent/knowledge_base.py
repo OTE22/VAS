@@ -1068,7 +1068,8 @@ ORDER BY total_detections DESC""",
 
         logger.info(f"[KB] Found {len(examples)} similar examples (threshold: {min_similarity})")
         if examples:
-            logger.debug(f"[KB] Top match: {examples[0]['question'][:100]}... (similarity: {examples[0]['similarity']})")
+            logger.debug("[KB] Top match similarity=%s",
+                         examples[0]["similarity"])
 
         return examples
 

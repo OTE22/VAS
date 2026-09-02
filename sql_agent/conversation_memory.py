@@ -240,6 +240,31 @@ class ConversationMemory:
             
         return session_id
 
+    def session_started_at(self):
+        """When the CURRENT conversation began, or None if unknown.
+
+        `reset_session` keeps the session id and rewrites `created_at`, so
+        this is the boundary between one conversation and the next.
+
+        None means "cannot tell", and callers must treat that as today's
+        unscoped behaviour: losing the boundary should cost isolation, never
+        the ability to refer to anything at all.
+        """
+        from datetime import datetime
+
+        if not self.current_session_id:
+            return None
+        if not is_safe_session_id(self.current_session_id):
+            return None
+        try:
+            path = self.storage_dir / f"{self.current_session_id}.json"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            stamp = raw.get("created_at")
+            return datetime.fromisoformat(stamp) if stamp else None
+        except Exception as e:
+            logger.debug("[MEMORY] no session start time: %s", e)
+            return None
+
     def reset_session(self) -> bool:
         """Begin a genuinely clean conversation, in RAM and on disk.
 
@@ -395,7 +420,14 @@ class ConversationMemory:
                 data = dict(existing)          # preserve unknown top-level keys
                 data.update({
                     "session_id": self.current_session_id,
-                    "created_at": datetime.utcnow().isoformat(),  # naive UTC (storage convention)
+                    # Conversation boundary, not "last saved at". Rewriting
+                    # this on every message made the artifact refresh query
+                    # exclude documents produced earlier in the SAME
+                    # conversation, so "same report" fell back to the most
+                    # recent unrelated SQL result. Only reset_session starts
+                    # a new boundary.
+                    "created_at": (existing.get("created_at")
+                                   or datetime.utcnow().isoformat()),
                     "message_count": len(self.messages),
                     "messages": [message_to_dict(msg) for msg in self.messages],
                     "working_context": merged_context,

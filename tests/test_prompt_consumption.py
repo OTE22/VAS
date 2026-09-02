@@ -79,7 +79,7 @@ def test_plan_action_receives_prior_turns_and_durable_memory(tools):
         "action": "chat", "confidence": 0.9, "target": None, "artifact_id": None,
         "language": None, "format": None, "modification": None,
         "clarify_question": None}))
-    tools.sql_llm = llm
+    tools.llm = llm
     tools.plan_action(_base_state())
     assert captured, "plan_action never called its model"
     assert MARKER in captured[0], "conversation context never reached the planner prompt"
