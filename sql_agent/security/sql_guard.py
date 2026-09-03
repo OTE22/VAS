@@ -110,6 +110,11 @@ class SqlVerdict:
     tables: List[str] = field(default_factory=list)
     statement_type: str = ""
     sql: str = ""
+    # The LIMIT-enforced SQL BEFORE the camera scope: what the agent may
+    # keep, show the model, learn from, and store in history. `sql` (scoped)
+    # exists for the executor only; seven learned examples had carried one
+    # user's pipeline IN-list into every later generation.
+    canonical: str = ""
 
     def __bool__(self) -> bool:
         return self.allowed
@@ -208,6 +213,49 @@ _SCOPE_PREDICATES = {
 }
 
 
+def _scope_ids_sql(policy: SqlPolicy) -> str:
+    return ", ".join(exp.Literal.string(str(p)).sql(dialect=policy.dialect)
+                     for p in sorted(policy.pipeline_scope or ()))
+
+
+def _enclosing_select(node):
+    parent = node.parent
+    while parent is not None and not isinstance(parent, exp.Select):
+        parent = parent.parent
+    return parent
+
+
+def _already_scoped(table, ids: str, policy: SqlPolicy) -> bool:
+    """Is this table already inside one of our scope wrappers? The wrapper
+    is `SELECT * FROM t WHERE <predicate with exactly this IN-list>`; the
+    IN-list is unique to the caller's scope."""
+    select = _enclosing_select(table)
+    if select is None or not ids:
+        return False
+    where = select.args.get("where")
+    if where is None:
+        return False
+    return ids in where.sql(dialect=policy.dialect)
+
+
+def _scope_wrappers(statement, policy: SqlPolicy):
+    """The subqueries our rewrite introduced, by identity, so the depth
+    bound counts the model's nesting and not ours."""
+    ids = _scope_ids_sql(policy)
+    if not ids:
+        return set()
+    found = set()
+    for sub in statement.find_all(exp.Subquery):
+        inner = sub.this
+        where = inner.args.get("where") if isinstance(inner, exp.Select) else None
+        if where is not None and ids in where.sql(dialect=policy.dialect):
+            found.add(id(sub))
+            # the faces wrapper also carries an inner sub-select on detections
+            for nested in inner.find_all(exp.Subquery):
+                found.add(id(nested))
+    return found
+
+
 def _apply_pipeline_scope(statement, policy: SqlPolicy, cte_names):
     """Rewrite every scoped physical table into a subquery limited to the
     caller's cameras, keeping its alias so column references still resolve.
@@ -217,11 +265,15 @@ def _apply_pipeline_scope(statement, policy: SqlPolicy, cte_names):
     pipeline ids are emitted as SQL string literals through sqlglot, never
     interpolated raw.
     """
-    ids = ", ".join(exp.Literal.string(str(p)).sql(dialect=policy.dialect)
-                    for p in sorted(policy.pipeline_scope))
+    ids = _scope_ids_sql(policy)
+    # IDEMPOTENT: the tools validate once and execute_query validates again,
+    # so the second pass sees tables we already wrapped. Wrapping them a
+    # second time nested every query one level deeper per pass and pushed
+    # "where was joey last seen" over the subquery-depth limit.
     targets = [t for t in statement.find_all(exp.Table)
                if (t.name or "").lower() in _SCOPE_PREDICATES
-               and (t.name or "").lower() not in cte_names]
+               and (t.name or "").lower() not in cte_names
+               and not _already_scoped(t, ids, policy)]
     for table in targets:
         bare = table.name.lower()
         scoped = sqlglot.parse_one(
@@ -366,7 +418,15 @@ def validate_sql(sql: str, policy: SqlPolicy) -> SqlVerdict:
             tables=sorted(referenced), statement_type=statement_type,
         )
 
-    if _subquery_depth(statement) > policy.max_subquery_depth:
+    ignored = _scope_wrappers(statement, policy) if policy.pipeline_scope else set()
+    depth = _subquery_depth(statement, ignore=ignored)
+    if depth > policy.max_subquery_depth:
+        # Shape only, never the SQL: enough to tell the model's nesting from
+        # our own wrappers when a scoped query is refused.
+        logger.info("[GUARD] TOO_COMPLEX depth=%d limit=%d wrappers_ignored=%d "
+                    "depth_unignored=%d scoped=%s", depth,
+                    policy.max_subquery_depth, len(ignored),
+                    _subquery_depth(statement), bool(policy.pipeline_scope))
         return _deny(
             "TOO_COMPLEX",
             f"Query nests subqueries more than {policy.max_subquery_depth} deep.",
@@ -376,6 +436,7 @@ def validate_sql(sql: str, policy: SqlPolicy) -> SqlVerdict:
     # --- camera scope ------------------------------------------------------
     # The chatbot was the one door that skipped the app's pipeline rule: any
     # user with chatbot access could read every camera and every person.
+    canonical = _enforce_limit(statement.copy(), policy)
     if policy.pipeline_scope is not None:
         if not policy.pipeline_scope:
             return _deny(
@@ -408,18 +469,29 @@ def validate_sql(sql: str, policy: SqlPolicy) -> SqlVerdict:
         tables=sorted(referenced),
         statement_type=statement_type,
         sql=safe_sql,
+        canonical=canonical,
     )
 
 
-def _subquery_depth(node, depth: int = 0) -> int:
+def _subquery_depth(node, depth: int = 0, ignore=frozenset()) -> int:
+    """Nesting depth, not counting the scope wrappers this module added.
+
+    One level per nested SELECT. Counting the Subquery node AND the Select
+    inside it charged two per level, so the limit of five refused three
+    nested IN-subqueries: a 220-character "where was Joey last seen" was
+    TOO_COMPLEX while an EXISTS of the same depth (no Subquery node) passed.
+    """
     deepest = depth
     for child in node.args.values():
         children = child if isinstance(child, list) else [child]
         for item in children:
             if not hasattr(item, "args"):
                 continue
-            next_depth = depth + 1 if isinstance(item, (exp.Subquery, exp.Select)) else depth
-            deepest = max(deepest, _subquery_depth(item, next_depth))
+            counts = (isinstance(item, exp.Select)
+                      and id(item) not in ignore
+                      and id(item.parent) not in ignore)
+            next_depth = depth + 1 if counts else depth
+            deepest = max(deepest, _subquery_depth(item, next_depth, ignore))
     return deepest
 
 

@@ -75,12 +75,14 @@ def test_a_rejection_does_not_end_a_single_step_turn():
     """
     llm = _ScriptedLlm([
         _native("query_database", {"question": "SELECT * FROM faces"}),  # bad
-        _native("query_database", {"question": "how many faces are enrolled"}),
+        # A paraphrase OF the message: one that shares nothing with it is
+        # refused on its own account now (paraphrase_ignores_user).
+        _native("query_database", {"question": "where joey was detected"}),
     ])
     call, trace, _fit = _run(llm, max_steps=1)
 
     assert call is not None, "one rejection still ended the turn"
-    assert call["arguments"]["question"] == "how many faces are enrolled"
+    assert call["arguments"]["question"] == "where joey was detected"
     assert len(llm.calls) >= 2, "the model was never asked again"
 
 

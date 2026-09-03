@@ -113,14 +113,19 @@ def test_an_arabic_continuation_is_read_the_same_way():
     assert call["name"] == "modify_active_query"
 
 
-def test_the_refusal_happens_once():
-    """A model that insists after being told is allowed through."""
+def test_insisting_does_not_make_a_new_question_a_continuation():
+    """"Refuse once" let a wrong report through: "can you track joey" was
+    answered with the previous turn's pipelines report. The message does
+    not change when the model insists, so neither does the verdict."""
     llm = _FakeLLM([
         _Reply("modify_active_query", {"change": "only today"}),
         _Reply("modify_active_query", {"change": "only today"}),
+        _Reply("modify_active_query", {"change": "only today"}),
+        _Reply("modify_active_query", {"change": "only today"}),
     ])
-    call, _trace = _run(llm, "Show me all detections from today")
-    assert call["name"] == "modify_active_query"
+    call, trace = _run(llm, "Show me all detections from today")
+    assert call is None
+    assert sum(1 for e in trace if e.get("rejected") == "not a continuation") >= 3
 
 
 # ------------------------------------------------------------ the wording

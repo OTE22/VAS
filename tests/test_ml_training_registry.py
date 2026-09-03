@@ -246,7 +246,18 @@ def test_bands_are_anomaly_vocabulary_not_threat_severity(trained_model):
 
 
 def test_supervised_training_returns_structured_refusal():
-    task = _train(JOB_PREFIX + uuid_mod.uuid4().hex[:8], algorithm="logreg")
+    job_id = JOB_PREFIX + uuid_mod.uuid4().hex[:8]
+    async def _go():
+        from backend.core.task_history import task_history_manager
+        from backend.ml import trainer
+        await _ensure_db()
+        await task_history_manager.create_job(
+            job_id=job_id, task_type="ml_training", task_name="pytest threat rank",
+            description="pytest reviewed-label gate")
+        await trainer.run_training_job(
+            job_id, model_type="threat_ranking_model", algorithm="logreg")
+        return await task_history_manager.get_task_by_job_id(job_id)
+    task = run_async(_go())
     assert task["status"] == "failed"
     assert task["error_code"] == "INSUFFICIENT_REVIEWED_LABELS"
     refusal = json.loads(task["error_message"])

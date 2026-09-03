@@ -138,6 +138,22 @@ class SQLIntelligenceAgent:
         self.db.sql_policy = dataclasses.replace(
             self.db.sql_policy, pipeline_scope=scope)
 
+    def keep_stored_names(self, source: str, translated: str, language: str) -> str:
+        """The name-fidelity footer for a translation made outside the graph
+        (the artifact route): stored person and camera names the source
+        mentions that the translation transliterated are appended as stored."""
+        from .tools.agent_tools import SQLAgentTools
+
+        if not translated:
+            return translated
+        tools = SQLAgentTools.__new__(SQLAgentTools)
+        tools.db = self.db
+        literals = tools._names_in_text(source, {"identity_index": self._identity_index})
+        missing = tools._missing_literals(translated, literals)
+        if missing and len(literals) <= tools._LITERAL_ENFORCE_MAX:
+            return translated + tools._names_as_stored_footer(missing, language)
+        return translated
+
     def set_identity_index(self, identities) -> None:
         """Give the next turn the enrolled people it may resolve names to.
 
@@ -334,11 +350,15 @@ class SQLIntelligenceAgent:
                         "operation": "REPLACE",
                         "field": "pending_clarification",
                         "proposed_value": {
-                            "type": ("person_resolution" if offered
+                            "type": ("typo" if state.get("typo_of")
+                                     else "person_resolution" if offered
                                      else "open_question"),
                             "original_intent": state.get("intent") or "SQL_QUERY",
                             "original_query": str(user_input)[:200],
                             "field": "person",
+                            # The misspelled token, so the answer can be
+                            # substituted into the original words.
+                            "wrong": str(state.get("typo_of") or "")[:120],
                             "candidates": offered},
                         "source": "tool_result"}, turn_id=turn_id)
                 except ds.DeltaRejected as rejection:

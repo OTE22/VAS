@@ -1036,6 +1036,16 @@ class BackgroundTaskHistory(Base):
     hostname = Column(String(100), nullable=True)
     notify_all_users = Column(Boolean, default=False)  # Whether this task affects all users
 
+    # Durable queue control.  These columns are nullable because this table
+    # also stores historical/non-queued background tasks.  Queue payloads are
+    # never serialized by the public task-history API.
+    queue_name = Column(String(32), nullable=True)
+    payload = Column(JSONB, nullable=True)
+    lease_owner = Column(String(100), nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    cancel_requested_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at = Column(DateTime, nullable=True, onupdate=datetime.utcnow)
 
@@ -1045,6 +1055,30 @@ class BackgroundTaskHistory(Base):
         Index('idx_task_history_scheduled', 'scheduled_time'),
         Index('idx_task_history_job_id', 'job_id'),
         Index('idx_task_history_correlation', 'correlation_id'),
+        Index('idx_task_history_queue_status', 'queue_name', 'status', 'scheduled_time'),
+        Index('idx_task_history_lease_expiry', 'lease_expires_at',
+              postgresql_where=text("status = 'running' AND lease_expires_at IS NOT NULL")),
+        Index('uq_ml_queue_active_task_type', 'task_type', unique=True,
+              postgresql_where=text(
+                  "queue_name = 'ml' AND status IN ('scheduled', 'running')"
+              )),
+    )
+
+
+class MLWorkerHeartbeat(Base):
+    """Last-seen state for independently deployed ML queue workers."""
+    __tablename__ = "ml_worker_heartbeats"
+
+    worker_id = Column(String(100), primary_key=True)
+    hostname = Column(String(100), nullable=False)
+    process_id = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="idle")
+    current_job_id = Column(String(64), nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    heartbeat_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('idx_ml_worker_heartbeat_at', 'heartbeat_at'),
     )
 
 

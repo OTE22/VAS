@@ -170,8 +170,25 @@ emit them:
   enforce. Behaviour unchanged.
 - `MALFORMED_CODES` (`PARSE_ERROR`, `EMPTY`, `TOO_COMPLEX`) — mistakes to
   correct. The reasoning layer may re-plan them; no security event.
+  `TOO_COMPLEX` bounds joins (`max_joins`) and nesting
+  (`max_subquery_depth`, 5): `_subquery_depth` counts one level per nested
+  SELECT, whatever node wraps it (IN-subquery, EXISTS, scalar, derived
+  table, CTE), and never the camera-scope wrappers the guard added itself.
+  It used to charge two per IN-subquery, so "where was Joey last seen" at
+  three levels was refused (`tests/test_subquery_depth.py`).
 - `INFRASTRUCTURE_CODES` (`PARSER_UNAVAILABLE`) — our dependency, never the
   user's doing.
+
+The verdict carries two texts. `sql` is the executable form (LIMIT plus
+the caller's camera scope) and exists for `execute_query` alone, which
+re-validates on every run. `canonical` is the LIMIT-enforced text BEFORE
+the scope, and it is what the agent keeps as `generated_sql`, shows the
+model as the previous query, learns into the knowledge base, and stores
+in history (`DatabaseManager.validate_query` returns it). Learning also
+refuses any SQL carrying a pipeline-id IN-list (`_carries_scope_literals`);
+`scripts/dev/purge_scoped_examples.py` removes examples learned before
+this rule. Seven had carried one test user's six cameras into every later
+generation (`tests/test_scope_stays_in_the_executor.py`).
 
 `is_enforceable` fails **closed** on an unrecognised code, and a test asserts
 that every emitted code is deliberately classified — silently enforcing on a
@@ -295,8 +312,11 @@ Related rules that live beside the lifecycle:
   LRU eviction while held or awaited (`_maybe_release_user_lock`); dropping a
   held lock let two turns run concurrently for one user with 11+ active users.
 - **User lock first, global slot second, both bounded.** All three transports
-  take the per-user lock (5 s) before the `SQL_AGENT_MAX_CONCURRENT`
-  semaphore (5 s). The old order took the slot first and then waited on the
+  take the per-user lock (60 s) before the `SQL_AGENT_MAX_CONCURRENT`
+  semaphore (5 s). The user wait is long on purpose: a turn's tail (history,
+  embedding, learning) runs on after the client has its answer, and a 5 s
+  wait made a user's very next message fail as BUSY. Nothing global is held
+  while they wait on their own previous turn. The old order took the slot first and then waited on the
   user lock with no timeout, so two tabs from one user held both slots and
   every other user got `AGENT_BUSY`.
 - **A cancelled or timed-out stream persists the failure, not a borrowed
@@ -437,6 +457,24 @@ yesterday" answered with none is correct, and dressing it as a failure teaches
 people to distrust a true result. The case where zero rows IS suspicious — a
 task narrowed to a named person — is caught earlier by the reasoning layer,
 which asks which person is meant.
+
+**Zero rows for a question is not zero detections for a person.** After an
+empty result resolves to a real, enrolled person, `_detections_on_record`
+counts their detections through the guarded read path before any verdict:
+with detections, the answer is "Nothing matched that question for JOEY
+(JOEY has 3 detections on record). The query looked for: …"; without, the
+old "enrolled, but no detections recorded". "with whom she was" had been
+answered with the latter for a person seen three times.
+
+**A camera is verified the same way before "no detections".** An exact camera
+match counts its detections (`_camera_detections_on_record`) before the
+verdict: with detections, "Nothing matched that question for camera X (the
+camera has N detections on record)"; without, the old wording. A literal the
+model compared against a NAME column that is really a camera label takes the
+camera path (`_is_known_camera_label`) instead of "No person named 'WEZARET
+DEFA3' is enrolled". And a companion question proposed as a *modification*
+of the previous query is turned into the subject's-detections query like any
+other: as a modification it came back six subqueries deep and was refused.
 
 **A camera gets the same second look as a person.** `filtered_cameras`
 reads the literals the SQL compared against `location_name` or `pipeline_id`;
@@ -643,12 +681,131 @@ detected at camera MD5AL_3EIN_7LWE?" was looked up as a person, found nobody,
 and became "What person were you referring to?". The user said it was a
 camera; that is a fact, not a judgement, so Python holds it.
 
+**An acknowledgement gets an acknowledgement, from no model.** "thank you",
+"ok", "شكرا", "تمام" (`is_acknowledgement`: every word from a small
+bilingual list, at most five words) are marked at ingest and routed straight
+to the chat node, which answers "You're welcome." / "Noted." / "على الرحب
+والسعة." / "تمام." without a model, a transcript or a FACTS block. Given the
+transcript, the model parroted the previous completion line ("The report on
+Iron Man has been translated into Arabic.") in reply to "thank you"; given the
+FACTS block, it answered "ok" with "It seems you're providing context about
+our conversation".
+
+**Native tool calling is re-probed.** One prose reply used to demote a model
+to the prompted fallback for the life of the process
+(`_NATIVE_SUPPORT[model] = False`); it is re-probed after ten minutes
+(`_NATIVE_REPROBE_SECONDS`).
+
+**A continuation of a data task is a request by construction.** When the
+message points back (`is_a_continuation`: pronouns, anaphora, connectives
+in both languages, whole-word matched) and the dialogue state holds a
+subject, task or camera, `is_a_request` is set true before the intent-fit
+gate can be consulted. "with whom she was", asked right after "when was joey
+last seen", was judged "not a request" on its four words and answered with a
+greeting while the loop model had already proposed the right query.
+
+## One decision per turn: chat, or query needed
+
+`route_turn` (`agent_loop.py`) makes the decision once, at planning time,
+and the loop obeys it. Facts first, each one something Python holds:
+
+| fact | kind |
+|---|---|
+| acknowledgement or greeting ("ok", "thanks", "hi", "شكرا") | chat |
+| answers a question the assistant asked | data |
+| a track command, politeness stripped ("can you track joey", "هل يمكنك تتبع") | data |
+| names a camera ("camera KSA", "كاميرا KSA") | data |
+| names an enrolled person (identity index, whole word) | data |
+| points back (pronoun, anaphora, connective) while a task or result is held | data |
+| none of the above | undecided |
+
+Only `undecided` reaches the single model judgement (`asked_for_an_action`),
+and it is asked exactly once, when the model first proposes an action or a
+prose answer. Every guard that used to consult it mid-loop now reads
+`is_a_request`, which the router seeded. This is what "each word goes for
+checking" was really asking for: not fewer facts, but one place that
+combines them and one judgement that runs only when they are silent.
+
+**"The report in Arabic" is a translation of the report you have.** A
+language request that points at what exists (`wants_translation`: "in
+Arabic", "بالعربية", "to English" with "the report", "it", "that") replaces
+whatever the model proposed, query, new document or modification, with
+`translate_document` of the last report, whenever a result or document is
+held. "can you make the report in arabic" had been run as a new query and
+rendered as a PDF titled with the request. Documents are now titled by the
+held subject ("IRON MAN - tracking report", "تقرير تتبع - IRON MAN"), and a
+candidate title that reads as a request ("can you…", "اجعل…") is refused.
+The `follow_up` and `artifacts` skills say the same to the model.
+
+**Interactive correction: the question suspends the request, the answer
+resumes it.** An unknown person or camera name is matched against what
+exists (`_closest_names`, difflib at 0.6); a close match becomes "Did you
+mean X? Reply yes or type the correct name", stored as a pending question of
+type `typo` with the misspelled token and the original words. The answer
+("yes" for a single candidate, a name, "the second one") is matched by
+`match_candidate`, the token is replaced in the original request
+(`_resume_corrected_request`), and the corrected request runs through the
+pipeline as if typed. The answer is the argument; the suspended request is
+the call. No re-planning, and no model asked to remember what was asked.
+
+**When it cannot answer, it asks - with options.** `_guidance` builds, in the
+user's language, what was understood (held subject, camera, time window),
+what is needed (a person, a camera or a time window, each with an example),
+and what exists (cameras from `list_cameras`, enrolled people from the
+identity index). It replaces "I could not complete this request" on
+exhaustion, and it is where the turn lands when the model insists on
+answering a data request from memory: that prose never reaches the user. An
+empty result with nothing to resolve adds when data last exists ("The most
+recent detection on record is …"), so the user can tell an empty day from
+an empty system.
+
+**A message naming an enrolled person is a request** (`names_a_known_person`,
+whole-word against the identity index), and a clarification about a person
+the look-up has just resolved is refused (`PERSON_RESOLVED`). "does joey was
+alone the last time shwe was seen" was answered "I'm not aware of any
+information about a person named Joey or Shwe" by a model that never queried;
+"when joey last seen" on a fresh session was answered "Can you clarify what
+you mean by Joey?" after the look-up had resolved Joey.
+
+**A pronoun is not a name.** `resolve_person` is refused for "she", "him",
+"them", "هي" or an empty string (`is_pronoun_or_empty`), pointed at the held
+subject instead; and an empty-result resolution on such a filter asks who is
+meant rather than reporting "No person named 'she' is enrolled" (or "«{}»").
+
+**"With whom" and "alone?" are answered from the co-appearance enrichment**
+(`_companion_answer`), which Python computes for tracking-shaped rows, in
+both languages and with no model. The model had produced "JOEY was with her"
+from Joey's own row.
+
 **The intent-fit gate reads facts before asking.** A message that names a
 camera asks about the data in any language, so `asked_for_an_action` returns
 true without a model call. When it does ask, the reply is read by `_says_yes`
 — markdown, quotes and Arabic نعم/لا included — and the prompt says to answer
 with one English word whatever the message's language. "من تم رصده في
 كاميرا wezaret؟" was judged "not a request" and answered as small talk.
+
+**A one-fact question gets a sentence, and a slice is not a history.**
+`_answer_shape` picks `direct` for a point question ("when", "where", "how
+many", "متى", "أين", "كم"…) with at most three rows, or for any query
+LIMITed to three or fewer; the direct prompt forbids headings, sections and
+computed totals. Every narration is also told when the SQL carried a small
+LIMIT (`_limit_note`), and the tracking report's statistics are labelled as
+describing the returned rows only. "when joey last seen and where" had
+produced a six-section report whose "Total detections: 1" was false: JOEY has
+three, and the query fetched the latest by design.
+
+**Stored names are copied, and checked.** The narration is told, per turn,
+exactly which person and camera strings from the result rows must appear
+verbatim (`_fidelity_directive`), and afterwards `_enforce_literals` appends
+any it dropped or translated as "Names as stored in the system: …" in the
+answer's language — streamed too, so nothing already shown is contradicted.
+Enforced for up to eight distinct identifiers; larger sets are instructed
+only, since a summary legitimately omits names. The same check runs on an
+inline translation, on a document translated before rendering, and on the
+artifact translation route (`agent.keep_stored_names`); `_names_in_text`
+finds the stored names the source mentions. The Arabic translation of the
+Iron Man report had written "آيرون مان". The Arabic report had turned
+WEZARET DEFA3 into وزارة and JOEY into جوي, strings no operator can search.
 
 **Prompt scaffolding is stripped from every reply** (`_strip_scaffolding`):
 the chat model, answering in Arabic, echoed the whole "[FACTS about this
@@ -665,6 +822,28 @@ instruction to start fresh and carry over no camera, person or time window.
 "Show me all detections from today" right after a camera question was run as
 "the wezaret query, but today" and answered about a camera the user never
 mentioned. Every word list in these guards is English and Arabic.
+
+**The paraphrase must be of this message.** `paraphrase_ignores_user` refuses
+a `query_database` whose paraphrase shares no content word with what the user
+typed (Latin words only; an Arabic message is paraphrased in English, so only
+a Latin name inside it can be required). "can you track joey" had been
+paraphrased as the previous turn's "What are the most active pipelines?" and
+answered with a pipelines report. The deterministic `track X` rule now also
+sees through politeness in both languages ("can you", "please", "هل يمكنك",
+"من فضلك"), so that command never reaches the model at all. These refusals,
+and the new-question ones, are no longer "once": a fact does not change
+because the model insists, and the rejection budget ends the loop honestly.
+
+The same fact closes two more doors. For a self-contained question the SQL
+generator is given **no conversation context** at all (the block exists to
+resolve "the same camera"; a message with nothing to resolve gets none), and
+a `query_database` paraphrase that names a held camera or person the user did
+not type is refused once as `CARRIED_OVER` (`carried_over`). Without both,
+"أظهر لي كل عمليات الرصد اليوم" was generated as "…at WEZARET DEFA3 today"
+straight after a camera question. A successful query that filtered on the
+user's own spelling also records the stored label it matched
+(`camera_matched`, one bounded look-up), so the report names the camera as
+the system knows it and the fidelity check holds it to that.
 
 A camera the user named is never asked about before a query has run
 (`camera_named_by_user` + `a_query_already_ran`, refused once). "Which
@@ -743,5 +922,26 @@ model stays in the routing list as a fallback.
   single-stage probe of `generate_sql` did NOT reproduce it; only running the
   whole turn in-process (planner paraphrase, RAG examples, correction hint)
   produced the escaped reply. Reproduce failures at the turn level.
+- **`pipelines.total_detections` is a cache, not a count.** It is incremented
+  as detections arrive and drifts (KSA: 17 cached, 25 real), and is 0 or NULL
+  for cameras that do have detections. The schema shown to the SQL model now
+  says so on the column and in the relationships ("COUNTS AND RANKINGS come
+  from the detections table"), and the knowledge-base seeds count as well:
+  the seed for "which pipeline has the most detections" read the cache with
+  `LIMIT 1`, and a reference example outranks schema prose in the model's
+  eyes. Seeds re-load automatically when their hash changes
+  (`_auto_initialize_seed_examples`) — but LEARNED examples do not, and a
+  wrong-but-executable query is learned the first time it returns a row and
+  then outranks everything for that exact question. `learn_from_query` now
+  refuses to learn a query that reads the cache (`_reads_cached_counter`);
+  `scripts/dev/purge_cached_counter_examples.py --apply` removes ones already
+  learned. "What are the most active pipelines?" kept answering "pytest-cam …
+  null" after the schema and the seeds were fixed, for exactly this reason.
+- **An import error under `sql_agent/` does not fail start-up.** The router
+  silently fails to mount, `/health` stays 200, and every chatbot endpoint
+  answers 404. A `list | set` in a word list did exactly this on 2026-09-03.
+  `tests/test_sql_agent_imports.py` imports every module and is the first
+  thing to run before a restart; a run script must treat an empty pytest
+  summary (a collection error) as a failure, not as "nothing failed".
 - **Response headers are lowercase on the wire.** `dict(headers)["X-Artifact-Id"]`
   fails on a response that has it.

@@ -22,7 +22,7 @@
 
     const API_TIMEOUT_MS = 20000;
     const JOB_POLL_INTERVAL_MS = 1500;
-    const JOB_POLL_MAX = 400;
+    const JOB_POLL_MAX_BACKOFF_MS = 30000;
     const PAGE_SIZE = 10;
     const MODE_ORDER = ['rules', 'shadow', 'hybrid', 'ml'];
 
@@ -87,6 +87,36 @@
         const parsed = new Date(value);
         if (Number.isNaN(parsed.getTime())) return String(value);
         return parsed.toLocaleString();
+    }
+
+    function formatRelativeTime(value) {
+        if (!value) return 'time not reported';
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return 'time not reported';
+        const seconds = Math.round((Date.now() - parsed.getTime()) / 1000);
+        if (Math.abs(seconds) < 45) return 'just now';
+        const minutes = Math.round(seconds / 60);
+        if (Math.abs(minutes) < 60) return Math.abs(minutes) + 'm ' + (minutes >= 0 ? 'ago' : 'from now');
+        const hours = Math.round(minutes / 60);
+        if (Math.abs(hours) < 48) return Math.abs(hours) + 'h ' + (hours >= 0 ? 'ago' : 'from now');
+        const days = Math.round(hours / 24);
+        return Math.abs(days) + 'd ' + (days >= 0 ? 'ago' : 'from now');
+    }
+
+    function setSummaryValue(id, value, tone, title) {
+        const node = getElement(id);
+        if (!node) return;
+        node.textContent = toText(value);
+        node.className = tone ? 'is-' + tone : '';
+        if (title) node.title = title;
+    }
+
+    function setConsoleConnection(status, label) {
+        const node = getElement('console-connection-state');
+        if (!node) return;
+        node.className = 'mlops-live-state is-' + status;
+        const textNode = node.querySelector('span:last-child');
+        if (textNode) textNode.textContent = label;
     }
 
     // ============================================
@@ -288,9 +318,15 @@
         predictionsPage: 1,
         labelsPage: 1,
         auditPage: 1,
-        activeJobId: null,
-        activeJobKind: null,   // 'training' | 'collection'
+        activeJobs: new Map(),
+        recentJobs: [],
+        mlWorker: null,
         jobPollTimer: null,
+        jobPollFailures: 0,
+        lastTerminalJobSignature: '',
+        lastJobsSyncAt: null,
+        modelTypes: [],
+        datasets: [],
         pendingAction: null    // { title, execute(reason) }
     };
 
@@ -299,6 +335,13 @@
             window.clearTimeout(state.jobPollTimer);
             state.jobPollTimer = null;
         }
+    }
+
+    function hasActiveJob(kind) {
+        for (const job of state.activeJobs.values()) {
+            if (!kind || job.kind === kind) return true;
+        }
+        return false;
     }
 
     // ============================================
@@ -314,7 +357,7 @@
         titleNode.textContent = title;
         reasonInput.value = '';
         panel.hidden = false;
-        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        panel.scrollIntoView({ block: 'nearest' });
         reasonInput.focus();
     }
 
@@ -352,12 +395,14 @@
             renderDataReadiness(data && data.data_readiness);
             renderOptionalCapabilities(data && data.optional_capabilities);
             renderModelTypeContract(data && data.model_types);
+            setConsoleConnection('online', 'Control plane connected');
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderCardError('mode-cards', err);
             renderCardError('label-readiness-body', err);
             renderCardError('data-readiness-body', err);
             renderCardError('optional-capabilities-body', err);
+            setConsoleConnection('offline', 'Control plane unavailable');
         }
     }
 
@@ -376,6 +421,9 @@
         const modes = (availability && availability.modes) || {};
         state.currentMode = toText(availability && availability.current_mode, 'rules');
         if (badge) badge.textContent = state.currentMode.toUpperCase();
+        setSummaryValue('summary-mode', state.currentMode.toUpperCase(),
+            state.currentMode === 'rules' ? 'healthy' : 'warning',
+            'Configured decision mode');
 
         const frag = document.createDocumentFragment();
         for (const modeName of MODE_ORDER) {
@@ -536,10 +584,8 @@
         body.replaceChildren(frag);
     }
 
-    // Reserved model types are interfaces for future releases: the backend
-    // refuses to train them (MODEL_TYPE_NOT_IMPLEMENTED) and the page must
-    // never offer a request it knows will be refused. Both selects are
-    // rebuilt from the capability contract the overview returns.
+    // The backend contract owns availability, algorithms, dataset kind and
+    // score semantics. Both selectors are rebuilt from it.
     function renderModelTypeContract(types) {
         if (!Array.isArray(types) || !types.length) return;
         state.modelTypes = types;
@@ -578,10 +624,22 @@
         const startBtn = getElement('start-training-btn');
         const note = getElement('model-type-note');
         const trainable = !contract || contract.trainable === true;
-        if (startBtn && !state.activeJobId) startBtn.disabled = !trainable;
+        const algorithm = getElement('training-algorithm');
+        if (algorithm && contract && algorithm.dataset.modelType !== contract.model_type) {
+            const options = (contract.algorithms || []).map(function (name) {
+                const option = el('option', null, toText(name));
+                option.value = toText(name);
+                if (name === contract.default_algorithm) option.selected = true;
+                return option;
+            });
+            algorithm.replaceChildren.apply(algorithm, options);
+            algorithm.dataset.modelType = contract.model_type;
+        }
+        if (startBtn) startBtn.disabled = !trainable || hasActiveJob('training');
         if (note) {
             note.textContent = contract
-                ? (trainable ? 'Status: Available — ' + toText(contract.note)
+                ? (trainable ? 'Status: Available · ' + toText(contract.entity_type)
+                    + ' · ' + toText(contract.score_type) + ' — ' + toText(contract.note)
                              : 'Status: Reserved / Future — Not trainable. ' + toText(contract.note))
                 : '';
             note.classList.toggle('note-bad', !trainable);
@@ -702,7 +760,11 @@
         detailBtn.addEventListener('click', function () { loadModelDetail(model.id); });
         actions.appendChild(detailBtn);
 
-        if (model.stage === 'validated') {
+        const contract = (state.modelTypes || []).find(function (item) {
+            return item.model_type === model.model_type;
+        });
+        if (model.stage === 'validated' && (!contract || contract.serving_mode === 'shadow'
+                || contract.serving_mode === 'on_demand_shadow')) {
             const approveBtn = el('button', 'mlops-btn mlops-btn-primary', 'Approve for SHADOW (observation only)');
             approveBtn.title = 'Shadow = the model runs in parallel and is recorded; it gets NO decision authority. Rules stay authoritative.';
             approveBtn.type = 'button';
@@ -713,6 +775,8 @@
                     function (reason) { return approveShadow(model.id, reason); });
             });
             actions.appendChild(approveBtn);
+        } else if (model.stage === 'validated' && contract && contract.serving_mode === 'offline_ranking') {
+            actions.appendChild(chip('Offline ranking only', 'info'));
         }
         if (model.stage === 'validated' || model.stage === 'shadow') {
             const rejectBtn = el('button', 'mlops-btn mlops-btn-danger', 'Reject');
@@ -1130,14 +1194,15 @@
         const btn = getElement('run-drift-btn');
         if (btn) btn.disabled = true;
         try {
-            await api('/api/ml/drift/run', { method: 'POST', timeout: 60000 });
-            loadDriftReports();
+            const result = await api('/api/ml/drift/run', { method: 'POST' });
+            renderJobStatus(result, 'Drift check scheduled');
+            await refreshJobs();
         } catch (err) {
             if (!err.aborted) {
                 setNote('mode-action-note', 'Drift run failed: ' + toText(err.message), 'bad');
             }
         } finally {
-            if (btn) btn.disabled = false;
+            syncJobControls();
         }
     }
 
@@ -1220,44 +1285,220 @@
         body.replaceChildren(frag);
     }
 
-    async function pollJob(jobId, attempt, onFinished) {
-        state.activeJobId = jobId;
-        if (attempt > JOB_POLL_MAX) {
-            renderJobStatus(null, 'Job is taking too long — check the Background Tasks page.');
-            finishJobUi();
+    const JOB_PRESENTATION = {
+        'training': { label: 'Model training', icon: 'fas fa-brain' },
+        'collection': { label: 'Feature collection', icon: 'fas fa-database' },
+        'dataset': { label: 'Dataset build', icon: 'fas fa-table' },
+        'backfill': { label: 'Dataset verification', icon: 'fas fa-fingerprint' },
+        'drift': { label: 'Drift analysis', icon: 'fas fa-chart-line' }
+    };
+
+    function renderJobs(items, worker) {
+        const body = getElement('training-status-body');
+        if (!body) return;
+        const frag = document.createDocumentFragment();
+        const workerStatus = toText(worker && worker.status, 'offline');
+        const workerState = toText(worker && worker.worker_state, 'unknown');
+        const heartbeatAt = worker && worker.heartbeat_at;
+        const activeCount = items.filter(function (task) {
+            return task.status === 'scheduled' || task.status === 'running';
+        }).length;
+        const failedCount = items.filter(function (task) { return task.status === 'failed'; }).length;
+
+        state.lastJobsSyncAt = new Date();
+        setSummaryValue('summary-worker',
+            workerStatus === 'healthy' ? ('Healthy · ' + workerState) : workerStatus,
+            workerStatus === 'healthy' ? 'healthy' : 'danger',
+            heartbeatAt ? 'Last heartbeat ' + formatDateTime(heartbeatAt) : 'No worker heartbeat');
+        setSummaryValue('summary-active-jobs', String(activeCount), activeCount ? 'warning' : 'healthy',
+            failedCount + ' failed job(s) in the latest ' + items.length + ' records');
+        setSummaryValue('summary-last-update', 'Just now', 'healthy', state.lastJobsSyncAt.toLocaleString());
+        setConsoleConnection('online', workerStatus === 'healthy'
+            ? 'Control plane connected' : 'Connected · worker ' + workerStatus);
+
+        const summary = el('div', 'mlops-job-summary');
+        const summaryCopy = el('div', 'mlops-job-summary-copy',
+            activeCount + ' active · ' + failedCount + ' failed · ' + items.length + ' recent');
+        summary.appendChild(summaryCopy);
+        const executor = el('div');
+        executor.appendChild(chip('worker ' + workerStatus,
+            workerStatus === 'healthy' ? 'ok' : 'bad'));
+        if (heartbeatAt) {
+            const heartbeat = el('span', 'mlops-job-summary-copy',
+                ' · heartbeat ' + formatRelativeTime(heartbeatAt));
+            heartbeat.title = formatDateTime(heartbeatAt);
+            executor.appendChild(heartbeat);
+        }
+        fillTrainingDatasetPicker(state.datasets || []);
+        summary.appendChild(executor);
+        frag.appendChild(summary);
+
+        if (workerStatus !== 'healthy') {
+            frag.appendChild(el('div', 'mlops-note note-bad',
+                'Executor is ' + workerStatus + '. Commands remain durable and will resume when the worker recovers.'));
+        }
+        if (!items.length) {
+            const empty = el('div', 'mlops-empty-state');
+            const inner = el('div');
+            inner.appendChild(faIcon('fas fa-inbox'));
+            inner.appendChild(el('div', null, 'No ML jobs yet. Start a workflow below to create the first durable run.'));
+            empty.appendChild(inner);
+            frag.appendChild(empty);
+            body.replaceChildren(frag);
             return;
         }
-        try {
-            const task = await api('/api/ml/training-jobs/' + encodeURIComponent(jobId));
-            const status = toText(task && task.status, 'unknown');
-            if (status === 'completed' || status === 'failed' || status === 'cancelled') {
-                renderJobStatus(task, status === 'completed' ? 'Job finished' : 'Job ' + status);
-                finishJobUi();
-                if (onFinished) onFinished(task);
-                return;
+
+        const priority = { running: 0, scheduled: 1, failed: 2, cancelled: 3, completed: 4 };
+        const ordered = items.slice().sort(function (left, right) {
+            const stateOrder = (priority[left.status] ?? 9) - (priority[right.status] ?? 9);
+            if (stateOrder !== 0) return stateOrder;
+            return new Date(right.updated_at ?? right.created_at ?? 0)
+                - new Date(left.updated_at ?? left.created_at ?? 0);
+        });
+        const list = el('div', 'mlops-job-list');
+        ordered.slice(0, 10).forEach(function (task) {
+            const status = toText(task.status, 'unknown');
+            const kind = toText(task.kind, 'job');
+            const presentation = JOB_PRESENTATION[kind] || { label: 'ML operation', icon: 'fas fa-cog' };
+            const details = task && typeof task.details === 'object' && task.details ? task.details : {};
+            const reportedPercent = toFiniteNumber(task.progress_percent);
+            const percent = reportedPercent === null ? (status === 'completed' ? 100 : 0)
+                : Math.max(0, Math.min(100, reportedPercent));
+            const rowTone = (status === 'failed' || status === 'cancelled') ? 'failed' : status;
+            const row = el('div', 'mlops-job-row is-' + rowTone);
+
+            const identity = el('div', 'mlops-job-identity');
+            const title = el('div', 'mlops-job-title');
+            title.appendChild(faIcon(presentation.icon));
+            title.appendChild(el('span', null, presentation.label));
+            title.appendChild(chip(status,
+                status === 'completed' ? 'ok'
+                    : ((status === 'failed' || status === 'cancelled') ? 'bad' : 'warn')));
+            identity.appendChild(title);
+            const id = el('div', 'mlops-job-id', toText(task.job_id));
+            id.title = toText(task.job_id);
+            identity.appendChild(id);
+            row.appendChild(identity);
+
+            const stage = el('div', 'mlops-job-stage');
+            stage.appendChild(el('strong', null, toText(details.stage, status).replaceAll('_', ' ')));
+            stage.appendChild(el('div', 'mlops-job-meta', task.cancel_requested
+                ? 'Cancellation requested' : toText(task.description, kind)));
+            row.appendChild(stage);
+
+            const progress = el('div');
+            const progressLabel = el('div', 'mlops-job-progress-label');
+            progressLabel.appendChild(el('span', null, 'Progress'));
+            progressLabel.appendChild(el('span', null, percent + '%'));
+            progress.appendChild(progressLabel);
+            const bar = el('div', 'mlops-progress');
+            bar.setAttribute('role', 'progressbar');
+            bar.setAttribute('aria-label', presentation.label + ' progress');
+            bar.setAttribute('aria-valuemin', '0');
+            bar.setAttribute('aria-valuemax', '100');
+            bar.setAttribute('aria-valuenow', String(percent));
+            const fill = el('span');
+            fill.style.width = percent + '%';
+            bar.appendChild(fill);
+            progress.appendChild(bar);
+            row.appendChild(progress);
+
+            const time = el('div', 'mlops-job-time');
+            const updatedAt = task.updated_at || task.created_at;
+            time.appendChild(el('strong', null, formatRelativeTime(updatedAt)));
+            const exact = el('span', null, formatDateTime(updatedAt));
+            time.appendChild(exact);
+            if (status === 'scheduled' || status === 'running') {
+                const cancel = el('button', 'mlops-btn mlops-btn-small',
+                    task.cancel_requested ? 'Cancellation requested' : 'Cancel job');
+                cancel.type = 'button';
+                cancel.dataset.cancelJobId = toText(task.job_id, '');
+                cancel.disabled = task.cancel_requested === true;
+                time.appendChild(cancel);
             }
-            renderJobStatus(task, 'Job running…');
-        } catch (err) {
-            if (err.aborted) return;
-        }
-        state.jobPollTimer = window.setTimeout(function () {
-            pollJob(jobId, attempt + 1, onFinished);
-        }, JOB_POLL_INTERVAL_MS);
+            row.appendChild(time);
+
+            if (task.error_code || task.error_message) {
+                row.appendChild(el('div', 'mlops-job-error',
+                    toText(task.error_code, 'ERROR') + ' · ' + toText(task.error_message, 'Job failed')));
+            }
+            list.appendChild(row);
+        });
+        frag.appendChild(list);
+        body.replaceChildren(frag);
     }
 
-    function finishJobUi() {
-        state.activeJobId = null;
-        state.activeJobKind = null;
-        stopJobPolling();
-        const startBtn = getElement('start-training-btn');
-        const cancelBtn = getElement('cancel-training-btn');
-        if (startBtn) startBtn.disabled = false;
+    function syncJobControls() {
         updateTrainingAvailability();
-        if (cancelBtn) cancelBtn.hidden = true;
+        const featureBtn = getElement('compute-features-btn');
+        const datasetBtn = getElement('build-dataset-btn');
+        const driftBtn = getElement('run-drift-btn');
+        if (featureBtn) featureBtn.disabled = hasActiveJob('collection');
+        if (datasetBtn) datasetBtn.disabled = hasActiveJob('dataset');
+        if (driftBtn) driftBtn.disabled = hasActiveJob('drift');
+        const backfillBtn = getElement('backfill-dataset-hashes-btn');
+        if (backfillBtn) backfillBtn.disabled = hasActiveJob('backfill');
+        const legacyCancel = getElement('cancel-training-btn');
+        if (legacyCancel) legacyCancel.hidden = true;
+    }
+
+    async function refreshJobs() {
+        stopJobPolling();
+        try {
+            const data = await api('/api/ml/jobs', { params: { limit: 20 } });
+            const items = data && Array.isArray(data.items) ? data.items : [];
+            state.recentJobs = items;
+            state.mlWorker = data && data.worker ? data.worker : null;
+            state.activeJobs.clear();
+            items.forEach(function (job) {
+                if (job.status === 'scheduled' || job.status === 'running') {
+                    state.activeJobs.set(toText(job.job_id, ''), job);
+                }
+            });
+            state.jobPollFailures = 0;
+            renderJobs(items, state.mlWorker);
+            syncJobControls();
+            const terminalSignature = items
+                .filter(function (job) { return job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'; })
+                .slice(0, 4)
+                .map(function (job) { return toText(job.job_id) + ':' + toText(job.status); })
+                .join('|');
+            if (state.lastTerminalJobSignature && terminalSignature !== state.lastTerminalJobSignature) {
+                loadOverview();
+                loadModels();
+                loadDatasets();
+                loadDriftReports();
+            }
+            state.lastTerminalJobSignature = terminalSignature;
+        } catch (err) {
+            if (err.aborted) return;
+            state.jobPollFailures += 1;
+            setConsoleConnection('offline', 'Control plane unavailable');
+            setSummaryValue('summary-worker', 'Unavailable', 'danger', toText(err.message));
+            setSummaryValue('summary-last-update', 'Sync failed', 'danger', toText(err.message));
+            if (!state.recentJobs.length) renderJobStatus(null, 'Unable to load ML jobs: ' + toText(err.message));
+        }
+        const delay = state.activeJobs.size
+            ? Math.min(JOB_POLL_MAX_BACKOFF_MS,
+                JOB_POLL_INTERVAL_MS * Math.pow(2, Math.min(5, state.jobPollFailures)))
+            : JOB_POLL_MAX_BACKOFF_MS;
+        state.jobPollTimer = window.setTimeout(refreshJobs, delay);
+    }
+
+    async function cancelJob(jobId) {
+        if (!jobId) return;
+        try {
+            await api('/api/ml/jobs/' + encodeURIComponent(jobId) + '/cancel', {
+                method: 'POST', body: {}
+            });
+            await refreshJobs();
+        } catch (err) {
+            if (!err.aborted) renderJobStatus(null, 'Cancel failed: ' + toText(err.message));
+        }
     }
 
     async function startTraining() {
-        if (state.activeJobId) return;
+        if (hasActiveJob('training')) return;
         const contract = selectedModelTypeContract();
         if (contract && contract.trainable !== true) {
             renderJobStatus(null, toText(contract.model_type) + ' is a reserved interface (Reserved / Future) — not trainable in this release.');
@@ -1269,7 +1510,6 @@
         const seedInput = getElement('training-seed-input');
         const hpInput = getElement('training-hyperparameters-input');
         const startBtn = getElement('start-training-btn');
-        const cancelBtn = getElement('cancel-training-btn');
         // Experiment knobs: an existing dataset (one immutable dataset, many
         // experiments), an explicit seed and explicit hyperparameters. Every
         // value sent here is persisted verbatim as the model's training_config.
@@ -1293,17 +1533,11 @@
         if (startBtn) startBtn.disabled = true;
         try {
             const result = await api('/api/ml/training-jobs', { method: 'POST', body: body });
-            state.activeJobKind = 'training';
-            if (cancelBtn) cancelBtn.hidden = false;
             renderJobStatus(result, 'Training scheduled');
-            pollJob(toText(result && result.job_id, ''), 1, function () {
-                loadModels();
-                loadOverview();
-            });
+            await refreshJobs();
         } catch (err) {
             if (startBtn) startBtn.disabled = false;
             updateTrainingAvailability();
-        updateTrainingAvailability();
             if (err.aborted) return;
             renderJobStatus(null,
                 toText(err.code, 'ERROR') + ': ' + toText(err.message, 'training failed to schedule'));
@@ -1311,16 +1545,8 @@
     }
 
     async function cancelTraining() {
-        if (!state.activeJobId || state.activeJobKind !== 'training') return;
-        try {
-            await api('/api/ml/training-jobs/' + encodeURIComponent(state.activeJobId) + '/cancel', {
-                method: 'POST', body: {}
-            });
-        } catch (err) {
-            if (!err.aborted) {
-                renderJobStatus(null, 'Cancel failed: ' + toText(err.message));
-            }
-        }
+        const training = [...state.activeJobs.values()].find(function (job) { return job.kind === 'training'; });
+        if (training) await cancelJob(training.job_id);
     }
 
     async function computeFeatures() {
@@ -1330,18 +1556,14 @@
             const result = await api('/api/ml/features/compute', { method: 'POST', body: {} });
             setNote('data-readiness-note',
                 'Feature collection scheduled (job ' + toText(result && result.job_id) + ').', 'ok');
-            const jobId = toText(result && result.job_id, '');
-            if (jobId && jobId !== '—') {
-                state.activeJobKind = 'collection';
-                pollJob(jobId, 1, function () { loadOverview(); });
-            }
+            await refreshJobs();
         } catch (err) {
             if (!err.aborted) {
                 setNote('data-readiness-note',
                     toText(err.code, 'ERROR') + ': ' + toText(err.message, 'collection failed'), 'bad');
             }
         } finally {
-            if (btn) btn.disabled = false;
+            syncJobControls();
         }
     }
 
@@ -1369,15 +1591,11 @@
         if (btn) btn.disabled = true;
         try {
             const outcome = await api('/api/ml/datasets', {
-                method: 'POST', timeout: 120000, body: body
+                method: 'POST', body: body
             });
-            const ex = (outcome && typeof outcome.extraction === 'object' && outcome.extraction) ? outcome.extraction : {};
-            renderDatasetsMessage('Dataset built: ' + toText(outcome && outcome.name)
-                + ' v' + formatMetric(outcome && outcome.version)
-                + ' (' + formatMetric(outcome && outcome.row_count) + ' rows; '
-                + formatMetric(ex.candidate_rows) + ' candidates, '
-                + formatMetric(ex.excluded_rows) + ' excluded by ' + toText(ex.sampling_policy) + ')', 'ok');
-            loadDatasets();
+            renderDatasetsMessage('Dataset build scheduled (job '
+                + toText(outcome && outcome.job_id) + ').', 'ok');
+            await refreshJobs();
         } catch (err) {
             if (!err.aborted) {
                 let message = toText(err.message, 'dataset build failed');
@@ -1392,7 +1610,7 @@
                 renderDatasetsMessage(message, 'bad');
             }
         } finally {
-            if (btn) btn.disabled = false;
+            syncJobControls();
         }
     }
 
@@ -1446,8 +1664,13 @@
         const first = el('option', null, 'Build a new dataset for this run');
         first.value = '';
         const options = [first];
+        const contract = selectedModelTypeContract();
+        const wantedKind = toText(contract && contract.dataset_kind, 'unsupervised');
+        const wantedFeatureSet = contract && contract.feature_set_version;
         for (const ds of items) {
-            if (ds.status !== 'built' || ds.kind !== 'unsupervised' || !ds.parquet_sha256) continue;
+            if (ds.status !== 'built' || ds.kind !== wantedKind || !ds.parquet_sha256) continue;
+            if (wantedFeatureSet && ds.feature_set_version !== wantedFeatureSet
+                    && contract.model_type !== 'behavior_anomaly_model') continue;
             const opt = el('option', null, toText(ds.name) + ' v' + formatMetric(ds.version)
                 + ' — ' + formatMetric(ds.row_count) + ' rows, ' + toText(ds.checksum).slice(0, 10));
             opt.value = toText(ds.id);
@@ -1458,18 +1681,73 @@
     }
 
     async function backfillDatasetHashes() {
+        if (hasActiveJob('backfill')) return;
         const btn = getElement('backfill-dataset-hashes-btn');
         if (btn) btn.disabled = true;
         try {
-            const report = await api('/api/ml/datasets/backfill-hashes', { method: 'POST', timeout: 120000, body: {} });
-            const verified = Array.isArray(report.verified) ? report.verified.length : 0;
-            const bad = Array.isArray(report.unverifiable) ? report.unverifiable : [];
-            renderDatasetsMessage('Verified ' + verified + ' legacy dataset(s); unverifiable: ' + bad.length
-                + (bad.length ? ' (' + bad.map(function (x) { return toText(x.name) + ' v' + formatMetric(x.version) + ': ' + toText(x.reason); }).join('; ') + ')' : ''),
-                bad.length ? 'warn' : 'ok');
-            setTimeout(loadDatasets, 1500);
+            const job = await api('/api/ml/datasets/backfill-hashes', { method: 'POST', body: {} });
+            renderDatasetsMessage('Dataset verification scheduled as ' + toText(job.job_id) + '.', 'ok');
+            await refreshJobs();
         } catch (err) {
             if (!err.aborted) renderDatasetsMessage('Verification failed: ' + toText(err.message), 'bad');
+        } finally {
+            syncJobControls();
+        }
+    }
+
+    function updateEvaluationForm() {
+        const type = getElement('evaluation-model-type');
+        const related = getElement('evaluation-related-row');
+        const ids = getElement('evaluation-identity-ids');
+        const value = type ? type.value : '';
+        if (related) related.hidden = value !== 'coappearance_anomaly_model';
+        if (ids) ids.placeholder = value === 'threat_ranking_model'
+            ? 'Comma-separated identity UUIDs (maximum 200)'
+            : 'Identity UUID';
+    }
+
+    async function runModelEvaluation() {
+        const typeNode = getElement('evaluation-model-type');
+        const idsNode = getElement('evaluation-identity-ids');
+        const relatedNode = getElement('evaluation-related-id');
+        const button = getElement('run-model-evaluation-btn');
+        const resultNode = getElement('model-evaluation-result');
+        if (!typeNode || !idsNode || !resultNode) return;
+        const modelType = typeNode.value;
+        const ids = idsNode.value.split(/[\s,]+/).map(function (value) { return value.trim(); })
+            .filter(Boolean).slice(0, 200);
+        if (!ids.length) {
+            resultNode.replaceChildren(el('div', 'mlops-note note-bad', 'Enter at least one identity UUID.'));
+            return;
+        }
+        if (button) button.disabled = true;
+        resultNode.replaceChildren(el('div', 'mlops-loading', 'Running observational evaluation…'));
+        try {
+            let response;
+            if (modelType === 'threat_ranking_model') {
+                response = await api('/api/ml/rank/threat-review', {
+                    method: 'POST', body: { identity_ids: ids }
+                });
+            } else {
+                const body = { model_type: modelType, identity_id: ids[0] };
+                if (modelType === 'coappearance_anomaly_model') {
+                    body.related_identity_id = relatedNode ? relatedNode.value.trim() : '';
+                    if (!body.related_identity_id) {
+                        throw { code: 'PAIR_ID_REQUIRED', message: 'Enter the related identity UUID.' };
+                    }
+                }
+                response = await api('/api/ml/score/relational', { method: 'POST', body: body });
+            }
+            const frag = document.createDocumentFragment();
+            frag.appendChild(el('div', 'mlops-note note-ok',
+                'Evaluation completed. The result was not applied to any live decision.'));
+            frag.appendChild(jsonBlock(response));
+            resultNode.replaceChildren(frag);
+        } catch (err) {
+            if (!err.aborted) resultNode.replaceChildren(el('div', 'mlops-note note-bad',
+                toText(err.code, 'EVALUATION_FAILED') + ': ' + toText(err.message)));
+        } finally {
+            if (button) button.disabled = false;
         }
     }
 
@@ -1697,6 +1975,7 @@
             });
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
+            state.datasets = items;
             const frag = document.createDocumentFragment();
             frag.appendChild(el('div', 'mlops-subheading',
                 'Recent datasets (' + formatMetric(data.total) + ' total)'));
@@ -2013,15 +2292,15 @@
         labels_readiness: {
             title: 'Label Readiness',
             what: 'Counts of REVIEWED manual labels against the minimums supervised training would need (ML_SUPERVISED_MIN_LABELS / PER_CLASS). Weak, unreviewed and disputed labels are listed but never counted.',
-            read: ['"supervised_gate_open" true only means the label COUNT is sufficient; supervised training stays disabled this release (SUPERVISED_NOT_ENABLED).'],
+            read: ['"supervised_gate_open" true means the reviewed-label count permits threat-ranking training; dataset, class-balance, leakage and artifact gates still apply.'],
             actions: [], progress: 'Grows as analysts confirm labels in the Labels Queue.'
         },
         data_readiness: {
             title: 'Data Readiness',
             what: 'Feature snapshots the collector has written (the rows datasets are built from) and the graph readiness floors for pair features.',
             read: ['Snapshots are computed point-in-time: only data strictly before each as_of is used.', 'The feature set version stamps every snapshot; models trained under another version never score current snapshots.'],
-            actions: ['Run feature collection: computes snapshots for new events (a background job; progress is shown in Training).'],
-            progress: 'The feature job reports its stage and percent in the Training card while it runs.'
+            actions: ['Run feature collection: computes snapshots for new events as a durable worker job.'],
+            progress: 'The feature job reports its backend stage and percent in the Durable Job Queue.'
         },
         capabilities: {
             title: 'Optional Capabilities',
@@ -2054,15 +2333,22 @@
             title: 'Drift Reports',
             what: 'PSI / KS / JS divergence of recent feature snapshots against the preceding window, plus prediction drift (score distribution, fallback and failure rates, latency). Observations only.',
             read: ['insufficient_data below ML_DRIFT_MIN_SAMPLES is honest, not a failure.', 'Severity follows the configured PSI thresholds; drift never triggers retraining or mode changes.'],
-            actions: ['Run drift check now: synchronous; also runs on the scheduled monitor.'],
-            progress: ''
+            actions: ['Run drift check now: enqueues a durable report-only job; the worker also schedules periodic checks.'],
+            progress: 'Track the run in the Durable Job Queue.'
         },
         training: {
             title: 'Training (manual)',
             what: 'Builds an immutable Parquet dataset (or reuses one you pick) and trains a CANDIDATE. Stages: loading/building dataset → training → evaluating → saving candidate → registering. Success = a VALIDATED model awaiting your shadow approval.',
             read: ['The stage strip and percent come from the job record; a failed job shows its stable error code (e.g. DATASET_FILE_HASH_MISMATCH, QUALITY_GATES_FAILED).', 'Datasets: definition/version, extraction audit (candidate / selected / excluded rows and the cap policy), logical checksum and Parquet file hash. "legacy build" rows predate extraction auditing and are reported, never rewritten.', 'Seed and hyperparameters you enter are persisted verbatim as the model\'s training configuration.'],
             actions: ['Start training: background job; only one at a time.', 'Build dataset: explicit definition, optional time range, and what to do above the cap (refuse by default).', 'Verify legacy datasets: records a file hash only when the reloaded rows reproduce the registered checksum.', 'Archive: releases the Parquet bytes of a dataset no model was trained from (lineage row and manifest stay).'],
-            progress: 'Watch the stage strip; the job id links the run to the audit log and the call log.'
+            progress: 'Watch the Durable Job Queue; the job id links the run to the audit log and call log.'
+        },
+        evaluation: {
+            title: 'Model Evaluation',
+            what: 'Runs approved pair/graph anomaly models as on-demand shadow observations, or a validated threat ranker to order an analyst review batch.',
+            read: ['Every response is explicitly applied_to_live_result=false.', 'Threat ranking is relative review priority, not a threat probability.'],
+            actions: ['Run evaluation: computes current features, verifies the artifact and returns an audited observational score.'],
+            progress: 'Synchronous and bounded to 200 identities for ranking.'
         },
         labels: {
             title: 'Labels Queue',
@@ -2097,6 +2383,8 @@
 
     // Short tooltips on the controls themselves (the help modal has the long form).
     const TOOLTIPS = {
+        'refresh-console-btn': 'Refresh operational state, jobs, models, evidence and audit data.',
+        'jobs-refresh-btn': 'Reload durable queue state and worker heartbeat now.',
         'current-mode-badge': 'Configured decision mode (settings.ML_DECISION_MODE). Rules always make the live decision this release.',
         'pause-ml-btn': 'Emergency stop: restore RULES as the only decision path. Audited.',
         'refresh-overview-btn': 'Reload the overview and the registry.',
@@ -2107,7 +2395,7 @@
         'shadow-evidence-btn': 'Per-band evidence with reviewed outcomes, for reviewing a future ML→risk mapping. Read-only; decision stays REQUIRES_VALIDATION.',
         'predictions-fallback-only': 'Show only predictions where the model did not score and rules served alone.',
         'run-drift-btn': 'Compute PSI/KS/JS drift now. Observation only; never retrains.',
-        'training-model-type': 'Capability contract from the backend: Available types train; Reserved / Future types are interfaces for later releases and cannot be submitted (the API would refuse them with MODEL_TYPE_NOT_IMPLEMENTED).',
+        'training-model-type': 'Capability contract from the backend: each model selects its entity type, feature set, dataset kind, algorithms and score semantics.',
         'label-selection-method': 'How this review was selected. Anything other than natural marks a stratified subset: positive rates then describe the selection, not population prevalence.',
         'label-assessment-id': 'Anchor the outcome to a RESOLVED assessment so it links to that assessment\u2019s shadow prediction exactly (otherwise the link is by subject and event day).',
         'label-notes': 'Free text for reviewers. Stored on the label only; never written to the call log.',
@@ -2140,6 +2428,27 @@
         });
     }
 
+    async function refreshConsole() {
+        const button = getElement('refresh-console-btn');
+        if (button) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+        }
+        setConsoleConnection('online', 'Synchronizing control plane');
+        try {
+            await Promise.allSettled([
+                loadOverview(), loadModels(), loadShadowSummary(), loadPredictions(),
+                loadDriftReports(), loadDatasetDefinitions(), loadDatasets(), loadLabels(),
+                loadPolicy(), loadAudit(), loadCalls(), refreshJobs()
+            ]);
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+            }
+        }
+    }
+
     function installHelpButtons() {
         document.querySelectorAll('.mlops-card[data-help]').forEach(function (card) {
             const header = card.querySelector('.mlops-card-header');
@@ -2158,8 +2467,10 @@
     function helpStatusLines(key) {
         const lines = [];
         if (key === 'mode' && state.currentMode) lines.push('Configured mode now: ' + toText(state.currentMode).toUpperCase());
-        if (key === 'training' && state.activeJobId) lines.push('A job is running: ' + toText(state.activeJobId));
-        if (key === 'training' && !state.activeJobId) lines.push('No job running.');
+        if (key === 'training' && state.activeJobs.size) {
+            lines.push(String(state.activeJobs.size) + ' ML job(s) queued or running.');
+        }
+        if (key === 'training' && !state.activeJobs.size) lines.push('No job running.');
         return lines;
     }
 
@@ -2370,6 +2681,8 @@
         });
         on('calls-refresh-btn', 'click', loadCalls);
         on('calls-errors-only', 'change', loadCalls);
+        on('refresh-console-btn', 'click', refreshConsole);
+        on('jobs-refresh-btn', 'click', refreshJobs);
         on('refresh-overview-btn', 'click', function () { loadOverview(); loadModels(); });
         on('pause-ml-btn', 'click', pauseMl);
         on('registry-action-confirm', 'click', confirmPendingAction);
@@ -2394,9 +2707,16 @@
         });
         on('run-drift-btn', 'click', runDrift);
         on('start-training-btn', 'click', startTraining);
+        on('evaluation-model-type', 'change', updateEvaluationForm);
+        on('run-model-evaluation-btn', 'click', runModelEvaluation);
         on('cancel-training-btn', 'click', cancelTraining);
         on('compute-features-btn', 'click', computeFeatures);
         on('build-dataset-btn', 'click', buildDataset);
+        on('training-status-body', 'click', function (event) {
+            const origin = event.target && event.target.closest ? event.target : null;
+            const button = origin ? origin.closest('button[data-cancel-job-id]') : null;
+            if (button) cancelJob(button.dataset.cancelJobId);
+        });
         on('datasets-body', 'click', function (event) {
             const origin = event.target && event.target.closest ? event.target : null;
             if (!origin) return;
@@ -2426,6 +2746,8 @@
             state.auditPage += 1; loadAudit();
         });
 
+        updateEvaluationForm();
+
         loadOverview();
         loadModels();
         loadShadowSummary();
@@ -2437,6 +2759,7 @@
         loadPolicy();
         loadAudit();
         loadCalls();
+        refreshJobs();
     }
 
     function destroy() {

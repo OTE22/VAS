@@ -65,7 +65,7 @@ class DatabaseManager:
                     {"column_name": "is_active", "data_type": "boolean", "is_nullable": "NO", "description": "Whether this camera/pipeline is currently active"},
                     {"column_name": "created_at", "data_type": "timestamp", "is_nullable": "NO", "description": "When the camera/pipeline was created"},
                     {"column_name": "updated_at", "data_type": "timestamp", "is_nullable": "YES", "description": "Last update timestamp"},
-                    {"column_name": "total_detections", "data_type": "integer", "is_nullable": "YES", "description": "Total number of detections by this camera"},
+                    {"column_name": "total_detections", "data_type": "integer", "is_nullable": "YES", "description": "A CACHED counter, incremented as detections arrive; it lags and can be NULL or 0 for cameras that do have detections. NEVER use it to count or rank cameras: count the detections table instead - COUNT(d.id) ... GROUP BY p.pipeline_id, p.location_name"},
                 ],
                 "primary_keys": ["id"],
                 "foreign_keys": []
@@ -88,6 +88,7 @@ class DatabaseManager:
             "faces.detection_id → detections.id (Many faces can belong to one detection event)",
             "detections.pipeline_id → pipelines.pipeline_id (varchar to varchar - Many detections belong to one camera/pipeline)",
             "Complete chain: faces → detections → pipelines allows tracking which camera detected which person",
+            "COUNTS AND RANKINGS come from the detections table (COUNT(d.id) GROUP BY the camera), never from pipelines.total_detections, which is a lagging cache",
             "IMPORTANT: detections.pipeline_id is VARCHAR and joins to pipelines.pipeline_id (VARCHAR), NOT pipelines.id (INTEGER)"
         ]
     }
@@ -348,7 +349,10 @@ class DatabaseManager:
             "is_safe": verdict.allowed,
             "reason": verdict.reason or "Query is safe and read-only",
             "code": verdict.code,
-            "sql": verdict.sql if verdict.allowed else "",
+            # The agent keeps the UNSCOPED canonical text: the scope is
+            # re-applied by execute_query on every run and must never reach
+            # the model, the knowledge base, or query history.
+            "sql": (verdict.canonical or verdict.sql) if verdict.allowed else "",
             "tables": verdict.tables,
             "statement_type": verdict.statement_type,
         }

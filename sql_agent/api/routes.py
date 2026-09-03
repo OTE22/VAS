@@ -147,6 +147,12 @@ def _bounded_query(raw) -> tuple:
 # values before this module loads.
 _sql_agent_semaphore = asyncio.Semaphore(SQL_AGENT_MAX_CONCURRENT)
 _SEMAPHORE_WAIT_SECONDS = 5.0
+# Waiting on your OWN previous turn is not starving anyone: the per-user lock
+# is taken before the global slot, so nothing is held while waiting. Bounded
+# all the same, but generously - a turn's tail (history, embedding, learning)
+# runs on for a few seconds after the client has its answer, and a 5s wait
+# made the very next message from the same user fail as BUSY.
+_USER_LOCK_WAIT_SECONDS = 60.0
 _BUSY_MESSAGE = (
     "The SQL assistant is currently handling other requests. "
     "Please try again in a few moments."
@@ -1169,7 +1175,7 @@ async def sql_agent_query(
                 resources_deferred = False
                 if user_lock is not None:
                     try:
-                        await asyncio.wait_for(user_lock.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+                        await asyncio.wait_for(user_lock.acquire(), timeout=_USER_LOCK_WAIT_SECONDS)
                         lock_acquired = True
                     except asyncio.TimeoutError:
                         _ACTIVE_REQUESTS.pop(rest_request_id, None)
@@ -1565,7 +1571,7 @@ async def sql_agent_query_stream(
                 # and bounded, so a blocked tab never holds a global slot.
                 if user_lock is not None:
                     try:
-                        await asyncio.wait_for(user_lock.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+                        await asyncio.wait_for(user_lock.acquire(), timeout=_USER_LOCK_WAIT_SECONDS)
                         lock_acquired = True
                     except asyncio.TimeoutError:
                         yield evt({"type": "error", "error_code": "AGENT_BUSY", "message": _BUSY_MESSAGE})
@@ -2183,7 +2189,7 @@ async def sql_agent_websocket(websocket: WebSocket):
                 # message never holds a global slot (see the REST route).
                 if user_lock is not None:
                     try:
-                        await asyncio.wait_for(user_lock.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+                        await asyncio.wait_for(user_lock.acquire(), timeout=_USER_LOCK_WAIT_SECONDS)
                         lock_acquired = True
                     except asyncio.TimeoutError:
                         await websocket.send_json(ws_evt({"type": "error", "error_code": "AGENT_BUSY",
@@ -3051,6 +3057,10 @@ async def _complete_translation(request: dict, current_user, agent_instance=None
                 "produce it in the language you want.", None)
 
     translated = await run_in_threadpool(translate_document_text, source, language)
+    if translated and agent_instance is not None:
+        # Same fidelity rule as the answer: names the translation
+        # transliterated are appended as stored.
+        translated = agent_instance.keep_stored_names(source, translated, language)
     if not translated:
         return translation_failure_message(language), None
 

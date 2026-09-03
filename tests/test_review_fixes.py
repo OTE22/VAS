@@ -199,12 +199,16 @@ def _tools():
 
 
 def test_running_out_of_steps_is_admitted_in_the_users_language():
+    """Now as GUIDANCE: what is needed, with options, in the user's
+    language - still reported as a failed turn."""
     tools = _tools()
+    openers = {"en": "I could not turn that into a query",
+               "ar": "لم أفهم هذا الطلب"}
     for lang in ("en", "ar"):
         state = {"reasoning_exhausted": True, "response_language": lang,
                  "terminal_state": "MAX_ITERATIONS"}
         out = tools.handle_chat(state)
-        assert out["final_response"] == tools._EXHAUSTED_NARRATION[lang]
+        assert out["final_response"].startswith(openers[lang])
         assert out["turn_failed"] is True
 
 

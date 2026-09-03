@@ -336,7 +336,8 @@ async def build_dataset(db: AsyncSession, *, name: str, kind: str,
         raise ValueError(f"sampling_policy must be one of {SAMPLING_POLICIES}")
     time_range = resolve_time_range(definition, start=time_range_start, end=time_range_end)
 
-    definitions = await feature_store.get_active_definitions(db, definition.entity_type)
+    definitions = await feature_store.get_definitions_for_feature_set(
+        db, definition.feature_set_version)
 
     population = [
         MLFeatureSnapshot.entity_type == definition.entity_type,

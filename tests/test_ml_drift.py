@@ -178,10 +178,12 @@ def test_drift_module_has_no_action_path():
             f"drift_service references {forbidden} — drift is report-only")
 
 
-def test_scheduled_drift_loop_is_report_only_and_supervised():
+def test_scheduled_drift_is_delegated_to_the_durable_worker():
     with io.open("/app/backend/lifespan.py", encoding="utf-8") as handle:
         lifespan_src = handle.read()
-    assert "ml_drift_monitor" in lifespan_src, "the drift loop is not registered"
-    assert "scheduled_check" in lifespan_src
-    # The loop wiring calls the drift service only — the forbidden tokens
-    # above already prove the service itself cannot act on what it sees.
+    with io.open("/app/backend/ml/worker.py", encoding="utf-8") as handle:
+        worker_src = handle.read()
+    assert "scheduled_check" not in lifespan_src
+    assert "delegated to the durable ML worker" in lifespan_src
+    assert "_enqueue_scheduled_drift_if_due" in worker_src
+    assert 'kind="drift"' in worker_src

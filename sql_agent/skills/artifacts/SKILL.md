@@ -18,7 +18,11 @@ A result exists to build from, or a document already exists.
 ## Constraints
 - Build from something that exists. If nothing has been produced, do the work
   first, then make the document from it.
-- Translate only a document you have confirmed exists.
+- Translate only a document you have confirmed exists - or, when none was
+  saved, the last report as written; a language request about "the report"
+  is a translation, not a new document.
+- A document is titled by its subject (the person, camera or question it
+  reports on), never by the words of the request that asked for it.
 - Never put a failure notice in a document as its content.
 - A document belongs to the conversation that made it.
 

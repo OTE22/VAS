@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-8">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-9">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -23,21 +23,59 @@
         <div class="intelligence-scan-line"></div>
 
         <div class="intelligence-content">
-            <header class="page-header">
+            <header class="page-header mlops-page-header">
                 <div class="header-content">
                     <div class="header-icon-wrapper">
-                        <i class="fas fa-project-diagram" aria-hidden="true"></i>
-                        <div class="header-icon-glow"></div>
+                        <i class="fas fa-layer-group" aria-hidden="true"></i>
                     </div>
                     <div class="header-text">
-                        <h1 class="page-title">ML Operations</h1>
-                        <p class="page-description">Decision modes, model registry, shadow evaluation, drift monitoring — rules remain the production decision system</p>
+                        <div class="mlops-eyebrow">Operations / Model control</div>
+                        <h1 class="page-title">Machine Learning Operations</h1>
+                        <p class="page-description">Observe durable jobs, validate evidence, and govern the model lifecycle. Rules remain the production decision authority.</p>
                     </div>
+                </div>
+                <div class="mlops-page-actions">
+                    <div class="mlops-live-state" id="console-connection-state" role="status">
+                        <span class="mlops-live-dot" aria-hidden="true"></span>
+                        <span>Connecting to control plane</span>
+                    </div>
+                    <button class="mlops-btn mlops-btn-primary" id="refresh-console-btn" type="button">
+                        <i class="fas fa-sync-alt" aria-hidden="true"></i> Refresh console
+                    </button>
                 </div>
             </header>
 
+            <section class="mlops-overview-strip" aria-label="ML operations summary">
+                <article class="mlops-summary-card">
+                    <div class="mlops-summary-icon"><i class="fas fa-shield-alt" aria-hidden="true"></i></div>
+                    <div><span class="mlops-summary-label">Decision authority</span><strong id="summary-mode">Loading</strong></div>
+                </article>
+                <article class="mlops-summary-card">
+                    <div class="mlops-summary-icon"><i class="fas fa-server" aria-hidden="true"></i></div>
+                    <div><span class="mlops-summary-label">ML worker</span><strong id="summary-worker">Checking</strong></div>
+                </article>
+                <article class="mlops-summary-card">
+                    <div class="mlops-summary-icon"><i class="fas fa-tasks" aria-hidden="true"></i></div>
+                    <div><span class="mlops-summary-label">Active jobs</span><strong id="summary-active-jobs">—</strong></div>
+                </article>
+                <article class="mlops-summary-card">
+                    <div class="mlops-summary-icon"><i class="fas fa-clock" aria-hidden="true"></i></div>
+                    <div><span class="mlops-summary-label">Last synchronized</span><strong id="summary-last-update">Waiting</strong></div>
+                </article>
+            </section>
+
+            <nav class="mlops-section-nav" aria-label="ML operations sections">
+                <a href="#operations-queue">Execution</a>
+                <a href="#system-governance">Governance</a>
+                <a href="#model-registry">Models</a>
+                <a href="#observability">Observability</a>
+                <a href="#workflows">Workflows</a>
+                <a href="#audit-trail">Audit</a>
+            </nav>
+
             <!-- The seven honesty warnings (static so they render even if every API call fails) -->
-            <section class="mlops-warnings" id="mlops-warnings" aria-label="Operating warnings">
+            <details class="mlops-warnings" id="mlops-warnings">
+                <summary><i class="fas fa-shield-alt" aria-hidden="true"></i> Operating guardrails <span>7 permanent constraints</span></summary>
                 <ul>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Anomaly does not mean threat.</li>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Heuristic scores are not probabilities.</li>
@@ -47,13 +85,32 @@
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Drift does not automatically prove model failure.</li>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Human review remains required.</li>
                 </ul>
-            </section>
+            </details>
 
             <div class="mlops-container">
 
+                <!-- Primary operational surface: durable server-owned execution state -->
+                <div class="mlops-card mlops-card-wide mlops-queue-card" data-help="training" id="operations-queue">
+                    <div class="mlops-card-header">
+                        <div>
+                            <div class="mlops-card-kicker">Live execution</div>
+                            <h2><i class="fas fa-stream" aria-hidden="true"></i> Durable Job Queue</h2>
+                        </div>
+                        <div class="mlops-header-actions">
+                            <span class="mlops-tag">PostgreSQL leased · worker executed</span>
+                            <button class="mlops-btn mlops-btn-small" id="jobs-refresh-btn" type="button">
+                                <i class="fas fa-sync-alt" aria-hidden="true"></i> Refresh
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mlops-card-body" id="training-status-body" role="status" aria-live="polite">
+                        <div class="mlops-loading"><i class="fas fa-spinner fa-spin" aria-hidden="true"></i> Loading durable jobs…</div>
+                    </div>
+                </div>
+
                 <!-- Decision mode panel: all four modes with exact gate reasons -->
                 <!-- What the ML system IS right now (facts from the backend) + the core changes -->
-                <div class="mlops-card mlops-card-wide" data-help="system">
+                <div class="mlops-card mlops-card-wide" data-help="system" id="system-governance">
                     <div class="mlops-card-header">
                         <h2><i class="fas fa-microchip"></i> System State</h2>
                         <div class="mlops-header-actions">
@@ -122,7 +179,7 @@
                 </div>
 
                 <!-- Model registry + lifecycle actions -->
-                <div class="mlops-card mlops-card-wide" data-help="registry">
+                <div class="mlops-card mlops-card-wide" data-help="registry" id="model-registry">
                     <div class="mlops-card-header">
                         <h2><i class="fas fa-archive"></i> Model Registry</h2>
                         <div class="mlops-header-actions">
@@ -170,7 +227,7 @@
                 </div>
 
                 <!-- Shadow comparison: descriptive only, different concepts -->
-                <div class="mlops-card mlops-card-wide" data-help="shadow">
+                <div class="mlops-card mlops-card-wide" data-help="shadow" id="observability">
                     <div class="mlops-card-header">
                         <h2><i class="fas fa-columns"></i> Shadow Comparison</h2>
                         <div class="mlops-header-actions">
@@ -244,7 +301,7 @@
                 </div>
 
                 <!-- Training jobs + dataset builds (manual only) -->
-                <div class="mlops-card" data-help="training">
+                <div class="mlops-card" data-help="training" id="workflows">
                     <div class="mlops-card-header">
                         <h2><i class="fas fa-graduation-cap"></i> Training (manual)</h2>
                     </div>
@@ -253,9 +310,9 @@
                             <label for="training-model-type">Model type:</label>
                             <select id="training-model-type" class="mlops-select">
                                 <option value="behavior_anomaly_model" selected>behavior_anomaly_model — Available</option>
-                                <option value="coappearance_anomaly_model" disabled>coappearance_anomaly_model — Reserved / Future · not trainable</option>
-                                <option value="social_graph_anomaly_model" disabled>social_graph_anomaly_model — Reserved / Future · not trainable</option>
-                                <option value="threat_ranking_model" disabled>threat_ranking_model — Reserved / Future · not trainable</option>
+                                <option value="coappearance_anomaly_model">coappearance_anomaly_model — Available</option>
+                                <option value="social_graph_anomaly_model">social_graph_anomaly_model — Available</option>
+                                <option value="threat_ranking_model">threat_ranking_model — Available</option>
                             </select>
                         </div>
                         <div id="model-type-note" class="mlops-mode-desc" role="note"></div>
@@ -286,7 +343,7 @@
                                 <i class="fas fa-stop"></i> Cancel
                             </button>
                         </div>
-                        <div id="training-status-body" class="mlops-status-area" role="status"></div>
+                        <div id="training-action-note" class="mlops-note" role="status"></div>
                         <hr class="mlops-divider">
                         <div class="mlops-form-row">
                             <label for="dataset-name-input">Dataset name:</label>
@@ -328,6 +385,41 @@
                         </div>
                         <div id="dataset-definition-note" class="mlops-mode-desc" role="note"></div>
                         <div id="datasets-body" class="mlops-status-area"></div>
+                    </div>
+                </div>
+
+                <!-- Governed observational scoring; never changes live decisions -->
+                <div class="mlops-card" data-help="evaluation" id="model-evaluation">
+                    <div class="mlops-card-header">
+                        <h2><i class="fas fa-ranking-star"></i> Model Evaluation</h2>
+                        <span class="mlops-chip chip-info">Observation only</span>
+                    </div>
+                    <div class="mlops-card-body">
+                        <p class="mlops-mode-desc">Run an approved relational shadow model or a validated threat-review ranker. Results are audited and never modify an assessment, alert, watchlist, or decision mode.</p>
+                        <div class="mlops-form-row">
+                            <label for="evaluation-model-type">Model:</label>
+                            <select id="evaluation-model-type" class="mlops-select">
+                                <option value="coappearance_anomaly_model" selected>Coappearance anomaly</option>
+                                <option value="social_graph_anomaly_model">Social-graph anomaly</option>
+                                <option value="threat_ranking_model">Threat-review ranking</option>
+                            </select>
+                        </div>
+                        <div class="mlops-form-row">
+                            <label for="evaluation-identity-ids">Identity ID(s):</label>
+                            <input type="text" id="evaluation-identity-ids" maxlength="7400" autocomplete="off" placeholder="UUID; ranking accepts comma-separated UUIDs">
+                        </div>
+                        <div class="mlops-form-row" id="evaluation-related-row">
+                            <label for="evaluation-related-id">Related identity ID:</label>
+                            <input type="text" id="evaluation-related-id" maxlength="36" autocomplete="off" placeholder="Required only for coappearance">
+                        </div>
+                        <div class="mlops-form-row">
+                            <button class="mlops-btn mlops-btn-primary" id="run-model-evaluation-btn" type="button">
+                                <i class="fas fa-play"></i> Run evaluation
+                            </button>
+                        </div>
+                        <div id="model-evaluation-result" class="mlops-status-area" aria-live="polite">
+                            <div class="mlops-empty-state">Choose a model and subject to run an observational evaluation.</div>
+                        </div>
                     </div>
                 </div>
 
@@ -411,9 +503,9 @@
                         <div class="mlops-header-actions">
                             <select id="policy-model-type" class="mlops-select">
                                 <option value="behavior_anomaly_model" selected>behavior_anomaly_model — Available</option>
-                                <option value="coappearance_anomaly_model">coappearance_anomaly_model — Reserved / Future</option>
-                                <option value="social_graph_anomaly_model">social_graph_anomaly_model — Reserved / Future</option>
-                                <option value="threat_ranking_model">threat_ranking_model — Reserved / Future</option>
+                                <option value="coappearance_anomaly_model">coappearance_anomaly_model — Available</option>
+                                <option value="social_graph_anomaly_model">social_graph_anomaly_model — Available</option>
+                                <option value="threat_ranking_model">threat_ranking_model — Available</option>
                             </select>
                         </div>
                     </div>
@@ -423,7 +515,7 @@
                 </div>
 
                 <!-- ML audit log -->
-                <div class="mlops-card mlops-card-wide" data-help="audit">
+                <div class="mlops-card mlops-card-wide" data-help="audit" id="audit-trail">
                     <div class="mlops-card-header">
                         <h2><i class="fas fa-scroll"></i> ML Audit Log</h2>
                     </div>
@@ -481,6 +573,6 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-8"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-13"></script>
 </body>
 </html>

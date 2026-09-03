@@ -859,32 +859,9 @@ async def lifespan(app: FastAPI):
             logger.error(f"  ❌ Batch flusher failed: {e}")
             # Non-critical
 
-        # 3.6.1 ML drift monitor (REPORT-ONLY — never triggers deployment or
-        # retraining; interval live-tunable; startup delay avoids competing
-        # with boot). Non-critical: RULES mode needs none of this.
-        logger.info("  🔄 Starting ML drift monitor...")
-        try:
-            from backend.core.service_supervisor import supervised_loop as _supervised_loop
-            from backend.ml.drift_service import drift_service as _drift_service
-
-            def _drift_interval():
-                hours = float(settings.ML_DRIFT_CHECK_INTERVAL_HOURS or 24)
-                return max(3600.0, hours * 3600.0)
-
-            ml_drift_task = asyncio.create_task(
-                _supervised_loop(
-                    "ml_drift_monitor",
-                    _drift_interval,
-                    _drift_service.scheduled_check,
-                    initial_delay=600.0,
-                ),
-                name="ml_drift_monitor",
-            )
-            logger.info("  ✅ ML drift monitor started (report-only)")
-            initialized_components.append("ml_drift_monitor")
-        except Exception as e:
-            logger.error(f"  ❌ ML drift monitor failed: {e}")
-            # Non-critical
+        # Scheduled drift is enqueued and executed by backend.ml.worker. The
+        # API process intentionally owns no CPU/file-heavy ML job loops.
+        logger.info("  ✅ ML drift scheduling delegated to the durable ML worker")
 
         # 3.7 Event-loop lag monitor: measures how late a 1s sleep wakes up.
         # Lag > 0.5s means something is blocking the loop — exactly the failure

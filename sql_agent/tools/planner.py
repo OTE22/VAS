@@ -94,8 +94,15 @@ class PlannedAction:
 # self-contained imperative with a named subject qualifies. Contextual
 # references ("track him") and compound work ("track Ali and make a PDF")
 # still need the tool loop because they require resolution or several actions.
+#: Politeness is not content. "can you track joey" was paraphrased by the
+#: model as the PREVIOUS turn's question and answered with a report about
+#: pipelines; stripped of "can you", it is the exact command this rule
+#: exists for. English and Arabic prefixes and verbs.
 _TRACK_PERSON_COMMAND = re.compile(
-    r"^\s*(?:please\s+)?track\s+(?:person\s+)?(?P<subject>.+?)\s*[.!?]?\s*$",
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|hey\s+"
+    r"|هل\s+(?:يمكنك|تستطيع|تقدر)\s+|من\s+فضلك\s+|ممكن\s+|لو\s+سمحت\s+)*"
+    r"(?:track|تتبع|تعقب|تابع)\s+(?:person\s+|الشخص\s+)?"
+    r"(?P<subject>.+?)\s*[.!?؟]?\s*$",
     re.IGNORECASE,
 )
 _CONTEXTUAL_TRACK_SUBJECTS = frozenset({

@@ -210,6 +210,8 @@ class TaskHistoryManager:
                             result=result,
                             error_code=error_code,
                             error_message=(error_message or "")[:2000] or None,
+                            lease_owner=None,
+                            lease_expires_at=None,
                             updated_at=now)
                 )
                 await db.commit()
@@ -251,6 +253,9 @@ class TaskHistoryManager:
                 if row.status == TaskStatus.RUNNING.value:
                     if row.job_id:
                         self._cancel_requested.add(row.job_id)
+                        row.cancel_requested_at = datetime.utcnow()
+                        row.updated_at = datetime.utcnow()
+                        await db.commit()
                         _task_log(row.job_id, row.task_type, "cancel_requested", task_id=task_id)
                         return True, "cancel_requested"
                     return False, "not_cancellable"
@@ -261,6 +266,161 @@ class TaskHistoryManager:
 
     def is_cancel_requested(self, job_id: str) -> bool:
         return job_id in self._cancel_requested
+
+    async def claim_next_queued_job(self, *, queue_name: str, lease_owner: str,
+                                    lease_seconds: int) -> Optional[Dict[str, Any]]:
+        """Atomically lease one due job using PostgreSQL SKIP LOCKED.
+
+        Competing worker containers can call this safely.  A job is visible to
+        exactly one claimant at a time; execution remains at-least-once only
+        where the operation itself opts into retrying.
+        """
+        now = datetime.utcnow()
+        try:
+            async with db_manager.get_session() as db:
+                row = (await db.execute(
+                    select(BackgroundTaskHistory)
+                    .where(
+                        BackgroundTaskHistory.queue_name == queue_name,
+                        BackgroundTaskHistory.status == TaskStatus.SCHEDULED.value,
+                        BackgroundTaskHistory.scheduled_time <= now,
+                    )
+                    .order_by(BackgroundTaskHistory.scheduled_time,
+                              BackgroundTaskHistory.id)
+                    .with_for_update(skip_locked=True)
+                    .limit(1)
+                )).scalar_one_or_none()
+                if row is None:
+                    return None
+                row.status = TaskStatus.RUNNING.value
+                row.started_at = row.started_at or now
+                row.progress_percent = 0
+                row.lease_owner = lease_owner[:100]
+                row.lease_expires_at = now + timedelta(seconds=max(10, lease_seconds))
+                row.heartbeat_at = now
+                row.worker_name = lease_owner[:100]
+                row.hostname = HOSTNAME
+                row.updated_at = now
+                await db.commit()
+                await db.refresh(row)
+                _task_log(row.job_id, row.task_type, "running", task_id=row.id,
+                          lease_owner=lease_owner)
+                return self._task_to_dict(row)
+        except Exception as e:
+            logger.error("[TASK_HISTORY] Queue claim failed for %s: %s",
+                         queue_name, e, exc_info=True)
+            return None
+
+    async def renew_job_lease(self, job_id: str, *, lease_owner: str,
+                              lease_seconds: int) -> bool:
+        """Extend a live lease only when this worker still owns it."""
+        now = datetime.utcnow()
+        try:
+            async with db_manager.get_session() as db:
+                result = await db.execute(
+                    update(BackgroundTaskHistory)
+                    .where(
+                        BackgroundTaskHistory.job_id == job_id,
+                        BackgroundTaskHistory.status == TaskStatus.RUNNING.value,
+                        BackgroundTaskHistory.lease_owner == lease_owner,
+                    )
+                    .values(
+                        lease_expires_at=now + timedelta(seconds=max(10, lease_seconds)),
+                        heartbeat_at=now,
+                        updated_at=now,
+                    )
+                )
+                await db.commit()
+                return (result.rowcount or 0) == 1
+        except Exception as e:
+            logger.error("[TASK_HISTORY] Lease renewal failed for %s: %s",
+                         job_id, e, exc_info=True)
+            return False
+
+    async def fail_expired_queue_leases(self, *, queue_name: str) -> int:
+        """Make abandoned work honest after a worker/container crash.
+
+        ML training and dataset publication are deliberately not auto-retried:
+        replay after an unknown crash point could register duplicate lineage.
+        Operators can submit a fresh job after inspecting the failed attempt.
+        """
+        now = datetime.utcnow()
+        try:
+            async with db_manager.get_session() as db:
+                result = await db.execute(
+                    update(BackgroundTaskHistory)
+                    .where(
+                        BackgroundTaskHistory.queue_name == queue_name,
+                        BackgroundTaskHistory.status == TaskStatus.RUNNING.value,
+                        BackgroundTaskHistory.lease_expires_at.isnot(None),
+                        BackgroundTaskHistory.lease_expires_at < now,
+                    )
+                    .values(
+                        status=TaskStatus.FAILED.value,
+                        success=False,
+                        completed_at=now,
+                        error_code="WORKER_LEASE_EXPIRED",
+                        error_message=("The ML worker stopped heartbeating. The job was not "
+                                       "replayed automatically because publication is not "
+                                       "safe to retry after an unknown crash point."),
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                await db.commit()
+                count = int(result.rowcount or 0)
+                if count:
+                    logger.error("[TASK_HISTORY] Failed %d abandoned %s job(s)",
+                                 count, queue_name)
+                return count
+        except Exception as e:
+            logger.error("[TASK_HISTORY] Stale lease reconciliation failed: %s",
+                         e, exc_info=True)
+            return 0
+
+    async def get_queued_job_payload(self, job_id: str,
+                                     *, queue_name: str) -> Optional[Dict[str, Any]]:
+        """Worker-only job read. Payload is intentionally absent from public serializers."""
+        try:
+            async with db_manager.get_session() as db:
+                row = (await db.execute(
+                    select(BackgroundTaskHistory).where(
+                        BackgroundTaskHistory.job_id == job_id,
+                        BackgroundTaskHistory.queue_name == queue_name,
+                    )
+                )).scalar_one_or_none()
+                if row is None:
+                    return None
+                out = self._task_to_dict(row)
+                out["payload"] = dict(row.payload or {})
+                return out
+        except Exception as e:
+            logger.error("[TASK_HISTORY] Queue payload read failed for %s: %s",
+                         job_id, e, exc_info=True)
+            return None
+
+    async def list_queued_jobs(self, *, queue_name: str,
+                               statuses: Optional[List[str]] = None,
+                               task_types: Optional[List[str]] = None,
+                               limit: int = 100) -> List[Dict[str, Any]]:
+        """List server-owned queue state for dashboard reconnection."""
+        try:
+            async with db_manager.get_session() as db:
+                conditions = [BackgroundTaskHistory.queue_name == queue_name]
+                if statuses:
+                    conditions.append(BackgroundTaskHistory.status.in_(statuses))
+                if task_types:
+                    conditions.append(BackgroundTaskHistory.task_type.in_(task_types))
+                rows = (await db.execute(
+                    select(BackgroundTaskHistory).where(*conditions)
+                    .order_by(desc(BackgroundTaskHistory.created_at))
+                    .limit(max(1, min(200, int(limit))))
+                )).scalars().all()
+                return [self._task_to_dict(row) for row in rows]
+        except Exception as e:
+            logger.error("[TASK_HISTORY] Queue listing failed: %s", e, exc_info=True)
+            return []
 
     # ------------------------------------------------------------------
     # Queries (server-side pagination / filtering / sorting / search)
@@ -683,6 +843,13 @@ class TaskHistoryManager:
             "worker_name": task.worker_name,
             "hostname": task.hostname,
             "notify_all_users": task.notify_all_users,
+            "queue_name": task.queue_name,
+            "lease_owner": task.lease_owner,
+            "lease_expires_at": task.lease_expires_at.isoformat() if task.lease_expires_at else None,
+            "heartbeat_at": task.heartbeat_at.isoformat() if task.heartbeat_at else None,
+            "cancel_requested": task.cancel_requested_at is not None,
+            "cancel_requested_at": (task.cancel_requested_at.isoformat()
+                                    if task.cancel_requested_at else None),
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "updated_at": task.updated_at.isoformat() if task.updated_at else None,
         }

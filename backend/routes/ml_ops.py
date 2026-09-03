@@ -18,9 +18,9 @@ import logging
 import time
 import uuid as uuid_mod
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -30,11 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db_connection import get_db
 from backend.auth.auth_service import require_capability
 from backend.auth.capabilities import Capability
-from backend.core.distributed_lock import DistributedLock
 from backend.core.rate_limiter import rate_limited
 from backend.ml.audit import ml_audit
 from backend.ml.constants import (
-    MODEL_TYPE_BEHAVIOR_ANOMALY, MODEL_TYPES, all_optional_capabilities, model_type_status)
+    IMPLEMENTED_MODEL_TYPES, MODEL_TYPE_BEHAVIOR_ANOMALY, MODEL_TYPES,
+    all_optional_capabilities, model_type_status)
+from backend.ml.model_specs import get_model_spec
 from backend.utils.time_utils import iso_utc
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,18 @@ class TrainingRequest(BaseModel):
     sampling_policy: Optional[str] = Field(default=None, pattern="^(refuse|newest_first|oldest_first)$")
 
 
+class RelationalScoreRequest(BaseModel):
+    model_type: str = Field(..., pattern="^(coappearance_anomaly_model|social_graph_anomaly_model)$")
+    identity_id: str = Field(..., min_length=36, max_length=36)
+    related_identity_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
+    model_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
+
+
+class ThreatRankRequest(BaseModel):
+    identity_ids: List[str] = Field(..., min_length=1, max_length=200)
+    model_id: Optional[str] = Field(default=None, min_length=36, max_length=36)
+
+
 _SELECTION_METHODS = ("natural", "stratified_by_band", "top_scores", "random", "manual")
 _ENTRY_POINTS = ("security_intelligence", "ml_ops", "api")
 
@@ -372,9 +385,8 @@ async def ml_overview(
             },
             "latest_drift_reports": [drift_service.serialize_report(r) for r in latest_drift],
             "optional_capabilities": all_optional_capabilities(),
-            # Capability contract per model type: the UI renders reserved
-            # types as "Reserved / Future - not trainable" from THIS list and
-            # never submits a request the API must refuse.
+            # Capability contract per model type: the UI derives algorithms,
+            # dataset kind, entity type and score semantics from THIS list.
             "model_types": [model_type_status(t) for t in MODEL_TYPES],
             # What the system IS right now + the core changes that made it so
             "system": await ml_system_state(db),
@@ -427,29 +439,13 @@ async def change_mode(
                 reason=body.reason, ip_address=(request.client.host if request.client else None))
             raise HTTPException(status_code=409, detail=mode_gated_detail(report))
 
-        from config import settings as app_settings
-        from backend.core.runtime_settings import apply_to_runtime
-        from db_models import Setting
-        before = str(app_settings.ML_DECISION_MODE)
-        row = (await db.execute(
-            select(Setting).where(Setting.key == "ML_DECISION_MODE"))).scalar_one_or_none()
-        if row is not None:
-            row.value = body.mode
-            row.updated_at = datetime.utcnow()
-        apply_to_runtime("ML_DECISION_MODE", body.mode)
-        await ml_audit(db, action="mode_change", actor_username=_actor(current_user),
-                       actor_user_id=_actor_id(current_user),
-                       object_type="ml_config", object_id="ML_DECISION_MODE",
-                       before={"mode": before}, after={"mode": body.mode},
-                       reason=body.reason,
-                       ip_address=(request.client.host if request.client else None))
-        await db.commit()
-        try:
-            from backend.ml import metrics as ml_metrics
-            await ml_metrics.refresh_state(db, reason="mode_change")
-        except Exception:
-            pass
-        return {"success": True, "mode": body.mode, "previous_mode": before}
+        from backend.ml.mode_service import change_decision_mode
+        return await change_decision_mode(
+            db, target_mode=body.mode, action="mode_change",
+            actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
+            reason=body.reason,
+            ip_address=(request.client.host if request.client else None),
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -467,30 +463,15 @@ async def pause_ml(
 ):
     """Emergency stop: unconditionally forces the decision mode back to 'rules', bypassing gate checks. Persisted, applied immediately, and audited with the required reason."""
     try:
-        from config import settings as app_settings
-        from backend.core.runtime_settings import apply_to_runtime
-        from db_models import Setting
-        before = str(app_settings.ML_DECISION_MODE)
-        row = (await db.execute(
-            select(Setting).where(Setting.key == "ML_DECISION_MODE"))).scalar_one_or_none()
-        if row is not None:
-            row.value = "rules"
-            row.updated_at = datetime.utcnow()
-        apply_to_runtime("ML_DECISION_MODE", "rules")
-        await ml_audit(db, action="pause", actor_username=_actor(current_user),
-                       actor_user_id=_actor_id(current_user),
-                       object_type="ml_config", object_id="ML_DECISION_MODE",
-                       before={"mode": before}, after={"mode": "rules"},
-                       reason=body.reason,
-                       ip_address=(request.client.host if request.client else None))
-        await db.commit()
-        try:
-            from backend.ml import metrics as ml_metrics
-            await ml_metrics.refresh_state(db, reason="pause")
-        except Exception:
-            pass
-        return {"success": True, "mode": "rules", "previous_mode": before,
-                "note": "rules engine restored as the sole decision path"}
+        from backend.ml.mode_service import change_decision_mode
+        result = await change_decision_mode(
+            db, target_mode="rules", action="pause",
+            actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
+            reason=body.reason,
+            ip_address=(request.client.host if request.client else None),
+        )
+        result["note"] = "rules engine restored as the sole decision path"
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -511,14 +492,20 @@ async def compute_features(
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """Launch feature-snapshot collection as a background job (202 + job_id). Incremental by default (watermark); `full_rebuild=true` recomputes all history under the CURRENT feature set — required once after a feature-set version bump, since incremental runs only see new events. A second request while one runs returns 409 JOB_ALREADY_RUNNING; a cross-worker lock prevents concurrent collection."""
+    """Persist a feature-snapshot command for the independent ML worker."""
     try:
-        from backend.ml.collector import launch_collection_job
-        outcome = await launch_collection_job(created_by_user_id=_actor_id(current_user),
-                                              full_rebuild=full_rebuild,
-                                              request_id=_current_request_id())
-        if outcome.get("status") == "busy":
-            raise _error(409, "JOB_ALREADY_RUNNING", outcome.get("reason", "busy"))
+        from backend.ml.job_service import enqueue_ml_job, MLJobConflict
+        try:
+            outcome = await enqueue_ml_job(
+                db, kind="collection", payload={"full_rebuild": bool(full_rebuild)},
+                description="Point-in-time feature snapshots from operational data",
+                created_by_user_id=_actor_id(current_user),
+                request_id=_current_request_id(),
+            )
+        except MLJobConflict as conflict:
+            raise _error(409, "JOB_ALREADY_RUNNING",
+                         "a feature collection job is already active",
+                         job_id=conflict.existing.get("job_id"))
         await ml_audit(db, action="collection_requested", actor_username=_actor(current_user),
                        actor_user_id=_actor_id(current_user), object_type="ml_collection_job",
                        object_id=str(outcome.get("job_id")),
@@ -699,7 +686,7 @@ async def list_datasets(
 
 
 @router.post("/api/ml/datasets", tags=["ML Operations"], summary="Build Dataset",
-             status_code=201)
+             status_code=202)
 async def build_dataset_endpoint(
     body: DatasetBuildRequest,
     db: AsyncSession = Depends(get_db),
@@ -707,9 +694,8 @@ async def build_dataset_endpoint(
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """Build a dataset version synchronously from a typed extraction definition (default: the definition of `kind`), an optional explicit time range and a declared cap policy. Returns 201 when built; a failed quality report or a cap refusal (EXTRACTION_EXCEEDS_CAP) is returned as 422."""
+    """Validate and enqueue an immutable dataset build; execution is worker-owned."""
     try:
-        from backend.ml.dataset_builder import build_dataset
         from backend.ml.dataset_definitions import get_definition
         definition = None
         if body.definition:
@@ -724,26 +710,36 @@ async def build_dataset_endpoint(
         end = body.time_range_end.replace(tzinfo=None) if body.time_range_end else None
         if start and end and start >= end:
             raise _error(422, "INVALID_TIME_RANGE", "time_range_start must be before time_range_end")
-        outcome = await build_dataset(db, name=body.name, kind=body.kind,
-                                      created_by=_actor_id(current_user),
-                                      definition=definition, time_range_start=start,
-                                      time_range_end=end, sampling_policy=body.sampling_policy,
-                                      split_strategy=body.split_strategy)
-        status_code = 201 if outcome["status"] == "built" else 422
-        # datasets are provenance: their creation (and refusal) is audited
+        from backend.ml.job_service import enqueue_ml_job, MLJobConflict
+        payload = {
+            "name": body.name, "kind": body.kind,
+            "definition": (definition.name if definition else None),
+            "definition_version": (definition.version if definition else None),
+            "time_range_start": iso_utc(start) if start else None,
+            "time_range_end": iso_utc(end) if end else None,
+            "sampling_policy": body.sampling_policy,
+            "split_strategy": body.split_strategy,
+            "created_by": _actor_id(current_user),
+        }
         try:
-            await ml_audit(db, action="dataset_build", actor_username=_actor(current_user),
-                           actor_user_id=_actor_id(current_user), object_type="ml_dataset",
-                           object_id=str(outcome.get("dataset_id") or body.name),
-                           after={"status": outcome.get("status"), "name": body.name,
-                                  "definition": (definition.key if definition else None),
-                                  "row_count": outcome.get("row_count"),
-                                  "refused": (outcome.get("extraction") or {}).get("refused")
-                                  if isinstance(outcome.get("extraction"), dict) else None})
-            await db.commit()
-        except Exception:
-            logger.debug("[ML_OPS] dataset build audit failed", exc_info=True)
-        return JSONResponse(status_code=status_code, content=jsonable(outcome))
+            outcome = await enqueue_ml_job(
+                db, kind="dataset", payload=payload,
+                description=f"{body.name} / {body.kind}",
+                created_by_user_id=_actor_id(current_user),
+                request_id=_current_request_id(),
+            )
+        except MLJobConflict as conflict:
+            raise _error(409, "JOB_ALREADY_RUNNING",
+                         "a dataset build is already active",
+                         job_id=conflict.existing.get("job_id"))
+        await ml_audit(db, action="dataset_build_requested",
+                       actor_username=_actor(current_user),
+                       actor_user_id=_actor_id(current_user),
+                       object_type="ml_dataset_job", object_id=outcome["job_id"],
+                       after={"name": body.name, "kind": body.kind,
+                              "definition": payload["definition"]})
+        await db.commit()
+        return JSONResponse(status_code=202, content=jsonable(outcome))
     except HTTPException:
         raise
     except Exception as e:
@@ -764,24 +760,34 @@ async def list_dataset_definitions(current_user=Depends(ML_MANAGE)):
 
 
 @router.post("/api/ml/datasets/backfill-hashes", tags=["ML Operations"],
-             summary="Verify legacy datasets and record their file hashes")
+             summary="Verify legacy datasets and record their file hashes",
+             status_code=202)
 async def backfill_dataset_hashes_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(ML_MANAGE),
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """For datasets built before file hashing: reload the Parquet, and only when the reloaded rows reproduce the registered checksum record the file sha256 + a manifest (legacy extraction policy). Lineage is never rewritten; unverifiable rows are listed with a reason."""
+    """Enqueue verification of legacy dataset files and their logical checksums."""
     try:
-        from backend.ml.dataset_builder import backfill_dataset_file_hashes
-        report = await backfill_dataset_file_hashes(db)
-        await ml_audit(db, action="dataset_backfill_hashes",
-                       actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
-                       object_type="ml_dataset", object_id="*",
-                       after={"verified": len(report["verified"]),
-                              "unverifiable": len(report["unverifiable"])})
+        from backend.ml.job_service import enqueue_ml_job, MLJobConflict
+        try:
+            outcome = await enqueue_ml_job(
+                db, kind="backfill", payload={},
+                description="Verify legacy dataset files and record hashes",
+                created_by_user_id=_actor_id(current_user),
+                request_id=_current_request_id(),
+            )
+        except MLJobConflict as conflict:
+            raise _error(409, "JOB_ALREADY_RUNNING",
+                         "dataset hash verification is already active",
+                         job_id=conflict.existing.get("job_id"))
+        await ml_audit(db, action="dataset_hash_backfill_requested",
+                       actor_username=_actor(current_user),
+                       actor_user_id=_actor_id(current_user),
+                       object_type="ml_dataset_job", object_id=outcome["job_id"])
         await db.commit()
-        return report
+        return JSONResponse(status_code=202, content=outcome)
     except HTTPException:
         raise
     except Exception as e:
@@ -868,89 +874,158 @@ async def dataset_detail(
              summary="Start Training Job", status_code=202)
 async def create_training_job(
     body: TrainingRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(ML_MANAGE),
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """Schedule model training as a background job (202 + job_id). Only behavior_anomaly_model is implemented; a concurrent job returns 409 TRAINING_ALREADY_RUNNING with the holder's job_id. Training produces a reviewable candidate, never a live replacement."""
-    from backend.ml import trainer
+    """Persist training for the independent worker; never execute it in the API."""
 
     if body.model_type not in MODEL_TYPES:
         raise _error(422, "UNKNOWN_MODEL_TYPE",
                      f"model_type must be one of {MODEL_TYPES}")
-    if body.model_type != MODEL_TYPE_BEHAVIOR_ANOMALY:
+    if body.model_type not in IMPLEMENTED_MODEL_TYPES:
         raise _error(422, "MODEL_TYPE_NOT_IMPLEMENTED",
-                     f"{body.model_type} is an interface reserved for future "
-                     "releases; only behavior_anomaly_model trains today")
+                     f"{body.model_type} is not implemented")
+    spec = get_model_spec(body.model_type)
+    if body.algorithm not in spec.algorithms:
+        raise _error(422, "ALGORITHM_NOT_SUPPORTED_FOR_MODEL",
+                     f"{body.algorithm} is not valid for {body.model_type}; "
+                     f"choose one of {spec.algorithms}")
 
-    job_id = f"mltrain-{uuid_mod.uuid4().hex[:8]}"
-    running = trainer.try_acquire_training(job_id)
-    if running is not None:
-        raise _error(409, "TRAINING_ALREADY_RUNNING",
-                     "a training job is already running", job_id=running)
-    dlock = DistributedLock("ml-training-job", ttl_seconds=1800)
-    if not await dlock.acquire(holder_label=job_id):
-        trainer.release_training(job_id)
-        raise _error(409, "TRAINING_ALREADY_RUNNING",
-                     "a training job is already running (another worker)",
-                     job_id=dlock.holder_hint or "unknown")
     try:
-        from backend.core.task_history import task_history_manager
-        task_id = await task_history_manager.create_job(
-            job_id=job_id, task_type="ml_training",
-            task_name="ML Anomaly Model Training",
-            description=f"{body.model_type} / {body.algorithm}",
-            created_by_user_id=_actor_id(current_user),
-            request_id=_current_request_id())
-
-        async def _run_and_release():
-            try:
-                await trainer.run_training_job(
-                    job_id, model_type=body.model_type,
-                    algorithm=body.algorithm,
-                    requested_by=_actor_id(current_user),
-                    dataset_id=body.dataset_id, seed=body.seed,
-                    hyperparameters=body.hyperparameters,
-                    sampling_policy=body.sampling_policy)
-            finally:
-                await dlock.release()
-
-        background_tasks.add_task(_run_and_release)
+        from backend.ml.job_service import enqueue_ml_job, MLJobConflict
+        payload = {
+            "model_type": body.model_type, "algorithm": body.algorithm,
+            "requested_by": _actor_id(current_user),
+            "dataset_id": body.dataset_id, "seed": body.seed,
+            "hyperparameters": body.hyperparameters,
+            "sampling_policy": body.sampling_policy,
+        }
+        try:
+            outcome = await enqueue_ml_job(
+                db, kind="training", payload=payload,
+                description=f"{body.model_type} / {body.algorithm}",
+                created_by_user_id=_actor_id(current_user),
+                request_id=_current_request_id(),
+            )
+        except MLJobConflict as conflict:
+            raise _error(409, "TRAINING_ALREADY_RUNNING",
+                         "a training job is already active",
+                         job_id=conflict.existing.get("job_id"))
         await ml_audit(db, action="training_requested",
                        actor_username=_actor(current_user),
                        actor_user_id=_actor_id(current_user),
-                       object_type="ml_training_job", object_id=job_id,
+                       object_type="ml_training_job", object_id=outcome["job_id"],
                        after={"model_type": body.model_type,
                               "algorithm": body.algorithm,
                               "dataset_id": body.dataset_id,
                               "seed": body.seed,
                               "hyperparameters": body.hyperparameters})
         await db.commit()
-        return JSONResponse(status_code=202, content={
-            "accepted": True, "job_id": job_id, "task_id": task_id,
-            "status": "scheduled", "task_type": "ml_training"})
+        return JSONResponse(status_code=202, content=outcome)
     except HTTPException:
-        trainer.release_training(job_id)
-        await dlock.release()
         raise
     except Exception as e:
-        trainer.release_training(job_id)
-        await dlock.release()
         raise _safe_500("training scheduling", e)
+
+
+@router.post("/api/ml/score/relational", tags=["ML Operations"],
+             summary="Run an observational relational shadow score")
+async def score_relational_model(
+    body: RelationalScoreRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+    _csrf: None = Depends(require_mlops_csrf),
+    _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
+):
+    """Score a pair or graph node without changing any live decision."""
+    from backend.ml.model_scoring_service import score_relational_subject
+    from backend.ml.registry_service import RegistryError
+    try:
+        result = await score_relational_subject(
+            db, model_type=body.model_type, identity_id=body.identity_id,
+            related_identity_id=body.related_identity_id, model_id=body.model_id)
+        await ml_audit(db, action="relational_shadow_scored",
+                       actor_username=_actor(current_user),
+                       actor_user_id=_actor_id(current_user),
+                       object_type="ml_model", object_id=result["model_id"],
+                       after={"model_type": body.model_type,
+                              "subject_id": result["subject_id"],
+                              "applied_to_live_result": False})
+        await db.commit()
+        return result
+    except RegistryError as exc:
+        raise _error(409 if "MODEL" in exc.code or "THRESHOLD" in exc.code else 422,
+                     exc.code, exc.message)
+    except (ValueError, TypeError) as exc:
+        raise _error(422, "INVALID_SUBJECT_ID", str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _safe_500("relational model scoring", exc)
+
+
+@router.post("/api/ml/rank/threat-review", tags=["ML Operations"],
+             summary="Rank identities for analyst review")
+async def rank_threat_review(
+    body: ThreatRankRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+    _csrf: None = Depends(require_mlops_csrf),
+    _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
+):
+    """Offline analyst prioritisation only; never writes a threat decision."""
+    from backend.ml.model_scoring_service import rank_identities
+    result = await rank_identities(db, body.identity_ids, model_id=body.model_id)
+    await ml_audit(db, action="threat_review_ranked",
+                   actor_username=_actor(current_user),
+                   actor_user_id=_actor_id(current_user),
+                   object_type="ml_model", object_id=body.model_id or "latest_validated",
+                   after={"requested": len(body.identity_ids), "scored": result["scored"],
+                          "failed": result["failed"], "applied_to_live_result": False})
+    await db.commit()
+    return result
+
+
+@router.get("/api/ml/jobs", tags=["ML Operations"], summary="List ML Jobs")
+async def list_ml_jobs_endpoint(
+    status: Optional[str] = Query(default=None, max_length=100),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+):
+    """Reconnectable queue state. Status is a comma-separated allowlist."""
+    from backend.ml.job_service import list_ml_jobs, ml_worker_health
+    from config import settings as app_settings
+    allowed = {"scheduled", "running", "completed", "failed", "cancelled"}
+    statuses = None
+    if status:
+        statuses = [part.strip() for part in status.split(",") if part.strip()]
+        if not statuses or any(part not in allowed for part in statuses):
+            raise _error(422, "INVALID_JOB_STATUS", "unknown ML job status")
+    items = await list_ml_jobs(statuses=statuses, limit=limit)
+    worker = await ml_worker_health(
+        db, lease_seconds=int(app_settings.ML_JOB_LEASE_SECONDS)
+    )
+    resp = JSONResponse(content={"items": items, "total": len(items), "worker": worker})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @router.get("/api/ml/training-jobs/{job_id}", tags=["ML Operations"],
             summary="Training Job Status")
+@router.get("/api/ml/jobs/{job_id}", tags=["ML Operations"],
+            summary="ML Job Status")
 async def get_training_job(
     job_id: str,
     current_user=Depends(ML_MANAGE),
 ):
-    """Status of one training or feature-computation job from task history. 404 for any other job type."""
+    """Status of one durable ML job. The training-jobs path is retained for compatibility."""
     from backend.core.task_history import task_history_manager
+    from backend.ml.job_service import ML_TASK_TYPES
     task = await task_history_manager.get_task_by_job_id(job_id)
-    if not task or task.get("task_type") not in ("ml_training", "ml_feature_computation"):
+    if not task or task.get("task_type") not in ML_TASK_TYPES:
         raise HTTPException(status_code=404, detail="Job not found")
     resp = JSONResponse(content=task)
     resp.headers["Cache-Control"] = "no-store"
@@ -959,34 +1034,32 @@ async def get_training_job(
 
 @router.post("/api/ml/training-jobs/{job_id}/cancel", tags=["ML Operations"],
              summary="Cancel Training Job")
+@router.post("/api/ml/jobs/{job_id}/cancel", tags=["ML Operations"],
+             summary="Cancel ML Job")
 async def cancel_training_job(
     job_id: str,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(ML_MANAGE),
     _csrf: None = Depends(require_mlops_csrf),
 ):
-    """Request cooperative cancellation of a running ML job - a training job (mltrain-*) or a feature-collection job (mlcollect-*; the collector checks between batches and chunks). 404 if no cancellable job holds that id; acceptance is audited."""
-    from backend.ml import trainer
-    if job_id.startswith("mlcollect-"):
-        from backend.core.task_history import task_history_manager
-        task = await task_history_manager.get_task_by_job_id(job_id)
-        if not task or task.get("status") not in ("running", "scheduled"):
-            raise HTTPException(status_code=404, detail="No cancellable job with that id")
-        ok, outcome = await task_history_manager.request_cancel(int(task["id"]))
-        if not ok:
-            raise HTTPException(status_code=404, detail=f"No cancellable job with that id ({outcome})")
-        action, object_type = "collection_cancelled", "ml_collection_job"
-    else:
-        accepted = trainer.request_cancel(job_id)
-        if not accepted:
-            raise HTTPException(status_code=404, detail="No cancellable job with that id")
-        action, object_type = "training_cancelled", "ml_training_job"
+    """Persist cancellation so it survives API/worker process boundaries."""
+    from backend.core.task_history import task_history_manager
+    from backend.ml.job_service import ML_TASK_TYPES, job_kind
+    task = await task_history_manager.get_task_by_job_id(job_id)
+    if (not task or task.get("task_type") not in ML_TASK_TYPES
+            or task.get("status") not in ("running", "scheduled")):
+        raise HTTPException(status_code=404, detail="No cancellable ML job with that id")
+    ok, outcome = await task_history_manager.request_cancel(int(task["id"]))
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No cancellable ML job with that id ({outcome})")
+    kind = job_kind(task.get("task_type"))
+    action, object_type = f"{kind}_cancel_requested", f"ml_{kind}_job"
     await ml_audit(db, action=action,
                    actor_username=_actor(current_user),
                    actor_user_id=_actor_id(current_user),
                    object_type=object_type, object_id=job_id)
     await db.commit()
-    return {"success": True, "job_id": job_id, "status": "cancel_requested"}
+    return {"success": True, "job_id": job_id, "status": outcome}
 
 
 # ---------------------------------------------------------------------------
@@ -1308,26 +1381,33 @@ async def drift_reports(
 
 
 @router.post("/api/ml/drift/run", tags=["ML Operations"],
-             summary="Run Drift Check Now")
+             summary="Run Drift Check Now", status_code=202)
 async def run_drift(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(ML_MANAGE),
     _csrf: None = Depends(require_mlops_csrf),
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
-    """Run data-drift and prediction-drift analysis synchronously in the request and return both reports."""
+    """Enqueue report-only drift computation for the independent worker."""
     try:
-        from backend.ml.drift_service import drift_service
-        job_id = f"manual-{uuid_mod.uuid4().hex[:8]}"
-        report = await drift_service.run_all(db, job_id=job_id)
+        from backend.ml.job_service import enqueue_ml_job, MLJobConflict
         try:
-            await ml_audit(db, action="drift_run_requested", actor_username=_actor(current_user),
-                           actor_user_id=_actor_id(current_user), object_type="ml_drift_run",
-                           object_id=job_id)
-            await db.commit()
-        except Exception:
-            logger.debug("[ML_OPS] drift run audit failed", exc_info=True)
-        return report
+            outcome = await enqueue_ml_job(
+                db, kind="drift", payload={"source": "manual"},
+                description="Manual report-only ML drift check",
+                created_by_user_id=_actor_id(current_user),
+                request_id=_current_request_id(),
+            )
+        except MLJobConflict as conflict:
+            raise _error(409, "JOB_ALREADY_RUNNING", "a drift check is already active",
+                         job_id=conflict.existing.get("job_id"))
+        await ml_audit(db, action="drift_run_requested", actor_username=_actor(current_user),
+                       actor_user_id=_actor_id(current_user), object_type="ml_drift_run",
+                       object_id=outcome["job_id"])
+        await db.commit()
+        return JSONResponse(status_code=202, content=outcome)
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_500("drift run", e)
 

@@ -1,16 +1,16 @@
 """
-Training jobs (first release: unsupervised behavioral anomaly only).
+Governed training jobs for behavioral, relational and ranking models.
 
 Algorithms: robust median/MAD baseline + IsolationForest (sklearn, seeded).
-Supervised families (logreg / random_forest / gradient_boosting) are
-scaffolded but GATED: below the reviewed-label minimums the job finishes
-with the structured refusal — no fabricated training. XGBoost/Optuna/SHAP/
-MLflow are optional-flag guarded and not consumed this release.
+Supervised threat ranking (logreg / random_forest / gradient_boosting) is
+GATED: below the reviewed-label minimums the job finishes with a structured
+refusal — no fabricated training. Its output is a relative review-rank score,
+not a calibrated probability. XGBoost/Optuna/SHAP/MLflow are optional-flag
+guarded and not consumed this release.
 
-Every metric recorded is something that was truthfully measured on this
-data: score distributions, band cutpoints (train quantiles), seed
-stability, and a DESCRIPTIVE anomaly-band × rule-severity table (different
-concepts, shown side by side, never differenced).
+Every metric recorded is something truthfully measured on the selected data:
+anomaly score distributions/cutpoints/stability, or ranking ROC-AUC and
+average precision only when a split contains both classes.
 
 Output is ALWAYS a candidate (training -> validated at best). Shadow entry
 is a separate, explicitly-approved administrator action.
@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 
 from backend.ml.constants import ANOMALY_BANDS, FEATURE_SET_VERSION, MODEL_TYPE_BEHAVIOR_ANOMALY
+from backend.ml.model_specs import get_model_spec
 from backend.ml.dataset_definitions import feature_set_limitations
 from backend.ml.registry_service import (
     RegistryError, current_dependency_versions, preprocess_feature_vector,
@@ -68,6 +69,11 @@ DEFAULT_HYPERPARAMETERS: Dict[str, Dict[str, Any]] = {
     # part of the scoring contract (registry_service.score_with_payload), not
     # a hyperparameter — recording it as one would claim a knob that does nothing.
     "mad_baseline": {},
+    "logreg": {"C": 1.0, "max_iter": 1000, "class_weight": "balanced"},
+    "random_forest": {"n_estimators": 300, "max_depth": None,
+                      "min_samples_leaf": 2, "class_weight": "balanced"},
+    "gradient_boosting": {"n_estimators": 200, "learning_rate": 0.05,
+                          "max_depth": 3},
 }
 BAND_QUANTILES = {"elevated": 0.90, "unusual": 0.97, "highly_unusual": 0.99}
 
@@ -193,6 +199,54 @@ def _fit_unsupervised(algorithm: str, matrix, seed: int,
     raise RegistryError("UNKNOWN_ALGORITHM", f"unsupported algorithm {algorithm!r}")
 
 
+def _fit_supervised(algorithm: str, matrix, labels, seed: int,
+                    hyperparameters: Optional[Dict[str, Any]] = None):
+    """Fit an explicitly supported binary ranker.
+
+    The returned score is used for ordering analyst work.  It is not exposed
+    as a calibrated probability and never maps directly to threat severity.
+    """
+    hp = resolve_hyperparameters(algorithm, hyperparameters)
+    if algorithm == "logreg":
+        from sklearn.linear_model import LogisticRegression
+        model = LogisticRegression(C=float(hp["C"]), max_iter=int(hp["max_iter"]),
+                                   class_weight=hp["class_weight"],
+                                   random_state=seed)
+    elif algorithm == "random_forest":
+        from sklearn.ensemble import RandomForestClassifier
+        model = RandomForestClassifier(
+            n_estimators=int(hp["n_estimators"]), max_depth=hp["max_depth"],
+            min_samples_leaf=int(hp["min_samples_leaf"]),
+            class_weight=hp["class_weight"], random_state=seed, n_jobs=1)
+    elif algorithm == "gradient_boosting":
+        from sklearn.ensemble import GradientBoostingClassifier
+        model = GradientBoostingClassifier(
+            n_estimators=int(hp["n_estimators"]), learning_rate=float(hp["learning_rate"]),
+            max_depth=int(hp["max_depth"]), random_state=seed)
+    else:
+        raise RegistryError("UNKNOWN_ALGORITHM", f"unsupported supervised algorithm {algorithm!r}")
+    model.fit(matrix, labels)
+    return model, hp
+
+
+def _binary_ranking_metrics(labels, scores) -> Dict[str, Any]:
+    """Only report metrics that the split can actually support."""
+    import numpy as np
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    y = np.asarray(labels, dtype=int)
+    s = np.asarray(scores, dtype=float)
+    out: Dict[str, Any] = {"rows": int(len(y)), "positive": int(y.sum()),
+                           "negative": int(len(y) - y.sum())}
+    if len(set(y.tolist())) < 2:
+        out["insufficient_classes"] = True
+        return out
+    out["roc_auc"] = float(roc_auc_score(y, s))
+    out["average_precision"] = float(average_precision_score(y, s))
+    out["score_p50"] = float(np.quantile(s, 0.5))
+    out["score_p90"] = float(np.quantile(s, 0.9))
+    return out
+
+
 def _band_for(score: float, cutpoints: Dict[str, float]) -> str:
     if score >= cutpoints["highly_unusual"]:
         return "highly_unusual"
@@ -296,6 +350,172 @@ async def load_training_dataset(db, dataset_id: str, *, expected_kind: str,
     return row, rows
 
 
+async def _train_supervised_ranking(
+        db, job_id: str, *, model_type: str, algorithm: str,
+        requested_by: Optional[int], dataset_id: Optional[str], seed: int,
+        hyperparameters: Optional[Dict[str, Any]], sampling_policy: Optional[str],
+        stage) -> Dict[str, Any]:
+    """Train and register a review-queue ranker from reviewed labels only."""
+    import numpy as np
+    from backend.ml.labeling_service import labeling_service
+
+    spec = get_model_spec(model_type)
+    stats = await labeling_service.label_stats(db)
+    if not stats["supervised_gate_open"]:
+        refusal = labeling_service.supervised_refusal(stats)
+        return {"failure": {"code": "INSUFFICIENT_REVIEWED_LABELS",
+                            "message": json.dumps(refusal)[:2000]}}
+    try:
+        resolved_hp = resolve_hyperparameters(algorithm, hyperparameters)
+    except RegistryError as exc:
+        return {"failure": {"code": exc.code, "message": exc.message}}
+
+    if dataset_id:
+        await stage("loading_dataset", 15)
+        try:
+            dataset_row, rows = await load_training_dataset(
+                db, dataset_id, expected_kind="supervised",
+                expected_feature_set_version=spec.feature_set_version)
+        except DatasetRefusal as refusal:
+            return {"failure": {"code": refusal.code, "message": refusal.message}}
+        dataset = {"dataset_id": str(dataset_row.id), "checksum": dataset_row.checksum,
+                   "reused": True}
+    else:
+        await stage("building_dataset", 15)
+        from backend.ml.dataset_builder import build_dataset
+        from backend.ml.dataset_definitions import get_definition
+        dataset = await build_dataset(
+            db, name=f"{model_type}-train", kind="supervised",
+            created_by=requested_by, build_job_id=job_id,
+            definition=get_definition(spec.dataset_definition),
+            sampling_policy=sampling_policy)
+        if dataset["status"] != "built":
+            return {"failure": {
+                "code": dataset.get("refusal") or "DATASET_VALIDATION_FAILED",
+                "message": json.dumps(dataset.get("quality_report", {}))[:2000]}}
+        dataset["reused"] = False
+        from db_models import MLDataset
+        dataset_row = (await db.execute(select(MLDataset).where(
+            MLDataset.id == uuid_mod.UUID(dataset["dataset_id"])))).scalar_one()
+        rows = _load_parquet_rows(dataset_row.storage_path)
+
+    train = [row for row in rows if row["split"] == "train"]
+    val = [row for row in rows if row["split"] == "val"]
+    test = [row for row in rows if row["split"] == "test"]
+    await stage("training", 45)
+    feature_names, medians, matrix_of = _assemble_matrix(train)
+    y_train = np.asarray([1 if row.get("label") == "positive" else 0 for row in train])
+    gates: Dict[str, Dict[str, Any]] = {
+        "minimum_train_rows": {"required": MIN_TRAIN_ROWS, "actual": len(train),
+                               "passed": len(train) >= MIN_TRAIN_ROWS},
+        "minimum_usable_features": {"required": MIN_USABLE_FEATURES,
+                                    "actual": len(feature_names),
+                                    "passed": len(feature_names) >= MIN_USABLE_FEATURES},
+        "both_classes_in_train": {"required": ["negative", "positive"],
+                                  "actual": sorted(set(y_train.tolist())),
+                                  "passed": len(set(y_train.tolist())) == 2},
+    }
+    if not all(g["passed"] for g in gates.values()):
+        return {"failure": {"code": "QUALITY_GATES_FAILED",
+                            "message": json.dumps(gates)[:2000]}}
+    model_obj, resolved_hp = _fit_supervised(
+        algorithm, matrix_of(train), y_train, seed, resolved_hp)
+    train_scores = model_obj.predict_proba(matrix_of(train))[:, 1]
+    gates["score_distribution_nondegenerate"] = {
+        "required": "std > 0", "actual": float(np.std(train_scores)),
+        "passed": float(np.std(train_scores)) > 0.0}
+    payload = {
+        "algorithm": algorithm, "model": model_obj,
+        "feature_names": feature_names,
+        "feature_set_version": dataset_row.feature_set_version,
+        "imputation_medians": medians,
+        "normalization": {"min": 0.0, "max": 1.0},
+        "band_cutpoints": {},
+        "dependency_versions": current_dependency_versions(),
+        "metadata": {"model_type": model_type, "model_purpose": spec.model_purpose,
+                     "score_type": spec.score_type, "dataset_id": dataset["dataset_id"],
+                     "dataset_checksum": dataset["checksum"], "seed": seed,
+                     "hyperparameters": resolved_hp,
+                     "trained_at": datetime.utcnow().isoformat() + "Z", "job_id": job_id},
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+    }
+    await stage("evaluating", 65)
+    evaluation = {
+        "score_type": spec.score_type, "is_probability": False,
+        "calibration_status": spec.calibration_status,
+        "note": ("supervised relative ranking of analyst review priority; classifier output is "
+                 "not a calibrated probability of threat and never replaces rules"),
+        "splits": {},
+    }
+    for split_name, part in (("train", train), ("val", val), ("test", test)):
+        if not part:
+            evaluation["splits"][split_name] = {"rows": 0, "insufficient_data": True}
+            continue
+        y = [1 if row.get("label") == "positive" else 0 for row in part]
+        evaluation["splits"][split_name] = _binary_ranking_metrics(
+            y, score_with_payload(payload, matrix_of(part)))
+
+    await stage("saving_candidate", 85)
+    version = await registry_service.next_version(db, model_type)
+    artifact_name = f"{model_type}-v{version}.pkl"
+    artifact_path = os.path.join(str(settings.ML_ARTIFACT_DIR), "candidates", artifact_name)
+    artifact_hash = save_artifact(payload, artifact_path)
+    from backend.ml.registry_service import validate_artifact
+    reloaded = validate_artifact(
+        artifact_path, expected_hash=artifact_hash,
+        expected_feature_names=feature_names,
+        expected_dependencies=payload["dependency_versions"])
+    before = score_with_payload(payload, matrix_of(train)[:5])
+    after = score_with_payload(reloaded, matrix_of(train)[:5])
+    deterministic = all(abs(a - b) < 1e-9 for a, b in zip(before, after))
+    gates["reload_determinism"] = {"required": True, "actual": deterministic,
+                                   "passed": deterministic}
+    gates_passed = all(g["passed"] for g in gates.values())
+
+    await stage("registering", 95)
+    from db_models import MLModel
+    from backend.ml.readiness import PREPROCESSOR_VERSION, feature_schema_hash
+    model_row = MLModel(
+        id=uuid_mod.uuid4(), model_type=model_type, version=version, stage="training",
+        algorithm=algorithm, model_purpose=spec.model_purpose,
+        score_type=spec.score_type, is_probability=False,
+        calibration_status=spec.calibration_status,
+        artifact_name=artifact_name, artifact_path=artifact_path,
+        artifact_hash=artifact_hash, artifact_size_bytes=os.path.getsize(artifact_path),
+        dependency_versions=payload["dependency_versions"],
+        feature_set_version=dataset_row.feature_set_version,
+        feature_names=feature_names, dataset_id=uuid_mod.UUID(dataset["dataset_id"]),
+        training_job_id=job_id, seed=seed, hyperparameters=resolved_hp,
+        training_config={"algorithm": algorithm, "seed": seed,
+                         "hyperparameters": resolved_hp,
+                         "feature_schema_hash": feature_schema_hash(feature_names),
+                         "preprocessor_version": PREPROCESSOR_VERSION,
+                         "rows": {"train": len(train), "val": len(val), "test": len(test)},
+                         "dataset_id": dataset["dataset_id"],
+                         "dataset_checksum": dataset["checksum"],
+                         "dataset_reused": dataset["reused"],
+                         "serving_mode": spec.serving_mode,
+                         "engineering_gate": "PASS" if gates_passed else "FAIL",
+                         "scientific_gate": "REQUIRES_CALIBRATION"},
+        code_version=_code_version(), metrics={"evaluation": evaluation},
+        quality_gates={"passed": gates_passed, "gates": gates},
+        evaluation_report=evaluation, submitted_at=datetime.utcnow(),
+        created_at=datetime.utcnow(), created_by=requested_by)
+    db.add(model_row)
+    await db.commit()
+    if gates_passed:
+        await registry_service.transition(
+            db, str(model_row.id), to_stage="validated", actor="training-job",
+            reason=f"ranking engineering gates passed (job {job_id})")
+    return {"model_id": str(model_row.id), "model_type": model_type,
+            "version": version, "algorithm": algorithm,
+            "stage": "validated" if gates_passed else "training",
+            "artifact_hash": artifact_hash, "dataset_id": dataset["dataset_id"],
+            "dataset_reused": dataset["reused"], "quality_gates": model_row.quality_gates,
+            "evaluation": evaluation, "serving_mode": spec.serving_mode,
+            "awaiting_shadow_approval": False}
+
+
 # ---------------------------------------------------------------------------
 # The training job
 # ---------------------------------------------------------------------------
@@ -336,6 +556,15 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
         release_training(job_id)
         await _observe_training_outcome_async(job_id)
         return
+    spec = get_model_spec(model_type)
+    if algorithm not in spec.algorithms:
+        await task_history_manager.finish_job(
+            job_id, success=False, error_code="ALGORITHM_NOT_SUPPORTED_FOR_MODEL",
+            error_message=(f"{algorithm!r} is not valid for {model_type}; "
+                           f"choose one of {', '.join(spec.algorithms)}"))
+        release_training(job_id)
+        await _observe_training_outcome_async(job_id)
+        return
 
     async def stage(name: str, percent: int):
         logger.info("[ML_OPS] job_id=%s training_stage=%s progress_percent=%s",
@@ -344,25 +573,20 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
 
     try:
         async with db_manager.get_session() as db:
-            # ---- supervised gate: honest structured refusal ---------------
-            if algorithm in SUPERVISED_ALGORITHMS:
-                from backend.ml.labeling_service import labeling_service
-                stats = await labeling_service.label_stats(db)
-                if not stats["supervised_gate_open"]:
-                    refusal = labeling_service.supervised_refusal(stats)
+            if spec.dataset_kind == "supervised":
+                outcome = await _train_supervised_ranking(
+                    db, job_id, model_type=model_type, algorithm=algorithm,
+                    requested_by=requested_by, dataset_id=dataset_id, seed=seed,
+                    hyperparameters=hyperparameters, sampling_policy=sampling_policy,
+                    stage=stage)
+                failure = outcome.get("failure")
+                if failure:
                     await task_history_manager.finish_job(
-                        job_id, success=False,
-                        error_code="INSUFFICIENT_REVIEWED_LABELS",
-                        error_message=json.dumps(refusal)[:2000],
-                        cancelled=False)
-                    logger.info("[ML_OPS] supervised training refused job_id=%s: %s",
-                                job_id, refusal)
-                    return
-                # Gate open (future state): still not implemented this release.
-                await task_history_manager.finish_job(
-                    job_id, success=False, error_code="SUPERVISED_NOT_ENABLED",
-                    error_message="supervised training is scaffolded but not "
-                                  "enabled in this release")
+                        job_id, success=False, error_code=failure["code"],
+                        error_message=failure["message"][:2000])
+                else:
+                    outcome["duration_ms"] = int((time.monotonic() - started) * 1000)
+                    await task_history_manager.finish_job(job_id, success=True, result=outcome)
                 return
             if algorithm not in UNSUPERVISED_ALGORITHMS:
                 raise RegistryError("UNKNOWN_ALGORITHM", f"algorithm {algorithm!r}")
@@ -381,7 +605,9 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                     # dataset's feature set (a v1 dataset reproduces a v1
                     # experiment — never relabelled as the current set).
                     dataset_row, rows = await load_training_dataset(
-                        db, dataset_id, expected_kind="unsupervised")
+                        db, dataset_id, expected_kind="unsupervised",
+                        expected_feature_set_version=(None if model_type == MODEL_TYPE_BEHAVIOR_ANOMALY
+                                                      else spec.feature_set_version))
                 except DatasetRefusal as refusal:
                     await task_history_manager.finish_job(
                         job_id, success=False, error_code=refusal.code,
@@ -394,9 +620,11 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
             else:
                 await stage("building_dataset", 15)
                 from backend.ml.dataset_builder import build_dataset
+                from backend.ml.dataset_definitions import get_definition
                 dataset = await build_dataset(
                     db, name=f"{model_type}-train", kind="unsupervised",
                     created_by=requested_by, build_job_id=job_id,
+                    definition=get_definition(spec.dataset_definition),
                     sampling_policy=sampling_policy)
                 if dataset["status"] != "built":
                     await task_history_manager.finish_job(
@@ -488,7 +716,7 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                 "score_type": "anomaly_score",
                 "is_probability": False,
                 "calibration_status": "not_applicable",
-                "note": ("unsupervised behavioral anomaly model — no labels "
+                "note": (f"unsupervised {spec.model_purpose} model — no labels "
                          "exist, so no precision/recall/AUC is reported; only "
                          "distributional and stability measurements"),
                 "splits": {},
@@ -574,7 +802,7 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
             evaluation["incumbent_comparison"] = compare_with_incumbent(
                 candidate_payload=payload,
                 candidate_meta={"model_type": model_type,
-                                "model_purpose": "behavioral_anomaly_detection",
+                                "model_purpose": spec.model_purpose,
                                 "score_type": "anomaly_score",
                                 "feature_set_version": feature_set_version,
                                 "artifact_size_bytes": None},
@@ -634,8 +862,8 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                 model_type=model_type, version=version,
                 stage="training",
                 algorithm=algorithm,
-                model_purpose="behavioral_anomaly_detection",
-                score_type="anomaly_score",
+                model_purpose=spec.model_purpose,
+                score_type=spec.score_type,
                 is_probability=False,
                 calibration_status="not_applicable",
                 artifact_name=artifact_name,

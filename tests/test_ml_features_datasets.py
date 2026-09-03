@@ -249,8 +249,9 @@ def test_graph_and_pair_features_gated_with_reasons(seeded):
                 pair_outcome = e.reason
         return ready, reasons, pair_outcome
     ready, reasons, pair_outcome = run_async(_run())
-    assert ready is False, "6-edge graph must fail the readiness floors"
-    assert any("min_edges" in r or "min_nodes" in r for r in reasons), reasons
+    assert ready is False, "the development graph must fail at least one readiness floor"
+    assert any(token in r for r in reasons
+               for token in ("min_edges", "min_nodes", "observation_span")), reasons
     assert pair_outcome.startswith("pair_below_min_appearances"), pair_outcome
 
 

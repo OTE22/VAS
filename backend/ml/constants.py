@@ -38,14 +38,17 @@ FEATURE_SET_VERSION = "secintel-features-v2"
 PREVIOUS_FEATURE_SET_VERSION = "secintel-features-v1"
 LABEL_DEFINITION_VERSION = "threat-label-v1"
 
-# Model types: only behavior_anomaly_model is implemented this release; the
-# rest are registered interfaces for future signals into the risk engine.
+# Registered security-intelligence model families.  Their entity, dataset,
+# algorithm and score contracts live in model_specs.py.
 MODEL_TYPE_BEHAVIOR_ANOMALY = "behavior_anomaly_model"
+MODEL_TYPE_COAPPEARANCE_ANOMALY = "coappearance_anomaly_model"
+MODEL_TYPE_SOCIAL_GRAPH_ANOMALY = "social_graph_anomaly_model"
+MODEL_TYPE_THREAT_RANKING = "threat_ranking_model"
 MODEL_TYPES = (
     MODEL_TYPE_BEHAVIOR_ANOMALY,
-    "coappearance_anomaly_model",
-    "social_graph_anomaly_model",
-    "threat_ranking_model",
+    MODEL_TYPE_COAPPEARANCE_ANOMALY,
+    MODEL_TYPE_SOCIAL_GRAPH_ANOMALY,
+    MODEL_TYPE_THREAT_RANKING,
 )
 ANOMALY_MODEL_TYPES = tuple(t for t in MODEL_TYPES if "anomaly" in t)
 
@@ -96,22 +99,19 @@ class FallbackReason(str, Enum):
     SHADOW_INTERNAL_ERROR = "SHADOW_INTERNAL_ERROR"             # shadow wrapper failed outside inference
 
 
-# Model types that have a dataset definition, features, trainer, artifact and
-# inference path in THIS release. Every other MODEL_TYPES entry is a reserved
-# interface: the API refuses to train it (MODEL_TYPE_NOT_IMPLEMENTED) and the
-# trainer refuses it too (defense in depth — the HTTP boundary is not the only
-# caller).
-IMPLEMENTED_MODEL_TYPES = (MODEL_TYPE_BEHAVIOR_ANOMALY,)
+# Each declared model now has an explicit contract in model_specs.  Serving
+# remains governed separately: anomaly families are shadow-only and threat
+# ranking is offline analyst prioritisation until calibrated evidence exists.
+IMPLEMENTED_MODEL_TYPES = MODEL_TYPES
 
 
 def model_type_status(model_type: str) -> Dict[str, Any]:
     """Capability contract for one model type — what the UI renders."""
-    implemented = model_type in IMPLEMENTED_MODEL_TYPES
-    return {"model_type": model_type,
-            "status": "available" if implemented else "reserved",
-            "trainable": implemented,
-            "note": ("trains in this release" if implemented
-                     else "reserved interface for a future release — not trainable")}
+    if model_type not in IMPLEMENTED_MODEL_TYPES:
+        return {"model_type": model_type, "status": "reserved", "trainable": False,
+                "note": "reserved interface — not trainable"}
+    from backend.ml.model_specs import get_model_spec
+    return get_model_spec(model_type).capability()
 
 
 # Redis coordination keys

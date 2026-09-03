@@ -528,3 +528,691 @@
 .mlops-status-bad { color: #f85149; font-weight: 600; }
 .mlops-status-warn { color: #d29922; font-weight: 600; }
 #model-type-note.note-bad { color: #f85149; }
+
+/* ============================================================
+   Operations console refresh (mlops-9)
+   A restrained control-room hierarchy: live execution first,
+   governance second, evidence and historical detail afterward.
+   ============================================================ */
+
+:root {
+    --mlops-page: #0a0f17;
+    --mlops-surface: #111925;
+    --mlops-surface-raised: #162131;
+    --mlops-surface-muted: #0e1622;
+    --mlops-border: #27364a;
+    --mlops-border-strong: #3b4d65;
+    --mlops-text: #e7edf5;
+    --mlops-text-muted: #98a8bb;
+    --mlops-accent: #4da3ff;
+    --mlops-accent-muted: rgba(77, 163, 255, 0.12);
+    --mlops-success: #45c58a;
+    --mlops-warning: #e4ad4b;
+    --mlops-danger: #ed6a6a;
+}
+
+.intelligence-main-container {
+    background: var(--mlops-page);
+}
+
+.intelligence-grid-overlay,
+.intelligence-scan-line,
+.header-icon-glow {
+    display: none !important;
+}
+
+.intelligence-content {
+    width: min(100%, 1600px);
+    margin-inline: auto;
+    padding: 1.75rem clamp(1rem, 2.5vw, 2.5rem) 4rem;
+}
+
+.mlops-page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2rem;
+    margin-bottom: 1.25rem;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+.mlops-page-header::after {
+    display: none !important;
+    animation: none !important;
+}
+
+.mlops-page-header .header-content {
+    min-width: 0;
+}
+
+.mlops-page-header .header-icon-wrapper {
+    display: grid;
+    place-items: center;
+    width: 3rem;
+    height: 3rem;
+    flex: 0 0 3rem;
+    border: 1px solid var(--mlops-border-strong);
+    border-radius: 10px;
+    background: var(--mlops-surface);
+    color: var(--mlops-accent);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.mlops-page-header .header-icon-wrapper i {
+    color: var(--mlops-accent);
+    filter: none;
+    text-shadow: none;
+}
+
+.mlops-page-header .page-title {
+    margin: 0.15rem 0 0.25rem;
+    color: var(--mlops-text);
+    font-size: clamp(1.7rem, 3vw, 2.35rem);
+    line-height: 1.15;
+    text-wrap: balance;
+    text-transform: none;
+    letter-spacing: normal;
+    text-shadow: none;
+}
+
+.mlops-page-header .page-description {
+    max-width: 780px;
+    margin: 0;
+    color: var(--mlops-text-muted);
+    line-height: 1.55;
+    text-wrap: pretty;
+    text-transform: none;
+    letter-spacing: normal;
+}
+
+.mlops-eyebrow,
+.mlops-card-kicker {
+    color: var(--mlops-accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: normal;
+}
+
+.mlops-page-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.mlops-live-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 2.25rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--mlops-border);
+    border-radius: 8px;
+    background: var(--mlops-surface);
+    color: var(--mlops-text-muted);
+    font-size: 0.78rem;
+}
+
+.mlops-live-dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    background: var(--mlops-warning);
+}
+
+.mlops-live-state.is-online .mlops-live-dot { background: var(--mlops-success); }
+.mlops-live-state.is-offline .mlops-live-dot { background: var(--mlops-danger); }
+
+.mlops-overview-strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.mlops-summary-card {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    min-width: 0;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--mlops-border);
+    border-radius: 10px;
+    background: var(--mlops-surface);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.mlops-summary-icon {
+    display: grid;
+    place-items: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    flex: 0 0 2.25rem;
+    border-radius: 8px;
+    background: var(--mlops-accent-muted);
+    color: var(--mlops-accent);
+}
+
+.mlops-summary-card > div:last-child {
+    min-width: 0;
+}
+
+.mlops-summary-label {
+    display: block;
+    margin-bottom: 0.18rem;
+    color: var(--mlops-text-muted);
+    font-size: 0.7rem;
+}
+
+.mlops-summary-card strong {
+    display: block;
+    overflow: hidden;
+    color: var(--mlops-text);
+    font-size: 0.95rem;
+    font-variant-numeric: tabular-nums;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mlops-summary-card strong.is-healthy { color: var(--mlops-success); }
+.mlops-summary-card strong.is-warning { color: var(--mlops-warning); }
+.mlops-summary-card strong.is-danger { color: var(--mlops-danger); }
+
+.mlops-section-nav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    gap: 0.35rem;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+    padding: 0.45rem;
+    border: 1px solid var(--mlops-border);
+    border-radius: 10px;
+    background: var(--mlops-page);
+    min-height: 2.9rem;
+}
+
+.mlops-section-nav a {
+    display: inline-flex !important;
+    align-items: center;
+    min-height: 2rem;
+    padding: 0.45rem 0.75rem;
+    border-radius: 7px;
+    color: var(--mlops-text-muted);
+    font-size: 0.78rem;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.mlops-section-nav a:hover,
+.mlops-section-nav a:focus-visible {
+    background: var(--mlops-accent-muted);
+    color: var(--mlops-text);
+    outline: none;
+}
+
+.mlops-warnings {
+    margin: 0 0 1rem;
+    padding: 0;
+    border: 1px solid rgba(228, 173, 75, 0.35);
+    border-left: 3px solid var(--mlops-warning);
+    border-radius: 8px;
+    background: rgba(228, 173, 75, 0.06);
+}
+
+.mlops-warnings summary {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.7rem 0.9rem;
+    color: #f1ca83;
+    font-size: 0.8rem;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.mlops-warnings summary span {
+    margin-left: auto;
+    color: var(--mlops-text-muted);
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+
+.mlops-warnings ul {
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 0.45rem 1.5rem;
+    padding: 0 0.9rem 0.8rem;
+}
+
+.mlops-warnings li {
+    color: #d8c4a0;
+}
+
+.mlops-container {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 1rem;
+}
+
+.mlops-card {
+    grid-column: span 6;
+    border: 1px solid var(--mlops-border);
+    border-radius: 12px;
+    background: var(--mlops-surface);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+}
+
+.mlops-card-wide {
+    grid-column: 1 / -1;
+}
+
+.mlops-card[id] {
+    scroll-margin-top: 4rem;
+}
+
+.mlops-queue-card {
+    border-color: #355173;
+}
+
+.mlops-card-header {
+    min-height: 3.5rem;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--mlops-border);
+    background: var(--mlops-surface-raised);
+}
+
+.mlops-card-header h2 {
+    margin-top: 0.12rem;
+    color: var(--mlops-text);
+    font-size: 0.98rem;
+    text-transform: none;
+    letter-spacing: normal;
+    text-wrap: balance;
+}
+
+.mlops-card-header h2 i {
+    width: 1.15rem;
+    color: var(--mlops-accent);
+    text-align: center;
+}
+
+.mlops-card-body {
+    padding: 1rem;
+    color: var(--mlops-text);
+}
+
+.mlops-btn {
+    min-height: 2.15rem;
+    border-color: var(--mlops-border-strong);
+    border-radius: 7px;
+    background: var(--mlops-surface-muted);
+    color: #cbd7e5;
+    font-weight: 600;
+    transition-duration: 150ms;
+}
+
+.mlops-btn:hover:not(:disabled) {
+    border-color: #57708e;
+    background: #1a2738;
+    color: #ffffff;
+}
+
+.mlops-btn:focus-visible,
+.mlops-select:focus-visible,
+.mlops-card input:focus-visible {
+    outline: 2px solid var(--mlops-accent);
+    outline-offset: 2px;
+}
+
+.mlops-btn-primary {
+    border-color: #3c82ca;
+    background: #245f9d;
+    color: #ffffff;
+}
+
+.mlops-btn-danger {
+    border-color: rgba(237, 106, 106, 0.5);
+    background: rgba(237, 106, 106, 0.08);
+    color: #f29a9a;
+}
+
+.mlops-select,
+.mlops-card input[type="text"],
+.mlops-card input[type="number"],
+.mlops-card input[type="datetime-local"] {
+    min-height: 2.25rem;
+    border-color: var(--mlops-border-strong);
+    border-radius: 7px;
+    background: var(--mlops-surface-muted);
+    color: var(--mlops-text);
+}
+
+.mlops-mode-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mlops-mode-card {
+    border-color: var(--mlops-border);
+    border-radius: 9px;
+    background: var(--mlops-surface-muted);
+}
+
+.mlops-mode-card.mode-current {
+    border-color: rgba(69, 197, 138, 0.65);
+    box-shadow: inset 3px 0 0 var(--mlops-success);
+}
+
+.mlops-mode-name,
+.mlops-mode-badge,
+.mlops-chip,
+.mlops-table th,
+.mlops-stat .stat-label {
+    letter-spacing: normal;
+}
+
+.mlops-mode-name {
+    text-transform: none;
+}
+
+.mlops-mode-desc,
+.mlops-inline-label,
+.mlops-kv dt,
+.mlops-stat .stat-label,
+.mlops-loading {
+    color: var(--mlops-text-muted);
+    text-wrap: pretty;
+}
+
+.mlops-chip {
+    background: rgba(152, 168, 187, 0.06);
+    font-variant-numeric: tabular-nums;
+}
+
+.mlops-chip.chip-ok { color: #79d9ad; }
+.mlops-chip.chip-warn { color: #f1ca83; }
+.mlops-chip.chip-bad { color: #f29a9a; }
+.mlops-chip.chip-info { color: #8dc2f7; border-color: rgba(77, 163, 255, 0.55); }
+
+.mlops-table-wrap {
+    border: 1px solid var(--mlops-border);
+    border-radius: 8px;
+}
+
+.mlops-table th {
+    padding: 0.65rem 0.7rem;
+    border-bottom-color: var(--mlops-border-strong);
+    background: var(--mlops-surface-muted);
+    color: var(--mlops-text-muted);
+}
+
+.mlops-table td {
+    padding: 0.68rem 0.7rem;
+    border-bottom-color: var(--mlops-border);
+    color: #d6e0eb;
+    font-variant-numeric: tabular-nums;
+}
+
+.mlops-table tbody tr:hover {
+    background: rgba(77, 163, 255, 0.04);
+}
+
+.mlops-stat-grid {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.mlops-stat {
+    border-color: var(--mlops-border);
+    background: var(--mlops-surface-muted);
+    text-align: left;
+}
+
+.mlops-stat .stat-value {
+    color: var(--mlops-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.mlops-kv dd,
+.mlops-pager,
+.mlops-call-row,
+.mlops-json-block {
+    font-variant-numeric: tabular-nums;
+}
+
+.mlops-contract-cell {
+    border-color: var(--mlops-border);
+    border-radius: 7px;
+    background: var(--mlops-surface-muted);
+}
+
+.mlops-tag {
+    border-style: solid;
+    border-color: var(--mlops-border-strong);
+    color: var(--mlops-text-muted);
+}
+
+/* Durable job ledger */
+.mlops-job-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.8rem;
+}
+
+.mlops-job-summary-copy {
+    color: var(--mlops-text-muted);
+    font-size: 0.78rem;
+}
+
+.mlops-job-list {
+    display: grid;
+    gap: 0.65rem;
+}
+
+.mlops-job-row {
+    display: grid;
+    grid-template-columns: minmax(190px, 1.2fr) minmax(160px, 1fr) minmax(180px, 1.4fr) auto;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.8rem;
+    border: 1px solid var(--mlops-border);
+    border-radius: 9px;
+    background: var(--mlops-surface-muted);
+}
+
+.mlops-job-row.is-running { border-left: 3px solid var(--mlops-accent); }
+.mlops-job-row.is-failed { border-left: 3px solid var(--mlops-danger); }
+.mlops-job-row.is-completed { border-left: 3px solid var(--mlops-success); }
+.mlops-job-row.is-scheduled { border-left: 3px solid var(--mlops-warning); }
+
+.mlops-job-identity,
+.mlops-job-stage,
+.mlops-job-time {
+    min-width: 0;
+}
+
+.mlops-job-title {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.3rem;
+    color: var(--mlops-text);
+    font-size: 0.86rem;
+    font-weight: 700;
+}
+
+.mlops-job-id,
+.mlops-job-meta {
+    overflow: hidden;
+    color: var(--mlops-text-muted);
+    font-family: Consolas, Monaco, monospace;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mlops-job-stage strong,
+.mlops-job-time strong {
+    display: block;
+    margin-bottom: 0.2rem;
+    color: #cfdae7;
+    font-size: 0.78rem;
+    font-weight: 650;
+}
+
+.mlops-job-time span {
+    color: var(--mlops-text-muted);
+    font-size: 0.72rem;
+}
+
+.mlops-job-progress-label {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.35rem;
+    color: var(--mlops-text-muted);
+    font-size: 0.7rem;
+}
+
+.mlops-progress {
+    height: 0.35rem;
+    margin: 0;
+    background: #202d3d;
+}
+
+.mlops-progress > span {
+    background: var(--mlops-accent);
+}
+
+.mlops-job-error {
+    grid-column: 1 / -1;
+    margin: -0.25rem 0 0;
+    padding-top: 0.55rem;
+    border-top: 1px solid rgba(237, 106, 106, 0.22);
+    color: #f29a9a;
+    font-size: 0.75rem;
+}
+
+.mlops-empty-state {
+    display: grid;
+    place-items: center;
+    min-height: 9rem;
+    padding: 1rem;
+    border: 1px dashed var(--mlops-border-strong);
+    border-radius: 9px;
+    color: var(--mlops-text-muted);
+    text-align: center;
+}
+
+.mlops-empty-state i {
+    margin-bottom: 0.55rem;
+    color: var(--mlops-accent);
+    font-size: 1.3rem;
+}
+
+.mlops-help-modal .mlops-help-content,
+.mlops-detail-drawer,
+.mlops-action-panel,
+.mlops-json-block {
+    border-color: var(--mlops-border-strong);
+    background: var(--mlops-surface-muted);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+@media (max-width: 1100px) {
+    .mlops-overview-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mlops-mode-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mlops-job-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+    /* admin.css makes the generic .nav-menu vertical at this breakpoint.
+       This page keeps primary navigation in one compact, scrollable row so
+       operational state remains above the fold. */
+    .military-navbar {
+        min-height: 3.5rem;
+        padding: 0.45rem 0.55rem;
+        gap: 0.35rem;
+        backdrop-filter: none;
+    }
+    .military-navbar .navbar-brand span,
+    .military-navbar .connection-status,
+    .military-navbar .navbar-user-info,
+    .military-navbar .logout-btn span {
+        display: none !important;
+    }
+    .military-navbar .navbar-brand {
+        width: 2.4rem;
+        justify-content: center;
+    }
+    .military-navbar .nav-menu {
+        flex: 1;
+        flex-direction: row;
+        gap: 0.1rem;
+        width: auto;
+        min-width: 0;
+        overflow-x: auto;
+        text-align: left;
+        scrollbar-width: none;
+    }
+    .military-navbar .nav-menu::-webkit-scrollbar { display: none; }
+    .military-navbar .military-nav-link,
+    .military-navbar .logout-btn {
+        flex: 0 0 2.25rem;
+        width: 2.25rem;
+        min-width: 2.25rem;
+        height: 2.25rem;
+        padding: 0;
+        justify-content: center;
+    }
+    .intelligence-main-container,
+    .intelligence-content {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+    }
+    .intelligence-content {
+        padding-inline: 0.75rem;
+    }
+    .intelligence-content > * {
+        min-width: 0;
+        max-width: 100%;
+    }
+    .mlops-page-header { align-items: stretch; flex-direction: column; gap: 1rem; }
+    .mlops-page-header .header-content { align-items: flex-start; min-width: 0; }
+    .mlops-page-header .header-text { min-width: 0; }
+    .mlops-page-header .page-title {
+        font-size: 1.45rem;
+        overflow-wrap: anywhere;
+        white-space: normal !important;
+    }
+    .mlops-page-header .page-description {
+        font-size: 0.78rem;
+        overflow-wrap: anywhere;
+        white-space: normal !important;
+    }
+    .mlops-page-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        width: 100%;
+    }
+    .mlops-page-actions .mlops-live-state,
+    .mlops-page-actions .mlops-btn { width: 100%; justify-content: center; }
+    .mlops-overview-strip { grid-template-columns: 1fr; }
+    .mlops-section-nav { width: 100%; min-width: 0; max-width: 100%; }
+    .mlops-container { grid-template-columns: 1fr; }
+    .mlops-card, .mlops-card-wide { grid-column: 1; }
+    .mlops-mode-grid { grid-template-columns: 1fr; }
+    .mlops-job-row { grid-template-columns: 1fr; gap: 0.7rem; }
+    .mlops-job-summary { align-items: flex-start; flex-direction: column; }
+    .mlops-warnings summary span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mlops-btn { transition: none; }
+    .fa-spin { animation: none !important; }
+}

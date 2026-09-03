@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from backend.ml.constants import (
     FEATURE_SET_VERSION, LABEL_DEFINITION_VERSION, PREVIOUS_FEATURE_SET_VERSION)
+from backend.ml.model_specs import COAPPEARANCE_FEATURE_SET, SOCIAL_GRAPH_FEATURE_SET
 
 EXTRACTION_POLICY_VERSION = "explicit-cap-v1"
 LEGACY_EXTRACTION_POLICY_VERSION = "legacy-oldest-first-cap-v0"
@@ -83,6 +84,26 @@ FEATURE_SET_LIMITATIONS: Dict[str, Tuple[Dict[str, str], ...]] = {
          "detail": "identities with more than 5000 appearances in the 90-day window "
                    "get every windowed feature as unavailable (appearance_window_truncated) "
                    "rather than an undercount"},
+    ),
+    "coappearance-features-v1": (
+        {"feature": "relationship cache",
+         "class": "processing_time_observation",
+         "detail": "pair snapshots observe the mutable relationship cache at collection time; "
+                   "the system does not reconstruct historical pair state from today's row"},
+        {"feature": "pair population",
+         "class": "readiness_gated",
+         "detail": "pairs below ML_GRAPH_MIN_PAIR_APPEARANCES carry an unavailable reason "
+                   "instead of a fabricated zero"},
+    ),
+    "social-graph-features-v1": (
+        {"feature": "relationship graph",
+         "class": "processing_time_observation",
+         "detail": "graph snapshots represent the cache at collection time, not a historical "
+                   "graph reconstructed with future relationship rows"},
+        {"feature": "graph population",
+         "class": "readiness_gated",
+         "detail": "no vectors are emitted until configured node, edge and observation-span "
+                   "floors all pass"},
     ),
 }
 
@@ -218,6 +239,40 @@ DEFINITIONS: Dict[str, Dict[str, DatasetDefinition]] = {
             label_definition_version=LABEL_DEFINITION_VERSION,
             source_tables=("ml_feature_snapshots", "ml_labels"),
             exclusions=_LABELED_EXCLUSIONS, notes=_PERSON_NOTES),
+    },
+    "coappearance_pair": {
+        "v1": DatasetDefinition(
+            name="coappearance_pair", version="v1",
+            purpose=("unsupervised pair-level anomaly rows captured when the "
+                     "relationship cache is refreshed; one immutable point-in-time "
+                     "snapshot per canonical identity pair"),
+            entity_type="pair", kind="unsupervised",
+            feature_set_version=COAPPEARANCE_FEATURE_SET,
+            notes=("Pair ids are canonical sorted UUIDs joined by '|'.",
+                   "Rows are readiness-gated; missing graph evidence is never encoded as zero.")),
+    },
+    "social_graph_person": {
+        "v1": DatasetDefinition(
+            name="social_graph_person", version="v1",
+            purpose=("unsupervised person-level graph-position anomaly rows "
+                     "captured from a readiness-qualified relationship graph"),
+            entity_type="person", kind="unsupervised",
+            feature_set_version=SOCIAL_GRAPH_FEATURE_SET,
+            notes=("Graph snapshots are processing-time observations of the relationship cache; "
+                   "the builder never reconstructs historical graphs from current edges.",)),
+    },
+    "threat_ranking_person_labeled": {
+        "v1": DatasetDefinition(
+            name="threat_ranking_person_labeled", version="v1",
+            purpose=("supervised analyst-review ranking from active, reviewed manual "
+                     "positive/negative outcomes joined to the latest point-in-time person snapshot"),
+            entity_type="person", kind="supervised",
+            feature_set_version=FEATURE_SET_VERSION,
+            label_definition_version=LABEL_DEFINITION_VERSION,
+            source_tables=("ml_feature_snapshots", "ml_labels"),
+            exclusions=_LABELED_EXCLUSIONS,
+            notes=("The output is a relative review-rank score, not a calibrated probability "
+                   "of threat and not a replacement for the rules engine.",)),
     },
 }
 

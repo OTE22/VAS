@@ -86,12 +86,19 @@ def create_sql_agent(conversation_memory=None, db=None) -> StateGraph:
     workflow.add_edge(START, "ingest_query")
 
     def route_after_ingestion(state: AgentState) -> str:
-        return "reject" if state.get("input_normalization_error") else "continue"
+        if state.get("input_normalization_error"):
+            return "reject"
+        # "thank you" / "ok": nothing to scan, plan or look up. The chat
+        # node answers with a fixed phrase and consults no model.
+        if state.get("acknowledgement"):
+            return "acknowledge"
+        return "continue"
 
     workflow.add_conditional_edges(
         "ingest_query",
         route_after_ingestion,
-        {"reject": "chat_response", "continue": "detect_malicious_intent"},
+        {"reject": "chat_response", "acknowledge": "chat_response",
+         "continue": "detect_malicious_intent"},
     )
     
     # Define routing function to check if user should be blocked

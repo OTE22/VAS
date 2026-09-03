@@ -126,9 +126,13 @@ def preprocess_feature_vector(payload: Dict[str, Any], features: Dict[str, Any])
 
 
 def score_with_payload(payload: Dict[str, Any], matrix) -> List[float]:
-    """Raw behavioral anomaly scores in [0,1] (higher = more unusual).
-    The ONLY scoring path — training evaluation, smoke tests and inference
-    all come through here (no skew)."""
+    """Model-family score in [0,1], through one train/serve implementation.
+
+    Unsupervised artifacts return relative anomaly scores. Classifier
+    artifacts return relative ranking scores; their model contract explicitly
+    prevents callers from presenting those values as calibrated threat
+    probabilities.
+    """
     import numpy as np
     algorithm = payload["algorithm"]
     if algorithm == "isolation_forest":
@@ -146,6 +150,12 @@ def score_with_payload(payload: Dict[str, Any], matrix) -> List[float]:
                 zs.append(abs(row[i] - params[name]["median"]) / (1.4826 * mad))
             z_scores.append(max(zs) if zs else 0.0)
         raw = np.array(z_scores)
+    elif algorithm in ("logreg", "random_forest", "gradient_boosting"):
+        # Classifier output is intentionally named a rank score by the model
+        # contract.  Without an independently validated calibration study it
+        # must not be presented as a probability of threat.
+        raw = payload["model"].predict_proba(matrix)[:, 1]
+        return [float(v) for v in raw]
     else:
         raise RegistryError("UNKNOWN_ALGORITHM", f"unsupported algorithm {algorithm!r}")
     norm = payload["normalization"]
@@ -338,6 +348,13 @@ class RegistryService:
                 "ANOMALY_SHADOW_CAP",
                 "anomaly models cannot pass administrator-approved SHADOW in "
                 "this release")
+        if to_stage == "shadow":
+            from backend.ml.model_specs import get_model_spec
+            if get_model_spec(row.model_type).serving_mode not in ("shadow", "on_demand_shadow"):
+                raise RegistryError(
+                    "SERVING_MODE_NOT_SUPPORTED",
+                    f"{row.model_type} is {get_model_spec(row.model_type).serving_mode}; "
+                    "it cannot enter the live shadow loop")
 
         now = datetime.utcnow()
         before_stage = row.stage

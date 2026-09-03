@@ -223,6 +223,17 @@ async def run_collection(db: AsyncSession, *, run_id: Optional[str] = None,
         if renew_cb:
             await renew_cb()
 
+    # Relational families are captured as their own immutable feature sets.
+    # This observes the cache as it exists now; it never backfills a historic
+    # graph using today's mutable relationship rows.
+    relational_stats: Dict[str, Any] = {
+        "skipped": True, "reason": "collection_cancelled" if cancelled else None}
+    if not cancelled:
+        from backend.ml.relational_feature_service import collect_relational_snapshots
+        relational_stats = await collect_relational_snapshots(
+            db, run_id=run_id, as_of=now_as_of)
+        await db.commit()
+
     checkpoint = await _lock_checkpoint(db)
     checkpoint.last_run_id = run_id
     checkpoint.last_run_at = datetime.utcnow()
@@ -258,6 +269,7 @@ async def run_collection(db: AsyncSession, *, run_id: Optional[str] = None,
         "reconciled_identities": reconciled,
         "snapshots_written": snapshots_written,
         "snapshots_deduplicated": snapshots_deduplicated,
+        "relational_features": relational_stats,
         "watermark_event_time": (checkpoint.watermark_event_time.isoformat() + "Z"
                                  if checkpoint.watermark_event_time else None),
         "full_rebuild": bool(full_rebuild),

@@ -141,7 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-d6f8a2c4e7b1}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
       DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
@@ -221,7 +221,7 @@ services:
 
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-d6f8a2c4e7b1}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
 
       DETECTION_MODEL: /app/weights/det_10g.onnx
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
@@ -343,6 +343,68 @@ services:
       - data        # API -> postgres/redis
       - ai          # API -> ollama
       - monitoring  # prometheus -> API /metrics
+
+  # Durable control-plane worker for CPU/file-heavy ML operations. It has no
+  # inbound port and no edge/AI network access. The API only inserts commands
+  # into PostgreSQL; this service leases and executes them in child processes.
+  ml_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    user: "1000:1000"
+    environment:
+      ENVIRONMENT: production
+      PYTHONUNBUFFERED: "1"
+      # This process serves no traffic. The API container owns the full HTTP
+      # security preflight; the worker receives only its database/runtime
+      # configuration and remains unreachable from the edge network.
+      CONFIG_PREFLIGHT: "0"
+      MIGRATIONS_MODE: verify
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
+      DATABASE_URL: postgresql+asyncpg://fr_app:${FR_APP_PASSWORD:?set FR_APP_PASSWORD in .env}@postgres:5432/face_recognition
+      POSTGRES_USER: fr_app
+      POSTGRES_PASSWORD: ${FR_APP_PASSWORD}
+      POSTGRES_DB: face_recognition
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_POOL_SIZE: 5
+      DB_MAX_OVERFLOW: 5
+      DB_POOL_PRE_PING: "true"
+      # This topology intentionally runs one serialized worker. Give it a
+      # stable identity so container replacements update one heartbeat row.
+      ML_WORKER_ID: ml-worker-production-primary
+      ML_ARTIFACT_DIR: /app/models/ml
+      LOG_LEVEL: INFO
+      LOG_DIR: /var/log/face-recognition
+      HF_HOME: /home/appuser/.cache/huggingface
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+    volumes:
+      - ml_artifacts_data:/app/models/ml
+      - logs_data:/var/log/face-recognition
+      - hf_cache_data:/home/appuser/.cache/huggingface
+    command: ["python", "-m", "backend.ml.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: '2.0', memory: 4G }
+        reservations: { cpus: '0.5', memory: 1G }
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+    restart: unless-stopped
+    networks:
+      - data
 
   ollama:
     image: ollama/ollama:latest

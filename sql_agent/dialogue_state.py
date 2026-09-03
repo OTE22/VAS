@@ -253,8 +253,26 @@ def match_candidate(state: dict, text: str) -> Optional[dict]:
             if match_key(candidate.get("display_name")) == key:
                 return candidate
 
+    # "Did you mean JOEY?" - "yes" picks the one candidate offered. Only
+    # for a single candidate: "yes" to a list of three chooses nothing.
+    if len(candidates) == 1 and _is_affirmative(text):
+        return candidates[0]
+
     position = _selected_position(text, len(candidates))
     return candidates[position - 1] if position else None
+
+
+_AFFIRMATIVES = frozenset("""
+yes y yeah yep yup sure correct right exactly ok okay indeed
+نعم أجل اجل ايوه أيوه صح صحيح تمام اوك أوك بالضبط
+""".split())
+
+
+def _is_affirmative(text: str) -> bool:
+    import re
+
+    words = re.findall(r"[^\W\d_]+", str(text or "").casefold())
+    return bool(words) and len(words) <= 3 and all(w in _AFFIRMATIVES for w in words)
 
 
 def apply_delta(state: dict, raw_delta: dict, *, turn_id: str) -> dict:

@@ -22,6 +22,7 @@ BASE = "http://localhost:8000"
 
 GET_ROUTES = [
     "/api/ml/overview",
+    "/api/ml/jobs",
     "/api/ml/features/definitions",
     "/api/ml/labels/stats",
     "/api/ml/labels",
@@ -191,6 +192,21 @@ def test_pagination_is_bounded(token):
     assert status == 200
 
 
+def test_ml_jobs_exposes_reconnectable_queue_and_worker_health(token):
+    status, body, headers = _http("GET", "/api/ml/jobs?limit=20", token=token)
+    assert status == 200, body
+    assert isinstance(body["items"], list)
+    assert body["total"] == len(body["items"])
+    assert body["worker"]["status"] == "healthy", body["worker"]
+    assert "hostname" not in body["worker"] and "process_id" not in body["worker"]
+    lowered = {k.lower(): v for k, v in headers.items()}
+    assert lowered.get("cache-control") == "no-store"
+
+    status, body, _ = _http("GET", "/api/ml/jobs?status=made-up", token=token)
+    assert status == 422
+    assert body["detail"]["error_code"] == "INVALID_JOB_STATUS"
+
+
 # ---------------------------------------------------------------------------
 # Path-free responses
 # ---------------------------------------------------------------------------
@@ -239,16 +255,17 @@ def test_pause_writes_an_audit_row(token):
 # Training-job refusals + retraining policy gate
 # ---------------------------------------------------------------------------
 
-def test_training_rejects_unknown_and_reserved_model_types(token):
+def test_training_rejects_unknown_types_and_cross_family_algorithms(token):
     status, body, _ = _http("POST", "/api/ml/training-jobs",
                             {"model_type": "nonsense_model"}, token=token)
     assert status == 422
     assert body["detail"]["error_code"] == "UNKNOWN_MODEL_TYPE"
 
     status, body, _ = _http("POST", "/api/ml/training-jobs",
-                            {"model_type": "coappearance_anomaly_model"}, token=token)
+                            {"model_type": "coappearance_anomaly_model",
+                             "algorithm": "logreg"}, token=token)
     assert status == 422
-    assert body["detail"]["error_code"] == "MODEL_TYPE_NOT_IMPLEMENTED"
+    assert body["detail"]["error_code"] == "ALGORITHM_NOT_SUPPORTED_FOR_MODEL"
 
 
 def test_training_job_lookup_404s_for_unknown_ids(token):

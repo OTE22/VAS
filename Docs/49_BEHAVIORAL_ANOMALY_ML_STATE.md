@@ -265,13 +265,15 @@ active row (a newer invalid row never masks a valid one) and logs why each rejec
 first time the system sees a new policy version it writes `ml_audit(mapping_observed)` so even an
 out-of-band row leaves an audit trail.
 
-## Reserved model types
+## Additional model families
 
-`coappearance_anomaly_model`, `social_graph_anomaly_model` and `threat_ranking_model` are reserved
-interfaces: no dataset definition, features, trainer, artifact or inference path exists. The API refuses to
-train them (`422 MODEL_TYPE_NOT_IMPLEMENTED`), the trainer refuses them too (defense in depth), and the
-ML-Ops page renders them from the capability contract (`GET /api/ml/overview` → `model_types`) as
-*Reserved / Future — not trainable* with the Train action disabled.
+`coappearance_anomaly_model`, `social_graph_anomaly_model` and `threat_ranking_model` now have explicit
+entity, feature-set, dataset, algorithm and score contracts in `backend/ml/model_specs.py`. Pair and graph
+snapshots are immutable processing-time observations of the relationship cache and are refused below the
+configured readiness floors. Both anomaly families remain administrator-approved shadow observations.
+Threat ranking trains only from reviewed manual labels and produces a relative analyst-review rank score;
+it is not a probability of threat and cannot enter the live shadow decision loop. See
+`Docs/92_RELATIONAL_ML_MODELS.md`.
 
 ## Retraining
 

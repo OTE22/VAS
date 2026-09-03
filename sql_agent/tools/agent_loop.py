@@ -87,6 +87,12 @@ Rules:
 # between the dev and production models and a setting is one more thing to get
 # wrong on a deploy.
 _NATIVE_SUPPORT: Dict[str, bool] = {}
+#: When a model was demoted to the prompted fallback. One prose reply used
+#: to demote a model for the life of the process; a capable model that
+#: answered one greeting in prose then ran every later turn on the weaker
+#: mechanism. Re-probed after this many seconds.
+_NATIVE_DEMOTED_AT: Dict[str, float] = {}
+_NATIVE_REPROBE_SECONDS = 600.0
 
 
 def _describe(arguments: Optional[dict]) -> str:
@@ -395,17 +401,257 @@ _CAMERA_NAMED = re.compile(rf"(?:^|\s)(?:{_CAMERA_WORD_RE})\s+([^\s?.,;:!؟،]+)
 #: model read it against the previous turn; the message itself never pointed
 #: back.
 _CONTINUATION_MARKERS = (
-    # English
-    "same", "that", "those", "these", "this one", "it ", "them", "also",
+    # English: anaphora, pronouns, connectives
+    "same", "that", "those", "these", "this one", "it", "them", "also",
     "too", "only", "just", "instead", "as well", "again", "more", "rest",
-    "other", "previous", "last one", "earlier", "before", "now ",
+    "other", "previous", "last one", "earlier", "before", "now",
+    "he", "she", "her", "him", "his", "hers", "they", "their", "whom",
+    "with whom", "who else", "and who",
     # Arabic (with the article and glued prepositions where common)
     "نفس", "ذلك", "تلك", "هذه", "هذا", "هؤلاء", "أيضا", "أيضاً", "ايضا",
     "فقط", "بدلا", "بدلاً", "كذلك", "السابق", "السابقة", "مرة أخرى",
     "مجددا", "مجدداً", "الباقي", "غيره", "غيرها", "منهم", "منها",
+    "هو", "هي", "هم", "معه", "معها", "معهم", "معهما", "مع من", "ومن",
+    "هناك", "بعدها", "قبلها",
 )
+_SINGLE_WORD_MARKERS = frozenset(m for m in _CONTINUATION_MARKERS
+                                 if " " not in m)
+_MULTI_WORD_MARKERS = tuple(m for m in _CONTINUATION_MARKERS if " " in m)
 _LEADING_CONNECTIVES = re.compile(r"^(?:and|but|or|so|plus|then|و|لكن|ثم|أو|او)\b",
                                   re.I)
+
+
+#: Function words and politeness, in the language the paraphrase is written
+#: in. Whatever is left of a message after these are the words a paraphrase
+#: of it must share.
+_PARAPHRASE_STOPWORDS = frozenset("""
+can could would will should please hey hi hello the a an me us i we you to of
+for in on at by with and or is are was were be been do does did what which who
+whom how give get tell show list find want need like it its this that these
+those there here about any some he she her him his hers they them their when
+where why
+""".split())
+
+
+def paraphrase_ignores_user(question: str, user_text: str,
+                            known_names=()) -> bool:
+    """Does the paraphrase share NOTHING with the user's message?
+
+    "can you track joey" was paraphrased as "What are the most active
+    pipelines?" - the previous turn's question, word for word. A paraphrase
+    of a message contains at least one of its content words. Latin words
+    only: an Arabic message is paraphrased in English, so its Arabic content
+    words cannot be required, but a Latin name typed inside it can.
+    """
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(user_text or ""))
+    content = [w.casefold() for w in words
+               if w.casefold() not in _PARAPHRASE_STOPWORDS]
+    if not content:
+        return False
+    q = str(question or "").casefold()
+    # A one-word paraphrase carries no sentence to compare; only a phrase
+    # can be "about something else".
+    if len(q.split()) < 2:
+        return False
+    # A name a look-up resolved this turn IS the user's word, corrected:
+    # "track Jeoy" is rightly paraphrased with "JOEY".
+    for offered in known_names or ():
+        for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", str(offered or "")):
+            content.append(w.casefold())
+    # Prefix match so "detections" is satisfied by "detection events".
+    return not any(w[:4] in q for w in content)
+
+
+def carried_over(question: str, user_text: str, dialogue_state) -> Optional[str]:
+    """A held camera or person that the paraphrase names but the user did
+    not. For a self-contained question that is the transcript leaking in:
+    "Show all detection events at WEZARET DEFA3 today" for a user who asked
+    for all detections today."""
+    fields = ((dialogue_state or {}).get("fields") or {})
+    held: List[str] = []
+    for name in ("active_camera", "referenced_entity"):
+        value = (fields.get(name) or {}).get("value")
+        held.extend(value if isinstance(value, list) else [value] if value else [])
+    q = " ".join(str(question or "").replace("_", " ").split()).casefold()
+    u = " ".join(str(user_text or "").replace("_", " ").split()).casefold()
+    for item in held:
+        key = " ".join(str(item or "").replace("_", " ").split()).casefold()
+        if key and key in q and key not in u:
+            return str(item)
+    return None
+
+
+#: Messages that ask for nothing and mean "received". Answered with a fixed
+#: phrase and no model, no transcript, no FACTS block: "thank you" was
+#: answered by repeating the previous completion line ("The report on Iron
+#: Man has been translated into Arabic."), and "ok" with "It seems you're
+#: providing context about our conversation" - the model reading the
+#: prompt scaffolding as the user's words.
+_ACK_WORDS = frozenset("""
+ok okay okey k kk fine good great nice cool perfect thanks thank thx ty
+thankyou cheers noted understood alright right sure yes yep yeah no nope
+done bye goodbye
+شكرا شكراً تمام حسنا حسناً طيب ماشي اوك أوك نعم لا ممتاز رائع جيد عظيم
+تم وصل فهمت مفهوم اوكي سلام جزاك
+""".split())
+_ACK_FILLER = frozenset(
+    "you very much a lot so lot it that is jazakallah".split()
+    + ["جزاك", "الله", "خير", "جزيلا", "جزيلاً", "لك", "كتير",
+       "كثيرا", "كثيراً", "على", "المساعدة"])
+_THANKS_WORDS = frozenset({"thanks", "thank", "thx", "ty", "thankyou", "cheers",
+                           "شكرا", "شكراً", "جزاك"})
+
+
+def is_acknowledgement(user_text: str) -> bool:
+    """Every word is an acknowledgement or its filler, and there are few."""
+    words = re.findall(r"[^\W\d_]+", str(user_text or "").casefold())
+    if not words or len(words) > 5:
+        return False
+    return all(w in _ACK_WORDS or w in _ACK_FILLER for w in words) and any(
+        w in _ACK_WORDS for w in words)
+
+
+def is_thanks(user_text: str) -> bool:
+    words = set(re.findall(r"[^\W\d_]+", str(user_text or "").casefold()))
+    return bool(words & _THANKS_WORDS)
+
+
+#: "with whom", "was she alone": the answer comes from the co-appearance
+#: enrichment, which only runs on the SUBJECT'S detection rows. So for such
+#: a question the query must be the subject's detections - the paraphrase is
+#: fixed here rather than left to the model, which asked for cameras.
+_COMPANION_QUESTION = re.compile(
+    r"(with whom|with who\b|who (?:was|were) with|whom was .* with|"
+    r"\balone\b|accompan|together with|مع من|برفقة|وحده|وحدها|لوحده|"
+    r"لوحدها|بمفرده|بمفردها)", re.I)
+
+
+def is_companion_question(text: str) -> bool:
+    return bool(_COMPANION_QUESTION.search(" ".join(str(text or "").split())))
+
+
+def held_subject(dialogue_state) -> Optional[str]:
+    fields = ((dialogue_state or {}).get("fields") or {})
+    value = (fields.get("referenced_entity") or {}).get("value")
+    if isinstance(value, list):
+        return str(value[0]) if value else None
+    return str(value) if value else None
+
+
+_PRONOUNS = frozenset("""
+he she her him his hers they them their it its who whom someone anyone
+هو هي هم هن معه معها له لها إياه إياها
+""".split())
+
+
+def is_pronoun_or_empty(name) -> bool:
+    text = " ".join(str(name or "").split()).casefold().strip("\"'“”‘’{}[]()")
+    if not text:
+        return True
+    return all(w in _PRONOUNS for w in re.findall(r"[^\W\d_]+", text)) and bool(
+        re.findall(r"[^\W\d_]+", text))
+
+
+#: "in Arabic", "بالعربية", "to English": the user wants what they already
+#: have, restated. Paired with a reference to the report, the answer is a
+#: TRANSLATION of the last report - never a new query, never a new document
+#: titled with the request. "can you make the report in arabic" produced a
+#: fresh PDF titled "can you make the report in arabic".
+_LANGUAGE_REQUEST = re.compile(
+    r"(?:\b(?:in|to|into)\s+(?P<en_lang>arabic|english)\b|"
+    r"\b(?P<en_lang2>arabic|english)\s+(?:version|translation)\b|"
+    r"(?P<ar_ar>بالعربي(?:ة)?|إلى العربية|الى العربية|للعربية)|"
+    r"(?P<ar_en>بالإنجليزي(?:ة)?|بالانجليزي(?:ة)?|إلى الإنجليزية|الى الانجليزية))",
+    re.I)
+_REFERS_TO_REPORT = re.compile(
+    r"(\breport\b|\bit\b|\bthat\b|\bthis\b|\bsame\b|\bthe result\b|\bthe answer\b|"
+    r"التقرير|النتيجة|الإجابة|ذلك|هذا|نفس)", re.I)
+
+
+def wants_translation(user_text: str) -> Optional[str]:
+    """The target language of a 'give me that in <language>' request, or
+    None. Only when the message also points at what exists (the report,
+    it, that): "track joey in arabic" is a NEW request with an output
+    language, and is left alone."""
+    text = " ".join(str(user_text or "").split())
+    match = _LANGUAGE_REQUEST.search(text)
+    if not match or not _REFERS_TO_REPORT.search(text):
+        return None
+    if match.group("ar_ar"):
+        return "ar"
+    if match.group("ar_en"):
+        return "en"
+    lang = (match.group("en_lang") or match.group("en_lang2") or "").lower()
+    return "ar" if lang == "arabic" else "en"
+
+
+def names_a_known_person(user_text: str, identity_index) -> Optional[str]:
+    """An enrolled person's name in the message: a data request by
+    construction. "does joey was alone the last time shwe was seen" was
+    answered "I'm not aware of any information about a person named Joey
+    or Shwe" by a model that never queried."""
+    low = " ".join(str(user_text or "").split()).casefold()
+    if not low:
+        return None
+    for entry in identity_index or []:
+        name = " ".join(str((entry or {}).get("display_name") or "").split())
+        if len(name) >= 3 and re.search(
+                rf"(?<![^\W\d_]){re.escape(name.casefold())}(?![^\W\d_])", low):
+            return name
+    return None
+
+
+def _resolved_this_turn(trace) -> List[str]:
+    """Names a resolve_person look-up settled in this pass."""
+    names = []
+    for entry in trace or []:
+        resolved = (entry or {}).get("resolved_entity") or {}
+        if resolved.get("canonical_name"):
+            names.append(str(resolved["canonical_name"]))
+    return names
+
+
+#: ONE decision per turn: does this message need the data, or is it chat?
+#: Facts first - each is something Python holds - and a single model
+#: judgement only when no fact settles it. Decided once, at planning time,
+#: and obeyed downstream: the loop seeds `is_a_request` from it instead of
+#: re-judging in the middle of tool selection.
+DATA = "data"
+CHAT = "chat"
+UNDECIDED = "undecided"
+
+
+def route_turn(user_text: str, *, dialogue_state=None, identity_index=None,
+               has_result: bool = False, clarification_answered: bool = False):
+    """(kind, reason). `kind` is DATA, CHAT or UNDECIDED; UNDECIDED means
+    the one model judgement in the loop decides."""
+    text = " ".join(str(user_text or "").split())
+    if not text:
+        return CHAT, "empty"
+    # An answer to a question WE asked wins over its own words: "yes" after
+    # "which one did you mean?" is data, not an acknowledgement.
+    fields = ((dialogue_state or {}).get("fields") or {})
+    if clarification_answered or (fields.get("pending_clarification") or {}).get("value"):
+        return DATA, "answers the question we asked"
+    if is_acknowledgement(text):
+        return CHAT, "acknowledgement"
+    if is_greeting(text):
+        return CHAT, "greeting"
+    from .planner import deterministic_request_plan
+
+    if deterministic_request_plan(text) is not None:
+        return DATA, "a track command"
+    if camera_named_by_user(text):
+        return DATA, "names a camera"
+    known = names_a_known_person(text, identity_index)
+    if known:
+        return DATA, f"names an enrolled person"
+    if is_a_continuation(text):
+        if has_result or any((fields.get(n) or {}).get("value")
+                             for n in ("referenced_entity", "active_task",
+                                       "active_camera")):
+            return DATA, "continues a data task"
+    return UNDECIDED, "no fact settles it"
 
 
 def is_a_continuation(user_text: str) -> bool:
@@ -419,13 +665,37 @@ def is_a_continuation(user_text: str) -> bool:
     if not text:
         return False
     low = text.casefold()
-    padded = f" {low} "
     if _LEADING_CONNECTIVES.match(low):
         return True
-    if any(f" {m.casefold()}" in padded for m in _CONTINUATION_MARKERS):
+    # Whole words, so "he" does not fire on "hello" and "it" not on "item".
+    words = set(re.findall(r"[^\W\d_]+", low))
+    if words & _SINGLE_WORD_MARKERS:
         return True
-    # "yes", "the pdf", "camera 3": fragments only make sense as answers.
-    return len(low.split()) <= 3
+    if any(m in low for m in _MULTI_WORD_MARKERS):
+        return True
+    # "yes", "the pdf", "camera 3": fragments only make sense as answers -
+    # unless the fragment IS a complete command the planner recognises on
+    # its own ("track joey").
+    if len(low.split()) <= 3:
+        from .planner import deterministic_request_plan
+
+        # A greeting is short too, and points at nothing. ("yes", "ok" DO
+        # point back - at a question the assistant asked.)
+        if words and all(w in _GREETING_WORDS for w in words):
+            return False
+        return deterministic_request_plan(text) is None
+    return False
+
+
+def is_greeting(user_text: str) -> bool:
+    words = re.findall(r"[^\W\d_]+", str(user_text or "").casefold())
+    return bool(words) and len(words) <= 4 and all(
+        w in _GREETING_WORDS or w in _ACK_FILLER for w in words)
+
+
+_GREETING_WORDS = frozenset(
+    "hi hello hey hiya morning evening afternoon greetings there "
+    "مرحبا مرحباً أهلا أهلاً اهلا السلام عليكم صباح مساء الخير النور".split())
 
 
 def camera_named_by_user(user_text: str) -> Optional[str]:
@@ -545,7 +815,16 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
 
     model_id = str(getattr(llm, "model", None) or getattr(llm, "model_name", ""))
     if _NATIVE_SUPPORT.get(model_id) is False:
-        supports_native_tools = False
+        import time as _time
+
+        demoted_at = _NATIVE_DEMOTED_AT.get(model_id, 0.0)
+        if _time.time() - demoted_at >= _NATIVE_REPROBE_SECONDS:
+            logger.info("[TOOL_LOOP] re-probing native tool calling for %s",
+                        model_id)
+            _NATIVE_SUPPORT.pop(model_id, None)
+            _NATIVE_DEMOTED_AT.pop(model_id, None)
+        else:
+            supports_native_tools = False
 
     model = llm
     if supports_native_tools:
@@ -613,6 +892,24 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
     # and did: "seed_person_016" was matched to its candidate and then refused
     # an action because, read alone, it asks for nothing.
     is_a_request = known_request
+    # A CONTINUATION of a data task is a request by construction. "with whom
+    # she was", asked right after "when was joey last seen", was judged "not
+    # a request" on its own words and answered with a greeting. The message
+    # points back; the task it points back at asked for data; no model
+    # needs to be consulted about that.
+    if is_a_request is None and is_a_continuation(user_text):
+        fields = ((dialogue_state or {}).get("fields") or {})
+        holds_a_task = has_result or any(
+            (fields.get(name) or {}).get("value")
+            for name in ("referenced_entity", "active_task", "active_camera"))
+        if holds_a_task:
+            is_a_request = True
+            logger.info("[TOOL_LOOP] continuation of a data task: a request "
+                        "by construction")
+    if is_a_request is None and names_a_known_person(user_text, identity_index):
+        is_a_request = True
+        logger.info("[TOOL_LOOP] names an enrolled person: a request by "
+                    "construction")
     # answer_directly on a turn that asked for data is refused once, not
     # forever: the second proposal is the model insisting, and it wins.
     direct_answer_refused = False
@@ -668,6 +965,9 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 logger.info("[TOOL_LOOP] %s produced no native tool call; "
                             "switching to the prompted fallback", model_id)
                 _NATIVE_SUPPORT[model_id] = False
+                import time as _time
+
+                _NATIVE_DEMOTED_AT[model_id] = _time.time()
                 supports_native_tools = False
                 mechanism = "prompted"
                 model = llm
@@ -769,6 +1069,33 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                     f"it is a greeting or small talk, use answer_directly.")))
                 continue
 
+        if (name == "answer_directly" and is_a_request is None
+                and not is_acknowledgement(user_text)
+                and not is_greeting(user_text)):
+            # The model wants to answer in prose before anything has been
+            # established. For a greeting that is right; for "check the
+            # situation" it produced "It seems we're starting fresh". One
+            # judgement call settles which - greetings and acknowledgements
+            # are exempt, so small talk still costs nothing.
+            is_a_request = asked_for_an_action(
+                llm, user_text,
+                question_pending=bool(
+                    ((dialogue_state or {}).get("fields") or {})
+                    .get("pending_clarification", {}).get("value")))
+
+        if (name == "answer_directly" and is_a_request is True
+                and direct_answer_refused):
+            # Told once, and it still wants to answer a data question from
+            # memory. Prose is never the answer to a data request; ending
+            # the loop hands the turn to the guidance path, which says what
+            # was understood and asks for what is missing.
+            logger.info("[TOOL_LOOP] answer_directly insisted on a data "
+                        "request; ending the loop for guidance")
+            trace.append({"tool": name, "rejected": "answered data without a query",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "UNQUERIED_ANSWER"}})
+            return None, trace, is_a_request
+
         if (name == "answer_directly" and is_a_request is True
                 and not direct_answer_refused):
             # The user asked for DATA - established, not guessed: either a
@@ -791,6 +1118,27 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 "only if a look-up left the request genuinely ambiguous.")))
             continue
 
+        if name == "resolve_person" and is_pronoun_or_empty(
+                arguments.get("name", "")):
+            # "she", "him", "" are not names. "with whom she was" was looked
+            # up as a person called "she" and answered "No person named
+            # 'she' is enrolled"; an empty name printed "{}".
+            subject = held_subject(dialogue_state)
+            logger.info("[TOOL_LOOP] refused resolve_person: the argument is "
+                        "a pronoun or empty")
+            rejections += 1
+            trace.append({"tool": name, "rejected": "not a name",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "NOT_A_NAME"}})
+            messages.append(HumanMessage(content=(
+                f"{arguments.get('name', '')!r} is not a person's name. "
+                + (f"The person under discussion is {subject!r}; use that "
+                   f"exact name, or query the database directly."
+                   if subject else
+                   "No person is under discussion; ask the user who they "
+                   "mean with ask_clarifying_question."))))
+            continue
+
         if name == "resolve_person" and names_a_camera(
                 arguments.get("name", ""), user_text):
             # The user said "camera X". X is not a person, and looking it
@@ -809,13 +1157,91 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 f"identifier.")))
             continue
 
+        target_language = wants_translation(user_text)
+        if (target_language and (has_result or artifact_index)
+                and name in ("query_database", "generate_document",
+                             "modify_active_query")):
+            # The user has a report and wants it in another language. That
+            # is a translation of what exists, whatever the model proposed:
+            # a new query answers a question nobody asked, and a new
+            # document gets titled with the request.
+            logger.info("[TOOL_LOOP] language request about the existing "
+                        "report: translating instead of %s", name)
+            name = "translate_document"
+            arguments = {"document_id": "", "language": target_language}
+
+        if (name in ("query_database", "modify_active_query")
+                and is_companion_question(user_text)):
+            # The enrichment that answers "with whom" runs on the SUBJECT'S
+            # detection rows, so that is the query - whoever the subject is:
+            # named in the message, or held from the previous turn. Left to
+            # the model, "هل كانت وحدها" became a query about cameras, and
+            # as a MODIFICATION of the previous query it became six
+            # subqueries deep and was refused as too complex.
+            subject = (names_a_known_person(user_text, identity_index)
+                       or held_subject(dialogue_state))
+            if subject:
+                fixed = (f"all detections of {subject} with camera name and "
+                         f"timestamp, most recent first")
+                if name != "query_database" or arguments.get("question") != fixed:
+                    logger.info("[TOOL_LOOP] companion question: querying "
+                                "the subject's detections")
+                    name = "query_database"
+                    arguments = {"question": fixed}
+
+        # A continuation's content is elsewhere by definition ("with whom
+        # she was" is about the previous subject), so only a self-contained
+        # message can have its paraphrase checked against its own words.
+        if (name == "query_database" and not is_a_continuation(user_text)
+                and paraphrase_ignores_user(
+                    arguments.get("question", ""), user_text,
+                    known_names=_names_offered(trace, prior_observations))):
+            # The paraphrase is about something else entirely - typically
+            # the previous question. A fact about the words, so refused
+            # every time; the rejection budget bounds a model that insists.
+            logger.info("[TOOL_LOOP] refused query_database: the paraphrase "
+                        "shares nothing with the user's message")
+            rejections += 1
+            trace.append({"tool": name, "rejected": "paraphrase ignores the message",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "PARAPHRASE_MISMATCH"}})
+            messages.append(HumanMessage(content=(
+                f"Your paraphrase does not reflect the user's message. "
+                f"Paraphrase THIS message and nothing else: {user_text!r}. "
+                f"Keep every name exactly as they wrote it.")))
+            continue
+
+        if (name == "query_database" and not is_a_continuation(user_text)):
+            leaked = carried_over(arguments.get("question", ""), user_text,
+                                  dialogue_state)
+            if leaked:
+                # A NEW question, paraphrased with the previous turn's
+                # camera or person folded in. The words came from the
+                # transcript, not from the user. A fact, so refused every
+                # time it recurs.
+                logger.info("[TOOL_LOOP] refused query_database: the "
+                            "paraphrase carries over something the user "
+                            "did not mention")
+                rejections += 1
+                trace.append({"tool": name, "rejected": "carried over context",
+                              "observation": {"status": "rejected",
+                                              "tool": name,
+                                              "reason_code": "CARRIED_OVER"}})
+                messages.append(HumanMessage(content=(
+                    f"Your paraphrase mentions {leaked!r}, which the user "
+                    f"did not. Their message {user_text!r} is a NEW question: "
+                    f"paraphrase exactly what it asks and nothing from "
+                    f"earlier turns.")))
+                continue
+
         if (name in ("modify_active_query", "update_task_state")
-                and not continuation_refused
                 and not is_a_continuation(user_text)):
             # The message states its own question. Re-running the PREVIOUS
             # one with a change drags its filters along: "Show me all
             # detections from today" became "the wezaret camera, but today"
             # and was answered about a camera the user never mentioned.
+            # Refused every time: the message does not change when the
+            # model insists, and "once" let a wrong report through.
             continuation_refused = True
             logger.info("[TOOL_LOOP] refused %s: the message does not point "
                         "back at the previous task", name)
@@ -829,6 +1255,27 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 f"'also', 'only'...). Treat it as NEW: use query_database "
                 f"with exactly what it asks, and carry over no camera, "
                 f"person or time window from before.")))
+            continue
+
+        resolved_names = _resolved_this_turn(trace)
+        low_user = " ".join(str(user_text or "").split()).casefold()
+        low_question = str(arguments.get("question", "")).casefold()
+        if name == "ask_clarifying_question" and any(
+                rn.casefold() in low_user or rn.casefold() in low_question
+                for rn in resolved_names):
+            # "Can you clarify what you mean by Joey?" - asked AFTER the
+            # look-up resolved Joey. The person is settled; the question is
+            # quitting. Query them.
+            logger.info("[TOOL_LOOP] refused a clarification about a person "
+                        "this turn already resolved")
+            rejections += 1
+            trace.append({"tool": name, "rejected": "asked about a resolved person",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "PERSON_RESOLVED"}})
+            messages.append(HumanMessage(content=(
+                f"The look-up already resolved {resolved_names[0]!r}. There "
+                f"is nothing to clarify: use query_database with that exact "
+                f"name.")))
             continue
 
         named_camera = camera_named_by_user(user_text)

@@ -25,6 +25,10 @@ from backend.ml.dataset_definitions import (
 # Core changes, newest first. Each entry names the contract it introduced so
 # the page can point the administrator at the right place.
 RELEASE_NOTES: List[Dict[str, Any]] = [
+    {"id": "relational-models", "title": "Relational and threat-ranking model families",
+     "detail": "Coappearance pairs and social-graph nodes now have isolated point-in-time "
+               "feature sets, typed datasets and shadow-only anomaly trainers. Threat ranking "
+               "uses reviewed labels for offline analyst priority and is never called a threat probability."},
     {"id": "call-log", "title": "Every ML-Ops call is logged",
      "detail": "One structured record per /api/ml/* request (request id, actor, route, status, "
                "error code, duration, produced ids) in the application log, tagged [MLOPS_CALL]; "
@@ -152,9 +156,18 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
         rows = (await db.execute(
             select(MLFeatureDefinition.name, MLFeatureDefinition.entity_type, MLFeatureDefinition.computation)
             .where(MLFeatureDefinition.is_active.is_(True)))).all()
+        relational_builders = {
+            "pair_co_appearance_count", "pair_relationship_count",
+            "pair_relationship_rate", "pair_common_pipelines", "pair_percentage",
+            "pair_span_days", "pair_recency_days", "graph_degree_centrality_v1",
+            "graph_weighted_degree_log_v1", "graph_pagerank_v1",
+            "graph_clustering_v1", "graph_bridge_ratio_v1",
+            "graph_mean_edge_weight_v1",
+        }
         unreachable_definitions = [
             {"name": name, "entity_type": etype, "computation": comp}
-            for name, etype, comp in rows if comp not in BUILDERS]
+            for name, etype, comp in rows
+            if comp not in BUILDERS and comp not in relational_builders]
     except Exception:
         unreachable_definitions = []
     if unreachable_definitions:
@@ -164,16 +177,14 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
                                    ", ".join(f"{d['name']} ({d['entity_type']}/{d['computation']})"
                                              for d in unreachable_definitions))})
 
-    # LIVE scientific readiness of the shadow model: reviewed evidence and
-    # the mapping status change over time, the training-time snapshot does
-    # not. The recorded status (what the mode gate reads) is refreshed when
-    # it differs - never rewritten otherwise.
+    # LIVE scientific readiness is projected without persistence. Query
+    # endpoints must never change governance state merely because an operator
+    # opened a dashboard.
     live_readiness = None
     if shadow is not None:
         try:
-            from backend.ml.readiness import compute_model_readiness, refresh_recorded_scientific_status
+            from backend.ml.readiness import compute_model_readiness
             live_readiness = await compute_model_readiness(db, shadow, persist=False, light=True)
-            await refresh_recorded_scientific_status(db, shadow, live_readiness)
         except Exception:
             logger.warning("[ML_OPS] live readiness computation failed", exc_info=True)
             live_readiness = None
@@ -188,25 +199,6 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
     # ---- the ML contract, in the exact vocabulary operators read ----------
     ml_mode_available = availability["modes"]["ml"]["available"]
     mapping = await decision_service._mapping_policy(db)
-    if mapping is not None:
-        # A validated mapping row is created out-of-band (no endpoint writes
-        # one). The first time the system sees a policy version it records
-        # the fact, so even an out-of-band row leaves an audit trail.
-        try:
-            from db_models import MLAuditLog
-            from backend.ml.audit import ml_audit
-            seen = (await db.execute(
-                select(MLAuditLog.id).where(MLAuditLog.action == "mapping_observed",
-                                            MLAuditLog.object_id == str(mapping.version)[:64])
-                .limit(1))).scalar_one_or_none()
-            if seen is None:
-                await ml_audit(db, action="mapping_observed", actor_username="system",
-                               object_type="ml_signal_mapping", object_id=str(mapping.version),
-                               after={"kind": mapping.kind, "scope": mapping.scope,
-                                      "calibration_status": mapping.calibration_status})
-                await db.commit()
-        except Exception:
-            logger.debug("[ML_OPS] mapping_observed audit failed", exc_info=True)
     contract = {
         "dataset": "VALID_FOR_EXPERIMENTATION",
         "feature_set": "ACTIVE",

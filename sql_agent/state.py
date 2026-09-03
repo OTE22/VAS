@@ -147,15 +147,34 @@ class AgentState(TypedDict):
     entity_resolution_attempted: Optional[bool]
     entity_without_data: Optional[str]
     entity_not_found: Optional[str]
+    # [canonical name, detections on record]: the question matched nothing,
+    # but the person is not without data.
+    entity_has_data: Optional[List]
     # The camera equivalents: the filter named a camera that does not exist,
     # or one that exists and simply has nothing recorded. `known_cameras`
     # carries the real names so the answer can offer them.
     camera_not_found: Optional[str]
     camera_without_data: Optional[str]
+    # [label, detections on record]: the question matched nothing, but the
+    # camera is not without data.
+    camera_has_data: Optional[List]
     known_cameras: Optional[List[str]]
     # The stored name a misspelled camera was corrected to before re-running
     # the query, so a second empty result can be worded about THAT camera.
     camera_corrected_to: Optional[str]
+    # The stored label of the camera a SUCCESSFUL query filtered on, when the
+    # filter used the user's own spelling ('wezaret' matched 'WEZARET DEFA3').
+    # The narration names the camera as the system knows it.
+    camera_matched: Optional[str]
+    # "thank you" / "ok" / "شكرا": answered with a fixed phrase, no model.
+    acknowledgement: Optional[bool]
+    # The one routing decision for the turn: "data", "chat" or "undecided".
+    turn_kind: Optional[str]
+    # The misspelled token a "Did you mean X?" question is about; stored
+    # with the pending question so the answer can correct the request.
+    typo_of: Optional[str]
+    # This turn's request was rebuilt from a suspended one plus the answer.
+    resumed_from_typo: Optional[bool]
     # The (tool, args) signature of the action this turn committed to, so a
     # second action can recognise a repeat of it.
     committed_signature: Optional[List]

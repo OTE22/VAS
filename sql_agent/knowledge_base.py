@@ -64,13 +64,19 @@ ORDER BY d.timestamp DESC LIMIT 10""",
         },
         {
             "question": "Show all active pipelines",
-            "sql": "SELECT id, pipeline_id, created_at, total_detections FROM pipelines WHERE is_active = true",
-            "purpose": "List all currently active detection pipelines"
+            # Counted from detections: pipelines.total_detections is a
+            # lagging cache (KSA showed 17 against 25 real detections).
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name, p.pipeline_id, p.created_at,
+       (SELECT COUNT(*) FROM detections d WHERE d.pipeline_id = p.pipeline_id) AS total_detections
+FROM pipelines p WHERE p.is_active = true ORDER BY total_detections DESC""",
+            "purpose": "List all currently active cameras with their real detection counts"
         },
         {
             "question": "Which pipeline has the most detections",
-            "sql": "SELECT pipeline_id, total_detections FROM pipelines ORDER BY total_detections DESC LIMIT 1",
-            "purpose": "Find the most productive pipeline"
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name, COUNT(d.id) AS total_detections
+FROM pipelines p JOIN detections d ON d.pipeline_id = p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name ORDER BY total_detections DESC LIMIT 5""",
+            "purpose": "Rank cameras by their real detection counts, busiest first"
         },
         {
             "question": "Show recent detections",
@@ -152,10 +158,11 @@ ORDER BY date DESC LIMIT 30""",
         },
         {
             "question": "Show pipelines created this week",
-            "sql": """SELECT id, pipeline_id, is_active, created_at, total_detections
-FROM pipelines
-WHERE created_at > NOW() - INTERVAL '7 days'
-ORDER BY created_at DESC""",
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name, p.pipeline_id, p.is_active, p.created_at,
+       (SELECT COUNT(*) FROM detections d WHERE d.pipeline_id = p.pipeline_id) AS total_detections
+FROM pipelines p
+WHERE p.created_at > NOW() - INTERVAL '7 days'
+ORDER BY p.created_at DESC""",
             "purpose": "List recently created pipelines"
         },
         {
@@ -360,17 +367,22 @@ ORDER BY d.timestamp ASC""",
             "purpose": "Track all detections of Phoebe across cameras chronologically"
         },
         {
-            "question": "Who was at camera entrance today",
+            # A camera filter goes on location_name (the human-readable
+            # label), never on pipeline_id (a UUID). The placeholder is
+            # deliberately not a real-looking name: this seed used to say
+            # "entrance", and the model copied that filter into companion
+            # questions that named no camera at all.
+            "question": "Who was at camera CAMERA_NAME today",
             "sql": """SELECT f.name, COUNT(*) as detection_count, MIN(d.timestamp) as first_seen, MAX(d.timestamp) as last_seen
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE LOWER(p.pipeline_id) LIKE LOWER('%entrance%')
+WHERE LOWER(p.location_name) LIKE LOWER('%CAMERA_NAME%')
     AND DATE(d.timestamp) = CURRENT_DATE
     AND f.name IS NOT NULL
 GROUP BY f.name
 ORDER BY detection_count DESC""",
-            "purpose": "List all people detected at entrance camera today"
+            "purpose": "List all people detected at the named camera today"
         },
         {
             "question": "Show person's complete journey today",

@@ -73,15 +73,18 @@ def test_a_data_question_answered_from_memory_is_refused_once():
                for e in trace)
 
 
-def test_a_model_that_insists_is_allowed_through():
-    """Refused once, not forever: the second proposal wins."""
+def test_a_model_that_insists_ends_the_loop_for_guidance():
+    """Prose is never the answer to a data request. Insisting ends the
+    loop, and the turn lands on the guidance path instead."""
     llm = _FakeLLM(replies=[
         _Reply("answer_directly", {"answer": "x"}),
         _Reply("answer_directly", {"answer": "x"}),
     ])
-    call, _trace = _run(llm, "Who was detected at camera wezaret?",
-                        known_request=True)
-    assert call["name"] == "answer_directly"
+    call, trace = _run(llm, "Who was detected at camera wezaret?",
+                       known_request=True)
+    assert call is None
+    assert sum(1 for e in trace
+               if e.get("rejected") == "answered data without a query") == 2
 
 
 def test_a_greeting_still_goes_straight_to_the_answer():

@@ -34,6 +34,7 @@ import os
 import pickle
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid as uuid_mod
@@ -512,6 +513,17 @@ def _http(method, path, token=None, body=None):
         return e.code, json.loads(e.read() or b"{}")
 
 
+def _wait_ml_job(job_id, token, timeout=120):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status, body = _http("GET", f"/api/ml/jobs/{job_id}", token)
+        assert status == 200, body
+        if body.get("status") in ("completed", "failed", "cancelled"):
+            return body
+        time.sleep(0.25)
+    raise AssertionError(f"ML job {job_id} did not finish within {timeout}s")
+
+
 @pytest.fixture(scope="module")
 def token():
     req = urllib.request.Request(BASE + "/api/auth/login",
@@ -576,8 +588,11 @@ def test_legacy_backfill_records_hash_only_when_rows_reproduce_checksum(token):
     with open(bad_row.storage_path, "r+b") as f:
         f.seek(100); byte = f.read(1); f.seek(100); f.write(bytes([byte[0] ^ 0xFF]))
 
-    status, report = _http("POST", "/api/ml/datasets/backfill-hashes", token, {})
-    assert status == 200, report
+    status, scheduled = _http("POST", "/api/ml/datasets/backfill-hashes", token, {})
+    assert status == 202, scheduled
+    task = _wait_ml_job(scheduled["job_id"], token)
+    assert task["status"] == "completed", task
+    report = task["result"]
     verified = {v["dataset_id"]: v for v in report["verified"]}
     unverifiable = {u["dataset_id"]: u for u in report["unverifiable"]}
     assert good["dataset_id"] in verified and bad["dataset_id"] in unverifiable

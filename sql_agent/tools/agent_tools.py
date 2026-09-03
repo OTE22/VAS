@@ -267,6 +267,30 @@ class SQLAgentTools:
         state["input_language"] = envelope.input_language
         state["response_language"] = envelope.response_language
         state["input_normalization_error"] = None
+        # "thank you", "ok", "شكرا": nothing to plan, look up or narrate.
+        # Routed straight to the chat node, which answers with a fixed
+        # phrase and consults no model.
+        from .agent_loop import is_acknowledgement
+
+        # "yes" after "Did you mean WEZARET DEFA3?" is an ANSWER, not an
+        # acknowledgement: with a question pending, the words go to the
+        # router, which resumes the suspended request.
+        try:
+            from .. import dialogue_state as _ds
+
+            pending = _ds.get_value(
+                (state.get("working_context") or {}).get("dialogue_state") or {},
+                "pending_clarification")
+        except Exception:
+            pending = None
+        state["acknowledgement"] = (not pending
+                                    and is_acknowledgement(envelope.normalized_text))
+        if state["acknowledgement"]:
+            state["turn_is_a_request"] = False
+            state["planned_action"] = {"action": "chat",
+                                       "source": "acknowledgement",
+                                       "confidence": 1.0}
+            state["intent"] = "CHAT"
         logger.info(
             "[STAGE_0] Query accepted (normalized_chars=%d input_language=%s "
             "response_language=%s)",
@@ -424,6 +448,26 @@ class SQLAgentTools:
             state["clarification_answered"] = True
             logger.info("[REACT] clarification answered subject_present=%s",
                         bool(chosen.get("display_name")))
+            # INTERACTIVE RESUME. The question was "Did you mean X?" about a
+            # misspelled token: put the chosen name into the ORIGINAL words
+            # and run that request, as if the user had typed it correctly.
+            # The answer is the argument; the suspended request is the call.
+            try:
+                pending = _ds.get_value(
+                    (state.get("working_context") or {}).get("dialogue_state") or {},
+                    "pending_clarification") or {}
+            except Exception:
+                pending = {}
+            if pending.get("type") == "typo" and pending.get("original_query"):
+                corrected = self._resume_corrected_request(
+                    pending.get("original_query"), pending.get("wrong"),
+                    chosen.get("display_name") or "")
+                if corrected and corrected != user_text:
+                    logger.info("[RESUME] corrected request "
+                                "(chars=%d) replaces the answer", len(corrected))
+                    state["normalized_input"] = corrected
+                    state["resumed_from_typo"] = True
+                    user_text = corrected
 
         # What THIS TURN has already established. Re-entering the loop for a
         # second action used to start from nothing, so the agent could resolve
@@ -502,21 +546,32 @@ class SQLAgentTools:
                     step_budget = int(settings.SQL_AGENT_MAX_REASONING_STEPS)
                 else:
                     step_budget = tool_registry_max_steps()
+                # ONE routing decision per turn - chat, or query needed -
+                # from facts, made here and obeyed by the loop. Only when no
+                # fact settles it does the loop's single model judgement run.
+                dialogue_now = (state.get("working_context") or {}).get(
+                    "dialogue_state")
+                turn_kind, why = agent_loop.route_turn(
+                    user_text, dialogue_state=dialogue_now,
+                    identity_index=state.get("identity_index") or [],
+                    has_result=bool(candidates.get("last_result")),
+                    clarification_answered=bool(state.get("clarification_answered")))
+                state["turn_kind"] = turn_kind
+                logger.info("[ROUTE] kind=%s because %s", turn_kind, why)
+                known_request = (True if turn_kind == agent_loop.DATA
+                                 else False if turn_kind == agent_loop.CHAT
+                                 else None)
                 tool_call, tool_trace, turn_is_a_request = agent_loop.run_tool_loop(
                     self.llm,
                     user_text=user_text,
                     context_block=context_block,
                     db=self.db,
-                    dialogue_state=(state.get("working_context") or {}).get(
-                        "dialogue_state"),
+                    dialogue_state=dialogue_now,
                     artifact_index=state.get("artifact_index") or [],
                     identity_index=state.get("identity_index") or [],
                     max_steps=max(1, step_budget),
                     prior_observations=prior_observations,
-                    # Deterministic: this message ANSWERS the question we
-                    # asked, so it continues that request by construction.
-                    known_request=True if state.get(
-                        "clarification_answered") else None,
+                    known_request=known_request,
                     has_result=bool(candidates.get("last_result")))
 
                 deterministic_override = False
@@ -1024,8 +1079,36 @@ class SQLAgentTools:
         needle = observation.get("unresolved_entity") or ""
         state["entity_resolution_attempted"] = True
 
+        is_camera = (observation.get("unresolved_kind") == "camera"
+                     or self._is_known_camera_label(needle))
+        if is_camera and self._camera_invented(state, needle):
+            # The user never named this camera and none is held: the model
+            # copied a filter from an example. "There is no camera named
+            # 'entrance'" answered "with whom she was".
+            return self._requery_without_invented_camera(state, needle)
+
         if observation.get("unresolved_kind") == "camera":
             return self._resolve_camera_and_route(state, needle)
+
+        # A literal compared against a NAME column can still be a camera the
+        # model put in the wrong column: "No person named 'WEZARET DEFA3' is
+        # enrolled" is not an answer. Known camera labels take the camera path.
+        if self._is_known_camera_label(needle):
+            logger.info("[REACT] the name filter is a camera label; resolving "
+                        "as a camera")
+            return self._resolve_camera_and_route(state, needle)
+
+        from .agent_loop import is_pronoun_or_empty
+
+        if is_pronoun_or_empty(needle):
+            # Nothing to resolve: the filter was a pronoun or empty. Not
+            # "No person named 'she' is enrolled" - ask who is meant.
+            state["reasoning_exhausted"] = True
+            state["terminal_state"] = reasoning.NOT_FOUND
+            state["planned_action"] = {"action": "chat",
+                                       "source": "entity_resolution",
+                                       "confidence": 1.0}
+            return "chat_response"
 
         result = tx.execute_read_only(
             "resolve_person", {"name": needle}, db=self.db,
@@ -1046,6 +1129,25 @@ class SQLAgentTools:
             return "chat_response"
 
         if status != "resolved":
+            # A typo? Offer the closest enrolled names and SUSPEND the
+            # request: "yes" or a name resumes it with the correction made
+            # to the original words (see _resume_corrected_request).
+            suggestion = self._closest_names(
+                needle, [(e or {}).get("display_name")
+                         for e in (state.get("identity_index") or [])])
+            if suggestion:
+                state["clarification_candidates"] = [
+                    {"display_name": name} for name in suggestion]
+                state["typo_of"] = needle
+                state["clarify_question"] = self._did_you_mean(
+                    needle, suggestion, state)
+                state["planned_action"] = {"action": "clarify",
+                                           "source": "typo_suggestion",
+                                           "confidence": 1.0}
+                state["terminal_state"] = reasoning.CLARIFY
+                logger.info("[REACT] typo suggestion offered (%d candidate(s))",
+                            len(suggestion))
+                return "chat_response"
             state["entity_not_found"] = needle
             state["terminal_state"] = reasoning.NOT_FOUND
             state["planned_action"] = {"action": "chat",
@@ -1083,8 +1185,19 @@ class SQLAgentTools:
             return "check_schema"
 
         # The filter WOULD have matched this person, so zero rows is a fact
-        # about the DATA, not about the query: they exist and have nothing
-        # recorded. "No matching records" hides that difference.
+        # about the DATA, not about the query. But WHICH fact: "with whom
+        # she was" for a person with three detections returned no rows and
+        # was answered "JOEY is enrolled, but has no detections recorded" -
+        # false. Zero rows means the QUESTION matched nothing; whether the
+        # person has anything recorded is a separate, checkable fact.
+        recorded = self._detections_on_record(canonical)
+        if recorded:
+            state["entity_has_data"] = [canonical, recorded]
+            state["terminal_state"] = reasoning.FINAL
+            state["planned_action"] = {"action": "chat",
+                                       "source": "entity_resolution",
+                                       "confidence": 1.0}
+            return "chat_response"
         state["entity_without_data"] = canonical
         state["terminal_state"] = reasoning.FINAL
         state["planned_action"] = {"action": "chat",
@@ -1097,15 +1210,464 @@ class SQLAgentTools:
     #: [end of facts]" block into its reply. Asking it not to is a plea;
     #: this is a rule.
     _SCAFFOLD_BLOCKS = re.compile(
-        r"\[FACTS about this turn.*?\[end of facts\]\s*", re.S | re.I)
+        r"(?:<<<FACTS.*?FACTS>>>|\[FACTS about this turn.*?\[end of facts\])\s*",
+        re.S | re.I)
     _SCAFFOLD_LABELS = re.compile(
-        r"\[(?:end of )?(?:facts|prior turns)[^\]]*\]\s*", re.I)
+        r"(?:<<<FACTS|FACTS>>>|\[(?:end of )?(?:facts|prior turns)[^\]]*\])\s*",
+        re.I)
+    #: A TRANSLATED echo of the block: a leading bracketed or bold-titled
+    #: segment about "facts / this turn" in Arabic, up to the first blank
+    #: line. The Arabic model produced "[حقيقة حول هذا الدور - ...]" and
+    #: "**حقيقة حول هذا الدور**" followed by the translated bullet points.
+    _SCAFFOLD_TRANSLATED = re.compile(
+        r"^\s*(?:\*\*)?\[?\s*(?:حقيقة|حقائق)\s+(?:حول|عن)\s+هذا\s+الدور.*?"
+        r"(?:\n\s*\n|\Z)", re.S)
 
     @classmethod
     def _strip_scaffolding(cls, text: str) -> str:
         cleaned = cls._SCAFFOLD_BLOCKS.sub("", str(text or ""))
         cleaned = cls._SCAFFOLD_LABELS.sub("", cleaned)
+        cleaned = cls._SCAFFOLD_TRANSLATED.sub("", cleaned)
         return cleaned.strip()
+
+    #: Columns whose values are IDENTIFIERS a reader will search for. A
+    #: translated or transliterated one finds nothing.
+    _LITERAL_COLUMNS = ("name", "display_name", "person_name", "location_name",
+                        "camera_name", "camera", "location")
+    _LITERAL_PLACEHOLDERS = frozenset({"", "unknown", "none", "null", "n/a"})
+    _LITERAL_CAP = 12
+    #: Above this many distinct literals a report legitimately summarises,
+    #: so presence is not enforced - only instructed.
+    _LITERAL_ENFORCE_MAX = 8
+
+    @classmethod
+    def _literals_in_rows(cls, rows) -> List[str]:
+        """Distinct person and camera names in the result, in row order."""
+        seen: List[str] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            for column in cls._LITERAL_COLUMNS:
+                value = row.get(column)
+                if value is None:
+                    continue
+                text = " ".join(str(value).split())
+                if text.casefold() in cls._LITERAL_PLACEHOLDERS:
+                    continue
+                if text not in seen:
+                    seen.append(text)
+                if len(seen) >= cls._LITERAL_CAP:
+                    return seen
+        return seen
+
+    @classmethod
+    def _missing_literals(cls, text: str, literals) -> List[str]:
+        """Which literals the narration does not contain VERBATIM.
+
+        Compared case-insensitively with spacing and underscores folded, so
+        'WEZARET DEFA3' is satisfied by 'wezaret defa3' but not by the user's
+        'wezaret' and never by a transliteration."""
+        haystack = cls._camera_key(text)
+        return [lit for lit in literals if cls._camera_key(lit) not in haystack]
+
+    @classmethod
+    def _turn_literals(cls, state) -> List[str]:
+        """Identifiers this turn is about: the rows' names, plus the stored
+        camera the filter matched or was corrected to. The rows alone missed
+        the camera whenever the SQL selected names and counts but not the
+        camera column - which is most reports."""
+        literals = cls._literals_in_rows(
+            (state.get("query_result") or {}).get("rows") or [])
+        for key in ("camera_corrected_to", "camera_matched"):
+            value = " ".join(str(state.get(key) or "").split())
+            if value and value not in literals:
+                literals.append(value)
+        return literals[:cls._LITERAL_CAP]
+
+    def _note_matched_camera(self, state) -> None:
+        """Record the stored label of the camera a successful query filtered
+        on. One bounded read, only when the SQL filtered on a camera literal
+        and no correction already named it."""
+        if state.get("camera_matched") or state.get("camera_corrected_to"):
+            return
+        try:
+            from .. import reasoning
+            from . import tool_executors as tx
+
+            asked = reasoning.filtered_cameras(state.get("generated_sql"))
+            if not asked:
+                return
+            wanted = self._camera_key(asked[0])
+            # A literal shorter than three letters ("1", "%") is not a
+            # camera name; containment on it matched "MAD5AL AMEN (1)" for
+            # a question that never mentioned a camera.
+            if len(re.sub(r"[^\w]", "", wanted)) < 3:
+                return
+            cameras = (tx.execute_read_only("list_cameras", {}, db=self.db)
+                       .get("cameras") or [])
+            hits = [c for c in cameras if any(
+                wanted == key or (len(wanted) >= 4 and (wanted in key or key in wanted))
+                for key in (self._camera_key(c.get("location")),
+                            self._camera_key(c.get("camera"))) if key)]
+            if len(hits) == 1:
+                state["camera_matched"] = (hits[0].get("location")
+                                           or hits[0].get("camera"))
+                logger.info("[STEP_6] camera filter matched a stored camera")
+        except Exception as e:  # never fatal: the report still narrates
+            logger.warning("[STEP_6] could not note the matched camera: %s", e)
+
+    def _names_in_text(self, text: str, state) -> List[str]:
+        """Stored person and camera names that appear in `text`: the
+        identifiers a translation of it must keep verbatim."""
+        haystack = self._camera_key(text)
+        if not haystack:
+            return []
+        candidates = [str((e or {}).get("display_name") or "")
+                      for e in (state.get("identity_index") or [])]
+        candidates += [c.get("location") or c.get("camera") or ""
+                       for c in self._all_cameras()]
+        found: List[str] = []
+        for name in candidates:
+            key = self._camera_key(name)
+            if len(key) >= 3 and key in haystack and name not in found:
+                found.append(name)
+            if len(found) >= self._LITERAL_CAP:
+                break
+        return found
+
+    @classmethod
+    def _fidelity_directive(cls, state) -> str:
+        """Tell the narration, before it starts, exactly which strings must
+        appear as stored. The general rule ("copy names exactly") was being
+        ignored in Arabic: wezaret became وزارة and JOEY became جوي."""
+        literals = cls._turn_literals(state)
+        # A long list is a summary's raw material, not a checklist: told
+        # that twelve camera names "must appear", the model wrote "the
+        # pipeline pytest-cam was not found in the results" into a report
+        # about the three busiest cameras.
+        if not literals or len(literals) > cls._LITERAL_ENFORCE_MAX:
+            return ""
+        listed = ", ".join(f"'{lit}'" for lit in literals)
+        return ("\n\nIDENTIFIERS: " + listed + ". When you name any of these, "
+                "copy it EXACTLY - never translate or transliterate, whatever "
+                "the output language, and in Latin letters even inside Arabic "
+                "sentences. An operator searches the system with these "
+                "strings. You need not name all of them.")
+
+    @staticmethod
+    def _names_as_stored_footer(missing, language: str) -> str:
+        listed = ", ".join(missing)
+        if (language or "en") == "ar":
+            return f"\n\nالأسماء كما هي مسجلة في النظام: {listed}"
+        return f"\n\nNames as stored in the system: {listed}"
+
+    @classmethod
+    def _enforce_literals(cls, state, response_text: str, streaming_callback):
+        """After narration: if a stored name was translated away, append it
+        as stored. The user always leaves with the true identifier, and
+        nothing already streamed is contradicted - only completed."""
+        literals = cls._turn_literals(state)
+        if not literals or len(literals) > cls._LITERAL_ENFORCE_MAX:
+            return response_text
+        missing = cls._missing_literals(response_text, literals)
+        if not missing:
+            return response_text
+        logger.info("[STEP_6] narration dropped or translated %d identifier(s); "
+                    "appending them as stored", len(missing))
+        footer = cls._names_as_stored_footer(
+            missing, state.get("response_language") or "en")
+        if streaming_callback:
+            streaming_callback({"type": "content", "content": footer,
+                                "step": "response"})
+        return response_text + footer
+
+    _SCOPE_LITERALS = re.compile(
+        r"pipeline_id\s+IN\s*\(\s*'[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}'", re.IGNORECASE)
+
+    @classmethod
+    def _carries_scope_literals(cls, sql: str) -> bool:
+        """Does the SQL carry a camera-scope IN-list of pipeline ids? That
+        is the guard's wrapper for ONE user, never a query to learn or show
+        the model: seven learned examples had carried a test user's six
+        cameras into every later generation."""
+        return bool(cls._SCOPE_LITERALS.search(" ".join(str(sql or "").split())))
+
+    @staticmethod
+    def _reads_cached_counter(sql: str) -> bool:
+        """Does the SQL take pipelines.total_detections as a count instead
+        of counting detections? The column is a lagging cache."""
+        text = " ".join(str(sql or "").split())
+        if "total_detections" not in text or "pipelines" not in text.lower():
+            return False
+        return "count(" not in text.lower()
+
+    #: A question that asks for ONE fact. Answered in a sentence or three,
+    #: never as a six-section report. "when joey last seen and where" got
+    #: a SECURITY INTELLIGENCE REPORT with a timeline of one entry and
+    #: "Total detections: 1" - false, because the query fetched the latest
+    #: row by design and the report treated it as the whole history.
+    _POINT_QUESTION = re.compile(
+        r"^\s*(?:when|where|who|whom|how many|how much|how long|what time|"
+        r"which|is|are|was|were|did|does|do|has|have|last time|with whom|"
+        r"with who|متى|أين|وين|من|كم|هل|ما هو|ما هي|آخر مرة|مع من)\b", re.I)
+    _SQL_LIMIT = re.compile(r"\bLIMIT\s+(\d+)\b", re.I)
+    _DIRECT_MAX_ROWS = 3
+
+    #: "with whom", "was she alone": answered from the co-appearance
+    #: enrichment, which Python computed, never from the model's reading of
+    #: the subject's own rows ("JOEY was with her" - with herself).
+    _COMPANION_QUESTION = re.compile(
+        r"(with whom|with who\b|who (?:was|were) with|whom was .* with|"
+        r"\balone\b|accompan|together with|مع من|برفقة|وحده|وحدها|لوحده|"
+        r"لوحدها|بمفرده|بمفردها)", re.I)
+
+    @classmethod
+    def _is_companion_question(cls, text: str) -> bool:
+        from .agent_loop import is_companion_question
+
+        return is_companion_question(text)
+
+    @staticmethod
+    def _subject_of(state, rows) -> str:
+        fields = ((state.get("working_context") or {})
+                  .get("dialogue_state") or {}).get("fields") or {}
+        held = (fields.get("referenced_entity") or {}).get("value")
+        if isinstance(held, list) and held:
+            return str(held[0])
+        if isinstance(held, str) and held:
+            return held
+        for row in rows or []:
+            name = (row or {}).get("name") or (row or {}).get("person_name")
+            if name and str(name).casefold() not in ("unknown", "none"):
+                return str(name)
+        return ""
+
+    def _companion_answer(self, state, rows) -> Optional[str]:
+        """Who was with the subject, from the deterministic enrichment.
+
+        None when the question is not about companions or the enrichment
+        did not run; otherwise a sentence in the answer's language."""
+        if not self._is_companion_question(state.get("normalized_input") or ""):
+            return None
+        companions = state.get("co_appearances")
+        if companions is None:
+            return None
+        subject = self._subject_of(state, rows)
+        if not subject:
+            return None
+        arabic = (state.get("response_language") or "en") == "ar"
+        # The LATEST detection, whatever order the rows came in: "the last
+        # time she was seen" was answered with the earliest row.
+        def _when(row):
+            return str((row or {}).get("timestamp") or (row or {}).get("time") or "")
+        last = max(rows, key=_when) if rows else {}
+        camera = (last.get("camera_name") or last.get("location_name")
+                  or last.get("camera") or "")
+        when = str(last.get("timestamp") or last.get("time") or "")[:19]
+        where = (f" at {camera}" if camera else "") + (f" on {when}" if when else "")
+        where_ar = (f" في {camera}" if camera else "") + (f" بتاريخ {when}" if when else "")
+        # The sentence commits to the LATEST detection, so only encounters
+        # at that detection belong in it; the enrichment covers every
+        # detection of the subject, and listing them all under the latest
+        # time claimed company that was not there. Earlier encounters are
+        # reported with their own camera and time.
+        last_minute = when[:16]
+        others, earlier = [], []
+        for entry in companions:
+            entry = entry or {}
+            person = str(entry.get("person") or entry.get("name") or "")
+            if not person or person.casefold() == subject.casefold():
+                continue
+            seen = str(entry.get("subject_seen_at") or "")[:16]
+            if seen and last_minute and seen != last_minute:
+                if len(earlier) < 3:
+                    earlier.append((person, entry.get("camera_name") or "", seen))
+            elif person not in others:
+                others.append(person)
+
+        def _encounter(person, camera, seen):
+            if arabic:
+                return f"{person} مع {subject}" + (f" في {camera}" if camera else "") + f" بتاريخ {seen}"
+            return f"{person} with {subject}" + (f" at {camera}" if camera else "") + f" on {seen}"
+
+        if not others:
+            if arabic:
+                text = (f"لم يتم رصد أي شخص معروف آخر مع {subject}{where_ar} "
+                        f"ضمن نافذة التواجد المشترك.")
+            else:
+                text = (f"No other identified person was detected with {subject}"
+                        f"{where} within the co-appearance window.")
+            if earlier:
+                listed = "؛ ".join(_encounter(*e) for e in earlier) if arabic \
+                    else "; ".join(_encounter(*e) for e in earlier)
+                text += (f" في مرات سابقة: {listed}." if arabic
+                         else f" Earlier: {listed}.")
+            return text
+        listed = "، ".join(others) if arabic else ", ".join(others)
+        if arabic:
+            text = f"تم رصد {listed} مع {subject}{where_ar}."
+        else:
+            text = (f"{listed} was detected with {subject}{where}." if len(others) == 1
+                    else f"{listed} were detected with {subject}{where}.")
+        if earlier:
+            more = "؛ ".join(_encounter(*e) for e in earlier) if arabic \
+                else "; ".join(_encounter(*e) for e in earlier)
+            text += (f" في مرات سابقة: {more}." if arabic else f" Earlier: {more}.")
+        return text
+
+    # ------------------------------------------------------------ guidance
+    #
+    # When the turn cannot be answered, say what was understood and ask for
+    # what is missing, with real options from the data. Built in Python
+    # from state: a model asked to "handle" a request it does not understand
+    # answers something else instead.
+
+    def _known_camera_names(self, limit: int = 5) -> List[str]:
+        try:
+            from . import tool_executors as tx
+
+            cameras = (tx.execute_read_only("list_cameras", {}, db=self.db)
+                       .get("cameras") or [])
+            names = [c.get("location") or c.get("camera") or "" for c in cameras]
+            return [n for n in names if n][:limit]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _known_person_names(state, limit: int = 3) -> List[str]:
+        names = []
+        for entry in state.get("identity_index") or []:
+            name = (entry or {}).get("display_name")
+            if name and name not in names:
+                names.append(str(name))
+            if len(names) >= limit:
+                break
+        return names
+
+    def _guidance(self, state) -> str:
+        """A guiding question: what was understood, what is needed, and
+        concrete options the user can pick from."""
+        arabic = (state.get("response_language") or "en") == "ar"
+        fields = ((state.get("working_context") or {})
+                  .get("dialogue_state") or {}).get("fields") or {}
+
+        def held(name):
+            value = (fields.get(name) or {}).get("value")
+            if isinstance(value, list):
+                return ", ".join(str(v) for v in value if v)
+            return str(value) if value else ""
+
+        understood = [x for x in (held("referenced_entity"), held("active_camera"),
+                                  held("active_time_range")) if x]
+        cameras = self._known_camera_names()
+        people = self._known_person_names(state)
+        cam = cameras[0] if cameras else ("WEZARET DEFA3" if not arabic else "WEZARET DEFA3")
+        who = people[0] if people else "JOEY"
+
+        if arabic:
+            parts = ["لم أفهم هذا الطلب بما يكفي لتحويله إلى استعلام."]
+            if understood:
+                parts.append("ما فهمته حتى الآن: " + "، ".join(understood) + ".")
+            parts.append("للإجابة أحتاج إلى واحد مما يلي: اسم شخص "
+                         f"(مثل: «تتبع {who}»)، أو كاميرا "
+                         f"(مثل: «من تم رصده في كاميرا {cam}»)، أو فترة زمنية "
+                         "(مثل: «عمليات الرصد أمس»).")
+            if cameras:
+                parts.append("الكاميرات المتاحة: " + "، ".join(cameras) + ".")
+            if people:
+                parts.append("أشخاص مسجلون مثل: " + "، ".join(people) + ".")
+            parts.append("ماذا تريد بالضبط؟")
+            return " ".join(parts)
+
+        parts = ["I could not turn that into a query."]
+        if understood:
+            parts.append("What I have so far: " + "; ".join(understood) + ".")
+        parts.append("To answer I need one of: a person's name "
+                     f"(for example \"track {who}\"), a camera "
+                     f"(for example \"who was detected at camera {cam}\"), "
+                     "or a time window (for example \"detections yesterday\").")
+        if cameras:
+            parts.append("Cameras available: " + ", ".join(cameras) + ".")
+        if people:
+            parts.append("Enrolled people include: " + ", ".join(people) + ".")
+        parts.append("Which would you like?")
+        return " ".join(parts)
+
+    def _latest_detection_hint(self, state, arabic: bool) -> str:
+        """After an empty result with nothing to resolve: WHEN data exists.
+        "No matching records" for "detections today" leaves the user
+        guessing whether the system is empty or the day is."""
+        if self is None or not hasattr(self, "db"):
+            return ""
+        try:
+            result = self.db.execute_query(
+                "SELECT MAX(timestamp) AS latest FROM detections")
+            rows = (result or {}).get("rows") or []
+            latest = str((rows[0] or {}).get("latest") or "")[:19] if rows else ""
+        except Exception:
+            latest = ""
+        if not latest:
+            return ""
+        if arabic:
+            return f" آخر عملية رصد مسجلة كانت في {latest}."
+        return f" The most recent detection on record is {latest}."
+
+    @classmethod
+    def _is_point_question(cls, text: str) -> bool:
+        return bool(cls._POINT_QUESTION.match(" ".join(str(text or "").split())))
+
+    @classmethod
+    def _sql_limit(cls, state) -> Optional[int]:
+        sql = state.get("validated_sql") or state.get("generated_sql") or ""
+        match = cls._SQL_LIMIT.search(str(sql))
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def _limit_note(cls, state) -> str:
+        """A fact the narration needs: a LIMITed result is a slice, not a
+        history. Without it "Total detections: 1" was reported for a person
+        with three, from a query that asked for the latest one."""
+        limit = cls._sql_limit(state)
+        if limit is None or limit > 10:
+            return ""
+        return (f"\n\nSCOPE: the query asked for at most {limit} row(s) "
+                f"(LIMIT {limit}), chosen by the ORDER BY. These rows are a "
+                f"slice, not the whole history: state no total, count, "
+                f"first-seen, average or range as if they were.")
+
+    @classmethod
+    def _answer_shape(cls, state, row_count: int) -> str:
+        """'direct' for a point question with a handful of rows; 'report'
+        otherwise. A fact about the question and the result, not a
+        judgement about tone."""
+        if row_count <= cls._DIRECT_MAX_ROWS and (
+                cls._is_point_question(state.get("normalized_input") or "")
+                or (cls._sql_limit(state) or 99) <= cls._DIRECT_MAX_ROWS):
+            return "direct"
+        return "report"
+
+    def _direct_prompt(self, state, rows, row_count: int):
+        if self._answer_shape(state, row_count) != "direct":
+            return None
+        preview = json.dumps(rows[:self._DIRECT_MAX_ROWS], indent=2,
+                             default=str)
+        return ChatPromptTemplate.from_messages([
+            SystemMessage(content=(
+                "You answer ONE question from surveillance data, in one to "
+                "three plain sentences. No headings, no sections, no bullet "
+                "lists, no title, no recommendations. Use only the rows "
+                "given. Copy names, camera names and timestamps exactly. "
+                "Do not compute or state totals, ranges or averages the "
+                "rows do not directly contain.")),
+            HumanMessage(content=(
+                f"Question: {state.get('normalized_input', '')}\n\n"
+                f"Rows ({row_count} returned):\n{preview}\n"
+                + self._limit_note(state)
+                + (("\n\n" + self._language_directive(state))
+                   if self._language_directive(state) else "")
+                + self._fidelity_directive(state)
+                + "\n\nAnswer the question directly.")),
+        ])
 
     @staticmethod
     def _modified_purpose(base_purpose, modification) -> str:
@@ -1117,11 +1679,156 @@ class SQLAgentTools:
         change = " ".join(str(modification or "").split())
         return f"{base}, changed: {change}" if change else base
 
+    def _is_known_camera_label(self, text: str) -> bool:
+        wanted = self._camera_key(text)
+        if len(wanted) < 3:
+            return False
+        return any(wanted in (self._camera_key(c.get("location")),
+                              self._camera_key(c.get("camera")))
+                   for c in self._all_cameras())
+
+    def _all_cameras(self) -> List[dict]:
+        try:
+            from . import tool_executors as tx
+
+            return list(tx.execute_read_only("list_cameras", {}, db=self.db)
+                        .get("cameras") or [])
+        except Exception:
+            return []
+
+    def _camera_detections_on_record(self, pipeline_id: str) -> int:
+        """Detections recorded for a camera, by its pipeline id, through the
+        guarded read path (scope included)."""
+        try:
+            from sqlglot import expressions as exp
+
+            literal = exp.Literal.string(str(pipeline_id or "")).sql(dialect="postgres")
+            result = self.db.execute_query(
+                f"SELECT COUNT(*) AS n FROM detections WHERE pipeline_id = {literal}")
+            rows = (result or {}).get("rows") or []
+            return int((rows[0] or {}).get("n") or 0) if rows else 0
+        except Exception as e:
+            logger.warning("[REACT] could not count camera detections: %s", e)
+            return 0
+
+    def _detections_on_record(self, canonical: str) -> int:
+        """How many detections a resolved person has, through the guarded
+        read path (scope included). A fixed literal query; the name is
+        emitted as a SQL string literal, never interpolated raw."""
+        try:
+            import sqlglot
+            from sqlglot import expressions as exp
+
+            literal = exp.Literal.string(str(canonical)).sql(dialect="postgres")
+            result = self.db.execute_query(
+                f"SELECT COUNT(*) AS n FROM faces WHERE name = {literal}")
+            rows = (result or {}).get("rows") or []
+            return int((rows[0] or {}).get("n") or 0) if rows else 0
+        except Exception as e:  # never fatal: fall back to the old verdict
+            logger.warning("[REACT] could not count detections on record: %s", e)
+            return 0
+
+    # -------------------------------------------- interactive correction
+    #
+    # A misspelled name or camera suspends the request with "Did you mean
+    # X?". The answer ("yes", the name, "the second one") is matched to the
+    # candidates shown, the wrong token is replaced in the ORIGINAL words,
+    # and the corrected request runs through the pipeline as if typed.
+
+    @classmethod
+    def _closest_names(cls, needle: str, names, limit: int = 3,
+                       cutoff: float = 0.6) -> List[str]:
+        import difflib
+
+        pool = [str(n) for n in names if n]
+        wanted = cls._camera_key(needle)
+        if not wanted or not pool:
+            return []
+        # Score each name by the best of: the whole label, or any single
+        # word of it. "wezart" against "WEZARET DEFA3" scores 0.63 whole
+        # and 0.92 on the word "wezaret" - the typo is in one word.
+        scored = []
+        for name in pool:
+            key = cls._camera_key(name)
+            parts = [key] + [w for w in key.split() if len(w) >= 4]
+            best = max(difflib.SequenceMatcher(None, wanted, p).ratio()
+                       for p in parts)
+            if best >= cutoff:
+                scored.append((best, name))
+        scored.sort(key=lambda s: -s[0])
+        out: List[str] = []
+        for _score, name in scored:
+            if name not in out:
+                out.append(name)
+            if len(out) >= limit:
+                break
+        return out
+
+    @staticmethod
+    def _did_you_mean(wrong: str, candidates, state, camera: bool = False) -> str:
+        arabic = (state.get("response_language") or "en") == "ar"
+        listed = ("، " if arabic else ", ").join(candidates)
+        if arabic:
+            what = "كاميرا" if camera else "شخص مسجل"
+            return (f"لم أجد {what} باسم «{wrong}». هل تقصد {listed}؟ "
+                    f"أجب بـ «نعم» أو اكتب الاسم الصحيح.")
+        what = "a camera" if camera else "an enrolled person"
+        return (f"I couldn't find {what} named “{wrong}”. Did you mean "
+                f"{listed}? Reply “yes” or type the correct name.")
+
+    @staticmethod
+    def _resume_corrected_request(original: str, wrong: str, chosen: str) -> str:
+        """The original words with the wrong token replaced, case-blind.
+        If the token is not found verbatim, the chosen name is appended so
+        the request still names it."""
+        text = str(original or "")
+        pattern = re.compile(re.escape(str(wrong or "")), re.I)
+        if wrong and pattern.search(text):
+            return pattern.sub(chosen, text, count=1)
+        return f"{text} {chosen}".strip()
+
     @staticmethod
     def _camera_key(text: str) -> str:
         """How two camera names are compared: case, spacing and the
         underscore-versus-space that ids and labels disagree on."""
         return " ".join(str(text or "").replace("_", " ").split()).casefold()
+
+    def _camera_invented(self, state: AgentState, needle: str) -> bool:
+        """Did the camera filter come from anywhere but the user? A fact:
+        the message, the request being resumed, the SQL-generation input
+        and the held camera are the only places a camera can be named."""
+        key = self._camera_key(needle)
+        if len(key) < 3:
+            return False
+        if not (state.get("normalized_input") or state.get("user_input")):
+            return False    # no message to check against: no verdict
+        fields = (((state.get("working_context") or {}).get("dialogue_state")
+                   or {}).get("fields") or {})
+        held = (fields.get("active_camera") or {}).get("value")
+        sources = [state.get("normalized_input"), state.get("user_input"),
+                   state.get("sql_generation_input"), state.get("camera_corrected_to"),
+                   state.get("camera_matched")]
+        sources += held if isinstance(held, list) else [held]
+        haystack = " ".join(self._camera_key(s) for s in sources if s)
+        # The user's own spelling may differ ("wezart"): match on words too.
+        words = [w for w in key.split() if len(w) >= 3]
+        return key not in haystack and not any(w in haystack for w in words)
+
+    def _requery_without_invented_camera(self, state: AgentState, needle: str) -> str:
+        """Regenerate once with the invented filter named, on the same
+        deterministic path as the stored-spelling correction."""
+        state["sql_correction_hint"] = {
+            "sql": (state.get("generated_sql") or "")[:600],
+            "reason": (f"The user did not mention a camera named {needle!r}. "
+                       "Remove that camera filter and add no constraint the "
+                       "user did not state."),
+        }
+        state["generated_sql"] = ""
+        state["query_result"] = None
+        state["sql_validation_status"] = "VALID"
+        logger.info("[REACT] re-querying without an invented camera filter "
+                    "(name_chars=%d)", len(needle or ""))
+        return "check_schema"
 
     def _resolve_camera_and_route(self, state: AgentState, needle: str) -> str:
         """The camera the empty query filtered on: real, misspelled, or absent.
@@ -1150,10 +1857,16 @@ class SQLAgentTools:
                     "known=%d", len(needle or ""), len(exact), len(labels))
 
         if exact:
-            # The filter WOULD have matched this camera: zero rows is a fact
-            # about the data, not the query.
-            state["camera_without_data"] = (exact[0].get("location")
-                                            or exact[0].get("camera"))
+            # The filter WOULD have matched this camera - but WHICH fact is
+            # the zero: the camera has nothing recorded, or this question
+            # matched nothing? "yes" to "Did you mean WEZARET DEFA3?" was
+            # answered "exists, but has no detections" for a camera with 49.
+            label = exact[0].get("location") or exact[0].get("camera")
+            recorded = self._camera_detections_on_record(exact[0].get("camera"))
+            if recorded:
+                state["camera_has_data"] = [label, recorded]
+            else:
+                state["camera_without_data"] = label
             state["terminal_state"] = reasoning.FINAL
             state["planned_action"] = {"action": "chat",
                                        "source": "camera_resolution",
@@ -1162,7 +1875,7 @@ class SQLAgentTools:
 
         # A near match - the stored label contains what was asked, or the
         # other way round - is a spelling to correct and run again.
-        near = [c for c in cameras if wanted and any(
+        near = [c for c in cameras if len(wanted) >= 3 and any(
             wanted in key or key in wanted
             for key in (self._camera_key(c.get("location")),
                         self._camera_key(c.get("camera"))) if key)]
@@ -1186,6 +1899,24 @@ class SQLAgentTools:
             state["sql_validation_status"] = "VALID"
             logger.info("[REACT] re-querying with the stored camera name")
             return "check_schema"
+
+        # A stricter cutoff for cameras: a dead id like MD5AL_3EIN_7LWE
+        # loosely resembles "MAD5AL AMEN (1)", and listing the real cameras
+        # serves better than a weak guess.
+        suggestion = self._closest_names(needle, labels, cutoff=0.75)
+        if suggestion:
+            state["clarification_candidates"] = [
+                {"display_name": name} for name in suggestion]
+            state["typo_of"] = needle
+            state["clarify_question"] = self._did_you_mean(needle, suggestion,
+                                                           state, camera=True)
+            state["planned_action"] = {"action": "clarify",
+                                       "source": "typo_suggestion",
+                                       "confidence": 1.0}
+            state["terminal_state"] = reasoning.CLARIFY
+            logger.info("[REACT] camera typo suggestion offered (%d)",
+                        len(suggestion))
+            return "chat_response"
 
         state["camera_not_found"] = needle
         state["terminal_state"] = reasoning.NOT_FOUND
@@ -1369,8 +2100,20 @@ Adapt them to match the user's specific question.
         else:
             logger.warning("⚠️ No RAG context available")
 
-        # Get conversation context if available
+        # Get conversation context if available - but ONLY for a message that
+        # points back at the previous task. The block exists to resolve "the
+        # same camera", "them", "and yesterday"; a self-contained question has
+        # nothing to resolve, and handing it the transcript is how "show me
+        # all detections from today" was generated as "...at WEZARET DEFA3
+        # today" for a user who never mentioned a camera.
+        from .agent_loop import is_a_continuation
+
         conversation_context = state.get("conversation_context", "")
+        if conversation_context and not is_a_continuation(
+                state.get("normalized_input") or ""):
+            logger.info("[STEP_4] self-contained question: prior turns "
+                        "withheld from SQL generation")
+            conversation_context = ""
         context_section = ""
         if conversation_context:
             context_section = f"""
@@ -1448,7 +2191,14 @@ If no query is possible:
 {{"sql": "", "purpose": "Explanation of why no query can be generated"}}"""),
             HumanMessage(content=(
                 "Generate SQL for the AUTHORITATIVE USER REQUEST:\n"
-                f"{state['normalized_input']}\n"
+                # A companion question is answered from the subject's own
+                # detections (the enrichment does the rest), so the fixed
+                # paraphrase IS the request: the raw words made "shwe" a
+                # location.
+                + (f"{state['sql_generation_input']}\n"
+                   if (state.get("sql_generation_input")
+                       and self._is_companion_question(state.get("normalized_input") or ""))
+                   else f"{state['normalized_input']}\n")
                 + (("\nPLANNER PARAPHRASE (interpretation aid only; the "
                     "authoritative request wins on any conflict):\n"
                     f"{state['sql_generation_input']}\n")
@@ -1971,8 +2721,11 @@ Provide the corrected SQL:""")
         # A category with no phrase yet falls back rather than saying nothing.
         return phrases.get(language) or cls._FAILURE_DEFAULT[language]
 
-    @staticmethod
-    def _empty_narration(state: AgentState) -> str:
+    def _empty_narration(self, state: AgentState = None) -> str:
+        # Callable on the class with just a state (older tests do); the
+        # latest-detection hint then has no db to ask and is omitted.
+        if state is None and isinstance(self, dict):
+            self, state = None, self
         """No rows is an ANSWER, and it is given in the language asked.
 
         Worded as a result rather than a failure: "how many detections
@@ -2010,6 +2763,18 @@ Provide the corrected SQL:""")
             return (f"No records matched for camera “{corrected}”."
                     + (f" The query looked for: {purpose}" if purpose else ""))
 
+        busy_camera = state.get("camera_has_data")
+        if busy_camera:
+            label, count = busy_camera[0], int(busy_camera[1])
+            purpose = " ".join(str(state.get("sql_purpose") or "").split())
+            if arabic:
+                return (f"لا توجد نتائج لهذا السؤال عن الكاميرا «{label}». "
+                        f"(لدى الكاميرا {count} عملية رصد مسجلة.)"
+                        + (f" ما تم البحث عنه: {purpose}" if purpose else ""))
+            return (f"Nothing matched that question for camera “{label}”. "
+                    f"(The camera has {count} detection(s) on record.)"
+                    + (f" The query looked for: {purpose}" if purpose else ""))
+
         idle_camera = state.get("camera_without_data")
         if idle_camera:
             if arabic:
@@ -2017,6 +2782,18 @@ Provide the corrected SQL:""")
                         f"عمليات رصد مسجلة لها.")
             return (f"Camera “{idle_camera}” exists, but has no detections "
                     f"recorded.")
+
+        has_data = state.get("entity_has_data")
+        if has_data:
+            person, count = has_data[0], int(has_data[1])
+            purpose = " ".join(str(state.get("sql_purpose") or "").split())
+            if arabic:
+                return (f"لا توجد نتائج لهذا السؤال عن {person}. "
+                        f"({person} لديه {count} عملية رصد مسجلة.)"
+                        + (f" ما تم البحث عنه: {purpose}" if purpose else ""))
+            return (f"Nothing matched that question for {person}. "
+                    f"({person} has {count} detection(s) on record.)"
+                    + (f" The query looked for: {purpose}" if purpose else ""))
 
         known = state.get("entity_without_data")
         if known:
@@ -2042,8 +2819,10 @@ Provide the corrected SQL:""")
             return ("\u0644\u0627 \u062a\u0648\u062c\u062f "
                     "\u0633\u062c\u0644\u0627\u062a "
                     "\u0645\u0637\u0627\u0628\u0642\u0629 "
-                    "\u0644\u0647\u0630\u0627 \u0627\u0644\u0628\u062d\u062b.")
-        return "I searched the database and found no matching records."
+                    "\u0644\u0647\u0630\u0627 \u0627\u0644\u0628\u062d\u062b."
+                    + self._latest_detection_hint(state, arabic=True))
+        return ("I searched the database and found no matching records."
+                + self._latest_detection_hint(state, arabic=False))
 
     @staticmethod
     def _grounding_section(state) -> str:
@@ -2089,10 +2868,15 @@ Provide the corrected SQL:""")
         facts.append("No data was created, modified or deleted — this "
                      "assistant can only read.")
 
-        return ("\n[FACTS about this turn - the ONLY actions you may describe "
-                "as having happened]\n"
+        # Sentinels survive translation: the Arabic model rendered the
+        # bracketed label as "[حقيقة حول هذا الدور ...]" and echoed it,
+        # which the English-only strip missed. `<<<FACTS` / `FACTS>>>` are
+        # copied verbatim when a model copies at all, and stripped by rule.
+        return ("\n<<<FACTS\n[FACTS about this turn - the ONLY actions you may "
+                "describe as having happened. Never quote or translate this "
+                "block; it is not part of the conversation.]\n"
                 + "\n".join(f"- {f}" for f in facts)
-                + "\n[end of facts]\n\n")
+                + "\n[end of facts]\nFACTS>>>\n\n")
 
     @staticmethod
     def _language_directive(state) -> str:
@@ -2143,7 +2927,12 @@ Provide the corrected SQL:""")
             if not looks_tracking:
                 return {"co_appearances": []}
 
-            subject = str(first.get("name") or first.get("person_name") or "").strip()
+            # ONE subject for the enrichment and the answer: the held
+            # subject when the conversation has one, else the first named
+            # row. Taking rows[0] here while the answer used the held name
+            # produced "JOEY was detected with IRON MAN" for a question
+            # about Joey.
+            subject = str(self._subject_of(state, rows) or "").strip()
             if not subject:
                 return {"co_appearances": []}
             # The name came out of the database, but it still becomes a SQL
@@ -2210,6 +2999,9 @@ LIMIT 200"""
             return {"co_appearances": []}
 
     def generate_story_response(self, state: AgentState) -> AgentState:
+        # The camera the query filtered on, as the system stores it, so the
+        # report can name it and the fidelity check can hold it to that.
+        self._note_matched_camera(state)
         """
         STEP 6: Humanized Story Output
         Transform results into a clear narrative.
@@ -2250,6 +3042,22 @@ Do not expose internal workings or SQL queries."""),
             if row_count == 0:
                 state["final_response"] = self._empty_narration(state)
                 return state
+            # "With whom" / "alone?" is answered from the co-appearance
+            # enrichment Python computed - no model, no misreading of the
+            # subject's own rows as company.
+            companion = self._companion_answer(state, rows)
+            if companion:
+                state["final_response"] = companion
+                logger.info("[STEP_6] companion question answered from the "
+                            "enrichment")
+                callback = state.get("streaming_callback")
+                if callback:
+                    callback({"type": "content", "content": companion,
+                              "step": "response"})
+                return state
+            # A point question with a handful of rows gets a sentence, not
+            # a report. Decided from the question and the result.
+            direct_prompt = self._direct_prompt(state, rows, row_count)
 
             # Check if this is a person tracking query (has camera_name/pipeline_id and timestamp)
             is_tracking_query = False
@@ -2267,14 +3075,28 @@ Do not expose internal workings or SQL queries."""),
             processed_data = self._process_tracking_data(rows) if is_tracking_query else rows
             results_preview = json.dumps(processed_data[:100], indent=2, default=str)  # Increased limit
 
-            if is_tracking_query:
+            if direct_prompt is not None:
+                prompt = direct_prompt
+                logger.info("[STEP_6] direct answer: point question, %d row(s)",
+                            row_count)
+            elif is_tracking_query:
                 # Extract actual statistics from data
                 actual_stats = self._extract_tracking_stats(rows)
+                if self._sql_limit(state) is not None:
+                    # The statistics describe the RETURNED rows. Labelled,
+                    # or "total_detections" of a LIMIT 5 becomes "5 total".
+                    actual_stats = {
+                        "scope": (f"these figures describe only the "
+                                  f"{len(rows)} row(s) the query was limited "
+                                  f"to, not the person's full history"),
+                        **actual_stats}
 
                 # Deterministic enrichment computed by enrich_co_appearance —
                 # the model is told about co-appearances, never asked to find them.
                 co_rows = state.get('co_appearances') or []
-                language_directive = self._language_directive(state)
+                language_directive = (self._language_directive(state)
+                                      + self._fidelity_directive(state)
+                                      + self._limit_note(state))
                 co_appearance_block = (
                     json.dumps(co_rows, indent=2, default=str)
                     if co_rows else '(none found in the window)'
@@ -2421,7 +3243,7 @@ Query purpose: {state.get('sql_purpose', 'Data retrieval')}
 ACTUAL RESULTS ({row_count} total rows):
 {results_preview}
 
-{self._language_directive(state)}
+{self._language_directive(state)}{self._fidelity_directive(state)}{self._limit_note(state)}
 
 Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual data provided above.
 - Extract all values EXACTLY as they appear in the data
@@ -2489,6 +3311,12 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                         chunk = response_text[i:i+chunk_size]
                         streaming_callback({"type": "content", "content": chunk, "step": "response"})
             
+            # Stored identifiers the narration translated away are appended
+            # as stored (streamed too), so the reader always has the string
+            # the system knows.
+            response_text = self._enforce_literals(state, response_text,
+                                                   streaming_callback)
+
             # Add name correction notice if applicable
             if state.get("name_correction_notice"):
                 notice = state['name_correction_notice'] + '\n\n'
@@ -2727,6 +3555,22 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         "explanation of why no query can be generated",
     })
 
+    _REQUEST_OPENERS = re.compile(
+        r"^\s*(?:can|could|would|will|please|make|give|show|translate|export|"
+        r"هل|من فضلك|اجعل|أعطني|اعطني|ترجم|صدّر|صدر)\b", re.I)
+
+    @classmethod
+    def _subject_title(cls, state, working_context) -> str:
+        """A title from the held subject, in the document's language."""
+        fields = ((working_context or {}).get("dialogue_state") or {}).get("fields") or {}
+        held = (fields.get("referenced_entity") or {}).get("value")
+        subject = (held[0] if isinstance(held, list) and held else held) or ""
+        subject = " ".join(str(subject).split())
+        if not subject:
+            return ""
+        arabic = (state.get("response_language") or "en") == "ar"
+        return f"تقرير تتبع - {subject}" if arabic else f"{subject} - tracking report"
+
     @classmethod
     def _usable_title(cls, candidate) -> str:
         """A title, or "" when the candidate is prompt scaffolding.
@@ -2737,6 +3581,9 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         """
         text = " ".join(str(candidate or "").split())
         if not text or text.lower() in cls._PROMPT_PLACEHOLDERS:
+            return ""
+        # The words of a request are not a title for its result.
+        if cls._REQUEST_OPENERS.match(text):
             return ""
         if len(text) <= 120:
             return text
@@ -2779,6 +3626,12 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                 logger.warning(
                     "[RENDER] translation failed; no mislabeled artifact created")
                 return state
+            # Stored names are identifiers in the document as much as in
+            # the answer: append any the translation transliterated.
+            literals = self._names_in_text(content, state)
+            missing = self._missing_literals(translated, literals)
+            if missing and len(literals) <= self._LITERAL_ENFORCE_MAX:
+                translated += self._names_as_stored_footer(missing, language)
             content = translated
             logger.info("[RENDER] translated source %s -> %s before rendering",
                         source_language, language)
@@ -2799,7 +3652,12 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         # Joey including which camera detected them, ordered chronologically
         # for story gene"). They stay as fallbacks for results recorded before
         # the question was stored.
-        title = (self._usable_title(last_result.get("question"))
+        # The SUBJECT names the document when one is held: "IRON MAN -
+        # tracking report" beats "track iron man", and beats "can you make
+        # the report in arabic" outright, which is what a document was once
+        # titled because the request had been run as a query.
+        title = (self._subject_title(state, working_context)
+                 or self._usable_title(last_result.get("question"))
                  or self._usable_title(last_result.get("purpose"))
                  or self._usable_title(working_context.get("last_query"))
                  or "Intelligence Report")
@@ -2984,6 +3842,15 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                     "What would you like me to report on?")
                 return state
             translated = translate_document_text(source, language)
+            if translated:
+                # The same fidelity rule as narration: a stored name the
+                # translation transliterated ("آيرون مان" for IRON MAN) is
+                # appended as stored, so the reader keeps the identifier.
+                translated = self._strip_scaffolding(translated)
+                literals = self._names_in_text(source, state)
+                missing = self._missing_literals(translated, literals)
+                if missing and len(literals) <= self._LITERAL_ENFORCE_MAX:
+                    translated += self._names_as_stored_footer(missing, language)
             state["final_response"] = (
                 translated or translation_failure_message(language))
             state["response_language"] = language
@@ -3044,13 +3911,59 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             state["final_response"] = state["input_normalization_error"]
             return state
 
+        # An acknowledgement gets an acknowledgement. No model: given the
+        # transcript it parroted the previous completion line, and given
+        # the FACTS block it asked what context the user was providing.
+        if state.get("acknowledgement"):
+            from .agent_loop import is_thanks
+
+            arabic = (state.get("response_language") or "en") == "ar"
+            thanks = is_thanks(state.get("normalized_input") or "")
+            if arabic:
+                state["final_response"] = ("على الرحب والسعة." if thanks
+                                           else "تمام.")
+            else:
+                state["final_response"] = ("You're welcome." if thanks
+                                           else "Noted.")
+            logger.info("[STEP_7] acknowledgement answered without a model")
+            return state
+
+        # A SQL failure that exhausted its re-plans reaches this node too.
+        # Its answer is the closed failure phrase, never the chat model
+        # narrating the FACTS block ("It seems that the query you attempted
+        # ... nesting subqueries more than 5 deep") - and, in Arabic, the
+        # block itself translated and echoed.
+        from .. import reasoning
+
+        failed_type = (state.get("observation") or {}).get("error_type")
+        # A REFUSAL (SQL_FORBIDDEN) stays with the model on purpose: its
+        # FACTS block states "refused, nothing was executed", which a test
+        # pins, and the sentinel strip now covers a translated echo.
+        if (failed_type in (reasoning.ErrorType.SQL_INVALID,
+                            reasoning.ErrorType.SQL_GENERATION_ERROR,
+                            reasoning.ErrorType.SQL_EXECUTION_ERROR_TRANSIENT,
+                            reasoning.ErrorType.SQL_EXECUTION_ERROR_PERMANENT,
+                            reasoning.ErrorType.SQL_EXECUTION_ERROR_CORRECTABLE,
+                            reasoning.ErrorType.SQL_OUT_OF_SCOPE)
+                and not (state.get("query_result") or {}).get("success")):
+            state["final_response"] = self._failure_narration(state)
+            state["turn_failed"] = True
+            logger.info("[STEP_7] SQL failure answered with the closed phrase")
+            return state
+
         # Bounded reasoning ran out on a REAL request. Say so. This narration
         # existed and nothing read it, so the chat model improvised a fluent
         # reply and the user never learned the work had been abandoned.
         if state.get("reasoning_exhausted"):
+            # Not "I could not complete this": say what was understood and
+            # ask for what is missing, with options from the data.
             lang = state.get("response_language") or "en"
-            state["final_response"] = self._EXHAUSTED_NARRATION.get(
-                lang, self._EXHAUSTED_NARRATION["en"])
+            try:
+                state["final_response"] = self._guidance(state)
+            except Exception as e:
+                logger.warning("[REACT] guidance failed: %s", e)
+                state["final_response"] = self._EXHAUSTED_NARRATION.get(
+                    lang, self._EXHAUSTED_NARRATION["en"])
             state["turn_failed"] = True
             logger.info("[REACT] terminal=%s answered with the exhaustion "
                         "notice", state.get("terminal_state"))
@@ -3062,6 +3975,8 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         # handing them to the narration model instead produced answers that
         # contradicted the look-up. Deterministic, and one fewer model call.
         if (state.get("entity_without_data") or state.get("entity_not_found")
+                or state.get("entity_has_data")
+                or state.get("camera_has_data")
                 or state.get("camera_without_data")
                 or state.get("camera_not_found")
                 or state.get("camera_corrected_to")):
@@ -3114,7 +4029,18 @@ out because the assistant is read-only.
 Never claim an action succeeded unless the FACTS block below says it did."""),
             HumanMessage(content=(
                 context_block
-                + self._grounding_section(state)
+                # A turn that asked for nothing and ran nothing gets no FACTS
+                # block to narrate: given one, the model answered "what
+                # happened" with "The facts state that no database query
+                # was run". The one-line rule below keeps the guarantee
+                # the block exists for.
+                + (("\n[Nothing was run or produced for this message; do not "
+                    "claim any action.]\n\n")
+                   if (asks_for_something is False
+                       and not (state.get("query_result") or {}).get("success")
+                       and not state.get("artifact_payload")
+                       and not state.get("committed_artifact_id"))
+                   else self._grounding_section(state))
                 + state["normalized_input"]
                 + topic_rule
                 + (("\n\n" + self._language_directive(state))
@@ -3179,6 +4105,22 @@ Never claim an action succeeded unless the FACTS block below says it did."""),
         rows_found = int(query_result.get("row_count") or 0)
         if query_result.get("success") and generated_sql and not rows_found:
             logger.info("[STEP_7] not learning a query that matched nothing")
+
+        if (query_result.get("success") and rows_found > 0 and generated_sql
+                and self._reads_cached_counter(generated_sql)):
+            # It ran and returned a row, and it is still the wrong query: a
+            # learned example outranks the schema text for that question
+            # from then on. "What are the most active pipelines?" kept
+            # answering "pytest-cam ... null" after both the schema and the
+            # seeds were fixed, because this had been learned.
+            logger.info("[STEP_7] not learning a query that reads the cached "
+                        "detection counter")
+            state["should_learn"] = False
+
+        if generated_sql and self._carries_scope_literals(generated_sql):
+            logger.info("[STEP_7] not learning a query that carries a camera "
+                        "scope IN-list")
+            state["should_learn"] = False
 
         if (
             query_result.get("success") and

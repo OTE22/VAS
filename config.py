@@ -1272,6 +1272,26 @@ class Settings(BaseSettings):
         default=24,
         description="Cadence of the report-only scheduled drift check. Default: 24"
     )
+    ML_JOB_POLL_SECONDS: float = Field(
+        default=2.0, ge=0.2, le=60.0,
+        description="Idle polling interval for the durable ML worker"
+    )
+    ML_JOB_LEASE_SECONDS: int = Field(
+        default=60, ge=20, le=3600,
+        description="Worker lease duration, renewed while a child job is alive"
+    )
+    ML_JOB_HEARTBEAT_SECONDS: float = Field(
+        default=10.0, ge=1.0, le=300.0,
+        description="How often the ML worker renews a running job lease"
+    )
+    ML_JOB_MAINTENANCE_SECONDS: float = Field(
+        default=30.0, ge=5.0, le=3600.0,
+        description="Cadence for stale-lease cleanup and scheduled-job checks"
+    )
+    ML_JOB_TERMINATE_GRACE_SECONDS: float = Field(
+        default=15.0, ge=1.0, le=300.0,
+        description="Grace period before a cancelled ML child process is killed"
+    )
     ML_DRIFT_MIN_SAMPLES: int = Field(
         default=200,
         description="Below this sample count drift reports state insufficient_data instead of a verdict. Default: 200"

@@ -24,6 +24,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.ml.constants import FEATURE_SET_VERSION
+from backend.ml.model_specs import COAPPEARANCE_FEATURE_SET, SOCIAL_GRAPH_FEATURE_SET
 from backend.ml.feature_builders import (
     BUILDERS, FeatureUnavailable, load_person_context)
 from config import settings
@@ -121,6 +122,24 @@ FEATURE_INVENTORY: List[Dict[str, Any]] = [
      "params": {"days": 30},
      "readiness_requirements": {"min_pair_appearances": "ML_GRAPH_MIN_PAIR_APPEARANCES"},
      "description": "Windowed same-camera co-appearances; unavailable below the pair floor"},
+    {"name": "pair_co_appearance_count_90d", "entity_type": "pair", "window": "90d",
+     "source": "identity_relationships", "computation": "pair_relationship_count",
+     "params": {}, "description": "Cached coappearances observed for the canonical pair"},
+    {"name": "pair_co_appearance_rate_per_day", "entity_type": "pair", "window": "90d",
+     "source": "identity_relationships", "computation": "pair_relationship_rate",
+     "params": {}, "description": "Coappearances divided by observed relationship days"},
+    {"name": "pair_common_pipeline_count", "entity_type": "pair", "window": "90d",
+     "source": "identity_relationships", "computation": "pair_common_pipelines",
+     "params": {}, "description": "Distinct cameras shared by the pair"},
+    {"name": "pair_co_appearance_percentage", "entity_type": "pair", "window": "90d",
+     "source": "identity_relationships", "computation": "pair_percentage",
+     "params": {}, "description": "Bounded cached coappearance percentage divided by 100"},
+    {"name": "pair_relationship_span_days", "entity_type": "pair", "window": "90d",
+     "source": "identity_relationships", "computation": "pair_span_days",
+     "params": {}, "description": "Days between first and last coappearance"},
+    {"name": "pair_days_since_last_coappearance", "entity_type": "pair", "window": "90d",
+     "source": "identity_relationships", "computation": "pair_recency_days",
+     "params": {}, "description": "Days from the most recent coappearance to snapshot time"},
     # --- DEFERRED (seeded inactive, honest reasons) ------------------------
     {"name": "degree_centrality_90d", "entity_type": "person", "window": "90d",
      "source": "graph", "computation": "graph_degree_centrality", "params": {},
@@ -142,6 +161,29 @@ FEATURE_INVENTORY: List[Dict[str, Any]] = [
      "readiness_requirements": {"min_nodes": "ML_GRAPH_MIN_NODES",
                                 "min_edges": "ML_GRAPH_MIN_EDGES"},
      "description": "DEFERRED: graph below readiness floors"},
+    # v2 graph definitions are implemented by graph_feature_service and live
+    # in an isolated feature-set contract; they do not enter behavioural
+    # snapshots merely because they are active.
+    {"name": "graph_degree_centrality_90d", "version": 1, "entity_type": "person", "window": "90d",
+     "source": "identity_relationships", "computation": "graph_degree_centrality_v1", "params": {},
+     "readiness_requirements": {"min_nodes": "ML_GRAPH_MIN_NODES", "min_edges": "ML_GRAPH_MIN_EDGES",
+                                "min_observation_days": "ML_GRAPH_MIN_OBSERVATION_DAYS"},
+     "description": "Degree divided by the number of other observed graph nodes"},
+    {"name": "graph_weighted_degree_log_90d", "version": 1, "entity_type": "person", "window": "90d",
+     "source": "identity_relationships", "computation": "graph_weighted_degree_log_v1", "params": {},
+     "description": "log1p of total coappearance edge weight"},
+    {"name": "graph_pagerank_90d", "version": 1, "entity_type": "person", "window": "90d",
+     "source": "identity_relationships", "computation": "graph_pagerank_v1", "params": {},
+     "description": "Weighted PageRank on the readiness-qualified graph"},
+    {"name": "graph_clustering_coefficient_90d", "version": 1, "entity_type": "person", "window": "90d",
+     "source": "identity_relationships", "computation": "graph_clustering_v1", "params": {},
+     "description": "Fraction of possible links present among immediate neighbours"},
+    {"name": "graph_bridge_ratio_90d", "version": 1, "entity_type": "person", "window": "90d",
+     "source": "identity_relationships", "computation": "graph_bridge_ratio_v1", "params": {},
+     "description": "Share of neighbour pairs not directly linked; high values indicate bridging"},
+    {"name": "graph_mean_edge_weight_90d", "version": 1, "entity_type": "person", "window": "90d",
+     "source": "identity_relationships", "computation": "graph_mean_edge_weight_v1", "params": {},
+     "description": "Mean coappearance count across incident edges"},
     {"name": "mean_recognition_confidence_30d", "entity_type": "person", "window": "30d",
      "source": "detections", "computation": "mean_recognition_confidence",
      "params": {"days": 30}, "is_active": False,
@@ -246,6 +288,42 @@ class FeatureStore:
         self._def_cache[cache_key] = (now, defs)
         return defs
 
+    async def get_definitions_for_feature_set(self, db: AsyncSession,
+                                              feature_set_version: str) -> List[dict]:
+        """Return the exact schema owned by a feature-set family.
+
+        Person behavioural and graph snapshots deliberately have different
+        schemas even though both use ``entity_type=person``.  Selecting only
+        by entity type would create train/serve skew as new model families are
+        added.
+        """
+        if feature_set_version == COAPPEARANCE_FEATURE_SET:
+            names = {item["name"] for item in FEATURE_INVENTORY
+                     if item["entity_type"] == "pair" and item.get("is_active", True)}
+        elif feature_set_version == SOCIAL_GRAPH_FEATURE_SET:
+            names = {item["name"] for item in FEATURE_INVENTORY
+                     if item["name"].startswith("graph_") and item.get("is_active", True)}
+        else:
+            names = {item["name"] for item in FEATURE_INVENTORY
+                     if item["entity_type"] == "person"
+                     and not item["name"].startswith("graph_")
+                     and item.get("is_active", True)}
+        from db_models import MLFeatureDefinition
+        rows = (await db.execute(
+            select(MLFeatureDefinition)
+            .where(MLFeatureDefinition.name.in_(sorted(names)))
+            .order_by(MLFeatureDefinition.name, MLFeatureDefinition.version.desc())
+        )).scalars().all()
+        latest = {}
+        for row in rows:
+            latest.setdefault(row.name, row)
+        return [{
+            "name": row.name, "version": row.version, "entity_type": row.entity_type,
+            "computation": row.computation, "params": dict(row.params or {}),
+            "leakage_class": row.leakage_class, "window": row.window,
+            "readiness_requirements": row.readiness_requirements,
+        } for row in latest.values()]
+
     # ------------------------------------------------------------------
     # Snapshots (offline + online share this exact code path)
     # ------------------------------------------------------------------
@@ -260,7 +338,7 @@ class FeatureStore:
         Point-in-time correctness lives in load_person_context (start_time <
         as_of). Unavailable features carry reasons — no fake zeros.
         """
-        definitions = await self.get_active_definitions(db, "person")
+        definitions = await self.get_definitions_for_feature_set(db, FEATURE_SET_VERSION)
         if not definitions:
             # A snapshot with zero features is meaningless ML data. This is a
             # configuration error (definitions are migration-seeded), so it

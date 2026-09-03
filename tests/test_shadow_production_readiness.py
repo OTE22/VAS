@@ -352,24 +352,29 @@ def test_both_mode_change_routes_share_the_gate_and_its_body(token):
 
 
 # ---------------------------------------------------------------------------
-# 4. Reserved model types: contract, not a guaranteed 422 from the page
+# 4. Model-family contracts
 # ---------------------------------------------------------------------------
 
-def test_reserved_model_types_are_declared_not_trainable(token):
+def test_all_model_families_are_declared_with_typed_training_contracts(token):
     overview = _overview(token)
     types = {t["model_type"]: t for t in overview["model_types"]}
-    assert types["behavior_anomaly_model"]["trainable"] is True
-    for reserved in ("coappearance_anomaly_model", "social_graph_anomaly_model", "threat_ranking_model"):
-        assert types[reserved]["trainable"] is False and types[reserved]["status"] == "reserved"
-        status, body = _http("POST", "/api/ml/training-jobs", {"model_type": reserved}, token=token)
-        assert status == 422 and body["detail"]["error_code"] == "MODEL_TYPE_NOT_IMPLEMENTED"
+    for model_type in ("behavior_anomaly_model", "coappearance_anomaly_model",
+                       "social_graph_anomaly_model", "threat_ranking_model"):
+        assert types[model_type]["trainable"] is True
+        assert types[model_type]["status"] == "available"
+        assert types[model_type]["algorithms"]
+        assert types[model_type]["feature_set_version"]
+    assert types["coappearance_anomaly_model"]["entity_type"] == "pair"
+    assert types["threat_ranking_model"]["dataset_kind"] == "supervised"
+    assert types["threat_ranking_model"]["is_probability"] is False
     html = open("/app/frontend/admin/ml-ops.html", encoding="utf-8").read()
-    assert 'value="threat_ranking_model" disabled' in html and "Reserved / Future" in html
+    assert 'value="threat_ranking_model"' in html
+    assert 'value="threat_ranking_model" disabled' not in html
     js = open("/app/frontend/js/admin-ml-ops.js", encoding="utf-8").read()
     assert "renderModelTypeContract" in js and "trainable !== true" in js
 
 
-def test_trainer_refuses_reserved_types_in_process():
+def test_trainer_refuses_an_algorithm_from_the_wrong_model_family():
     async def _go():
         from backend.core.task_history import task_history_manager
         from backend.ml import trainer
@@ -377,11 +382,13 @@ def test_trainer_refuses_reserved_types_in_process():
         job_id = "pytest-reserved-" + uuid_mod.uuid4().hex[:8]
         await task_history_manager.create_job(job_id=job_id, task_type="ml_training",
                                               task_name="pytest reserved", description="pytest")
-        await trainer.run_training_job(job_id, model_type="threat_ranking_model")
+        await trainer.run_training_job(job_id, model_type="threat_ranking_model",
+                                       algorithm="isolation_forest")
         task = await task_history_manager.get_task_by_job_id(job_id)
         return task
     task = run_async(_go())
-    assert task["status"] == "failed" and task["error_code"] == "MODEL_TYPE_NOT_IMPLEMENTED"
+    assert task["status"] == "failed"
+    assert task["error_code"] == "ALGORITHM_NOT_SUPPORTED_FOR_MODEL"
     assert _sql("SELECT count(*) FROM ml_models WHERE model_type = 'threat_ranking_model'", scalar=True) == 0
 
 
@@ -698,7 +705,7 @@ def test_seed_labels_and_duplicate_comparisons_cannot_reach_readiness_gate_or_re
         assert gates["signal_mapping"]["status"] == "REQUIRES_VALIDATION"
         assert _policy() is None, "labels never create a mapping policy"
         report = _evidence(token, model_id)
-        assert report["data_quality"]["duplicate_comparisons"] >= 1
+        assert report["data_quality"]["duplicate_comparisons"] == 0
         entry = report["models"][model_id]
         assert entry["predictions"] == _sql(
             "SELECT count(*) FROM ml_predictions WHERE model_id = CAST(:m AS uuid) AND ml_anomaly_band IS NOT NULL "
@@ -706,7 +713,7 @@ def test_seed_labels_and_duplicate_comparisons_cannot_reach_readiness_gate_or_re
         assert "seed-manual" in report["excluded_non_evidence_labels"]
         status, summary = _http("GET", "/api/ml/shadow/summary?days=7", token=token)
         if status == 200 and not summary.get("insufficient_data"):
-            assert summary["duplicate_comparisons"] >= 1
+            assert summary["duplicate_comparisons"] == 0
         alerts = {a["code"] for a in overview["system"]["alerts"]}
         assert "NON_EVIDENCE_LABELS_PRESENT" in alerts
     finally:

@@ -10,7 +10,7 @@ three-sided navbar registration; version-pinned assets in the house script
 order; the seven warnings verbatim in markup; scroll-region layout; and the
 page script's safety contracts — DOM building only, typed normalizers,
 latest-wins requests, bounded job polling, no browser dialogs, pagehide
-cleanup.
+cleanup, and the live operator-console hierarchy.
 """
 
 import json
@@ -137,13 +137,13 @@ def test_page_chrome_follows_the_house_rules():
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
     nav_at = html.find("js/navbar-loader.js?v=nav-7")
-    page_at = html.find("js/admin-ml-ops.js?v=mlops-8")
+    page_at = html.find("js/admin-ml-ops.js?v=mlops-13")
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-8" in html, "the page stylesheet is not version-pinned"
+    assert "admin-ml-ops.css?v=mlops-9" in html, "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 
@@ -158,6 +158,7 @@ def test_page_surfaces_every_operations_section():
     for element_id in ("current-mode-badge", "mode-cards", "pause-ml-btn",
                        "label-readiness-body", "data-readiness-body",
                        "optional-capabilities-body", "models-table-body",
+                       "model-evaluation", "model-evaluation-result",
                        "stop-shadow-btn", "registry-action-panel",
                        "model-detail-drawer", "shadow-summary-body",
                        "predictions-body", "predictions-fallback-only",
@@ -166,6 +167,24 @@ def test_page_surfaces_every_operations_section():
                        "build-dataset-btn", "labels-body", "create-label-btn",
                        "policy-body", "audit-body"):
         assert f'id="{element_id}"' in html, f"missing section anchor #{element_id}"
+
+
+def test_operator_console_leads_with_live_backend_execution_state():
+    html = read(HTML)
+    js = read(JS)
+    queue_at = html.find('id="operations-queue"')
+    governance_at = html.find('id="system-governance"')
+    assert -1 not in (queue_at, governance_at) and queue_at < governance_at
+    for element_id in (
+        "console-connection-state", "summary-mode", "summary-worker",
+        "summary-active-jobs", "summary-last-update", "jobs-refresh-btn",
+    ):
+        assert f'id="{element_id}"' in html
+    assert "function setConsoleConnection" in js
+    assert "function setSummaryValue" in js
+    assert "JOB_PRESENTATION" in js
+    assert "mlops-job-row" in js
+    assert "aria-valuenow" in js
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +225,13 @@ def test_page_script_requests_are_latest_wins_and_cleaned_up():
     assert "no-store" in code
 
 
-def test_page_script_polling_is_bounded():
+def test_page_script_polling_has_bounded_backoff():
     code = code_only(read(JS))
-    match = re.search(r"const JOB_POLL_MAX = (\d+)", code)
-    assert match, "no JOB_POLL_MAX bound"
-    assert int(match.group(1)) <= 1000
-    assert "attempt > JOB_POLL_MAX" in code, "the poll loop never checks its bound"
+    match = re.search(r"const JOB_POLL_MAX_BACKOFF_MS = (\d+)", code)
+    assert match, "no job polling backoff bound"
+    assert int(match.group(1)) <= 60000
+    assert "Math.min(JOB_POLL_MAX_BACKOFF_MS" in code
+    assert "window.setTimeout(refreshJobs, delay)" in code
 
 
 def test_page_script_exposes_no_filesystem_paths():

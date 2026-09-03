@@ -101,6 +101,38 @@ services:
     networks:
       - face_recognition_network
 
+  # One-shot schema migration. Both the API and the ML worker wait for this,
+  # matching the production startup ordering and eliminating schema races.
+  migrate:
+    image: face-detector/api:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+      args:
+        INSTALL_DEV: "true"
+    user: "1000:1000"
+    environment:
+      ENVIRONMENT: development
+      CONFIG_PREFLIGHT: "0"
+      MIGRATIONS_MODE: run
+      DATABASE_URL: postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: face_recognition
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      HF_HOME: /home/appuser/.cache/huggingface
+    volumes:
+      - ../:/app
+      - hf_cache_data:/home/appuser/.cache/huggingface
+    command: ["python", "-m", "backend.utils.migrations", "--upgrade-head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - face_recognition_network
+
   # Face Recognition Service (CPU Version)
   face_recognition:
     # Name the built image explicitly. Without this, Compose derives it from
@@ -327,6 +359,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       # Liveness only (zero-I/O endpoint): checks the event loop is alive without
       # flapping when a dependency is slow. /health stays available for humans.
@@ -351,6 +385,63 @@ services:
         reservations:
           cpus: '2.0'
           memory: 4G
+    networks:
+      - face_recognition_network
+
+  # Separate ML worker even in development, so local behavior matches the
+  # production request/queue/worker boundary.
+  ml_worker:
+    image: face-detector/api:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+      args:
+        INSTALL_DEV: "true"
+    container_name: face_recognition_ml_worker
+    user: "1000:1000"
+    environment:
+      ENVIRONMENT: development
+      PYTHONUNBUFFERED: "1"
+      CONFIG_PREFLIGHT: "0"
+      MIGRATIONS_MODE: verify
+      DATABASE_URL: postgresql+asyncpg://postgres:admin@postgres:5432/face_recognition
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: face_recognition
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_POOL_SIZE: 5
+      DB_MAX_OVERFLOW: 5
+      DB_POOL_PRE_PING: "true"
+      ML_WORKER_ID: ml-worker-development-primary
+      ML_ARTIFACT_DIR: /app/models/ml
+      LOG_LEVEL: INFO
+      LOG_DIR: /var/log/face-recognition
+      HF_HOME: /home/appuser/.cache/huggingface
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+    volumes:
+      - ../:/app
+      - ../logs:/var/log/face-recognition
+      - hf_cache_data:/home/appuser/.cache/huggingface
+    command: ["python", "-m", "backend.ml.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    restart: unless-stopped
     networks:
       - face_recognition_network
 
@@ -557,4 +648,3 @@ networks:
   webhook_integration:
     external: true
     name: webhook_integration
-

@@ -186,6 +186,7 @@ _NAME_COLUMNS = frozenset({"name", "display_name", "person_name"})
 #: result narrowed to one of these deserves the same second look a person's
 #: name gets: the camera may be misspelled, or not exist at all.
 _CAMERA_COLUMNS = frozenset({"location_name", "pipeline_id"})
+_UUID_SHAPE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
 def _filtered_literals(sql: Optional[str], columns: frozenset) -> list:
@@ -210,12 +211,19 @@ def _filtered_literals(sql: Optional[str], columns: frozenset) -> list:
             if not isinstance(node, (exp.EQ, exp.Like, exp.ILike, exp.In,
                                      exp.NEQ)):
                 continue
-            if not [c for c in node.find_all(exp.Column)
-                    if c.name.lower() in columns]:
+            matched = [c for c in node.find_all(exp.Column)
+                       if c.name.lower() in columns]
+            if not matched:
                 continue
-            for literal in node.find_all(exp.Literal):
-                if not literal.is_string:
-                    continue
+            literals = [lit for lit in node.find_all(exp.Literal) if lit.is_string]
+            # The caller's camera SCOPE is an IN-list of pipeline ids that
+            # the guard adds; it is not something the user asked for. An
+            # IN-list of several ids, or a UUID-shaped id, is the scope.
+            if any(c.name.lower() == "pipeline_id" for c in matched) and (
+                    (isinstance(node, exp.In) and len(literals) > 1)
+                    or any(_UUID_SHAPE.match(str(lit.this)) for lit in literals)):
+                continue
+            for literal in literals:
                 value = str(literal.this).strip("%").strip()
                 if value and value not in found:
                     found.append(value)
