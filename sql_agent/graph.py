@@ -28,9 +28,14 @@ _OBSERVATION_TARGETS = (
 )
 
 
-def create_sql_agent(conversation_memory=None) -> StateGraph:
-    """Create the SQL Intelligence Agent workflow with RAG."""
-    tools = SQLAgentTools(conversation_memory=conversation_memory)
+def create_sql_agent(conversation_memory=None, db=None) -> StateGraph:
+    """Create the SQL Intelligence Agent workflow with RAG.
+
+    `db` is the owning agent's DatabaseManager. Passing it is what makes a
+    policy set on the agent (the per-turn camera scope) govern the SQL the
+    graph runs; without it the tools hold a separate, unscoped instance.
+    """
+    tools = SQLAgentTools(conversation_memory=conversation_memory, db=db)
 
     # Create the graph
     workflow = StateGraph(AgentState)

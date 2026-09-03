@@ -54,6 +54,19 @@ _session_locks: Dict[str, threading.Lock] = {}
 # more than any prompt window consumes (get_conversation_context reads 6).
 # The bound is on raw turns ONLY; see the pruning comment in save_session.
 _MAX_STORED_MESSAGES = 40
+
+#: Per-message cap in the prompt window. The planner envelope is budgeted
+#: at 4,000 characters; three verbatim intelligence reports of 3-5 KB each
+#: dwarfed it. The head of a message is what "it" and "that one" resolve
+#: against; the rest is available through last_result, not the transcript.
+_MAX_CONTEXT_MESSAGE_CHARS = 600
+
+
+def _clip(text, limit: int = _MAX_CONTEXT_MESSAGE_CHARS) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " […]"
 _session_locks_guard = threading.Lock()
 
 
@@ -545,9 +558,9 @@ class ConversationMemory:
         context_lines = ["Previous conversation context:"]
         for msg in recent:
             if isinstance(msg, HumanMessage):
-                context_lines.append(f"User: {msg.content}")
+                context_lines.append(f"User: {_clip(msg.content)}")
             elif isinstance(msg, AIMessage):
-                context_lines.append(f"Assistant: {msg.content}")
+                context_lines.append(f"Assistant: {_clip(msg.content)}")
 
         return "\n".join(context_lines)
 

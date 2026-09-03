@@ -92,6 +92,9 @@ def main():
             # Process the query
             print("\n🤖 Agent: ", end="")
             response = agent.query(user_input)
+            if isinstance(response, tuple):
+                # (phrase, state) is how a failed or flagged turn returns.
+                response = response[0]
             print(response)
 
         except KeyboardInterrupt:

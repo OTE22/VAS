@@ -1160,13 +1160,33 @@ async def sql_agent_query(
         try:
             QUERY_TIMEOUT = SQL_AGENT_TOTAL_TIMEOUT
             try:
+                # The user's OWN lock first, and bounded. Taking the global
+                # slot before waiting on it let a user's second tab hold a
+                # slot while blocked behind their first: two requests from
+                # one person occupied both slots and everyone else got BUSY.
+                user_lock = _get_user_lock(user_id) if user_id else None
+                lock_acquired = False
+                resources_deferred = False
+                if user_lock is not None:
+                    try:
+                        await asyncio.wait_for(user_lock.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+                        lock_acquired = True
+                    except asyncio.TimeoutError:
+                        _ACTIVE_REQUESTS.pop(rest_request_id, None)
+                        return JSONResponse(
+                            status_code=503,
+                            content={"success": False, "error": _BUSY_MESSAGE, "response": None},
+                        )
                 # Concurrency cap: bounded number of simultaneous agent queries;
                 # reject with "busy" instead of piling threads onto Ollama.
                 try:
                     await asyncio.wait_for(_sql_agent_semaphore.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
                 except asyncio.TimeoutError:
+                    if lock_acquired:
+                        user_lock.release()
+                        lock_acquired = False
                     # Busy is retryable BY DESIGN, so the idempotency entry is
-                    # removed outright — keeping it would 409 the very retry
+                    # removed outright: keeping it would 409 the very retry
                     # the message invites.
                     _ACTIVE_REQUESTS.pop(rest_request_id, None)
                     return JSONResponse(
@@ -1174,13 +1194,7 @@ async def sql_agent_query(
                         content={"success": False, "error": _BUSY_MESSAGE, "response": None},
                     )
 
-                user_lock = _get_user_lock(user_id) if user_id else None
-                lock_acquired = False
-                resources_deferred = False
                 try:
-                    if user_lock:
-                        await user_lock.acquire()
-                        lock_acquired = True
                     logger.info("[SQL_AGENT_API] Starting query timeout=%ss chars=%d",
                                 QUERY_TIMEOUT, len(query))
                     # The shared lifecycle, inside the user's lock — the same
@@ -1368,14 +1382,14 @@ async def sql_agent_query(
                     query=query,
                     response=response,
                     session_id=session_id,
-                    success=True,
+                    success=not result_dict.get("turn_failed"),
                     processing_time_ms=execution_time_ms,
                     metadata=metadata,
                     request_label="query-sync",
                 )
 
         body = {
-            "success": True,
+            "success": not result_dict.get("turn_failed"),
             "response": response,
             "session_id": session_id,
             "timestamp": datetime.utcnow().isoformat()
@@ -1547,20 +1561,30 @@ async def sql_agent_query_stream(
             timeout_source = None
 
             try:
+                # Per-user serialization FIRST (double-submit / second tab),
+                # and bounded, so a blocked tab never holds a global slot.
+                if user_lock is not None:
+                    try:
+                        await asyncio.wait_for(user_lock.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+                        lock_acquired = True
+                    except asyncio.TimeoutError:
+                        yield evt({"type": "error", "error_code": "AGENT_BUSY", "message": _BUSY_MESSAGE})
+                        yield evt({"type": "complete", "success": False})
+                        completion_sent = True
+                        return
+
                 # Concurrency cap: bounded simultaneous agent queries
                 try:
                     await asyncio.wait_for(_sql_agent_semaphore.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
                     sem_acquired = True
                 except asyncio.TimeoutError:
+                    if lock_acquired and user_lock is not None:
+                        user_lock.release()
+                        lock_acquired = False
                     yield evt({"type": "error", "error_code": "AGENT_BUSY", "message": _BUSY_MESSAGE})
                     yield evt({"type": "complete", "success": False})
                     completion_sent = True
                     return
-
-                # Per-user serialization (double-submit / second tab)
-                if user_lock is not None:
-                    await user_lock.acquire()
-                    lock_acquired = True
 
                 # The shared lifecycle. This transport NOT calling it is how
                 # "same report but camera 3" silently bound to recency on the
@@ -1840,17 +1864,14 @@ async def sql_agent_query_stream(
                     slowest_step, slowest_ms, stage_summary,
                 )
 
-                # Conversation-memory fallback for history persistence only
-                if not final_response:
-                    try:
-                        if hasattr(agent_instance, 'conversation_memory') and agent_instance.conversation_memory:
-                            recent_messages = agent_instance.conversation_memory.get_recent_messages(limit=5)
-                            for msg in reversed(recent_messages or []):
-                                if msg.get('role') == 'assistant' and msg.get('content'):
-                                    final_response = msg.get('content')
-                                    break
-                    except Exception:
-                        pass
+                # No fallback for an empty response. This used to copy the
+                # PREVIOUS assistant message out of memory and persist it as
+                # this query's answer. The failure is named instead.
+                outcome_error = None
+                if not stream_success:
+                    outcome_error = ("Cancelled" if was_cancelled
+                                     else f"Timed out ({timeout_source})"
+                                     if timeout_source else "Streaming error")
             
             # Log to audit and save history after streaming completes.
             # Note: do NOT require final_response here - even queries that produced an
@@ -1880,7 +1901,7 @@ async def sql_agent_query_stream(
                                 query=query,
                                 response=final_response,
                                 success=stream_success,
-                                error_message=None if stream_success else "Streaming error",
+                                error_message=outcome_error,
                                 processing_time_ms=stream_time_ms,
                                 session_id=session_id
                             )
@@ -2158,20 +2179,32 @@ async def sql_agent_websocket(websocket: WebSocket):
             worker_done = None
             user_lock = _get_user_lock(current_user.id) if (AUTH_AVAILABLE and current_user) else None
             try:
+                # Per-user lock FIRST and bounded, so a blocked second
+                # message never holds a global slot (see the REST route).
+                if user_lock is not None:
+                    try:
+                        await asyncio.wait_for(user_lock.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+                        lock_acquired = True
+                    except asyncio.TimeoutError:
+                        await websocket.send_json(ws_evt({"type": "error", "error_code": "AGENT_BUSY",
+                                                          "message": _BUSY_MESSAGE}))
+                        await websocket.send_json(ws_evt({"type": "complete", "success": False}))
+                        _finish_request(request_id, "failed")
+                        continue
+
                 # Concurrency cap shared with the HTTP endpoints
                 try:
                     await asyncio.wait_for(_sql_agent_semaphore.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
                     sem_acquired = True
                 except asyncio.TimeoutError:
+                    if lock_acquired and user_lock is not None:
+                        user_lock.release()
+                        lock_acquired = False
                     await websocket.send_json(ws_evt({"type": "error", "error_code": "AGENT_BUSY",
                                                       "message": _BUSY_MESSAGE}))
                     await websocket.send_json(ws_evt({"type": "complete", "success": False}))
                     _finish_request(request_id, "failed")
                     continue
-
-                if user_lock is not None:
-                    await user_lock.acquire()
-                    lock_acquired = True
 
                 # The shared lifecycle — same call as REST and SSE, so this
                 # transport can no longer drift (it used to skip the artifact
@@ -2677,8 +2710,12 @@ async def prepare_turn(agent_instance, current_user) -> None:
 
     Never fatal: a failed load costs reference resolution, not the turn.
     """
+    # Scope FIRST, and not wrapped: if it cannot be bound the turn must not
+    # run against whatever scope the cached agent held before.
+    scope = await _pipeline_scope_for(current_user)
+    agent_instance.set_pipeline_scope(scope)
     await _refresh_artifact_index(agent_instance, current_user)
-    await _refresh_identity_index(agent_instance, current_user)
+    await _refresh_identity_index(agent_instance, current_user, scope)
     try:
         session_id = agent_instance.conversation_memory.current_session_id
     except Exception:
@@ -2798,7 +2835,42 @@ def _remember_result_row_id(agent_instance, history_id) -> None:
         logger.warning("[MEMORY] could not record the result row id: %s", e)
 
 
-async def _refresh_identity_index(agent_instance, current_user) -> None:
+async def _pipeline_scope_for(current_user):
+    """None for an administrator; otherwise the user's assigned cameras.
+
+    The rule every REST route applies through require_pipeline_access - the
+    chatbot used to be the one door that skipped it. If the grants cannot
+    be read this returns an EMPTY set, so the guard refuses: a scope that
+    widens when it cannot be read is the failure mode worth designing
+    against.
+    """
+    role = getattr(current_user, "role", None)
+    user_id = getattr(current_user, "id", None)
+    if role == "admin":
+        logger.info("[SCOPE] user_id=%s role=admin scope=unrestricted", user_id)
+        return None
+    if user_id is None:
+        logger.warning("[SCOPE] no user id on %r; scope=empty",
+                       type(current_user).__name__)
+        return set()
+    try:
+        from backend.auth.auth_service import AuthService
+
+        async with db_manager.get_session() as db:
+            scope = set(await AuthService.get_user_pipelines(user_id, db))
+        # Audit line: ids only, never names. This is what proves, per turn,
+        # which cameras a non-admin was allowed to read.
+        logger.info("[SCOPE] user_id=%s role=%s scope=%d camera(s)",
+                    user_id, role, len(scope))
+        return scope
+    except Exception as e:
+        logger.warning("[SCOPE] could not read pipeline access for "
+                       "user_id=%s: %s; scope=empty", user_id, e)
+        return set()
+
+
+async def _refresh_identity_index(agent_instance, current_user,
+                                  scope=None) -> None:
     """Hand the agent the enrolled people it may resolve a name against.
 
     Root cause of "track ali" answering that Ali did not exist: the resolver's
@@ -2824,13 +2896,18 @@ async def _refresh_identity_index(agent_instance, current_user) -> None:
         from db_models import Identity, IdentityStatus, IdentityType
 
         async with db_manager.get_session() as db:
+            stmt = (select(Identity.id, Identity.display_name)
+                    .where(Identity.type == IdentityType.KNOWN,
+                           Identity.status == IdentityStatus.ACTIVE,
+                           Identity.display_name.isnot(None)))
+            if scope is not None:
+                # The same predicate the identities API applies: a name the
+                # caller may not see is a name the resolver may not offer.
+                from backend.core.identity_pipelines import pipeline_scope_predicate
+
+                stmt = stmt.where(pipeline_scope_predicate(None, scope))
             rows = await db.execute(
-                select(Identity.id, Identity.display_name)
-                .where(Identity.type == IdentityType.KNOWN,
-                       Identity.status == IdentityStatus.ACTIVE,
-                       Identity.display_name.isnot(None))
-                .order_by(Identity.display_name)
-                .limit(500))
+                stmt.order_by(Identity.display_name).limit(500))
             agent_instance.set_identity_index(
                 [{"identity_id": str(identity_id), "display_name": display}
                  for identity_id, display in rows.all() if display])
@@ -3640,4 +3717,3 @@ async def get_query_context(
     except Exception as e:
         logger.error(f"[CONTEXT] Error getting context: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-

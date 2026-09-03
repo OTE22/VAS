@@ -185,10 +185,17 @@ def token():
     status, probe, _h = _http("/api/sql-agent/query", {"query": "hello"},
                               token=access, method="POST", timeout=900)
     reply = (probe.get("response") or "") if isinstance(probe, dict) else ""
+    # A failed turn no longer carries the exception text in its reply: the
+    # agent answers with a closed phrase and reports `success: false`. The
+    # text signs are kept for older builds; the flag is what settles it now.
+    # Matching on prose alone stopped skipping the moment the prose changed,
+    # and the whole suite then ran, and failed, on a stack with no model.
+    turn_failed = isinstance(probe, dict) and probe.get("success") is False
     unreachable = ("Name or service not known", "Connection refused",
                    "encountered an error", "Max retries", "Failed to connect",
-                   "transport failure")
-    if status != 200 or not reply or any(sign in reply for sign in unreachable):
+                   "transport failure", "couldn't put together an answer")
+    if (status != 200 or not reply or turn_failed
+            or any(sign in reply for sign in unreachable)):
         pytest.skip(f"no language model reachable for end-to-end turns: "
                     f"{status} {reply[:160]!r}")
     return access

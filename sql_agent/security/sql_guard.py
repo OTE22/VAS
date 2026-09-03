@@ -86,6 +86,11 @@ class SqlPolicy:
     allow_explain: bool = False
     max_joins: int = 10
     max_subquery_depth: int = 5
+    # The caller's cameras. None is an administrator - no restriction. A set
+    # narrows every scoped table to those pipelines. An EMPTY set fails
+    # closed: the guard refuses rather than widens, the same rule the app's
+    # pipeline_scope_predicate applies to every REST route.
+    pipeline_scope: Optional[FrozenSet[str]] = None
 
     @staticmethod
     def for_tables(tables: Sequence[str], **kwargs) -> "SqlPolicy":
@@ -145,6 +150,18 @@ MALFORMED_CODES = frozenset({
 #: and never correctable by re-planning.
 INFRASTRUCTURE_CODES = frozenset({
     "PARSER_UNAVAILABLE",
+    # The camera-scope rewrite itself failed; the query was refused so as to
+    # fail closed. Ours, not the user's.
+    "SCOPE_ERROR",
+})
+
+#: The caller is not allowed to see anything the query would read - no
+#: cameras assigned. Not an attack, not a broken query, not our fault: an
+#: administrator has not granted access. Never enforceable (a user asking a
+#: plain question must not be threatened with a block) and never correctable
+#: by re-planning (no rewrite makes an unassigned user assigned).
+AUTHORIZATION_CODES = frozenset({
+    "NO_PIPELINE_ACCESS",
 })
 
 
@@ -158,7 +175,8 @@ def is_enforceable(code: Optional[str]) -> bool:
     if not code:
         return False
     code = str(code).upper()
-    if code in MALFORMED_CODES or code in INFRASTRUCTURE_CODES:
+    if (code in MALFORMED_CODES or code in INFRASTRUCTURE_CODES
+            or code in AUTHORIZATION_CODES):
         return False
     return True
 
@@ -177,6 +195,42 @@ def _qualified_name(table) -> str:
     schema = table.text("db")
     name = (table.name or "").lower()
     return f"{schema.lower()}.{name}" if schema else name
+
+
+#: How each readable table narrows to a camera scope. `faces` has no
+#: pipeline column of its own and reaches a camera only through its
+#: detection, which is why it is scoped through a sub-select.
+_SCOPE_PREDICATES = {
+    "pipelines": "pipeline_id IN ({ids})",
+    "detections": "pipeline_id IN ({ids})",
+    "faces": ("detection_id IN (SELECT id FROM detections "
+              "WHERE pipeline_id IN ({ids}))"),
+}
+
+
+def _apply_pipeline_scope(statement, policy: SqlPolicy, cte_names):
+    """Rewrite every scoped physical table into a subquery limited to the
+    caller's cameras, keeping its alias so column references still resolve.
+
+    Done on the AST after the allow-list, so joins, CTEs and nested selects
+    are all covered without any of them having to remember a WHERE. The
+    pipeline ids are emitted as SQL string literals through sqlglot, never
+    interpolated raw.
+    """
+    ids = ", ".join(exp.Literal.string(str(p)).sql(dialect=policy.dialect)
+                    for p in sorted(policy.pipeline_scope))
+    targets = [t for t in statement.find_all(exp.Table)
+               if (t.name or "").lower() in _SCOPE_PREDICATES
+               and (t.name or "").lower() not in cte_names]
+    for table in targets:
+        bare = table.name.lower()
+        scoped = sqlglot.parse_one(
+            f"SELECT * FROM {bare} WHERE "
+            + _SCOPE_PREDICATES[bare].format(ids=ids),
+            dialect=policy.dialect,
+        ).subquery(alias=table.alias_or_name)
+        table.replace(scoped)
+    return statement
 
 
 def validate_sql(sql: str, policy: SqlPolicy) -> SqlVerdict:
@@ -318,6 +372,29 @@ def validate_sql(sql: str, policy: SqlPolicy) -> SqlVerdict:
             f"Query nests subqueries more than {policy.max_subquery_depth} deep.",
             tables=sorted(referenced), statement_type=statement_type,
         )
+
+    # --- camera scope ------------------------------------------------------
+    # The chatbot was the one door that skipped the app's pipeline rule: any
+    # user with chatbot access could read every camera and every person.
+    if policy.pipeline_scope is not None:
+        if not policy.pipeline_scope:
+            return _deny(
+                "NO_PIPELINE_ACCESS",
+                "You have not been assigned any cameras, so there is "
+                "nothing here you can query.",
+                tables=sorted(referenced), statement_type=statement_type,
+            )
+        try:
+            statement = _apply_pipeline_scope(statement, policy, cte_names)
+        except Exception as e:
+            # Fail closed: a scope that could not be applied is not a scope.
+            logger.warning("Could not apply the camera scope: %s", e)
+            return _deny(
+                "SCOPE_ERROR",
+                "The query could not be limited to your cameras, so it "
+                "was not run.",
+                tables=sorted(referenced), statement_type=statement_type,
+            )
 
     # --- row cap -----------------------------------------------------------
     # Enforced in the SQL itself, not only by fetchmany: without a LIMIT the

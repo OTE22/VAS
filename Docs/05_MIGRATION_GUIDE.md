@@ -82,6 +82,32 @@ When you need to make schema changes:
 3. Review the migration file
 4. Apply: `alembic upgrade head`
 
+### When you add a migration, move the head pins
+
+The Alembic head is pinned in five places so a drifted schema fails closed
+instead of serving traffic. A new revision that leaves them behind makes a
+fresh production deploy refuse to migrate (`REVISION_MISMATCH`) and fails
+these tests in the full regression:
+
+| Where | What to change |
+|---|---|
+| `docker/docker-compose.prod.yml` | both `MIGRATIONS_EXPECTED_HEAD:-<head>` defaults |
+| `tests/test_vector_index_migration.py` | `EXPECTED_HEAD` |
+| `tests/test_identity_merge_smoke.py` | `test_schema_head_is_current` |
+| `tests/test_ml_foundation.py` | `test_migration_head_and_seeds` |
+| `tests/test_risk_platform.py` | `test_migration_applied_and_indexed` |
+
+`tests/test_compose_and_deployment.py::test_prod_migrations_head_default_matches_the_repo_head`
+compares the compose default against the repository head, so it is the one
+that tells you the pins are stale. Find every pin with:
+
+```bash
+grep -rn "<old head>" tests/ docker/ config.py
+```
+
+Leave the `down_revision` inside the new migration file alone; that one is
+the chain itself.
+
 ### Rollback (if needed):
 
 ```bash

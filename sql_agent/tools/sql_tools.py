@@ -19,17 +19,29 @@ except ImportError:  # pragma: no cover - deployment requires sqlglot
 
 
 def _json_object(text: str) -> Optional[dict]:
-    """Return the first decodable JSON object without a greedy regex."""
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char != "{":
-            continue
-        try:
-            value, _end = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
+    """Return the first decodable JSON object without a greedy regex.
+
+    `strict=False`: a model that lays its SQL out on several lines INSIDE
+    the JSON string emits raw newlines there, which strict JSON forbids.
+    Refusing the whole envelope for that turned a correct query into "Could
+    not extract SQL" three times in a row and a turn that never ran.
+    """
+    decoder = json.JSONDecoder(strict=False)
+    # `\'` is how the SQL model escapes the quotes around a filter value -
+    # LIKE LOWER(\'%MD5AL%\') - and it is not a JSON escape at all. Seen
+    # live: a correct query refused as "Could not extract SQL" three times.
+    # A single quote never needs escaping in JSON, so dropping the backslash
+    # cannot change the meaning of a valid envelope.
+    for candidate in (text, text.replace("\\'", "'")):
+        for index, char in enumerate(candidate):
+            if char != "{":
+                continue
+            try:
+                value, _end = decoder.raw_decode(candidate[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
     return None
 
 

@@ -75,7 +75,11 @@ Rules:
   after a look-up came back with no match, or when the request refers to
   something and you have checked and cannot tell what. Asking the user a
   question they already answered is worse than a query that returns nothing.
-- A follow-up modifies the current task; it does not start a new one."""
+- A follow-up modifies the current task; it does not start a new one.
+- answer_directly is for small talk and questions about the assistant
+  itself. A question about the DATA is answered by query_database, even when
+  a look-up found nothing: the query is what proves there is nothing, and it
+  is how the user learns what does exist."""
 
 
 # Per-model memory of whether native function calling actually works. Probed
@@ -210,6 +214,12 @@ def asked_for_an_action(llm, user_text: str, *,
     A model failure means the turn proceeds as before — this may refuse an
     action, never break one.
     """
+    # Facts first. A message that names a camera asks about the data, in
+    # any language; no model needs to be consulted. "من تم رصده في كاميرا
+    # wezaret؟" was judged NOT a request and answered as small talk.
+    if camera_named_by_user(user_text):
+        return True
+
     try:
         # A message answering a question the assistant ASKED is a request,
         # however little it says on its own. Judged without that fact, every
@@ -220,6 +230,9 @@ def asked_for_an_action(llm, user_text: str, *,
                      "previous turn and is waiting for the answer. A message "
                      "that answers it CONTINUES that request."
                      if question_pending else "")
+        situation += ("\n\nThe message may be in any language, Arabic "
+                      "included. Judge its MEANING. Reply with the single "
+                      "English word YES or NO and nothing else.")
 
         reply = llm.invoke([
             SystemMessage(content=INTENT_FIT_PROMPT + situation),
@@ -229,10 +242,27 @@ def asked_for_an_action(llm, user_text: str, *,
         logger.warning("[TOOL_LOOP] intent-fit check failed (%s); allowing", e)
         return True
 
-    text = str(getattr(reply, "content", reply) or "").strip().upper()
+    text = str(getattr(reply, "content", reply) or "").strip()
     if not text:
         return True                      # no answer is not a refusal
-    return text.startswith("YES")
+    return _says_yes(text)
+
+
+_YES_WORDS = ("yes", "y", "نعم", "أجل", "اجل", "ايوه", "أيوه")
+_NO_WORDS = ("no", "n", "لا", "كلا")
+
+
+def _says_yes(text: str) -> bool:
+    """Read a YES/NO verdict from a reply that may carry markdown, quotes,
+    punctuation or an Arabic word. Fails toward NO on anything unclear."""
+    stripped = re.sub(r"^[\s\*\"'`_\-\.:\(\[]+", "", str(text or ""))
+    first = re.split(r"[\s\*\"'`_\.,:;!\)\]؟،]+", stripped, maxsplit=1)[0]
+    first = first.casefold()
+    if first in _YES_WORDS:
+        return True
+    if first in _NO_WORDS:
+        return False
+    return stripped.casefold().startswith("yes")
 
 
 _ACTION_DESCRIPTIONS = {
@@ -325,7 +355,113 @@ _COMMON_WORDS = frozenset({
 _NOT_NAMES = _COMMON_WORDS | _own_vocabulary()
 
 
-def names_a_stranger(question: str, user_text: str) -> Optional[str]:
+def _names_offered(trace, prior_observations) -> List[str]:
+    """Names the system itself put on the table this turn.
+
+    Candidates from an ambiguous look-up, and the person a look-up resolved.
+    A clarifying question may name these even though the user never typed
+    them: "Ali Abbass or Ali Hassan?" after "track ali" is the right
+    question, and the stranger guard used to reject it.
+    """
+    names: List[str] = []
+    for entry in list(trace or []) + list(prior_observations or []):
+        entry = entry or {}
+        for cand in entry.get("clarification_candidates") or []:
+            cand = cand or {}
+            names.append(cand.get("display_name") or cand.get("name") or "")
+        resolved = entry.get("resolved_entity") or {}
+        names.append(resolved.get("canonical_name") or "")
+    return [n for n in names if n]
+
+
+#: A token that is not a word: at least one digit or underscore among
+#: letters, four or more characters. Camera and pipeline identifiers.
+_IDENTIFIER_SHAPES = re.compile(
+    r"\b(?=[A-Za-z0-9_-]*[0-9_])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{4,}\b")
+
+#: English and Arabic. "كاميرا" with and without the definite article and
+#: the attached prepositions the script glues on (بكاميرا, الكاميرا, للكاميرا).
+_CAMERA_WORDS = ("camera", "cam", "pipeline", "كاميرا", "الكاميرا",
+                 "بكاميرا", "بالكاميرا", "لكاميرا", "للكاميرا", "كامرة")
+_CAMERA_WORD_RE = "|".join(re.escape(w) for w in _CAMERA_WORDS)
+_CAMERA_LEAD = re.compile(rf"^(?:{_CAMERA_WORD_RE})\s+", re.I)
+_CAMERA_NAMED = re.compile(rf"(?:^|\s)(?:{_CAMERA_WORD_RE})\s+([^\s?.,;:!؟،]+)",
+                           re.I)
+
+#: A message CONTINUES the previous task only when it says so. Anaphora and
+#: connectives in both languages; anything else that stands on its own is a
+#: new question, whatever the transcript looks like. "Show me all detections
+#: from today" was treated as "the wezaret query, but today" because the
+#: model read it against the previous turn; the message itself never pointed
+#: back.
+_CONTINUATION_MARKERS = (
+    # English
+    "same", "that", "those", "these", "this one", "it ", "them", "also",
+    "too", "only", "just", "instead", "as well", "again", "more", "rest",
+    "other", "previous", "last one", "earlier", "before", "now ",
+    # Arabic (with the article and glued prepositions where common)
+    "نفس", "ذلك", "تلك", "هذه", "هذا", "هؤلاء", "أيضا", "أيضاً", "ايضا",
+    "فقط", "بدلا", "بدلاً", "كذلك", "السابق", "السابقة", "مرة أخرى",
+    "مجددا", "مجدداً", "الباقي", "غيره", "غيرها", "منهم", "منها",
+)
+_LEADING_CONNECTIVES = re.compile(r"^(?:and|but|or|so|plus|then|و|لكن|ثم|أو|او)\b",
+                                  re.I)
+
+
+def is_a_continuation(user_text: str) -> bool:
+    """Does the message point back at the previous task?
+
+    A fact about the words, not a judgement about intent: a marker, a
+    leading connective, or a fragment too short to stand alone. Everything
+    else states its own question.
+    """
+    text = " ".join(str(user_text or "").split())
+    if not text:
+        return False
+    low = text.casefold()
+    padded = f" {low} "
+    if _LEADING_CONNECTIVES.match(low):
+        return True
+    if any(f" {m.casefold()}" in padded for m in _CONTINUATION_MARKERS):
+        return True
+    # "yes", "the pdf", "camera 3": fragments only make sense as answers.
+    return len(low.split()) <= 3
+
+
+def camera_named_by_user(user_text: str) -> Optional[str]:
+    """The camera token the user introduced with the word camera, if any."""
+    match = _CAMERA_NAMED.search(" ".join(str(user_text or "").split()))
+    return match.group(1) if match else None
+
+
+def a_query_already_ran(prior_observations) -> bool:
+    for o in prior_observations or []:
+        if o.get("tool") == "query_database" and o.get("status") == "ok":
+            return True
+    return False
+
+
+def names_a_camera(name: str, user_text: str) -> bool:
+    """Is the `resolve_person` argument a CAMERA the user named?
+
+    A matter of fact, not judgement: the user wrote "camera X", so X is a
+    camera. "Who was detected at camera MD5AL_3EIN_7LWE?" was answered with
+    "What person were you referring to?" because the model looked the
+    camera token up as a person and, finding nobody, asked about them.
+    """
+    token = " ".join(str(name or "").split())
+    if not token:
+        return False
+    if _CAMERA_LEAD.match(token):
+        return True
+    token = token.casefold()
+    text = " ".join(str(user_text or "").split()).casefold()
+    return any(re.search(rf"(?:^|\s){re.escape(word)}\s+{re.escape(token)}", text)
+               for word in _CAMERA_WORDS)
+
+
+def names_a_stranger(question: str, user_text: str,
+                     known_names=()) -> Optional[str]:
     """A name the QUESTION uses that the user's message never mentioned.
 
     Returns that name, or None when the question stays within what the user
@@ -340,14 +476,32 @@ def names_a_stranger(question: str, user_text: str) -> Optional[str]:
     what a person's name looks like.
     """
     haystack = " ".join((user_text or "").split()).lower()
+    known = [str(n).lower() for n in (known_names or []) if n]
     for quoted, capitalised in _NAME_SHAPES.findall(question or ""):
         candidate = (quoted or capitalised or "").strip()
         if not candidate or candidate.lower() in _NOT_NAMES:
             continue
         if len(candidate) < 3:
             continue
-        if candidate.lower() not in haystack:
-            return candidate
+        if candidate.lower() in haystack:
+            continue
+        # Offered by a look-up this turn: the system said it, not a
+        # stranger. Substring, because the shape regex may capture one
+        # word of a two-word name.
+        if any(candidate.lower() in k for k in known):
+            continue
+        return candidate
+    # Identifier-shaped tokens - camera ids like MD5AL_3EIN_7LWE - are not
+    # name-shaped, and "What camera is MD5AL_3EIN_7LWE?" was asked in reply
+    # to "Who was detected at camera wezaret?": the model carried the
+    # PREVIOUS turn's camera into a question about this one.
+    for candidate in _IDENTIFIER_SHAPES.findall(question or ""):
+        low = candidate.lower()
+        if low in _NOT_NAMES or low in haystack:
+            continue
+        if any(low in k for k in known):
+            continue
+        return candidate
     return None
 
 
@@ -459,6 +613,11 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
     # and did: "seed_person_016" was matched to its candidate and then refused
     # an action because, read alone, it asks for nothing.
     is_a_request = known_request
+    # answer_directly on a turn that asked for data is refused once, not
+    # forever: the second proposal is the model insisting, and it wins.
+    direct_answer_refused = False
+    camera_clarification_refused = False
+    continuation_refused = False
 
     # THREE bounds, because they bound three different things.
     #
@@ -610,9 +769,95 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                     f"it is a greeting or small talk, use answer_directly.")))
                 continue
 
+        if (name == "answer_directly" and is_a_request is True
+                and not direct_answer_refused):
+            # The user asked for DATA - established, not guessed: either a
+            # look-up or an action was proposed first and judged, or the
+            # message answers a question we asked. Answering without a
+            # query invents an answer ("I don't have any information about
+            # that camera"). Refused ONCE; a model that insists is allowed
+            # through, because it may know something the guard does not.
+            direct_answer_refused = True
+            logger.info("[TOOL_LOOP] refused answer_directly: the user "
+                        "asked for data and nothing was queried")
+            rejections += 1
+            trace.append({"tool": name, "rejected": "answered data without a query",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "UNQUERIED_ANSWER"}})
+            messages.append(HumanMessage(content=(
+                "The user asked about the data. Do not answer from memory: "
+                "use query_database (a query that returns nothing is a valid "
+                "answer and is reported honestly), or ask_clarifying_question "
+                "only if a look-up left the request genuinely ambiguous.")))
+            continue
+
+        if name == "resolve_person" and names_a_camera(
+                arguments.get("name", ""), user_text):
+            # The user said "camera X". X is not a person, and looking it
+            # up as one finds nobody - which the model then asks about.
+            logger.info("[TOOL_LOOP] refused resolve_person: the name is a "
+                        "camera the user named")
+            rejections += 1
+            trace.append({"tool": name, "rejected": "named a camera",
+                          "observation": {"status": "rejected",
+                                          "tool": name,
+                                          "reason_code": "NOT_A_PERSON"}})
+            messages.append(HumanMessage(content=(
+                f"{arguments.get('name', '')!r} is a camera the user named, "
+                f"not a person. Cameras need no look-up: query the database "
+                f"for it directly, or list_cameras if you need its exact "
+                f"identifier.")))
+            continue
+
+        if (name in ("modify_active_query", "update_task_state")
+                and not continuation_refused
+                and not is_a_continuation(user_text)):
+            # The message states its own question. Re-running the PREVIOUS
+            # one with a change drags its filters along: "Show me all
+            # detections from today" became "the wezaret camera, but today"
+            # and was answered about a camera the user never mentioned.
+            continuation_refused = True
+            logger.info("[TOOL_LOOP] refused %s: the message does not point "
+                        "back at the previous task", name)
+            rejections += 1
+            trace.append({"tool": name, "rejected": "not a continuation",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "NEW_QUESTION"}})
+            messages.append(HumanMessage(content=(
+                f"The message {user_text!r} states its own question and does "
+                f"not refer back to the previous one (no 'same', 'that', "
+                f"'also', 'only'...). Treat it as NEW: use query_database "
+                f"with exactly what it asks, and carry over no camera, "
+                f"person or time window from before.")))
+            continue
+
+        named_camera = camera_named_by_user(user_text)
+        if (name == "ask_clarifying_question" and named_camera
+                and not a_query_already_ran(prior_observations)
+                and not camera_clarification_refused):
+            # "Which camera is wezaret?" - asked with the camera list in
+            # hand. A camera the user named needs no clarification before a
+            # query: the query runs, and an empty result is resolved against
+            # the real cameras (misspelling corrected and re-run, or the
+            # real names offered). Asking first is quitting before starting.
+            camera_clarification_refused = True
+            logger.info("[TOOL_LOOP] refused a clarification about a camera "
+                        "the user named; query it")
+            rejections += 1
+            trace.append({"tool": name, "rejected": "asked about a named camera",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "CAMERA_NAMED"}})
+            messages.append(HumanMessage(content=(
+                f"The user named the camera: {named_camera!r}. Do not ask "
+                f"which camera; use query_database with that camera exactly "
+                f"as written. If it does not match, the system resolves it "
+                f"against the real camera list and corrects the spelling.")))
+            continue
+
         if name == "ask_clarifying_question":
-            stranger = names_a_stranger(arguments.get("question", ""),
-                                        user_text)
+            stranger = names_a_stranger(
+                arguments.get("question", ""), user_text,
+                known_names=_names_offered(trace, prior_observations))
             if stranger:
                 # The question names somebody the user did not mention. The
                 # model sees the whole transcript and can ask about whoever

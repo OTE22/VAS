@@ -76,6 +76,15 @@ STATUS=1
 teardown() {
   set +e
   echo "== teardown ($PROJECT)"
+  # Keep the isolated API's own log beside the pytest log. Without it a
+  # failure that only happens on this stack (agent turns on the local model,
+  # an endpoint that stops answering) leaves nothing to read once the
+  # containers are gone - which was the case for every timeout in
+  # 2026-09-02's runs.
+  if [ -n "${RUN_LOG:-}" ]; then
+    docker logs "$API" > "${RUN_LOG%.log}_api.log" 2>&1 || true
+    echo "   isolated API log: ${RUN_LOG%.log}_api.log"
+  fi
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
   if [ -n "$DEV_DBS_BEFORE" ]; then
     local dbs_after; dbs_after="$(psql_dev "SELECT string_agg(datname, ',' ORDER BY datname) FROM pg_database")"

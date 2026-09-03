@@ -139,11 +139,23 @@ class AgentState(TypedDict):
     # Set when bounded reasoning ran out on a real request, so the answer can
     # say so instead of changing the subject.
     reasoning_exhausted: Optional[bool]
+    # The turn produced a closed-vocabulary failure phrase, not an answer.
+    # Reported as a failure and kept out of memory.
+    turn_failed: Optional[bool]
     # Entity resolution after an empty result: attempted once per turn, and
     # its two honest outcomes.
     entity_resolution_attempted: Optional[bool]
     entity_without_data: Optional[str]
     entity_not_found: Optional[str]
+    # The camera equivalents: the filter named a camera that does not exist,
+    # or one that exists and simply has nothing recorded. `known_cameras`
+    # carries the real names so the answer can offer them.
+    camera_not_found: Optional[str]
+    camera_without_data: Optional[str]
+    known_cameras: Optional[List[str]]
+    # The stored name a misspelled camera was corrected to before re-running
+    # the query, so a second empty result can be worded about THAT camera.
+    camera_corrected_to: Optional[str]
     # The (tool, args) signature of the action this turn committed to, so a
     # second action can recognise a repeat of it.
     committed_signature: Optional[List]

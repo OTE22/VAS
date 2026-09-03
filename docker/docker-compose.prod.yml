@@ -141,7 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-c5e7f9a1b3d4}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-d6f8a2c4e7b1}
       DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
@@ -221,7 +221,7 @@ services:
 
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-c5e7f9a1b3d4}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-d6f8a2c4e7b1}
 
       DETECTION_MODEL: /app/weights/det_10g.onnx
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx

@@ -1422,6 +1422,26 @@
         }
     }
 
+    // The camera example prompt names a REAL camera this user can see, the
+    // busiest one, or stays hidden. /api/pipelines is already scoped per
+    // user, so a restricted account is never invited to ask about a camera
+    // it cannot query.
+    async function refreshCameraExample() {
+        const li = document.querySelector('.example-queries li[data-example="camera"]');
+        if (!li) return;
+        try {
+            const result = await api('/api/pipelines');
+            const cameras = Array.isArray(result.payload) ? result.payload : [];
+            const best = cameras
+                .filter((c) => c && c.pipeline_name)
+                .sort((a, b) => (b.total_detections || 0) - (a.total_detections || 0))[0];
+            if (!best) return;
+            const slot = li.querySelector('.example-camera-name');
+            if (slot) slot.textContent = best.pipeline_name;
+            li.hidden = false;
+        } catch (e) { /* the suggestion simply stays hidden */ }
+    }
+
     async function initialize() {
         if (initialized) return;
         initialized = true;
@@ -1447,6 +1467,7 @@
             }
         } catch (e) { /* backend enforces auth regardless */ }
 
+        refreshCameraExample();
         checkSQLAgentHealth();
         // Through refreshHistory(), NOT loadQueryHistory() directly: the
         // conversations module owns the sidebar when it is loaded, and both

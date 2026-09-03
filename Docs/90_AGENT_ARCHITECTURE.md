@@ -89,6 +89,20 @@ fragmentary command in a session that already has a result or a document —
 becomes a **clarification**, never small talk. Answering "make it Arabic" as
 conversation is the exact bug this replaced.
 
+Two more silences were removed by the implementation review:
+
+- **Running out of steps is said.** When bounded reasoning is spent on a real
+  request, `handle_chat` short-circuits on `reasoning_exhausted` and answers
+  with `_EXHAUSTED_NARRATION` in the turn's language. That phrase existed and
+  nothing read it, so the chat model improvised a fluent reply and the user
+  never learned the work had been abandoned.
+- **An exception is never the answer.** A failure while narrating or in the
+  top-level handler sets `turn_failed` and a closed phrase
+  (`_FAILURE_NARRATION`, `_UNEXPECTED_FAILURE`). The turn is reported as
+  `success: false` on every transport and is **not committed to memory**;
+  the traceback used to be stored as an assistant message and replayed to
+  the model in the next window.
+
 ### Observing what the action produced
 
 Until this loop existed, a turn was decide → act → narrate. Nothing looked at
@@ -267,7 +281,7 @@ lifecycle is its fix (`sql_agent/api/routes.py`):
 
 | Function | When | Does |
 |---|---|---|
-| `prepare_turn()` | before the graph runs, inside the user's lock | artifact index + source-SQL map, durable memory |
+| `prepare_turn()` | before the graph runs, inside the user's lock | **camera scope** (`set_pipeline_scope`, see Docs/26), artifact index + source-SQL map, scoped identity index, durable memory |
 | `complete_turn_document()` | at the transport's completion boundary, before the terminal event is serialized | finishes pending render/translation so the client learns of the document in the same event |
 | `finalize_turn()` | after the terminal event | shielded history persist + the working-memory row pointer |
 
@@ -280,6 +294,16 @@ Related rules that live beside the lifecycle:
 - **Lock lifetime ≠ agent lifetime.** The per-user lock survives its agent's
   LRU eviction while held or awaited (`_maybe_release_user_lock`); dropping a
   held lock let two turns run concurrently for one user with 11+ active users.
+- **User lock first, global slot second, both bounded.** All three transports
+  take the per-user lock (5 s) before the `SQL_AGENT_MAX_CONCURRENT`
+  semaphore (5 s). The old order took the slot first and then waited on the
+  user lock with no timeout, so two tabs from one user held both slots and
+  every other user got `AGENT_BUSY`.
+- **A cancelled or timed-out stream persists the failure, not a borrowed
+  answer.** The SSE cleanup used to backfill an empty response from the last
+  assistant message in memory and store it under the new question. It now
+  persists `response=None` with `error_message` naming `Cancelled` or
+  `Timed out (<source>)`.
 - **REST idempotency**: `POST /query` accepts a `request_id` with the same
   exactly-once contract SSE/WS always had; a duplicate is refused with
   `409 DUPLICATE_REQUEST`. `AGENT_BUSY` removes the entry so an honest retry
@@ -413,6 +437,23 @@ yesterday" answered with none is correct, and dressing it as a failure teaches
 people to distrust a true result. The case where zero rows IS suspicious — a
 task narrowed to a named person — is caught earlier by the reasoning layer,
 which asks which person is meant.
+
+**A camera gets the same second look as a person.** `filtered_cameras`
+reads the literals the SQL compared against `location_name` or `pipeline_id`;
+an empty result narrowed to one is observed with `unresolved_kind: camera`
+and resolved by `_resolve_camera_and_route` against `list_cameras`, once per
+turn and without a model call. Three outcomes, worded in both languages:
+the camera exists and has nothing recorded; the name is a near match for one
+stored camera, so the query is corrected and run again; or there is no such
+camera, and the answer names the real ones. A corrected re-run that still
+matches nothing is an ANSWER, never a clarification — it names the camera and
+what the query looked for, because by then the constraint, not the camera,
+is the likeliest reason. The correction hint names the column
+(`pipelines.location_name`) as well as the value: told only "stored as X",
+the model put the label into the id column and matched nothing. "No matching records" for a
+camera that has not existed for months was true and useless — and the UI's
+example prompt was the one suggesting it. That prompt now names the busiest
+camera the user can see, from `/api/pipelines`, or stays hidden.
 
 ---
 
@@ -586,6 +627,60 @@ after a look-up, which is what keeps it from becoming the keyword rule it
 replaced. A genuinely ambiguous request costs one step out of three; the
 alternative is answering a plain question with a question.
 
+A second guard, `names_a_stranger`, rejects a question that names somebody
+the user never mentioned ("track iron man" → "what do you mean by Joey?").
+It exempts names the **system** put on the table this turn — candidates from
+an ambiguous `resolve_person` and the person a look-up resolved
+(`_names_offered`) — because "Ali Abbass or Ali Hassan?" after "track ali"
+is the right question and the surnames come from the database, not the user.
+It reads identifier shapes as well as name shapes: "What camera is
+MD5AL_3EIN_7LWE?" in reply to a question about camera *wezaret* carried the
+previous turn's camera into this one, and an id is not capitalised.
+
+A third guard, `names_a_camera`, refuses `resolve_person` for a token the
+user introduced with the word *camera* (or *cam*, *pipeline*). "Who was
+detected at camera MD5AL_3EIN_7LWE?" was looked up as a person, found nobody,
+and became "What person were you referring to?". The user said it was a
+camera; that is a fact, not a judgement, so Python holds it.
+
+**The intent-fit gate reads facts before asking.** A message that names a
+camera asks about the data in any language, so `asked_for_an_action` returns
+true without a model call. When it does ask, the reply is read by `_says_yes`
+— markdown, quotes and Arabic نعم/لا included — and the prompt says to answer
+with one English word whatever the message's language. "من تم رصده في
+كاميرا wezaret؟" was judged "not a request" and answered as small talk.
+
+**Prompt scaffolding is stripped from every reply** (`_strip_scaffolding`):
+the chat model, answering in Arabic, echoed the whole "[FACTS about this
+turn … [end of facts]" block into its answer. Asking it not to is a plea;
+the regex is a rule, applied to both the chat and the story paths.
+
+**New question or continuation** is decided by the message's own words
+(`is_a_continuation`), not by the model reading the transcript: an anaphor or
+connective ("same", "that", "also", "only", a leading "and"; "نفس", "ذلك",
+"أيضاً", "فقط", a leading "و"), or a fragment of three words or fewer,
+continues the previous task. Anything else states its own question, and
+`modify_active_query` / `update_task_state` are refused once for it with the
+instruction to start fresh and carry over no camera, person or time window.
+"Show me all detections from today" right after a camera question was run as
+"the wezaret query, but today" and answered about a camera the user never
+mentioned. Every word list in these guards is English and Arabic.
+
+A camera the user named is never asked about before a query has run
+(`camera_named_by_user` + `a_query_already_ran`, refused once). "Which
+camera is wezaret?" was asked with the camera list in hand; the query path
+resolves a misspelling against that list itself and re-runs, so asking first
+is quitting before starting. After a query has come back empty, asking is
+allowed again.
+
+A fourth refuses `answer_directly` **once** when the turn is known to ask for
+data (`is_a_request` established by an earlier proposal, or by the message
+answering a question we asked) and nothing has been queried. "Who was
+detected at camera wezaret?" was answered from memory with "I don't have any
+information about that camera"; the query is what proves there is nothing,
+and how the user learns what does exist. A model that proposes it a second
+time is allowed through: it may know something the guard does not.
+
 ---
 
 ## Model routing
@@ -606,9 +701,28 @@ model stays in the routing list as a fallback.
 - **Undeclared state keys are dropped.** LangGraph merges each node's result
   against `AgentState`; anything not declared there vanishes with no error.
   This has caused three separate "impossible" bugs.
-- **`SQLAgent.query()` returns a tuple** only when there is work for the API
-  layer. Adding a new kind of pending work means adding it to that condition,
-  or it is silently discarded.
+- **One `DatabaseManager` per agent, and the graph must be built around it.**
+  `SQLAgentTools` used to construct its own manager, so a policy bound on
+  `agent.db` (the camera scope) never reached the instance that executed the
+  SQL: every unit test was green and a KSA-only user saw all sixteen cameras
+  live. `create_sql_agent(..., db=self.db)` is what shares the instance;
+  `test_the_graph_executes_through_the_agents_own_database_manager` pins it.
+  A policy that is set somewhere is not a policy until the executor reads it
+  from there.
+- **`SQLAgent.query()` returns a tuple** when there is work for the API
+  layer, when a security flag is raised, and when the turn **failed**
+  (`turn_failed` in the state, so the route can report `success: false`).
+  Adding a new kind of pending work means adding it to that condition, or it
+  is silently discarded. The CLI in `sql_agent/main.py` unwraps the tuple.
+- **Camera and time-range filters retire with their subject.** When the
+  resolved subject changes, `active_camera` and `active_time_range` are
+  REMOVEd app-side alongside `active_task` (`_commit_tool_result_deltas`),
+  unless the model's own delta set that field this turn. They used to stay
+  "authoritative" until the model happened to propose removing them.
+- **The prompt window is capped per message.** `get_conversation_context`
+  clips each message to `_MAX_CONTEXT_MESSAGE_CHARS` (600). Three verbatim
+  intelligence reports used to dwarf the 4,000-character planner envelope
+  that was budgeted so carefully around them.
 - **A fallback can hide a total failure.** `modify_sql` falls back to the
   unmodified query so the user sees something; `sql_was_modified` exists so
   that fallback is distinguishable from a real rewrite. It once passed its
@@ -621,5 +735,13 @@ model stays in the routing list as a fallback.
   re-plan budget means answering honestly — never "run it anyway". `PARTIAL`
   counts as invalid: it means the fix also failed to validate and the original
   bad query was kept.
+- **The SQL model escapes single quotes as `\'` inside its JSON envelope**
+  (`LIKE LOWER(\'%x%\')`), which is not a JSON escape. `_json_object` in
+  `sql_tools.py` retries with the backslash dropped and decodes with
+  `strict=False` for raw newlines. Before that, a correct query was refused
+  three times as "Could not extract SQL" and the turn never executed — and a
+  single-stage probe of `generate_sql` did NOT reproduce it; only running the
+  whole turn in-process (planner paraphrase, RAG examples, correction hint)
+  produced the escaped reply. Reproduce failures at the turn level.
 - **Response headers are lowercase on the wire.** `dict(headers)["X-Artifact-Id"]`
   fails on a response that has it.

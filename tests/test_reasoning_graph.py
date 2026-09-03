@@ -231,7 +231,8 @@ def test_every_guard_denial_code_is_deliberately_classified():
     source = inspect.getsource(sql_guard)
     emitted = set(re.findall(r'_deny\(\s*"([A-Z_]+)"', source))
     classified = (sql_guard.ENFORCEABLE_CODES | sql_guard.MALFORMED_CODES
-                  | sql_guard.INFRASTRUCTURE_CODES)
+                  | sql_guard.INFRASTRUCTURE_CODES
+                  | sql_guard.AUTHORIZATION_CODES)
 
     assert emitted, "no denial codes found — did the guard change shape?"
     assert not (emitted - classified), (

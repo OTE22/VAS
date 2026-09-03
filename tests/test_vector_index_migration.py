@@ -18,7 +18,7 @@ import pytest
 
 from conftest import run_on_shared_loop as run_async
 
-EXPECTED_HEAD = "c5e7f9a1b3d4"
+EXPECTED_HEAD = "d6f8a2c4e7b1"
 LEGAL_STATES = {"pending", "synced", "failed"}
 
 

@@ -212,13 +212,17 @@ def translate_document_text(source: str, language: str) -> str:
 class SQLAgentTools:
     """Tools for the SQL Intelligence Agent."""
 
-    def __init__(self, conversation_memory=None):
+    def __init__(self, conversation_memory=None, db=None):
         # Routed by task, not by hardcoded model name: the registry decides
         # which model serves each, applies the data-sensitivity policy, and
         # records any fallback.
         self.llm = create_llm(TaskType.CHAT)  # chat, intent, normalization, analysis
         self.sql_llm = create_sql_llm(TaskType.SQL_GENERATION)  # generation and repair
-        self.db = DatabaseManager(config)
+        # ONE DatabaseManager per agent, shared with the graph's owner. The
+        # tools used to build their own, so a policy bound on the agent's
+        # instance (the caller's camera scope) never reached the instance
+        # that actually executed SQL - the scoped user saw every camera.
+        self.db = db if db is not None else DatabaseManager(config)
         self.kb = SQLKnowledgeBase(config)  # Knowledge Base for RAG
         self.conversation_memory = conversation_memory  # Conversation memory for context
 
@@ -1020,6 +1024,9 @@ class SQLAgentTools:
         needle = observation.get("unresolved_entity") or ""
         state["entity_resolution_attempted"] = True
 
+        if observation.get("unresolved_kind") == "camera":
+            return self._resolve_camera_and_route(state, needle)
+
         result = tx.execute_read_only(
             "resolve_person", {"name": needle}, db=self.db,
             identity_index=state.get("identity_index") or [])
@@ -1082,6 +1089,108 @@ class SQLAgentTools:
         state["terminal_state"] = reasoning.FINAL
         state["planned_action"] = {"action": "chat",
                                    "source": "entity_resolution",
+                                   "confidence": 1.0}
+        return "chat_response"
+
+    #: Prompt scaffolding that must never reach the user. The chat model,
+    #: answering in Arabic, echoed the whole "[FACTS about this turn ...
+    #: [end of facts]" block into its reply. Asking it not to is a plea;
+    #: this is a rule.
+    _SCAFFOLD_BLOCKS = re.compile(
+        r"\[FACTS about this turn.*?\[end of facts\]\s*", re.S | re.I)
+    _SCAFFOLD_LABELS = re.compile(
+        r"\[(?:end of )?(?:facts|prior turns)[^\]]*\]\s*", re.I)
+
+    @classmethod
+    def _strip_scaffolding(cls, text: str) -> str:
+        cleaned = cls._SCAFFOLD_BLOCKS.sub("", str(text or ""))
+        cleaned = cls._SCAFFOLD_LABELS.sub("", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _modified_purpose(base_purpose, modification) -> str:
+        """What a modified query is FOR: the original question plus the
+        change, so "No records matched ... The query looked for:" names the
+        whole question rather than "Filter the results to only include
+        detections from today"."""
+        base = " ".join(str(base_purpose or "").split()) or "the previous question"
+        change = " ".join(str(modification or "").split())
+        return f"{base}, changed: {change}" if change else base
+
+    @staticmethod
+    def _camera_key(text: str) -> str:
+        """How two camera names are compared: case, spacing and the
+        underscore-versus-space that ids and labels disagree on."""
+        return " ".join(str(text or "").replace("_", " ").split()).casefold()
+
+    def _resolve_camera_and_route(self, state: AgentState, needle: str) -> str:
+        """The camera the empty query filtered on: real, misspelled, or absent.
+
+        Python, not a model call, and one bounded look-up. The UI once
+        suggested "Who was detected at camera MD5AL_3EIN_7LWE?" for a camera
+        that no longer existed, and the answer was "no matching records" -
+        true, and useless. The look-up separates the three cases the way
+        the person path already does.
+        """
+        from .. import reasoning
+        from . import tool_executors as tx
+
+        listing = tx.execute_read_only("list_cameras", {}, db=self.db)
+        cameras = listing.get("cameras") or []
+        labels = [c.get("location") or c.get("camera") or ""
+                  for c in cameras]
+        labels = [label for label in labels if label]
+        state["known_cameras"] = labels[:12]
+
+        wanted = self._camera_key(needle)
+        exact = [c for c in cameras
+                 if wanted in (self._camera_key(c.get("location")),
+                               self._camera_key(c.get("camera")))]
+        logger.info("[REACT] camera_resolution name_chars=%d exact=%d "
+                    "known=%d", len(needle or ""), len(exact), len(labels))
+
+        if exact:
+            # The filter WOULD have matched this camera: zero rows is a fact
+            # about the data, not the query.
+            state["camera_without_data"] = (exact[0].get("location")
+                                            or exact[0].get("camera"))
+            state["terminal_state"] = reasoning.FINAL
+            state["planned_action"] = {"action": "chat",
+                                       "source": "camera_resolution",
+                                       "confidence": 1.0}
+            return "chat_response"
+
+        # A near match - the stored label contains what was asked, or the
+        # other way round - is a spelling to correct and run again.
+        near = [c for c in cameras if wanted and any(
+            wanted in key or key in wanted
+            for key in (self._camera_key(c.get("location")),
+                        self._camera_key(c.get("camera"))) if key)]
+        if len(near) == 1:
+            stored = near[0].get("location") or near[0].get("camera")
+            state["camera_corrected_to"] = stored
+            # Name the COLUMN as well as the value: the label lives in
+            # pipelines.location_name and the id in pipelines.pipeline_id,
+            # and a hint that says only "stored as X" had the model put the
+            # label into the id column, which matches nothing.
+            state["sql_correction_hint"] = {
+                "sql": (state.get("generated_sql") or "")[:600],
+                "reason": (f"the filter used {needle!r}, but this camera is "
+                           f"stored with pipelines.location_name = {stored!r} "
+                           f"(pipelines.pipeline_id = "
+                           f"{near[0].get('camera')!r}) - filter on "
+                           f"location_name with that exact value, and add "
+                           f"no constraint the user did not state")}
+            state["generated_sql"] = ""
+            state["query_result"] = None
+            state["sql_validation_status"] = "VALID"
+            logger.info("[REACT] re-querying with the stored camera name")
+            return "check_schema"
+
+        state["camera_not_found"] = needle
+        state["terminal_state"] = reasoning.NOT_FOUND
+        state["planned_action"] = {"action": "chat",
+                                   "source": "camera_resolution",
                                    "confidence": 1.0}
         return "chat_response"
 
@@ -1327,6 +1436,10 @@ Query Generation Rules:
 9. A request for the ANSWER in another language ("in Arabic", "بالعربية")
    changes only how the report is written afterwards. It never changes the
    query, the column names, or the values you filter on. Ignore it here.
+10. ADD NO CONSTRAINT THE USER DID NOT STATE. No time window ("today",
+    "last 7 days"), no status filter, no minimum confidence unless the
+    request says so. The reference examples show shapes, not conditions to
+    copy: "who was detected at camera X" means all time, every detection.
 
 Respond with ONLY a JSON object:
 {{"sql": "YOUR SQL QUERY HERE", "purpose": "Brief explanation of what the query does"}}
@@ -1746,6 +1859,14 @@ Provide the corrected SQL:""")
     #: in the log, where the operator who needs it can see it and the person
     #: the query is ABOUT cannot.
     _FAILURE_PHRASES = {
+        "sql_out_of_scope": {
+            "en": ("You have not been assigned any cameras yet, so there is "
+                   "nothing here you can query. Please ask an administrator "
+                   "for access."),
+            "ar": ("لم يتم تعيين أي كاميرات لحسابك بعد، لذا لا توجد بيانات "
+                   "يمكنك الاستعلام عنها. يرجى التواصل مع المسؤول لمنحك "
+                   "الصلاحية."),
+        },
         "sql_execution_error_correctable": {
             "en": ("I could not build a query that the database would accept "
                    "for that. Could you rephrase it, or ask for one thing at "
@@ -1865,6 +1986,37 @@ Provide the corrected SQL:""")
         # needs: whether the person is unknown to the system, or known and
         # simply never seen.
         arabic = (state.get("response_language") or "en") == "ar"
+
+        # The camera cases, settled by the look-up the same way.
+        missing_camera = state.get("camera_not_found")
+        if missing_camera:
+            cameras = [c for c in (state.get("known_cameras") or []) if c]
+            listed = "، ".join(cameras) if arabic else ", ".join(cameras)
+            if arabic:
+                return (f"لا توجد كاميرا باسم «{missing_camera}»."
+                        + (f" الكاميرات المتاحة: {listed}." if listed else ""))
+            return (f"There is no camera named “{missing_camera}”."
+                    + (f" The cameras are: {listed}." if listed else ""))
+
+        corrected = state.get("camera_corrected_to")
+        if corrected:
+            # The camera is real and the query was re-run with its stored
+            # name; nothing matched. Say what was looked for, because the
+            # constraint - not the camera - is the likeliest reason.
+            purpose = " ".join(str(state.get("sql_purpose") or "").split())
+            if arabic:
+                return (f"لا توجد سجلات مطابقة للكاميرا «{corrected}»."
+                        + (f" ما تم البحث عنه: {purpose}" if purpose else ""))
+            return (f"No records matched for camera “{corrected}”."
+                    + (f" The query looked for: {purpose}" if purpose else ""))
+
+        idle_camera = state.get("camera_without_data")
+        if idle_camera:
+            if arabic:
+                return (f"الكاميرا «{idle_camera}» موجودة، لكن لا توجد "
+                        f"عمليات رصد مسجلة لها.")
+            return (f"Camera “{idle_camera}” exists, but has no detections "
+                    f"recorded.")
 
         known = state.get("entity_without_data")
         if known:
@@ -2347,16 +2499,15 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                             streaming_callback({"type": "content", "content": word + ' ', "step": "response"})
                 response_text = notice + response_text
             
-            state["final_response"] = response_text
+            state["final_response"] = self._strip_scaffolding(response_text)
             logger.info(f"[STEP_6] Story response generated successfully ({len(state['final_response'])} chars)")
             logger.info(f"✅ Final response generated ({len(state['final_response'])} chars)")
         except Exception as e:
-            logger.error(f"[STEP_6] Story generation failed: {str(e)}", exc_info=True)
-            error_msg = f"I apologize, but I encountered an error while preparing your response: {str(e)}"
-            state["final_response"] = error_msg
+            self._fail_turn(state, e)
             if streaming_callback:
-                streaming_callback({"type": "error", "message": error_msg, "step": "error"})
-            logger.error(f"❌ Error generating response: {str(e)}")
+                streaming_callback({"type": "error",
+                                    "message": state["final_response"],
+                                    "step": "error"})
 
         logger.info("[STEP_6] Final response ready (chars=%d)",
                     len(state.get("final_response") or ""))
@@ -2786,9 +2937,10 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             # validator as fresh generation; no branch gets private authority.
             state["generated_sql"] = adjusted
             state["validated_sql"] = ""
-            state["sql_purpose"] = (prepared.get("purpose")
-                                    or f"{last_result.get('purpose') or 'previous query'} "
-                                       f"({str(modification)[:80]})")
+            # The modification model describes the CHANGE ("filter to
+            # today"); a reader of an empty result needs the whole question.
+            state["sql_purpose"] = self._modified_purpose(
+                last_result.get("purpose"), modification)
             state["sql_was_modified"] = (adjusted.strip() != (base_sql or "").strip())
             logger.info("[MODIFY_SQL] adjusted SQL changed=%s chars=%d",
                         state["sql_was_modified"], len(adjusted))
@@ -2863,6 +3015,27 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                "one thing at a time."),
     }
 
+    #: Said when the answer itself could not be produced. A closed set, so
+    #: an exception message - a traceback, a hostname, a model's refusal -
+    #: is never streamed as the answer nor remembered as one.
+    _FAILURE_NARRATION = {
+        "ar": "لم أتمكن من إعداد إجابة لهذا الطلب. يرجى المحاولة مرة أخرى.",
+        "en": "I couldn't put together an answer for that. Please try again.",
+    }
+
+    def _fail_turn(self, state: AgentState, exc: BaseException) -> AgentState:
+        """Replace the answer with a fixed phrase and mark the turn failed.
+
+        The exception is logged in full here, once, and goes nowhere else.
+        """
+        lang = state.get("response_language") or "en"
+        state["final_response"] = self._FAILURE_NARRATION.get(
+            lang, self._FAILURE_NARRATION["en"])
+        state["turn_failed"] = True
+        logger.error("[REACT] turn failed: %s: %s", type(exc).__name__, exc,
+                     exc_info=True)
+        return state
+
     def handle_chat(self, state: AgentState) -> AgentState:
         """Handle pure chat responses without SQL."""
         if state.get("input_normalization_error"):
@@ -2871,12 +3044,27 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             state["final_response"] = state["input_normalization_error"]
             return state
 
+        # Bounded reasoning ran out on a REAL request. Say so. This narration
+        # existed and nothing read it, so the chat model improvised a fluent
+        # reply and the user never learned the work had been abandoned.
+        if state.get("reasoning_exhausted"):
+            lang = state.get("response_language") or "en"
+            state["final_response"] = self._EXHAUSTED_NARRATION.get(
+                lang, self._EXHAUSTED_NARRATION["en"])
+            state["turn_failed"] = True
+            logger.info("[REACT] terminal=%s answered with the exhaustion "
+                        "notice", state.get("terminal_state"))
+            return state
+
         # A look-up already SETTLED this turn: the person is enrolled with
         # nothing recorded, or is not enrolled at all. Both are facts, and
         # stating them is the whole point of having resolved the name -
         # handing them to the narration model instead produced answers that
         # contradicted the look-up. Deterministic, and one fewer model call.
-        if state.get("entity_without_data") or state.get("entity_not_found"):
+        if (state.get("entity_without_data") or state.get("entity_not_found")
+                or state.get("camera_without_data")
+                or state.get("camera_not_found")
+                or state.get("camera_corrected_to")):
             state["final_response"] = self._empty_narration(state)
             logger.info("[REACT] terminal=%s answered from the look-up",
                         state.get("terminal_state"))
@@ -2943,12 +3131,11 @@ Never claim an action succeeded unless the FACTS block below says it did."""),
             logger.info(f"[STEP_7] ✅ LLM final response received ({len(response)} chars)")
             logger.info("[STEP_7] Chat response received (chars=%d)",
                         len(str(response)))
-            state["final_response"] = response.strip()
+            state["final_response"] = self._strip_scaffolding(response)
             logger.info(f"[STEP_7] ✅ Final response set in state ({len(state['final_response'])} chars)")
             logger.info(f"✅ Chat response generated")
         except Exception as e:
-            state["final_response"] = f"I apologize, but I encountered an error: {str(e)}"
-            logger.error(f"❌ Error: {str(e)}")
+            self._fail_turn(state, e)
 
         logger.info("[STEP_7] Final response ready (chars=%d)",
                     len(state.get("final_response") or ""))

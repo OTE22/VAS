@@ -130,6 +130,28 @@ The system automatically:
 - ✅ Checks access before allowing promote/merge operations
 - ✅ Filters merge suggestions by user's pipeline access
 - ✅ Validates access on every API request
+- ✅ Limits the SQL assistant (chatbot) to the user's cameras
+
+### The assistant is scoped the same way
+
+`can_use_chatbot` opens the assistant; pipeline access decides what it can
+see. Before every turn the API binds the caller's grants onto the agent
+(`prepare_turn` → `set_pipeline_scope`), and the SQL guard rewrites every
+table the model reads (`pipelines`, `detections`, `faces`) into a subquery
+limited to those cameras. Joins, CTEs and nested selects inherit it because
+the rewrite is done on the AST, not on the prompt. The name resolver is
+scoped with the same predicate the identities API uses, so a person the user
+may not see is never offered as a match.
+
+- An **admin** is unrestricted (`pipeline_scope = None`).
+- A user with **no grants** gets nothing, not everything: the guard refuses
+  with `NO_PIPELINE_ACCESS`.
+- If the grants **cannot be read**, the scope is treated as empty for that
+  turn. An authorization rule that widens on failure is the one worth
+  designing against.
+
+Revoking a pipeline takes effect on the user's next turn: the scope is read
+fresh each time, independent of the `permissions_version` agent rebuild.
 
 ### Access Verification
 

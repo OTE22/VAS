@@ -68,6 +68,9 @@ class ErrorType:
     #: syntax error. Retrying the same SQL cannot help, but REWRITING it can,
     #: which is precisely what the re-plan path does.
     SQL_EXECUTION_ERROR_CORRECTABLE = "sql_execution_error_correctable"
+    #: The caller has no cameras assigned, so the guard refused to run
+    #: anything. Terminal for this turn; only an administrator changes it.
+    SQL_OUT_OF_SCOPE = "sql_out_of_scope"
     EMPTY_RESULT = "empty_result"
     ENTITY_UNRESOLVED = "entity_unresolved"
     ARTIFACT_MISSING = "artifact_missing"
@@ -179,6 +182,52 @@ def classify_execution_error(error_text: Any) -> str:
 #: nothing to do with how a user phrases anything.
 _NAME_COLUMNS = frozenset({"name", "display_name", "person_name"})
 
+#: The columns a query filters on when the user named a CAMERA. A zero-row
+#: result narrowed to one of these deserves the same second look a person's
+#: name gets: the camera may be misspelled, or not exist at all.
+_CAMERA_COLUMNS = frozenset({"location_name", "pipeline_id"})
+
+
+def _filtered_literals(sql: Optional[str], columns: frozenset) -> list:
+    """String literals the query compared against one of `columns`.
+
+    Same walk as filtered_names, parameterised by column set. Never raises:
+    unparseable SQL names nothing.
+    """
+    if not sql:
+        return []
+    try:
+        import sqlglot
+        from sqlglot import expressions as exp
+
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return []
+
+    found: list = []
+    try:
+        for node in tree.walk():
+            if not isinstance(node, (exp.EQ, exp.Like, exp.ILike, exp.In,
+                                     exp.NEQ)):
+                continue
+            if not [c for c in node.find_all(exp.Column)
+                    if c.name.lower() in columns]:
+                continue
+            for literal in node.find_all(exp.Literal):
+                if not literal.is_string:
+                    continue
+                value = str(literal.this).strip("%").strip()
+                if value and value not in found:
+                    found.append(value)
+    except Exception:
+        return found
+    return found
+
+
+def filtered_cameras(sql: Optional[str]) -> list:
+    """String literals the query compared against a CAMERA column."""
+    return _filtered_literals(sql, _CAMERA_COLUMNS)
+
 
 def filtered_names(sql: Optional[str]) -> list:
     """String literals the query compared against a NAME column.
@@ -266,8 +315,10 @@ def _expected_data(state: dict) -> bool:
     candidates = state.get("planner_candidates") or {}
     if candidates.get("unresolved_references"):
         return True
-    # The SQL itself filtered on a person's name.
+    # The SQL itself filtered on a person's name, or on a camera's.
     if filtered_names(state.get("generated_sql")):
+        return True
+    if filtered_cameras(state.get("generated_sql")):
         return True
     # A name correction happened this turn: the query was about a person.
     return bool(state.get("name_corrections"))
@@ -378,6 +429,11 @@ def build_observation(state: dict) -> Dict[str, Any]:
             elif code in sql_guard.INFRASTRUCTURE_CODES:
                 observation["error_type"] = (
                     ErrorType.SQL_EXECUTION_ERROR_PERMANENT)
+            elif code in sql_guard.AUTHORIZATION_CODES:
+                # No cameras assigned. Not forbidden, not broken: nothing to
+                # read. Saying "not permitted - I can only read data" here
+                # would be untrue and would carry the block warning.
+                observation["error_type"] = ErrorType.SQL_OUT_OF_SCOPE
             else:
                 observation["error_type"] = ErrorType.SQL_FORBIDDEN
         elif any(sign in str(error_text).lower() for sign in _FORBIDDEN_SIGNS):
@@ -405,8 +461,17 @@ def build_observation(state: dict) -> Dict[str, Any]:
             # subject: on a fresh turn there is no remembered subject, which
             # is exactly the case that used to fall through unhandled.
             names = filtered_names(state.get("generated_sql"))
-            observation["unresolved_entity"] = (
-                names[0] if names else _active_entity(state))
+            cameras = filtered_cameras(state.get("generated_sql"))
+            if names or not cameras:
+                observation["unresolved_entity"] = (
+                    names[0] if names else _active_entity(state))
+                observation["unresolved_kind"] = "person"
+            else:
+                # The query narrowed to a CAMERA and found nothing. "No
+                # matching records" for a camera that does not exist is
+                # true and useless; the look-up says which it is.
+                observation["unresolved_entity"] = cameras[0]
+                observation["unresolved_kind"] = "camera"
             observation["sanitized_detail"] = (
                 "no rows for the entity the task was narrowed to")
             return observation
@@ -518,6 +583,13 @@ def decide_next(observation: Dict[str, Any], *, mode: str = ReasoningMode.CONTEX
                 and not observation.get("resolution_attempted")):
             return {"decision": RESOLVE_ENTITY,
                     "reason": "the query returned nothing for a named person",
+                    "error_type": error_type}
+        # A CAMERA was already resolved against the real list and the
+        # query re-run with its stored name. Nothing matched: that is an
+        # answer about the data, not a doubt about which camera is meant.
+        if observation.get("unresolved_kind") == "camera":
+            return {"decision": ANSWER,
+                    "reason": "no records matched the camera named",
                     "error_type": error_type}
         # The query ran and the database answered honestly: nothing matched
         # the person this task was narrowed to. The likeliest cause is the

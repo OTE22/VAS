@@ -18,6 +18,12 @@ from .graph import create_sql_agent
 # Setup logger for SQL Agent
 logger = logging.getLogger(__name__)
 
+#: The only thing an unexpected exception may say to the user. The exception
+#: text itself used to be returned as the answer AND committed to memory,
+#: where the next turn replayed it to the model as context.
+_UNEXPECTED_FAILURE = ("Something went wrong while handling that request. "
+                       "Please try again.")
+
 # Neutral placeholder. Every transport replaces this with the policy layer's
 # verdict, but if one ever forgets, the fallback the user sees must still be
 # true — a refusal, never a claim about their account.
@@ -84,8 +90,11 @@ class SQLIntelligenceAgent:
         logger.info("Initializing SQL Intelligence Agent")
         self.conversation_memory = conversation_memory or ConversationMemory()
         logger.info(f"Conversation memory initialized (session: {self.conversation_memory.current_session_id})")
-        self.agent = create_sql_agent(conversation_memory=self.conversation_memory)
+        # The database manager FIRST, then the graph built around it, so the
+        # tools execute through the same instance `set_pipeline_scope` binds.
         self.db = DatabaseManager(config)
+        self.agent = create_sql_agent(conversation_memory=self.conversation_memory,
+                                      db=self.db)
         self.kb = SQLKnowledgeBase(config)
         # The caller's recent documents, refreshed by the API layer before
         # each turn. Ids, titles and languages only — never content, and never
@@ -112,6 +121,22 @@ class SQLIntelligenceAgent:
         each turn holds that user's lock, so this cannot leak across users.
         """
         self._artifact_index = list(artifacts or [])
+
+    def set_pipeline_scope(self, allowed) -> None:
+        """Bind this agent's SQL to the caller's cameras for the coming turn.
+
+        `None` is an administrator - no restriction. Anything else becomes
+        the exact set the guard rewrites every table against, so a user
+        assigned cameras 1 and 2 cannot read camera 3 through the chatbot
+        any more than through the REST API. An empty set stays empty: the
+        guard refuses, it does not widen.
+        """
+        import dataclasses
+
+        scope = None if allowed is None else frozenset(
+            str(p) for p in allowed)
+        self.db.sql_policy = dataclasses.replace(
+            self.db.sql_policy, pipeline_scope=scope)
 
     def set_identity_index(self, identities) -> None:
         """Give the next turn the enrolled people it may resolve names to.
@@ -370,6 +395,22 @@ class SQLIntelligenceAgent:
                             current = ds.apply_delta(current, {
                                 "operation": "REMOVE", "field": "active_task",
                                 "source": "user_correction"}, turn_id=turn_id)
+                        # The camera and time range were qualifiers of that
+                        # old job. They stayed "authoritative" until the
+                        # model happened to propose removing them, so a new
+                        # subject inherited yesterday's window. A field the
+                        # model's delta set THIS turn is the new job's own.
+                        touched = {(proposed or {}).get("field")}
+                        for stale in ("active_camera", "active_time_range"):
+                            if stale in touched:
+                                continue
+                            if ds.get_value(current, stale):
+                                current = ds.apply_delta(current, {
+                                    "operation": "REMOVE", "field": stale,
+                                    "source": "user_correction"},
+                                    turn_id=turn_id)
+                                logger.info("[STATE] %s retired with the old "
+                                            "subject", stale)
                     except ds.DeltaRejected as rejection:
                         logger.info("[DIALOGUE_STATE] subject delta rejected: "
                                     "%s", rejection)
@@ -473,6 +514,12 @@ class SQLIntelligenceAgent:
                 # not contaminate memory for the next valid request.
                 return response
             
+            if result.get("turn_failed"):
+                # A closed failure phrase: reported as a failure, and kept
+                # OUT of memory where it would be replayed as an answer.
+                logger.info("[SQL_AGENT] turn failed; nothing committed")
+                return response, result
+
             # Commit the completed turn together.
             self.conversation_memory.add_user_message(user_input)
             self.conversation_memory.add_ai_message(response)
@@ -495,10 +542,8 @@ class SQLIntelligenceAgent:
             raise
         except Exception as e:
             logger.error(f"[SQL_AGENT] Error processing query: {str(e)}", exc_info=True)
-            error_msg = f"I encountered an unexpected error: {str(e)}"
-            self.conversation_memory.add_user_message(user_input)
-            self.conversation_memory.add_ai_message(error_msg)
-            return error_msg
+            # Closed phrase, and NOT committed to memory.
+            return _UNEXPECTED_FAILURE, {"turn_failed": True}
 
     def query_stream(self, user_input: str, learn: bool = True, cancel_event=None):
         """
@@ -710,6 +755,14 @@ class SQLIntelligenceAgent:
                            "response_length": len(final_response),
                            "success": False, "has_document": False}
                     return
+                if accumulated_state.get("turn_failed"):
+                    # The phrase is streamed, the failure is reported as one,
+                    # and nothing is committed to memory.
+                    yield {"type": "complete", "message": "Query failed",
+                           "step": "done", "response": final_response,
+                           "response_length": len(final_response),
+                           "success": False, "has_document": False}
+                    return
                 logger.info(f"[SQL_AGENT] Streaming query completed successfully (response length: {len(final_response)} chars)")
                 has_document = self._finish_turn(
                     user_input, final_response, accumulated_state)
@@ -750,12 +803,8 @@ class SQLIntelligenceAgent:
                 
         except Exception as e:
             logger.error(f"[SQL_AGENT] Error in streaming query: {str(e)}", exc_info=True)
-            error_msg = f"I encountered an unexpected error: {str(e)}"
-            try:
-                self.conversation_memory.add_user_message(user_input)
-                self.conversation_memory.add_ai_message(error_msg)
-            except:
-                pass
+            # Closed phrase, and NOT committed to memory.
+            error_msg = _UNEXPECTED_FAILURE
             yield {"type": "error", "message": error_msg, "step": "error"}
             # Always yield completion to close stream properly
             yield {"type": "complete", "message": "Stream ended with error", "step": "done", "success": False}

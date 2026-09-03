@@ -76,8 +76,11 @@
                                     <li>Track Joey</li>
                                     <li>Show me all detections from today
                                     </li>
-                                    <li>Who was detected at camera
-                                        MD5AL_3EIN_7LWE?</li>
+                                    <!-- Filled from /api/pipelines with a camera this user can
+                                         see; stays hidden when there is none. A hard-coded name
+                                         here outlived its camera by months. -->
+                                    <li data-example="camera" hidden>Who was detected at camera
+                                        <span class="example-camera-name"></span>?</li>
                                     <li>What are the most active pipelines?
                                     </li>
                                 </ul>
