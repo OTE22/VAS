@@ -193,8 +193,11 @@ verification, settings — is documented **once**, in 46.
 - **[53_ANIMATED_AVATAR_ROUTE_VERIFICATION.md](53_ANIMATED_AVATAR_ROUTE_VERIFICATION.md)** — how to verify the avatar routes
 - **[54_AVATAR_VISIBILITY_AND_TIMING.md](54_AVATAR_VISIBILITY_AND_TIMING.md)** — visibility and timing
 
-## Production operations (60–63, 69, 72–74)
+## Production operations (60–63, 69, 72–74, 93)
 
+- **[91_ML_JOB_WORKER_ARCHITECTURE.md](91_ML_JOB_WORKER_ARCHITECTURE.md)** — durable ML job queue and the ml_worker service
+- **[92_RELATIONAL_ML_MODELS.md](92_RELATIONAL_ML_MODELS.md)** — the four governed model families; rules stay authoritative
+- **[93_PRODUCTION_RUNBOOK.md](93_PRODUCTION_RUNBOOK.md)** — orientation map: every artifact (secrets, certs, volumes, DB roles, JWT) in order of use
 - **[61_DEPLOYMENT_RUNBOOK.md](61_DEPLOYMENT_RUNBOOK.md)** — **the production authority**
 - **[60_BACKUP_AND_RESTORE.md](60_BACKUP_AND_RESTORE.md)** — backup, restore, disaster-recovery drill
 - **[63_REDIS_CACHING_GUIDE.md](63_REDIS_CACHING_GUIDE.md)** — Redis caching

@@ -31,7 +31,11 @@ from backend.ml.job_service import ML_QUEUE
 
 
 logger = logging.getLogger(__name__)
-WORKER_ID = os.getenv("ML_WORKER_ID") or f"ml-worker:{socket.gethostname()}:{os.getpid()}"
+# Read through settings, not os.getenv: config.py is the only configuration
+# interface, so a rename there cannot silently stop reaching this module.
+# Empty (the declared default) still means "derive an identity from the
+# host and pid", which is what os.getenv returning None used to mean.
+WORKER_ID = settings.ML_WORKER_ID or f"ml-worker:{socket.gethostname()}:{os.getpid()}"
 
 
 def _seconds(name: str, default: float, minimum: float) -> float:
@@ -350,7 +354,9 @@ async def execute_job(job_id: str) -> int:
 
 def main() -> int:
     logging.basicConfig(
-        level=getattr(logging, str(getattr(settings, "LOG_LEVEL", "INFO")).upper(), logging.INFO),
+        # No "INFO" fallback here: config.py already declares LOG_LEVEL with
+        # that default, and repeating it means two places to change.
+        level=getattr(logging, str(settings.LOG_LEVEL).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     parser = argparse.ArgumentParser(description=__doc__)

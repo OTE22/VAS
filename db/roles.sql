@@ -54,10 +54,10 @@ END
 $$;
 
 -- Passwords come from psql variables so they are never written into this file.
-ALTER ROLE fr_app       WITH PASSWORD :app_password;
-ALTER ROLE fr_migrator  WITH PASSWORD :migrator_password;
-ALTER ROLE fr_readonly  WITH PASSWORD :readonly_password;
-ALTER ROLE fr_backup    WITH PASSWORD :backup_password;
+ALTER ROLE fr_app       WITH PASSWORD :'app_password';
+ALTER ROLE fr_migrator  WITH PASSWORD :'migrator_password';
+ALTER ROLE fr_readonly  WITH PASSWORD :'readonly_password';
+ALTER ROLE fr_backup    WITH PASSWORD :'backup_password';
 
 -- Explicitly strip privileges that must never be held, in case a role already
 -- existed with more than it should.
@@ -103,6 +103,10 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO fr_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT ON TABLES TO fr_readonly, fr_backup;
+-- SELECT only (not USAGE): pg_dump reads each sequence's last_value; it never
+-- calls nextval. Without this, a migration-created sequence blocks the backup.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT ON SEQUENCES TO fr_backup;
 
 -- Objects created BY the migrator must also be reachable by the application.
 ALTER DEFAULT PRIVILEGES FOR ROLE fr_migrator IN SCHEMA public
@@ -111,6 +115,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE fr_migrator IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO fr_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE fr_migrator IN SCHEMA public
     GRANT SELECT ON TABLES TO fr_readonly, fr_backup;
+-- The migrator is what actually CREATES these sequences, so this is the grant
+-- that matters for every future migration.
+ALTER DEFAULT PRIVILEGES FOR ROLE fr_migrator IN SCHEMA public
+    GRANT SELECT ON SEQUENCES TO fr_backup;
 
 -- ---------------------------------------------------------------------
 -- Transfer ownership of existing objects to fr_app

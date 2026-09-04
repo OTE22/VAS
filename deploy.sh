@@ -223,6 +223,13 @@ for module in install gpu models db health upgrade dev; do
     . "$ROOT/scripts/deploy/stage-${module}.sh"
 done
 
+# The path manifest and the read-only doctor are not stages, so they are not
+# named stage-*.sh and the loop above does not reach them.
+# shellcheck source=scripts/deploy/paths.sh
+. "$ROOT/scripts/deploy/paths.sh"
+# shellcheck source=scripts/deploy/doctor.sh
+. "$ROOT/scripts/deploy/doctor.sh"
+
 # ---------------------------------------------------------------------------
 # Stage 01 — preflight
 # Detect the host. Refuses nothing yet; establishes every fact later stages
@@ -687,6 +694,9 @@ main() {
         restart)      require_root restart; open_log "$@"; cmd_restart; finish_report ;;
         status)       cmd_status ;;
         health)       open_log "$@"; cmd_health_only; finish_report ;;
+        doctor)       doctor_run ;;
+        paths)        echo "Deployment paths — reality vs scripts/deploy/paths.sh"; echo
+                      verify_deployment_paths ;;
         gpu-test)     open_log "$@"; stage_preflight; stage_gpu_detect; stage_gpu_test; finish_report ;;
         model-check)  open_log "$@"; stage_preflight; stage_model_check; finish_report ;;
         model-manifest) cmd_model_manifest ;;

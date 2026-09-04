@@ -1,0 +1,3 @@
+user default off
+user fr_app on #2f48d8e0c22f0039d48d093cb9f84f640cffd17b0ec7d10408262e98f453f219 ~* &* +@all -@admin -@dangerous -flushall -flushdb -shutdown -config -debug -replicaof -slaveof -module -acl -script
+user fr_monitor on #b44ef25e21ffc91dedcb0d69a52721f4026c188e48a1fbeebef36abccd3c4639 ~* &* +@read +ping +info +client|id -@admin -@dangerous

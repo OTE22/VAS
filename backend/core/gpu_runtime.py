@@ -122,9 +122,18 @@ def run_inference_smoke_test(session, model_name: str) -> bool:
 
         feed = {}
         for spec in inputs:
+            # Dynamic BATCH dims become 1; dynamic SPATIAL dims become a real
+            # image size. Substituting 1 everywhere fed SCRFD a 1x1-pixel image
+            # whose spatial dims collapse to 0x0 a few conv layers in - ONNX
+            # Runtime raised INVALID_ARGUMENT, the handler below reported it as
+            # a GPU failure, and the first production GPU deployment died at
+            # startup on perfectly healthy hardware. The first axis of an image
+            # tensor is batch; every later dynamic axis gets a size a detection
+            # model can actually convolve.
             shape = [
-                1 if (isinstance(d, str) or d is None or d < 0) else d
-                for d in spec.shape
+                (1 if index == 0 else 640)
+                if (isinstance(dim, str) or dim is None or dim < 0) else dim
+                for index, dim in enumerate(spec.shape)
             ]
             dtype = np.float32
             if "int64" in str(spec.type):
@@ -138,7 +147,7 @@ def run_inference_smoke_test(session, model_name: str) -> bool:
         return True
     except Exception as e:
         logger.error("%s: inference smoke test FAILED: %s: %s",
-                     model_name, type(e).__name__, e)
+                     model_name, type(e).__name__, e, exc_info=True)
         return False
 
 

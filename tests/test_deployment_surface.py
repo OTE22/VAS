@@ -252,6 +252,12 @@ def test_compose_sets_no_unknown_application_setting():
         # scripts/backup.sh (libpq), redis-cli, python runtime, build arg
         "PGHOST", "PGUSER", "PGPASSWORD", "PGDATABASE",
         "REDISCLI_AUTH", "PYTHONUNBUFFERED", "INSTALL_DEV",
+        # Read by docker-entrypoint.sh (line 83) BEFORE python starts, to decide
+        # whether to run `python -m backend.security.config_guard`. It cannot be
+        # a declared setting: it gates whether settings validation runs at all,
+        # so resolving it through Settings would be circular. ml_worker sets it
+        # to 0 because it serves no traffic and the API owns the HTTP preflight.
+        "CONFIG_PREFLIGHT",
         # compose interpolation only; the application never reads it
         "PUBLIC_ORIGIN",
         # huggingface_hub / sentence-transformers read this directly from the

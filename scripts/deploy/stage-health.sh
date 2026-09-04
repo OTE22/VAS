@@ -193,7 +193,7 @@ storage_round_trip() {
 
 forged_token_rejected() {
     local code
-    code="$(curl_status "http://localhost:8000/api/identities" \
+    code="$(curl_status "http://localhost:8000/api/auth/me" \
         -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdHRhY2tlciIsInJvbGUiOiJhZG1pbiJ9.not-a-real-signature")" \
         || { echo "request failed"; return 1; }
     case "$code" in
@@ -215,8 +215,10 @@ unsigned_webhook_refused() {
 
 tls_serves_certificate() {
     local host="$1" out
-    out="$(compose exec -T nginx sh -c \
-        "echo | openssl s_client -connect 127.0.0.1:443 -servername $host 2>/dev/null | openssl x509 -noout -subject" 2>/dev/null)" || {
+    # From the host, not inside nginx: nginx:alpine has no openssl binary, so
+    # the in-container form reported "TLS handshake failed" while HTTPS served
+    # 200 the whole time. deploy.sh runs on the host, which has openssl.
+    out="$(echo | openssl s_client -connect 127.0.0.1:443 -servername "$host" 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)" || {
         echo "TLS handshake failed"; return 1; }
     printf '%s' "$out" | grep -q . || { echo "no certificate presented"; return 1; }
     printf '%s' "${out#subject=}"

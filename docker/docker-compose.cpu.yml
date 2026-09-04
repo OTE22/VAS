@@ -53,7 +53,7 @@ services:
       POSTGRES_WORK_MEM: 16MB
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - ../init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     ports:
       - "5432:5432"
     healthcheck:

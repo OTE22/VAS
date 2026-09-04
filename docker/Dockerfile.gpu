@@ -44,8 +44,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python and pip
-RUN ln -s /usr/bin/python3.11 /usr/bin/python && \
-    ln -s /usr/bin/python3.11 /usr/bin/python3
+# -f: the CUDA/Ubuntu 22.04 base already ships a /usr/bin/python3 symlink, so a
+# plain `ln -s` fails with "File exists" and the whole build dies at step 2.
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python3
 
 # =====================================================
 # System dependencies (runtime only)

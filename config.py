@@ -1220,6 +1220,10 @@ class Settings(BaseSettings):
 
     # ML pipeline (first release: RULES is the production decision system;
     # anomaly models cap at administrator-approved SHADOW)
+    ML_WORKER_ID: str = Field(
+        default="",
+        description="Stable identity for the ML worker, so a container replacement updates one heartbeat row instead of creating a new one. Empty means derive it from hostname and pid. Default: \"\""
+    )
     ML_DECISION_MODE: str = Field(
         default="rules",
         description="Decision mode: rules (default, production-safe) | shadow (after an approved anomaly model) | hybrid/ml (GATED this release — activation returns the unmet gates). Default: rules"
