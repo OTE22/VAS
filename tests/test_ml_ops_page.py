@@ -137,13 +137,13 @@ def test_page_chrome_follows_the_house_rules():
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
     nav_at = html.find("js/navbar-loader.js?v=nav-7")
-    page_at = html.find("js/admin-ml-ops.js?v=mlops-13")
+    page_at = html.find("js/admin-ml-ops.js?v=mlops-14")
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-9" in html, "the page stylesheet is not version-pinned"
+    assert "admin-ml-ops.css?v=mlops-10" in html, "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 
@@ -185,6 +185,22 @@ def test_operator_console_leads_with_live_backend_execution_state():
     assert "JOB_PRESENTATION" in js
     assert "mlops-job-row" in js
     assert "aria-valuenow" in js
+
+
+def test_page_groups_the_lifecycle_into_guided_workspaces():
+    html = read(HTML)
+    js = read(JS)
+    expected = {"overview": 3, "prepare": 6, "review": 2, "monitor": 3, "audit": 2}
+    assert 'id="mlops-guide-title"' in html
+    assert 'id="mlops-next-step-title"' in html
+    assert 'id="mlops-workspace-panels"' in html
+    for workspace, count in expected.items():
+        assert f'data-mlops-view="{workspace}"' in html
+        assert len(re.findall(f'data-mlops-panel="{workspace}"', html)) == count
+    assert "function activateWorkspace" in js
+    assert "function installWorkspaceNavigation" in js
+    assert "function updateNextStep" in js
+    assert "window.history.replaceState" in js
 
 
 # ---------------------------------------------------------------------------

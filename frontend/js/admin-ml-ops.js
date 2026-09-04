@@ -25,6 +25,33 @@
     const JOB_POLL_MAX_BACKOFF_MS = 30000;
     const PAGE_SIZE = 10;
     const MODE_ORDER = ['rules', 'shadow', 'hybrid', 'ml'];
+    const WORKSPACES = {
+        overview: {
+            kicker: 'Current state',
+            title: 'Overview',
+            description: 'Check service health, active work, and which system is making live decisions.'
+        },
+        prepare: {
+            kicker: 'Lifecycle step 2',
+            title: 'Prepare data and train',
+            description: 'Review readiness, build datasets, manage labels, and start a manual training run.'
+        },
+        review: {
+            kicker: 'Lifecycle step 3',
+            title: 'Review models',
+            description: 'Inspect registered models and test observational scoring before approving shadow use.'
+        },
+        monitor: {
+            kicker: 'Lifecycle step 4',
+            title: 'Monitor shadow ML',
+            description: 'Compare rules with shadow results, inspect fallbacks, and review drift without affecting live decisions.'
+        },
+        audit: {
+            kicker: 'Lifecycle step 5',
+            title: 'Audit and troubleshoot',
+            description: 'Trace administrator actions and API calls with reasons, request IDs, and error codes.'
+        }
+    };
 
     function debugLog() {
         if (DEBUG && window.console) console.log.apply(console, arguments);
@@ -114,9 +141,11 @@
     function setConsoleConnection(status, label) {
         const node = getElement('console-connection-state');
         if (!node) return;
+        state.consoleStatus = status;
         node.className = 'mlops-live-state is-' + status;
         const textNode = node.querySelector('span:last-child');
         if (textNode) textNode.textContent = label;
+        updateNextStep();
     }
 
     // ============================================
@@ -327,8 +356,106 @@
         lastJobsSyncAt: null,
         modelTypes: [],
         datasets: [],
+        activeWorkspace: 'overview',
+        consoleStatus: 'connecting',
         pendingAction: null    // { title, execute(reason) }
     };
+
+    function activateWorkspace(name, shouldScroll) {
+        const workspace = WORKSPACES[name] ? name : 'overview';
+        const copy = WORKSPACES[workspace];
+        state.activeWorkspace = workspace;
+
+        document.querySelectorAll('[data-mlops-panel]').forEach(function (panel) {
+            panel.hidden = panel.dataset.mlopsPanel !== workspace;
+        });
+        document.querySelectorAll('[data-mlops-view]').forEach(function (button) {
+            const active = button.dataset.mlopsView === workspace;
+            button.classList.toggle('is-active', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+
+        const kicker = getElement('mlops-workspace-kicker');
+        const title = getElement('mlops-workspace-title');
+        const description = getElement('mlops-workspace-description');
+        const count = getElement('mlops-workspace-count');
+        if (kicker) kicker.textContent = copy.kicker;
+        if (title) title.textContent = copy.title;
+        if (description) description.textContent = copy.description;
+        if (count) {
+            const total = document.querySelectorAll('[data-mlops-panel="' + workspace + '"]').length;
+            count.textContent = total + (total === 1 ? ' section' : ' sections');
+        }
+
+        if (shouldScroll) {
+            const heading = document.querySelector('.mlops-workspace-heading');
+            if (heading) heading.scrollIntoView({ block: 'start' });
+        }
+    }
+
+    function installWorkspaceNavigation() {
+        document.querySelectorAll('[data-mlops-view], [data-open-mlops-view]').forEach(function (control) {
+            control.addEventListener('click', function () {
+                const workspace = control.dataset.mlopsView || control.dataset.openMlopsView;
+                activateWorkspace(workspace, true);
+            });
+        });
+
+        const hashWorkspace = {
+            '#operations-queue': 'overview',
+            '#system-governance': 'overview',
+            '#workflows': 'prepare',
+            '#model-registry': 'review',
+            '#observability': 'monitor',
+            '#audit-trail': 'audit'
+        }[window.location.hash];
+        activateWorkspace(hashWorkspace || 'overview', false);
+        if (window.location.hash && window.history && window.history.replaceState) {
+            window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+    }
+
+    function updateNextStep() {
+        const title = getElement('mlops-next-step-title');
+        const description = getElement('mlops-next-step-description');
+        const action = getElement('mlops-next-step-action');
+        if (!title || !description || !action) return;
+
+        let next = {
+            title: 'Rules are protecting live decisions',
+            description: 'No ML job is active. Prepare data and labels when you are ready to build the next candidate.',
+            workspace: 'prepare',
+            action: 'Prepare data'
+        };
+        const workerStatus = toText(state.mlWorker && state.mlWorker.status, 'unknown');
+        if (state.consoleStatus === 'offline' || (state.mlWorker && workerStatus !== 'healthy')) {
+            next = {
+                title: 'Restore the ML worker first',
+                description: 'The control plane or worker is unavailable. Durable commands are retained and will resume after recovery.',
+                workspace: 'overview',
+                action: 'Check system health'
+            };
+        } else if (state.activeJobs.size) {
+            next = {
+                title: state.activeJobs.size + (state.activeJobs.size === 1 ? ' job is in progress' : ' jobs are in progress'),
+                description: 'Follow the current stage and wait for completion before starting conflicting work.',
+                workspace: 'overview',
+                action: 'Follow job progress'
+            };
+        } else if (state.currentMode === 'shadow') {
+            next = {
+                title: 'Review shadow evidence',
+                description: 'Rules still decide. Compare shadow outputs, fallbacks, and drift before considering another lifecycle change.',
+                workspace: 'monitor',
+                action: 'Open monitoring'
+            };
+        }
+
+        title.textContent = next.title;
+        description.textContent = next.description;
+        action.textContent = next.action;
+        action.dataset.openMlopsView = next.workspace;
+    }
 
     function stopJobPolling() {
         if (state.jobPollTimer) {
@@ -424,6 +551,7 @@
         setSummaryValue('summary-mode', state.currentMode.toUpperCase(),
             state.currentMode === 'rules' ? 'healthy' : 'warning',
             'Configured decision mode');
+        updateNextStep();
 
         const frag = document.createDocumentFragment();
         for (const modeName of MODE_ORDER) {
@@ -1458,6 +1586,7 @@
             state.jobPollFailures = 0;
             renderJobs(items, state.mlWorker);
             syncJobControls();
+            updateNextStep();
             const terminalSignature = items
                 .filter(function (job) { return job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'; })
                 .slice(0, 4)
@@ -1477,6 +1606,7 @@
             setSummaryValue('summary-worker', 'Unavailable', 'danger', toText(err.message));
             setSummaryValue('summary-last-update', 'Sync failed', 'danger', toText(err.message));
             if (!state.recentJobs.length) renderJobStatus(null, 'Unable to load ML jobs: ' + toText(err.message));
+            updateNextStep();
         }
         const delay = state.activeJobs.size
             ? Math.min(JOB_POLL_MAX_BACKOFF_MS,
@@ -2283,98 +2413,98 @@
 
     const HELP = {
         mode: {
-            title: 'Decision Mode',
+            title: 'Live decision mode',
             what: 'Which engine makes the live threat decision. RULES: the deterministic risk engine (risk-engine-v1) alone. SHADOW: rules still decide; the approved anomaly model runs in parallel and its output is only recorded for comparison. HYBRID and ML are gated this release — requesting them serves rules and records the gate reasons.',
             read: ['The badge is the mode configured NOW (settings.ML_DECISION_MODE).', 'A card marked "gated" lists the exact unmet conditions; nothing here invents readiness.', '"Pause ML" restores RULES immediately and writes an audit row.'],
             actions: ['Activate: changes the configured mode (reason required, audited).', 'Pause ML: emergency stop back to rules.'],
             progress: 'Nothing long-running here: a change applies to the next assessment.'
         },
         labels_readiness: {
-            title: 'Label Readiness',
+            title: 'Are labels ready?',
             what: 'Counts of REVIEWED manual labels against the minimums supervised training would need (ML_SUPERVISED_MIN_LABELS / PER_CLASS). Weak, unreviewed and disputed labels are listed but never counted.',
             read: ['"supervised_gate_open" true means the reviewed-label count permits threat-ranking training; dataset, class-balance, leakage and artifact gates still apply.'],
             actions: [], progress: 'Grows as analysts confirm labels in the Labels Queue.'
         },
         data_readiness: {
-            title: 'Data Readiness',
+            title: 'Is data ready?',
             what: 'Feature snapshots the collector has written (the rows datasets are built from) and the graph readiness floors for pair features.',
             read: ['Snapshots are computed point-in-time: only data strictly before each as_of is used.', 'The feature set version stamps every snapshot; models trained under another version never score current snapshots.'],
             actions: ['Run feature collection: computes snapshots for new events as a durable worker job.'],
             progress: 'The feature job reports its backend stage and percent in the Durable Job Queue.'
         },
         capabilities: {
-            title: 'Optional Capabilities',
+            title: 'Available capabilities',
             what: 'Optional ML libraries (MLflow, Optuna, XGBoost, SHAP). Each is reported with one of four honest statuses; none is used this release.',
             read: ['"flag_off" means not enabled; "not_installed" means the package is absent; nothing is downloaded automatically (offline deployment).'],
             actions: [], progress: ''
         },
         registry: {
-            title: 'Model Registry',
+            title: 'Models awaiting review',
             what: 'Every trained model with its stage. Lifecycle: training → validated (quality gates passed) → shadow (explicit administrator approval) → archived. Anomaly models can never reach approved/production this release.',
             read: ['Exactly one model per type can be in SHADOW; approving a second one archives the first and retires its threshold set.', 'Detail shows full lineage: dataset id + both hashes, training configuration as run, code version, artifact sha256, whether the artifact file is present, dependency versions, evaluation and the descriptive comparison with the incumbent.'],
             actions: ['Approve for SHADOW (observation only): the only promotion; requires a reason; binds to the artifact checksum; grants NO decision authority.', 'Reject: records a reason and retires thresholds.', 'Stop shadow: rollback — archives the shadow model; rules keep deciding.'],
             progress: 'Training produces a VALIDATED candidate, never a live model.'
         },
         shadow: {
-            title: 'Shadow Comparison',
+            title: 'Rules compared with shadow ML',
             what: 'What the shadow model said alongside the rules result for the same assessments. Rule severity and anomaly band are different concepts shown side by side; no score difference is ever computed.',
             read: ['operational_disagreement: both_flagged / rules_only / anomaly_only / neither — which mechanism would have raised attention.', 'Evidence report: per band, how many predictions carry a reviewed outcome and how those outcomes split — the material a human needs to judge a future ML→risk mapping. The decision stays REQUIRES_VALIDATION.'],
             actions: ['Window: 7/30/90 days.', 'Evidence report: read-only.'],
             progress: 'Accumulates with every live assessment while the mode is SHADOW.'
         },
         predictions: {
-            title: 'Recent Predictions',
+            title: 'Recent shadow predictions',
             what: 'Individual shadow predictions with their lineage: model, threshold set version, snapshot, event time and, when an analyst later reviewed the assessment, the linked outcome label.',
             read: ['fallback_reason set = the model did not score (no approved model, timeout, artifact/feature-set mismatch…); the live decision was unaffected.', 'Scores are anomaly scores in [0,1], not probabilities.'],
             actions: ['Fallback only: filter to predictions that fell back.'],
             progress: ''
         },
         drift: {
-            title: 'Drift Reports',
+            title: 'Data and prediction drift',
             what: 'PSI / KS / JS divergence of recent feature snapshots against the preceding window, plus prediction drift (score distribution, fallback and failure rates, latency). Observations only.',
             read: ['insufficient_data below ML_DRIFT_MIN_SAMPLES is honest, not a failure.', 'Severity follows the configured PSI thresholds; drift never triggers retraining or mode changes.'],
             actions: ['Run drift check now: enqueues a durable report-only job; the worker also schedules periodic checks.'],
             progress: 'Track the run in the Durable Job Queue.'
         },
         training: {
-            title: 'Training (manual)',
+            title: 'Build and train',
             what: 'Builds an immutable Parquet dataset (or reuses one you pick) and trains a CANDIDATE. Stages: loading/building dataset → training → evaluating → saving candidate → registering. Success = a VALIDATED model awaiting your shadow approval.',
             read: ['The stage strip and percent come from the job record; a failed job shows its stable error code (e.g. DATASET_FILE_HASH_MISMATCH, QUALITY_GATES_FAILED).', 'Datasets: definition/version, extraction audit (candidate / selected / excluded rows and the cap policy), logical checksum and Parquet file hash. "legacy build" rows predate extraction auditing and are reported, never rewritten.', 'Seed and hyperparameters you enter are persisted verbatim as the model\'s training configuration.'],
             actions: ['Start training: background job; only one at a time.', 'Build dataset: explicit definition, optional time range, and what to do above the cap (refuse by default).', 'Verify legacy datasets: records a file hash only when the reloaded rows reproduce the registered checksum.', 'Archive: releases the Parquet bytes of a dataset no model was trained from (lineage row and manifest stay).'],
             progress: 'Watch the Durable Job Queue; the job id links the run to the audit log and call log.'
         },
         evaluation: {
-            title: 'Model Evaluation',
+            title: 'Test a model safely',
             what: 'Runs approved pair/graph anomaly models as on-demand shadow observations, or a validated threat ranker to order an analyst review batch.',
             read: ['Every response is explicitly applied_to_live_result=false.', 'Threat ranking is relative review priority, not a threat probability.'],
             actions: ['Run evaluation: computes current features, verifies the artifact and returns an audited observational score.'],
             progress: 'Synchronous and bounded to 200 identities for ranking.'
         },
         labels: {
-            title: 'Labels Queue',
+            title: 'Review outcome labels',
             what: 'Analyst labels (manual) and weak labels about assessments. A manual label can only be created for a RESOLVED assessment; review actions confirm, dispute or retract it; supersede corrects it while keeping the chain.',
             read: ['Only active, manual, reviewed labels count toward readiness and supervised datasets.', 'Labels are linked to predictions as outcomes for later evaluation.'],
             actions: ['Create label, confirm/dispute/retract, supersede.'],
             progress: ''
         },
         policy: {
-            title: 'Retraining Policy',
+            title: 'Retraining policy',
             what: 'Scheduled retraining parameters. Scheduled retraining is GATED this release: enabling it is refused (SCHEDULED_RETRAINING_GATED); training stays a manual, reviewable action.',
             read: ['Values are advisory until the gate is lifted.'], actions: [], progress: ''
         },
         audit: {
-            title: 'ML Audit Log',
+            title: 'Administrator activity',
             what: 'Every administrator action on the ML system: mode changes, pause, training requests, model stage transitions, threshold activation/retirement, label lifecycle, dataset archive/verification.',
             read: ['Each row names the actor, the object and the reason given.'], actions: [], progress: ''
         },
         system: {
-            title: 'System State',
+            title: 'System health',
             what: 'The facts that define the ML system right now, read from the database and settings at load time: the current feature set and its known limitations, which engine decides, what is in shadow and whether it can score current snapshots, dataset and model inventory, the extraction policy, the call log and the migration head.',
             read: ['Alerts are conditions that need an administrator (for example a shadow model trained under an older feature set — it falls back on every assessment until a current one is approved).', '"What changed" lists the core changes that produced this state, newest first.'],
             actions: ['What changed: release notes.'], progress: ''
         },
         calls: {
-            title: 'Recent Calls',
+            title: 'API call diagnostics',
             what: 'One record per /api/ml/* request: time, request id, actor, method, route, status, error code, duration and the ids the call produced. The request id is the X-Request-ID header the browser received and the req=<id> on every server log line of that call.',
             read: ['Errors only: status ≥ 400 (refusals carry their stable error_code).', 'Bodies are sanitised summaries (keys and short values; no feature vectors, no secrets).', 'The same records are in the server application log, tagged [MLOPS_CALL], for offline debugging.'],
             actions: ['Refresh; Errors only.'], progress: ''
@@ -2672,6 +2802,7 @@
 
     function init() {
         debugLog('ml-ops init');
+        installWorkspaceNavigation();
         on('system-notes-btn', 'click', openReleaseNotes);
         installHelpButtons();
         applyTooltips();
