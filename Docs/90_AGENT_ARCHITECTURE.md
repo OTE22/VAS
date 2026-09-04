@@ -475,6 +475,26 @@ camera path (`_is_known_camera_label`) instead of "No person named 'WEZARET
 DEFA3' is enrolled". And a companion question proposed as a *modification*
 of the previous query is turned into the subject's-detections query like any
 other: as a modification it came back six subqueries deep and was refused.
+An enrolled person named in the message is recorded in `resolved_entities`
+by `_note_named_person` at routing time, so the subject is committed to
+dialogue state whether or not a look-up ran (it used to be written only
+from `resolve_person` results, and a turn answered without a look-up held
+nothing for the next "with whom she was").
+A companion question with a subject (named, or held) is settled BEFORE the
+tool loop: `companion_query` in `agent_loop` returns the fixed
+`query_database` call and `plan_action` commits it with a `source: fact`
+trace entry, no model step spent. Live, the loop had spent four rejections
+asking who "she" was and the planner wrote "people detected with Joey today".
+The enrichment and the answer share ONE subject (`_subject_of`: the held
+entity, else the first named row); the answer names the latest detection
+and reports only company seen at that detection, with earlier encounters
+given their own camera and time ("Earlier: IRON MAN with JOEY at … on …").
+A camera literal nobody named (not in the message, the resumed request,
+the generation input, or the held camera) is an invented filter, not a
+camera to look up: `_camera_invented` → one deterministic regeneration
+with the filter called out (`_requery_without_invented_camera`). The seed
+"Who was at camera entrance today" had been copied into "with whom she
+was" and answered "There is no camera named 'entrance'".
 
 **A camera gets the same second look as a person.** `filtered_cameras`
 reads the literals the SQL compared against `location_name` or `pipeline_id`;

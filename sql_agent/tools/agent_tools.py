@@ -558,21 +558,36 @@ class SQLAgentTools:
                     clarification_answered=bool(state.get("clarification_answered")))
                 state["turn_kind"] = turn_kind
                 logger.info("[ROUTE] kind=%s because %s", turn_kind, why)
+                self._note_named_person(state, user_text)
                 known_request = (True if turn_kind == agent_loop.DATA
                                  else False if turn_kind == agent_loop.CHAT
                                  else None)
-                tool_call, tool_trace, turn_is_a_request = agent_loop.run_tool_loop(
-                    self.llm,
-                    user_text=user_text,
-                    context_block=context_block,
-                    db=self.db,
-                    dialogue_state=dialogue_now,
-                    artifact_index=state.get("artifact_index") or [],
-                    identity_index=state.get("identity_index") or [],
-                    max_steps=max(1, step_budget),
-                    prior_observations=prior_observations,
-                    known_request=known_request,
-                    has_result=bool(candidates.get("last_result")))
+                fact_call = (agent_loop.companion_query(
+                    user_text, dialogue_now, state.get("identity_index") or [])
+                    if known_request is not False else None)
+                if fact_call:
+                    # A fact settles the action: no model step to spend.
+                    logger.info("[REACT] companion question: the subject's "
+                                "detections are the query")
+                    tool_call = fact_call
+                    tool_trace = [{"step": 0, "tool": fact_call["name"],
+                                   "signature": [fact_call["name"], json.dumps(
+                                       fact_call["arguments"], sort_keys=True)],
+                                   "committed": True, "source": "fact"}]
+                    turn_is_a_request = True
+                else:
+                    tool_call, tool_trace, turn_is_a_request = agent_loop.run_tool_loop(
+                        self.llm,
+                        user_text=user_text,
+                        context_block=context_block,
+                        db=self.db,
+                        dialogue_state=dialogue_now,
+                        artifact_index=state.get("artifact_index") or [],
+                        identity_index=state.get("identity_index") or [],
+                        max_steps=max(1, step_budget),
+                        prior_observations=prior_observations,
+                        known_request=known_request,
+                        has_result=bool(candidates.get("last_result")))
 
                 deterministic_override = False
                 if (deterministic_plan and tool_call
@@ -1792,6 +1807,25 @@ class SQLAgentTools:
         """How two camera names are compared: case, spacing and the
         underscore-versus-space that ids and labels disagree on."""
         return " ".join(str(text or "").replace("_", " ").split()).casefold()
+
+    @staticmethod
+    def _note_named_person(state: AgentState, user_text: str) -> Optional[str]:
+        """An enrolled person named in the message is this turn's subject,
+        look-up or not. The subject was committed to dialogue state only
+        from `resolve_person` results, so "does joey was alone" (answered
+        without a look-up) held nothing, and "with whom she was" next had
+        no subject and was answered about IRON MAN."""
+        from .agent_loop import names_a_known_person
+
+        named = names_a_known_person(user_text, state.get("identity_index") or [])
+        if not named:
+            return None
+        entries = list(state.get("resolved_entities") or [])
+        if not any((e or {}).get("canonical_name") == named for e in entries):
+            entries.append({"kind": "person", "canonical_name": named,
+                            "source": "identity_index"})
+            state["resolved_entities"] = entries
+        return named
 
     def _camera_invented(self, state: AgentState, needle: str) -> bool:
         """Did the camera filter come from anywhere but the user? A fact:

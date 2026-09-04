@@ -530,6 +530,28 @@ def is_companion_question(text: str) -> bool:
     return bool(_COMPANION_QUESTION.search(" ".join(str(text or "").split())))
 
 
+def companion_query(user_text: str, dialogue_state, identity_index) -> Optional[dict]:
+    """The one query a companion question needs, or None.
+
+    The enrichment that answers "with whom" / "alone?" runs on the
+    SUBJECT'S detection rows, so that is the query - whoever the subject
+    is: named in the message, or held from the previous turn. A fact, so
+    the model is not consulted: left to it, "with whom she was" spent four
+    rejections asking who "she" was and the planner then wrote "people
+    detected with Joey today", and "هل كانت وحدها" became a query about
+    cameras.
+    """
+    if not is_companion_question(user_text):
+        return None
+    subject = (names_a_known_person(user_text, identity_index)
+               or held_subject(dialogue_state))
+    if not subject:
+        return None
+    return {"name": "query_database",
+            "arguments": {"question": (f"all detections of {subject} with camera "
+                                       f"name and timestamp, most recent first")}}
+
+
 def held_subject(dialogue_state) -> Optional[str]:
     fields = ((dialogue_state or {}).get("fields") or {})
     value = (fields.get("referenced_entity") or {}).get("value")
@@ -1170,24 +1192,14 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
             name = "translate_document"
             arguments = {"document_id": "", "language": target_language}
 
-        if (name in ("query_database", "modify_active_query")
-                and is_companion_question(user_text)):
-            # The enrichment that answers "with whom" runs on the SUBJECT'S
-            # detection rows, so that is the query - whoever the subject is:
-            # named in the message, or held from the previous turn. Left to
-            # the model, "هل كانت وحدها" became a query about cameras, and
-            # as a MODIFICATION of the previous query it became six
-            # subqueries deep and was refused as too complex.
-            subject = (names_a_known_person(user_text, identity_index)
-                       or held_subject(dialogue_state))
-            if subject:
-                fixed = (f"all detections of {subject} with camera name and "
-                         f"timestamp, most recent first")
-                if name != "query_database" or arguments.get("question") != fixed:
-                    logger.info("[TOOL_LOOP] companion question: querying "
-                                "the subject's detections")
-                    name = "query_database"
-                    arguments = {"question": fixed}
+        if name in ("query_database", "modify_active_query"):
+            fact = companion_query(user_text, dialogue_state, identity_index)
+            if fact and (name != "query_database"
+                         or arguments.get("question") != fact["arguments"]["question"]):
+                logger.info("[TOOL_LOOP] companion question: querying "
+                            "the subject's detections")
+                name = fact["name"]
+                arguments = dict(fact["arguments"])
 
         # A continuation's content is elsewhere by definition ("with whom
         # she was" is about the previous subject), so only a self-contained

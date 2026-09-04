@@ -151,6 +151,37 @@ def test_the_latest_detection_is_the_one_described():
     assert "2026-08-23 11:11:54" in answer and "2026-08-20" not in answer
 
 
+def test_a_companion_question_is_settled_before_any_model_step():
+    """Live, "with whom she was" spent four rejections (clarify, a pronoun
+    look-up, clarify, clarify) and the planner then wrote "people detected
+    with Joey today". The subject is held, so the query is a fact."""
+    from sql_agent.tools.agent_loop import companion_query
+
+    held = {"fields": {"referenced_entity": {"value": ["JOEY"]}}}
+    call = companion_query("with whom she was", held, INDEX)
+    assert call == {"name": "query_database", "arguments": {
+        "question": "all detections of JOEY with camera name and timestamp, most recent first"}}
+    assert companion_query("مع من كانت", held, INDEX)["arguments"]["question"].startswith(
+        "all detections of JOEY")
+    assert companion_query("who was with ali abbass", None, INDEX)["arguments"]["question"].startswith(
+        "all detections of Ali Abbass")
+    assert companion_query("where was joey last seen", held, INDEX) is None
+    assert companion_query("with whom she was", None, INDEX) is None
+
+
+def test_naming_an_enrolled_person_makes_them_the_turns_subject():
+    """Committed to dialogue state from `resolved_entities`, which only a
+    look-up used to fill: "does joey was alone" held nothing, and the next
+    "with whom she was" was answered about IRON MAN."""
+    state = {"identity_index": INDEX}
+    assert T._note_named_person(state, "does joey was alone the last time shwe was seen") == "JOEY"
+    assert state["resolved_entities"] == [
+        {"kind": "person", "canonical_name": "JOEY", "source": "identity_index"}]
+    T._note_named_person(state, "track joey again")
+    assert len(state["resolved_entities"]) == 1
+    assert T._note_named_person({"identity_index": INDEX}, "with whom she was") is None
+
+
 def test_a_companion_question_queries_the_subjects_detections():
     """The enrichment runs on the subject's rows, so that is the query."""
     llm = _FakeLLM([_Reply("query_database", {"question": "list all cameras"})])
@@ -244,6 +275,47 @@ def test_a_camera_label_in_the_name_column_is_resolved_as_a_camera():
     assert route == "chat_response"
     assert state.get("entity_not_found") is None
     assert state["camera_has_data"][0] == "WEZARET DEFA3"
+
+
+def test_company_is_reported_at_the_detection_it_was_seen_at():
+    """The enrichment covers every detection of the subject; the sentence
+    names the latest one. IRON MAN seen with JOEY three days earlier was
+    being reported as company at the latest detection, and a companion at
+    the latest detection was once reported as nobody."""
+    tools = T.__new__(T)
+    rows = [{"name": "JOEY", "camera_name": "WEZARET DEFA3", "timestamp": "2026-08-23 11:11:54"}]
+    earlier = [{"camera_name": "WEZARET DEFA3", "person": "IRON MAN",
+                "subject_seen_at": "2026-08-20 20:23:26"}]
+    answer = tools._companion_answer(_state("with whom she was", earlier), rows)
+    assert answer.startswith("No other identified person was detected with JOEY at WEZARET DEFA3 on 2026-08-23 11:11:54")
+    assert answer.endswith("Earlier: IRON MAN with JOEY at WEZARET DEFA3 on 2026-08-20 20:23.")
+
+    at_last = [{"camera_name": "WEZARET DEFA3", "person": "IRON MAN",
+                "subject_seen_at": "2026-08-23 11:11:10"}]
+    answer = tools._companion_answer(_state("with whom she was", at_last), rows)
+    assert answer == "IRON MAN was detected with JOEY at WEZARET DEFA3 on 2026-08-23 11:11:54."
+    arabic = tools._companion_answer(_state("مع من كانت", earlier, "ar"), rows)
+    assert arabic.startswith("لم يتم رصد أي شخص معروف آخر مع JOEY") and "IRON MAN مع JOEY" in arabic
+
+
+def test_the_enrichment_and_the_answer_share_one_subject():
+    """The rows of a model-written query can start with someone else."""
+    class _Db:
+        def __init__(self):
+            self.sql = ""
+
+        def execute_query(self, sql):
+            self.sql = sql
+            return {"success": True, "rows": []}
+
+    tools = T.__new__(T)
+    tools.db = _Db()
+    state = _state("with whom she was", None)
+    state["query_result"] = {"rows": [
+        {"name": "IRON MAN", "camera_name": "WEZARET DEFA3", "timestamp": "2026-08-23 11:11:10"},
+        {"name": "JOEY", "camera_name": "WEZARET DEFA3", "timestamp": "2026-08-23 11:11:54"}]}
+    tools.enrich_co_appearance(state)
+    assert "LOWER('JOEY')" in tools.db.sql and "LOWER('IRON MAN')" not in tools.db.sql
 
 
 def test_other_questions_are_left_to_the_narration():

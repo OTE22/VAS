@@ -679,7 +679,8 @@ def serialize_dataset(row) -> Dict[str, Any]:
 # Legacy datasets: prove the file, then record its hash (never rewrite lineage)
 # ---------------------------------------------------------------------------
 
-async def backfill_dataset_file_hashes(db: AsyncSession) -> Dict[str, Any]:
+async def backfill_dataset_file_hashes(db: AsyncSession, *,
+                                       job_id: Optional[str] = None) -> Dict[str, Any]:
     """For every built dataset that predates Parquet file hashing: reload the
     Parquet, recompute the canonical-row fingerprint and, ONLY if it equals
     the registered `checksum` (so the file on disk is provably the registered
@@ -745,6 +746,12 @@ async def backfill_dataset_file_hashes(db: AsyncSession) -> Dict[str, Any]:
             _atomic_json_write(m_path, manifest)
             row.manifest_path = m_path
         report["verified"].append({**ident, "parquet_sha256": row.parquet_sha256})
+    from backend.ml.audit import ml_audit
+    await ml_audit(
+        db, action="dataset_backfill_hashes", actor_username="ml-worker",
+        object_type="ml_dataset", object_id=job_id or "manual-backfill",
+        after={"checked": report["checked"], "verified": len(report["verified"]),
+               "unverifiable": len(report["unverifiable"])})
     await db.commit()
     return report
 

@@ -324,7 +324,7 @@ async def execute_job(job_id: str) -> int:
                 job_id, 10, details={"stage": "verifying_dataset_hashes"}
             )
             async with db_manager.get_session() as db:
-                result = await backfill_dataset_file_hashes(db)
+                result = await backfill_dataset_file_hashes(db, job_id=job_id)
             await task_history_manager.finish_job(job_id, success=True, result=result)
             return 0
 

@@ -302,9 +302,10 @@ def test_the_guard_reads_the_trace_not_the_users_words():
     ])
     call_first, _ = _run(refused, user_text=text, db=_Db())
 
-    # Same text, same (empty) session — but a look-up ran first.
+    # Same text, same (empty) session — but a look-up ran first. (A pronoun
+    # is refused as a name before any look-up, so the look-up names someone.)
     allowed = _FakeLLM([
-        _Reply("resolve_person", {"name": "him"}),
+        _Reply("resolve_person", {"name": "joey"}),
         _Reply("ask_clarifying_question", {"question": "Who?"}),
     ])
     call_after, _ = _run(allowed, user_text=text, db=_Db())
