@@ -210,6 +210,12 @@ open_log() {
     [ "${DRY_RUN}" = "1" ] && { DEPLOY_LOG="(dry-run: not written)"; return 0; }
     mkdir -p "$ROOT/logs/deploy" 2>/dev/null || return 0
     DEPLOY_LOG="$ROOT/logs/deploy/deploy-$(date -u +%Y%m%dT%H%M%SZ).log"
+    # deploy.sh runs as root, so the log it creates is root-owned and the
+    # operator cannot read or rotate it without sudo. The manifest already says
+    # logs/deploy belongs to the service uid; hand each new log to the same
+    # owner so that stays true for the FILES too, not just the directory.
+    : > "$DEPLOY_LOG" 2>/dev/null || true
+    chown "${SVC_UID:-1000}:${SVC_GID:-1000}" "$DEPLOY_LOG" 2>/dev/null || true
     exec > >(tee -a "$DEPLOY_LOG") 2>&1
     printf 'FACE_DETECTOR deploy.sh — %s — subcommand=%s args=%s\n' \
         "$(timestamp)" "${SUBCOMMAND:-<default>}" "$*"

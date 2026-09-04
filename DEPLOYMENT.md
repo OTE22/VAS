@@ -46,6 +46,10 @@ Work completed:
   whatever it finds) and `./deploy.sh paths` (ownership drift).
 - **Guard tests added** — 25 cases covering variables, volumes and restart
   policy. Full deployment suite: **225 passing**.
+- **File ownership unified** (§5a) — everything in the tree belongs to the host
+  user except 19 credential files that are deliberately root-owned.
+- **Docker reachable without sudo** (§7a) — a systemd drop-in keeps the socket
+  accessible to the operator across every restart, so GUI tools connect.
 
 ---
 
@@ -648,6 +652,69 @@ Then trust the CA once per machine (§3) and browse to
 
 ---
 
+## 5a. File ownership — who owns what, and why
+
+`scripts/deploy/paths.sh` is the **single source of truth** for ownership and
+permissions. It exists because these values were previously set in four
+different places, and three separate production failures came out of the
+disagreement — including one where redis could not read its own ACL file and
+crash-looped, silently taking the whole application tier down with it.
+
+The rule it encodes:
+
+| Kind of path | Owner |
+|---|---|
+| a container **writes** it | `1000:1000` (the service uid = your user) |
+| a container **reads** it | readable by the service, **never writable** |
+| a secret | `0440 root:1000` — you can read it, nothing can modify it |
+| a credential store | `root`, as tight as the tooling allows |
+
+### Almost everything is yours
+
+The entire source tree, docs, scripts, tests, weights, map data and logs are
+owned by `itdirect-ai`. You do not need `sudo` to edit code, add a model, drop
+in a `.mbtiles` archive, or read a deploy log.
+
+Reference data (`weights/`, `map-data/production`, `map-data/metadata`) is
+yours **and** still safe from containers, because those are bind-mounted
+**read-only** (`:ro`). The `:ro` flag is what actually prevents a container
+writing to them — host ownership was never doing that job.
+
+### The 19 files that stay root, and what each protects
+
+```
+docker/.env              all 8 database / Redis / Grafana passwords
+certs/server.key         the TLS private key nginx serves
+certs/internal-ca.key    the CA key — can mint a cert for ANY hostname (§3)
+secrets/*                jwt, bootstrap admin, webhook keys
+backups/*                database dumps + config snapshots containing secrets
+.deployment/state.json   deployment state
+```
+
+These are not tidiness — they are the boundary that keeps a stray script, a
+compromised dependency, or a mistyped command from reading every credential in
+the system. You can still *read* `secrets/` without sudo (the directory is
+`0750 root:1000`); you simply cannot modify them.
+
+> **One exception is not root at all:** `docker/redis/users.acl` is owned by
+> **uid 999** — that is the redis user *inside* the container. Change it and
+> redis cannot read its own ACL, crash-loops, and every service that waits on
+> redis being healthy fails to start behind a generic
+> `dependency failed to start` message that never mentions redis.
+
+### Checking and repairing ownership
+
+```bash
+sudo ./deploy.sh paths       # read-only: every row must say "ok"
+sudo ./deploy.sh install     # stage 03 re-applies the manifest
+```
+
+If you deliberately change an owner, **update `paths.sh` in the same step**.
+Otherwise `paths` and `doctor` report DRIFT forever, and the next `install`
+silently reverts your change.
+
+---
+
 ## 6. Logging in the first time
 
 ```
@@ -685,6 +752,100 @@ deliberately `restart: "no"` — it is a one-shot job.
 
 ---
 
+## 7a. Seeing Docker in a GUI
+
+### VS Code — simplest
+
+Install the **Container Tools** extension (Microsoft). You get a sidebar with
+containers, images, volumes and networks, plus right-click **View Logs**,
+**Attach Shell** and **Inspect**. It uses your existing engine — no new daemon.
+
+### Why it may say "permission denied"
+
+```
+Failed to connect. Is Docker running?
+permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock
+```
+
+Docker is fine. The socket is `srw-rw---- root:docker`, and **Linux applies
+group membership only at login**. Any program started before your account was
+added to the `docker` group — including your desktop session, and anything
+launched from it — still runs without that group.
+
+Check it:
+
+```bash
+id -nG                  # groups THIS session actually has
+id -nG $USER            # groups the ACCOUNT is configured with
+```
+
+If `docker` appears in the second but not the first, that is the whole problem.
+
+**Permanent fix, already applied here** — a systemd drop-in at
+`/etc/systemd/system/docker.socket.d/10-acl.conf`:
+
+```ini
+[Socket]
+ExecStartPost=-/usr/bin/setfacl -m u:itdirect-ai:rw /run/docker.sock
+```
+
+It hooks `docker.socket` (the unit that creates the socket), so the ACL is
+reapplied on every Docker restart and every reboot. The leading `-` means a
+`setfacl` failure is ignored — a permissions problem must never stop Docker
+itself from starting.
+
+This grants nothing beyond what the `docker` group already grants; it just
+applies without waiting for a fresh login. After your next logout/login, group
+membership covers it and the drop-in is redundant but harmless.
+
+### Portainer — a full web dashboard
+
+Run it **standalone**, not in the production compose file:
+
+```bash
+docker volume create portainer_data
+docker run -d --name portainer --restart unless-stopped \
+  -p 127.0.0.1:9443:9443 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v portainer_data:/data \
+  portainer/portainer-ce:latest
+```
+
+Then open **https://localhost:9443**.
+
+Two deliberate choices there:
+
+- **`127.0.0.1:9443`, not `0.0.0.0`.** Mounting the Docker socket gives
+  Portainer root-equivalent control of the host — anyone who reaches that port
+  can start a privileged container and own the machine. For remote access,
+  tunnel it: `ssh -L 9443:127.0.0.1:9443 user@192.168.1.111`.
+- **Not added to `docker-compose.prod.yml`.** The test
+  `test_only_web_ports_are_published` allows 80/443/3000 only, so adding it
+  would fail the suite — correctly, since Portainer is not part of the product.
+
+### lazydocker — terminal, zero exposure
+
+```bash
+sudo apt install lazydocker && lazydocker
+```
+
+### Do NOT install Docker Desktop
+
+It ships **its own engine** and switches the CLI context to it. That engine has
+none of these containers, so `docker ps` returns an empty list while the stack
+is serving traffic — a confusion that cost real time on this deployment.
+`./deploy.sh doctor` **section 0** detects it:
+
+```
+connected to Docker Desktop (context=...)   WRONG ENGINE
+fix: docker context use default
+```
+
+Rancher Desktop has the same problem, for the same reason.
+
+---
+
 ## 8. If something breaks
 
 | Symptom | Where to look |
@@ -694,6 +855,9 @@ deliberately `restart: "no"` — it is a one-shot job.
 | certificate warning | the CA is not trusted on that machine (§3) |
 | all four basemaps missing | `map-data/metadata/content_verdicts.json` absent; the gate fails closed |
 | a mounted secret ignored | check the field name — it is `REDIS_URL_FILE`, not `REDIS_PASSWORD_FILE` |
+| Docker GUI: "permission denied" on the socket | your session predates the `docker` group (§7a) |
+| `docker ps` empty while the site serves | CLI pointed at Docker Desktop's engine — `docker context use default` |
+| `deploy.sh paths` reports DRIFT | someone changed an owner without updating `paths.sh` (§5a) |
 
 Start with `sudo ./deploy.sh doctor`. It is read-only, orders findings by
 dependency, and prints the command that fixes each one. **Read the first

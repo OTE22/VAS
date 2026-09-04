@@ -50,9 +50,16 @@ DEPLOY_PATHS=(
   # uid 1000 is in the docker group and that is already root-equivalent.
   "secrets              0750  root:1000    host dir; the FILES inside are 0440 root:1000"
   "certs                0755  root:root    TLS; server.key stays 0600, CA cert is world-readable"
-  "weights              0755  root:1000    ONNX models, read-only to face_recognition"
-  "map-data/production  0755  root:1000    .mbtiles + fonts, read-only to martin"
-  "map-data/metadata    0755  root:1000    checksums + dataset catalogue"
+  # Reference data: owned by the host user, not root. The operator installs
+  # model weights and map archives by hand, and root-owned directories meant
+  # every such copy needed sudo. Container safety does not depend on this
+  # ownership - both are bind-mounted READ-ONLY (`:ro`), which is what actually
+  # stops a container writing to them. The files inside were already 1000:1000;
+  # only the directory inodes were root, which made the tree inconsistent for
+  # no benefit.
+  "weights              0755  1000:1000    ONNX models, read-only (:ro) to face_recognition"
+  "map-data/production  0755  1000:1000    .mbtiles + fonts, read-only (:ro) to martin"
+  "map-data/metadata    0755  1000:1000    checksums, catalogue, content verdicts"
   "docker/redis         0755  root:root    holds users.acl, which is 0640 999:1000"
   # NOTE — storage, logs and database below are mounted by the DEVELOPMENT
   # stack (docker-compose.cpu.yml binds them from the host). PRODUCTION mounts
