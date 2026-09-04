@@ -162,41 +162,191 @@ ssl_certificate_key /etc/nginx/certs/server.key;
 Read-only matters: a container that could rewrite its own certificate could
 present any identity it liked.
 
-### Using them on a client machine
+### The two CA files do OPPOSITE things
 
-Your browser warns because it has never been told to trust *your* CA. The
-certificate is correct — the trust is missing. Install the CA once per machine:
+This is the one thing to get right.
 
-**Ubuntu / Debian**
+| File | What it is | Where it goes |
+|---|---|---|
+| `internal-ca.crt` | **public** certificate, `BEGIN CERTIFICATE`, 0644 | **copy to every client**, import into the browser/OS trust store |
+| `internal-ca.key` | **secret** private key, `BEGIN PRIVATE KEY`, 0600 | **move OFFLINE.** Never onto a client, never into a browser |
+
+Tell them apart at a glance:
+
+```bash
+head -1 certs/internal-ca.crt     # -----BEGIN CERTIFICATE-----   → distribute
+head -1 certs/internal-ca.key     # -----BEGIN PRIVATE KEY-----   → offline
+```
+
+Anyone holding `internal-ca.key` can mint a trusted certificate for **any**
+hostname your clients accept — including your bank's. That is why it leaves the
+building.
+
+### Where to move `internal-ca.key`
+
+Somewhere offline and backed up: a USB stick in a drawer or safe, or an
+encrypted password-manager attachment. It is 3 KB.
+
+```bash
+sudo cp certs/internal-ca.key /media/$USER/<your-usb>/face-detector-ca.key
+sudo shred -u certs/internal-ca.key        # secure-delete from the server
+```
+
+**You need it again only to issue a new server certificate** — roughly every
+27 months, or to add a name/IP. Bring it back to `certs/`, run the script, then
+remove it again.
+
+**This is safe.** The script creates a CA only when `internal-ca.crt` is
+missing. With the certificate still present and the key absent, signing fails
+with a clear error instead of silently generating a *new* CA — which would
+invalidate trust on every client you had already set up.
+
+> Losing this key is survivable but annoying: you cannot issue new server
+> certificates, so you would create a fresh CA and re-install it everywhere.
+> Losing `internal-ca.crt` costs nothing — it can be re-exported from the key,
+> or copied off any client that already has it.
+
+### Getting `internal-ca.crt` to a client machine
+
+```bash
+# from the client, pull it over the network
+scp itdirect-ai@192.168.1.111:/home/itdirect-ai/Desktop/VAS/certs/internal-ca.crt .
+```
+
+Or copy it onto a USB stick. It is public — email, chat and file shares are all
+fine.
+
+Verify it is the right file before trusting it (compare on both machines):
+
+```bash
+openssl x509 -in internal-ca.crt -noout -fingerprint -sha256
+# sha256 Fingerprint=74:B1:2F:13:96:1B:A6:81:8B:6E:9E:AF:14:51:20:EF:
+#                    D2:49:00:B0:7E:02:14:88:CB:D8:20:DF:D3:47:80:1F
+```
+
+### Where exactly to install it
+
+**Windows — GUI (covers Chrome and Edge)**
+
+1. Double-click `internal-ca.crt` → **Install Certificate**
+2. Choose **Local Machine** (all users) → Next → *accept the UAC prompt*
+3. Select **Place all certificates in the following store** → **Browse**
+4. Choose **Trusted Root Certification Authorities** → OK → Next → Finish
+5. Restart the browser
+
+Getting step 3 wrong is the usual failure — if you leave it on "Automatically
+select", Windows files it somewhere that is not trusted and nothing changes.
+
+To check: run `certlm.msc` → **Trusted Root Certification Authorities** →
+**Certificates** → look for *Face Detector Internal CA*.
+
+**Windows — PowerShell (as Administrator)**
+
+```powershell
+Import-Certificate -FilePath .\internal-ca.crt `
+  -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+**Ubuntu / Debian (covers curl, wget, and system tools)**
+
 ```bash
 sudo cp internal-ca.crt /usr/local/share/ca-certificates/face-detector-ca.crt
-sudo update-ca-certificates
+sudo update-ca-certificates          # must report "1 added"
 ```
 
-**Windows** (as Administrator)
-```powershell
-Import-Certificate -FilePath internal-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+The `.crt` extension and the `/usr/local/share/ca-certificates/` path are both
+required — the tool ignores anything else.
+
+**Chrome / Chromium on Linux** keeps its **own** store, so the step above does
+*not* cover it:
+
+```bash
+sudo apt install libnss3-tools
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," \
+  -n "Face Detector Internal CA" -i internal-ca.crt
+certutil -d sql:$HOME/.pki/nssdb -L      # confirm it is listed
 ```
 
-**Firefox** keeps its own store: Settings → Privacy & Security → Certificates →
-View Certificates → Authorities → Import → tick *"Trust this CA to identify
-websites"*.
+**Firefox (every OS)** also keeps its own store:
 
-Copy **`internal-ca.crt`** only. Never copy `internal-ca.key` — whoever holds it
-can mint a certificate for *any* hostname your clients now trust.
+Settings → **Privacy & Security** → scroll to **Certificates** → **View
+Certificates** → **Authorities** tab → **Import** → pick `internal-ca.crt` →
+tick **"Trust this CA to identify websites"** → OK → restart Firefox.
 
-> **Do this now:** move `certs/internal-ca.key` to offline storage. You only
-> need it to issue a new server certificate, which is rare.
+**macOS**
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain internal-ca.crt
+```
+
+Or: double-click the file → Keychain Access → **System** → find *Face Detector
+Internal CA* → double-click → **Trust** → *When using this certificate* →
+**Always Trust**.
+
+**Android** — Settings → Security → **Encryption & credentials** → **Install a
+certificate** → **CA certificate** → accept the warning → pick the file.
+
+**iOS / iPadOS** — AirDrop or email the file, open it, Settings → **Profile
+Downloaded** → Install. Then the step everyone misses: Settings → General →
+About → **Certificate Trust Settings** → enable the switch for this CA.
+
+### Confirming it worked
+
+```bash
+curl https://face-detector.internal/health/live      # note: NO -k flag
+```
+
+No certificate warning and a `200` means trust is working. In a browser, the
+padlock appears with no interstitial. If it still warns, you almost certainly
+installed into the wrong store (Windows step 3), or the browser keeps its own
+store (Firefox, Chrome-on-Linux) and needs its own import.
 
 ### Renewing before 2028
 
+The script **refuses to overwrite an existing certificate**, so remove the
+server pair first. Keep the two CA files — reissuing those would force every
+client to re-trust.
+
 ```bash
-rm certs/server.crt certs/server.key      # keep the CA files
+rm certs/server.crt certs/server.key          # keep internal-ca.*
 sudo bash scripts/tls/make-internal-ca.sh
 sudo ./deploy.sh start
 ```
 
 Clients keep working — they trust the CA, not the individual certificate.
+
+### Adding an IP address to the certificate
+
+> **You almost certainly do not need this.** If you set up DNS (§5 — the
+> recommended path), the existing certificate already covers
+> `face-detector.internal` and **nothing about the certificates changes at
+> all**. Skip this section.
+>
+> **The CA is never removed.** Neither this procedure nor renewal touches
+> `internal-ca.crt` or `internal-ca.key`. Only the *server* pair is replaced,
+> and clients keep trusting it because they trust the CA, not the server
+> certificate. You never re-distribute anything.
+
+Only needed if you want to browse to the raw IP, `https://192.168.1.111`.
+The script takes the IP as a **second argument**:
+
+```bash
+rm certs/server.crt certs/server.key
+sudo bash scripts/tls/make-internal-ca.sh face-detector.internal 192.168.1.111
+sudo ./deploy.sh start
+```
+
+That produces `SAN: DNS:face-detector.internal, DNS:localhost, IP:127.0.0.1, IP:192.168.1.111`.
+
+> Even then, browsing by IP still fails **login**, because the app checks the
+> browser's `Origin` against `PUBLIC_ORIGIN` (§5). To make IP access work end
+> to end you must also set `PUBLIC_ORIGIN=https://192.168.1.111` in
+> `docker/.env` and restart. **Using the name is simpler and is what this
+> deployment is built around.**
+
+Certificate lifetimes are set in the script: CA 3650 days (10 years), server
+825 days (~27 months, the maximum most browsers accept).
 
 ---
 
@@ -244,8 +394,132 @@ Grafana is bound to loopback only.
 ### The host's own address
 
 ```
-wlp130s0f0   192.168.1.111/24      ← the LAN address other machines would use
+wlp130s0f0   192.168.1.111/24  (WiFi)   ← the LAN address other machines use
+enp129s0     DOWN, no cable             ← wired port, currently unused
+default via 192.168.1.1
 ```
+
+---
+
+## 4a. Giving the server a static IP
+
+**Nothing in the stack needs changing.** Container IPs are Docker's own private
+networks, nginx binds every interface (`0.0.0.0:80`, `0.0.0.0:443`), and the app
+identifies itself by *name*, not address. No config edit, no rebuild, no restart.
+
+**But you should do it anyway.** The address is currently handed out by DHCP:
+
+```
+inet 192.168.1.111/24 ... scope global dynamic
+                                       ^^^^^^^
+```
+
+Every client reaching this server maps `face-detector.internal → 192.168.1.111`.
+When DHCP hands out a different address, **every one of those clients breaks
+silently** — a connection timeout, with nothing in the server logs, because the
+request never arrives.
+
+> **Before you start:** make sure the router will not give `.111` to something
+> else. Either exclude it from the DHCP pool, or choose an address outside the
+> pool. Do this at the console — reconfiguring the interface you are connected
+> over will drop your session.
+
+### Linux — desktop (NetworkManager)
+
+This host uses NetworkManager; the active connection is named `Tiger`.
+
+```bash
+sudo nmcli con mod "Tiger" \
+  ipv4.method manual \
+  ipv4.addresses 192.168.1.111/24 \
+  ipv4.gateway 192.168.1.1 \
+  ipv4.dns "192.168.1.1"
+sudo nmcli con up "Tiger"
+```
+
+Verify — the word `dynamic` must be gone:
+
+```bash
+ip -4 addr show wlp130s0f0        # expect: scope global noprefixroute
+ip route | grep default           # expect: default via 192.168.1.1
+```
+
+To revert: `sudo nmcli con mod "Tiger" ipv4.method auto && sudo nmcli con up "Tiger"`
+
+*Prefer the wired port* if you can run a cable — replace `"Tiger"` with the
+wired connection name (`nmcli con show` lists them) and `wlp130s0f0` with
+`enp129s0`. For a server taking camera webhooks and doing GPU inference, wired
+avoids WiFi roaming and interference.
+
+### Linux — server install (netplan, no NetworkManager)
+
+Ubuntu Server uses netplan instead. Edit `/etc/netplan/*.yaml`:
+
+```yaml
+network:
+  version: 2
+  ethernets:
+    enp129s0:
+      dhcp4: false
+      addresses: [192.168.1.111/24]
+      routes:
+        - to: default
+          via: 192.168.1.1
+      nameservers:
+        addresses: [192.168.1.1]
+```
+
+```bash
+sudo netplan try      # applies, then auto-reverts in 120s unless you confirm
+sudo netplan apply
+```
+
+`netplan try` is the safe one — if the change locks you out, it undoes itself.
+
+### Windows — GUI
+
+1. **Settings → Network & Internet** → click the adapter (Ethernet or Wi-Fi)
+2. Next to **IP assignment**, click **Edit**
+3. Change **Automatic (DHCP)** to **Manual**, turn **IPv4** on
+4. Fill in:
+   - **IP address** `192.168.1.111`
+   - **Subnet mask** `255.255.255.0`   *(this is what `/24` means)*
+   - **Gateway** `192.168.1.1`
+   - **Preferred DNS** `192.168.1.1`
+5. **Save**
+
+### Windows — PowerShell (as Administrator)
+
+```powershell
+# find the adapter name first
+Get-NetAdapter
+
+New-NetIPAddress -InterfaceAlias "Ethernet" `
+  -IPAddress 192.168.1.111 -PrefixLength 24 -DefaultGateway 192.168.1.1
+
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses 192.168.1.1
+```
+
+Verify with `ipconfig /all` — **DHCP Enabled** should read **No**.
+
+To revert to DHCP:
+
+```powershell
+Set-NetIPInterface -InterfaceAlias "Ethernet" -Dhcp Enabled
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ResetServerAddresses
+```
+
+### After the change
+
+Nothing to do on the server. Confirm the stack is still reachable:
+
+```bash
+sudo ./deploy.sh doctor
+curl -sk -o /dev/null -w '%{http_code}\n' https://face-detector.internal/health/live
+```
+
+If you changed to a **different** address, update wherever the name is mapped —
+each client's hosts file, or the single A record on your router (§5).
 
 > **Note the gap:** the certificate does *not* include `192.168.1.111`, so
 > another machine browsing to `https://192.168.1.111` gets a name-mismatch
@@ -291,20 +565,86 @@ that check and **login is refused** — even though the page loads. `curl -k`
 hides this completely, which is why `./deploy.sh doctor` checks it separately
 (section 6).
 
-### To reach it from another computer
+### Static IP + DNS — the recommended setup
 
-On each client machine, point the name at this host's LAN IP:
+This is the combination you want, and it needs **no certificate work whatsoever**.
 
-- **Linux / macOS** — add to `/etc/hosts`:
+```
+static IP on the server        192.168.1.111        (§4a)
+one DNS A record               face-detector.internal → 192.168.1.111
+existing certificate           already covers that name — unchanged
+internal-ca.crt / .key         untouched, never re-distributed
+```
+
+Why it needs nothing from the certificates: the server certificate is issued
+for the **name**, and the name is what clients keep using. The IP behind the
+name is a DNS concern, invisible to TLS. Change the IP, update one A record,
+and every client follows — no re-issuing, no re-trusting, no downtime.
+
+**Option A — your router (simplest).** Most home/office routers can map a name
+to an address. Look for *Local DNS*, *DNS Host Names*, *Static DNS*, or
+*Address Reservation* in the admin page at `http://192.168.1.1`, and add:
+
+```
+Name: face-detector.internal        Address: 192.168.1.111
+```
+
+While you are there, reserve `192.168.1.111` for this server's MAC so DHCP
+never offers it to anything else.
+
+**Option B — a real DNS server** (dnsmasq, Pi-hole, or Windows Server DNS), if
+the router cannot do it.
+
+*dnsmasq or Pi-hole* — one line in `/etc/dnsmasq.d/face-detector.conf`:
+
+```
+address=/face-detector.internal/192.168.1.111
+```
+```bash
+sudo systemctl restart dnsmasq        # or: pihole restartdns
+```
+
+*Windows Server DNS* — in **DNS Manager**, right-click your forward lookup
+zone → **New Host (A or AAAA)** → Name `face-detector`, IP `192.168.1.111`.
+Or in PowerShell as Administrator:
+
+```powershell
+Add-DnsServerResourceRecordA -ZoneName "internal" `
+  -Name "face-detector" -IPv4Address "192.168.1.111"
+```
+
+Then point clients' DNS at that server (usually handed out by DHCP).
+
+**Option C — per-machine hosts file**, only if you have no DNS control. This
+does not scale: every client needs editing again if the IP ever changes.
+
+- **Linux / macOS** — `/etc/hosts`:
   ```
   192.168.1.111    face-detector.internal
   ```
-- **Windows** — same line in `C:\Windows\System32\drivers\etc\hosts`
-  (edit as Administrator).
-- **Whole network** — add one `A` record on your router or internal DNS server:
-  `face-detector.internal → 192.168.1.111`. Then no client edits are needed.
+- **Windows** — the same line in `C:\Windows\System32\drivers\etc\hosts`
+  (open Notepad as Administrator).
 
-Then trust the CA (§3) and browse to **https://face-detector.internal**.
+### Verifying DNS works
+
+From a client machine:
+
+```bash
+nslookup face-detector.internal        # must return 192.168.1.111
+curl -I https://face-detector.internal/health/live
+```
+
+```powershell
+Resolve-DnsName face-detector.internal     # Windows
+ipconfig /flushdns                         # if it still returns the old address
+```
+
+Then trust the CA once per machine (§3) and browse to
+**https://face-detector.internal**.
+
+> Keep the server's own `/etc/hosts` line (`127.0.0.1 face-detector.internal`)
+> even after DNS is working. It lets the server reach itself without leaving the
+> box, which is what `./deploy.sh doctor` and the health checks rely on.
 
 ---
 
