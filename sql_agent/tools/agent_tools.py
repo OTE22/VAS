@@ -656,6 +656,13 @@ class SQLAgentTools:
                             paraphrase = str(
                                 (tool_call.get("arguments") or {}).get(
                                     "question") or "").strip()
+                            if deterministic_plan:
+                                # A deterministic command IS the request, in
+                                # the user's own words. The model paraphrased
+                                # "report for tracking joey" as the PREVIOUS
+                                # turn's question, so the report came back as
+                                # that turn's one-line answer.
+                                paraphrase = user_text.strip()
                             if paraphrase:
                                 # A planning aid, not a replacement for the
                                 # authoritative normalized request.
@@ -667,7 +674,9 @@ class SQLAgentTools:
                         if planned.get("action") == "clarify":
                             state["clarify_question"] = planned.get(
                                 "clarify_question")
-                        if planned.get("language"):
+                        if (planned.get("language")
+                                and self._language_was_requested(
+                                    state, planned, user_text)):
                             state["response_language"] = planned["language"]
                         logger.info(planner.audit_line(
                             user_id=state.get("user_id"),
@@ -769,13 +778,14 @@ class SQLAgentTools:
             state["terminal_state"] = None
             return state
 
+        plan = self._refuse_unrequested_translation(state, plan, user_text)
         state["planned_action"] = plan.as_dict()
         observability.observe_planner_action(plan.action, plan.source)
         state["intent"] = self._ACTION_TO_INTENT.get(plan.action, "CHAT")
         state["intent_confidence"] = plan.confidence
         if plan.action == "clarify":
             state["clarify_question"] = plan.clarify_question
-        if plan.language:
+        if plan.language and self._language_was_requested(state, plan, user_text):
             state["response_language"] = plan.language
 
         # `executed` names the NODE this turn will run, not the legacy intent:
@@ -1807,6 +1817,50 @@ class SQLAgentTools:
         """How two camera names are compared: case, spacing and the
         underscore-versus-space that ids and labels disagree on."""
         return " ".join(str(text or "").replace("_", " ").split()).casefold()
+
+    #: Actions that rewrite an existing answer into another language.
+    _TRANSLATION_ACTIONS = ("translate_artifact", "translate_document")
+
+    @staticmethod
+    def _language_was_requested(state, plan, user_text: str) -> bool:
+        """Did THIS message ask for a language? The answer's language is
+        otherwise the message's own, decided by the input pipeline from its
+        script - never one the model proposed or the last turn happened to
+        use. A plan language always won, so an English request could be
+        answered in Arabic."""
+        from .agent_loop import wants_translation
+
+        if wants_translation(user_text):
+            return True
+        action = (plan.get("action") if isinstance(plan, dict)
+                  else getattr(plan, "action", ""))
+        # A document is rendered from a report whose language the render
+        # path already settled; that is not this turn's reply language.
+        return action == "generate_document"
+
+    def _refuse_unrequested_translation(self, state, plan, user_text: str):
+        """A translation nobody asked for is not an answer.
+
+        "report for tracking joey" was executed as translate_artifact and
+        came back as an Arabic rewrite of the previous report. Whether a
+        translation was asked for is a fact about the message, so it is
+        settled here rather than left to the model that proposed it.
+        """
+        from . import agent_loop
+
+        if (plan.action not in self._TRANSLATION_ACTIONS
+                or agent_loop.wants_translation(user_text)):
+            return plan
+        wanted_data = (state.get("turn_kind") == agent_loop.DATA
+                       or bool(state.get("turn_is_a_request")))
+        logger.info("[REACT] refused %s: no language was asked for; "
+                    "answering the message instead (data=%s)",
+                    plan.action, wanted_data)
+        plan.action = "query_database" if wanted_data else "chat"
+        plan.language = None
+        plan.artifact_id = None
+        plan.source = f"{plan.source}+translation-refused"
+        return plan
 
     @staticmethod
     def _note_named_person(state: AgentState, user_text: str) -> Optional[str]:

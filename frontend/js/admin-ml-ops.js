@@ -25,32 +25,76 @@
     const JOB_POLL_MAX_BACKOFF_MS = 30000;
     const PAGE_SIZE = 10;
     const MODE_ORDER = ['rules', 'shadow', 'hybrid', 'ml'];
+    const WORKSPACE_ORDER = ['overview', 'prepare', 'review', 'monitor', 'audit'];
     const WORKSPACES = {
-        overview: {
+        'overview': {
             kicker: 'Current state',
             title: 'Overview',
-            description: 'Check service health, active work, and which system is making live decisions.'
+            description: 'Check service health, active work, and which system is making live decisions.',
+            purpose: 'Begin here before changing anything. This stage confirms that the control plane and worker can accept work and shows whether rules or shadow ML are active.',
+            run: ['Select Refresh console.', 'Review Work in progress, System health, and Live decision mode.'],
+            verify: ['The console says Connected, the worker says Healthy, and the decision authority matches your expectation.', 'Any queued or running job has a visible stage and progress value.'],
+            recover: ['If your session expired, sign in again and return to this page.', 'If the worker is unavailable, restore it and refresh; durable queued commands remain recorded. Production rules continue to protect live decisions.'],
+            primaryTarget: 'refresh-console-btn',
+            primaryLabel: 'Refresh all status'
         },
-        prepare: {
+        'prepare': {
             kicker: 'Lifecycle step 2',
             title: 'Prepare data and train',
-            description: 'Review readiness, build datasets, manage labels, and start a manual training run.'
+            description: 'Review readiness, build datasets, manage labels, and start a manual training run.',
+            purpose: 'Create trustworthy, point-in-time data and a candidate model. Nothing in this stage changes live decisions.',
+            run: ['Compute missing features and review outcome labels.', 'Build or select a compatible immutable dataset, then start a training run.'],
+            verify: ['The queue reports Completed, readiness shows sufficient coverage, and the dataset records its hashes.', 'A new Validated candidate appears in Review models.'],
+            recover: ['Read the error beside the action and correct the stated field, time range, or compatibility problem.', 'Use the request ID in Audit when the cause is unclear, then rerun or cancel the active job.'],
+            primaryTarget: 'workflows',
+            primaryLabel: 'Open build and train'
         },
-        review: {
+        'review': {
             kicker: 'Lifecycle step 3',
             title: 'Review models',
-            description: 'Inspect registered models and test observational scoring before approving shadow use.'
+            description: 'Inspect registered models and test observational scoring before approving shadow use.',
+            purpose: 'Decide whether a validated candidate has enough evidence for safe shadow observation. Approval still gives it no live decision authority.',
+            run: ['Open Model detail and check dataset hashes, metrics, gates, purpose, and serving scope.', 'Run an observational evaluation, then approve a suitable candidate for Shadow with an audit reason.'],
+            verify: ['The model stage changes to Shadow and the confirmation appears beside the registry.', 'Rules remain the decision authority and shadow predictions begin appearing in Monitor.'],
+            recover: ['Reject an unsuitable candidate with a reason.', 'Use Stop shadow (rollback) if confidence is lost; this archives the shadow model while rules remain live.'],
+            primaryTarget: 'model-registry',
+            primaryLabel: 'Review candidate models'
         },
-        monitor: {
+        'monitor': {
             kicker: 'Lifecycle step 4',
             title: 'Monitor shadow ML',
-            description: 'Compare rules with shadow results, inspect fallbacks, and review drift without affecting live decisions.'
+            description: 'Compare rules with shadow results, inspect fallbacks, and review drift without affecting live decisions.',
+            purpose: 'Observe how shadow ML behaves next to the rule system. These results are evidence for review, never an automatic deployment decision.',
+            run: ['Choose the time window and model, then review the shadow comparison and recent predictions.', 'Run a drift check and inspect fallbacks, missing features, sample size, and response time.'],
+            verify: ['Predictions arrive for the expected model with acceptable fallback and failure rates.', 'Drift reports have enough samples and no unresolved compatibility warning.'],
+            recover: ['Compute missing features or approve a compatible shadow model when data is absent.', 'Stop shadow from Review models if safety or confidence is in doubt.'],
+            primaryTarget: 'observability',
+            primaryLabel: 'Inspect shadow evidence'
         },
-        audit: {
+        'audit': {
             kicker: 'Lifecycle step 5',
             title: 'Audit and troubleshoot',
-            description: 'Trace administrator actions and API calls with reasons, request IDs, and error codes.'
+            description: 'Trace administrator actions and API calls with reasons, request IDs, and error codes.',
+            purpose: 'Reconstruct what happened and troubleshoot failures without guessing. Every lifecycle change should have an actor, reason, and outcome.',
+            run: ['Review Administrator activity for lifecycle changes.', 'Use Recent API calls and Errors only to correlate the time, status, error code, and request ID.'],
+            verify: ['The actor, action, target, reason, and API result describe the same event.', 'A successful retry is visible after the original failed request.'],
+            recover: ['For 401, sign in again. For 409, refresh and review lifecycle gates. For 422, correct the input. For 404, choose a current record.', 'Give the request ID to an administrator when the service error cannot be resolved here.'],
+            primaryTarget: 'audit-trail',
+            primaryLabel: 'Review activity and errors'
         }
+    };
+
+    const MODEL_TYPE_LABELS = {
+        behavior_anomaly_model: 'Behavior anomaly (person)',
+        coappearance_anomaly_model: 'Coappearance anomaly (identity pair)',
+        social_graph_anomaly_model: 'Social graph anomaly (person)',
+        threat_ranking_model: 'Threat-review ranking (offline)'
+    };
+    const ALGORITHM_LABELS = {
+        isolation_forest: 'Isolation Forest',
+        mad_baseline: 'Median/MAD baseline',
+        empirical_baseline: 'Empirical baseline',
+        logistic_regression: 'Logistic regression'
     };
 
     function debugLog() {
@@ -107,6 +151,48 @@
             return (fallback === undefined) ? '—' : fallback;
         }
         return String(value);
+    }
+
+    function humanizeToken(value) {
+        const text = toText(value, 'Unknown').replace(/[_-]+/g, ' ').toLowerCase();
+        return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
+    function friendlyModelType(value) {
+        return MODEL_TYPE_LABELS[value] || humanizeToken(value);
+    }
+
+    function friendlyAlgorithm(value) {
+        return ALGORITHM_LABELS[value] || humanizeToken(value);
+    }
+
+    function recoveryForError(err) {
+        const byCode = {
+            MODE_GATED: 'Review the unmet gate in Live decision mode before retrying.',
+            VALIDATION_ERROR: 'Check the required fields and use compatible values.',
+            INVALID_TIME_RANGE: 'Choose a valid start and end time, with the start before the end.',
+            DATASET_DEFINITION_KIND_MISMATCH: 'Select a dataset definition made for this model type.',
+            DATASET_REFERENCED_BY_MODEL: 'This dataset is in use by a model and cannot be archived.',
+            DATASET_ALREADY_ARCHIVED: 'Refresh datasets and choose an active dataset.',
+            MODEL_NOT_FOUND: 'Refresh models and choose a current model.',
+            INVALID_MODEL_ID: 'Select a registered model and retry.',
+            AUTH_EXPIRED: 'Sign in again, then return to this page.'
+        };
+        if (err && err.code && byCode[err.code]) return byCode[err.code];
+        const status = err && err.status;
+        if (status === 401) return 'Sign in again, then return to this page.';
+        if (status === 404) return 'The selected record no longer exists. Refresh and choose a current record.';
+        if (status === 409) return 'Refresh this workspace and review the current lifecycle state or gate before retrying.';
+        if (status === 422) return 'Check the required fields and compatible options, then retry.';
+        if (status >= 500) return 'Check System health, note the request ID, and retry after the service recovers.';
+        return 'Check the backend connection, refresh this workspace, and retry.';
+    }
+
+    function formatActionError(context, err) {
+        let text = context + ': ' + toText(err && err.message, 'Unknown error') + '. ' + recoveryForError(err);
+        if (err && err.code) text += ' Error code: ' + err.code + '.';
+        if (err && err.requestId) text += ' Request ID: ' + err.requestId + '.';
+        return text;
     }
 
     function formatDateTime(value) {
@@ -245,6 +331,7 @@
         e.status = (opts && opts.status) || null;
         e.code = (opts && opts.code) || null;
         e.detailExtra = (opts && opts.detailExtra) || null;
+        e.requestId = (opts && opts.requestId) || null;
         e.aborted = !!(opts && opts.aborted);
         return e;
     }
@@ -287,7 +374,7 @@
         window.clearTimeout(timer);
 
         if (response.status === 401) {
-            window.location.href = '/login';
+            window.location.href = '/signin';
             throw ApiError('Session expired', { status: 401, code: 'AUTH_EXPIRED' });
         }
         if (!response.ok) {
@@ -304,7 +391,12 @@
                     message = detail;
                 }
             } catch (_) { /* keep generic */ }
-            throw ApiError(message, { status: response.status, code: code, detailExtra: detailExtra });
+            throw ApiError(message, {
+                status: response.status,
+                code: code,
+                detailExtra: detailExtra,
+                requestId: response.headers.get('X-Request-ID') || response.headers.get('X-Request-Id')
+            });
         }
         if (response.status === 204) return null;
         return response.json();
@@ -355,11 +447,82 @@
         lastTerminalJobSignature: '',
         lastJobsSyncAt: null,
         modelTypes: [],
+        models: [],
         datasets: [],
         activeWorkspace: 'overview',
         consoleStatus: 'connecting',
         pendingAction: null    // { title, execute(reason) }
     };
+
+    function replaceList(id, items) {
+        const node = getElement(id);
+        if (!node) return;
+        const frag = document.createDocumentFragment();
+        items.forEach(function (item) { frag.appendChild(el('li', null, item)); });
+        node.replaceChildren(frag);
+    }
+
+    function workspaceStatus(workspace) {
+        const workerStatus = toText(state.mlWorker && state.mlWorker.status, 'unknown').toLowerCase();
+        if (workspace === 'overview') {
+            if (state.consoleStatus === 'offline' || (state.mlWorker && workerStatus !== 'healthy')) {
+                return { text: 'Needs attention', tone: 'bad' };
+            }
+            if (state.consoleStatus !== 'online') return { text: 'Checking readiness', tone: 'warn' };
+            return { text: 'Ready', tone: 'ok' };
+        }
+        if (workspace === 'prepare') {
+            if (state.mlWorker && workerStatus !== 'healthy') return { text: 'Blocked — worker unavailable', tone: 'bad' };
+            if (state.activeJobs.size) return { text: 'Running — ' + state.activeJobs.size + ' active', tone: 'info' };
+            return { text: 'Ready to prepare', tone: 'ok' };
+        }
+        if (workspace === 'review') {
+            const candidates = state.models.filter(function (model) { return model.stage === 'validated'; }).length;
+            if (candidates) return { text: candidates + (candidates === 1 ? ' candidate to review' : ' candidates to review'), tone: 'warn' };
+            if (state.models.some(function (model) { return model.stage === 'shadow'; })) return { text: 'Shadow model active', tone: 'info' };
+            return { text: 'Waiting for a candidate', tone: 'warn' };
+        }
+        if (workspace === 'monitor') {
+            if (state.currentMode === 'shadow' || state.models.some(function (model) { return model.stage === 'shadow'; })) {
+                return { text: 'Shadow observation active', tone: 'info' };
+            }
+            return { text: 'Waiting for shadow approval', tone: 'warn' };
+        }
+        return { text: 'Available for review', tone: 'ok' };
+    }
+
+    function updateRunbook(workspace) {
+        const copy = WORKSPACES[workspace];
+        const index = WORKSPACE_ORDER.indexOf(workspace);
+        const position = getElement('mlops-runbook-position');
+        const purpose = getElement('mlops-runbook-purpose');
+        const status = getElement('mlops-runbook-status');
+        if (position) position.textContent = 'Step ' + (index + 1) + ' of ' + WORKSPACE_ORDER.length;
+        if (purpose) purpose.textContent = copy.purpose;
+        replaceList('mlops-runbook-run', copy.run);
+        replaceList('mlops-runbook-verify', copy.verify);
+        replaceList('mlops-runbook-recover', copy.recover);
+        if (status) {
+            const current = workspaceStatus(workspace);
+            status.textContent = current.text;
+            status.className = 'mlops-chip chip-' + current.tone;
+        }
+        const previous = getElement('mlops-runbook-previous');
+        const next = getElement('mlops-runbook-next');
+        const primary = getElement('mlops-runbook-primary');
+        if (previous) {
+            previous.disabled = index === 0;
+            previous.dataset.targetWorkspace = WORKSPACE_ORDER[index - 1] || '';
+        }
+        if (next) {
+            next.disabled = index === WORKSPACE_ORDER.length - 1;
+            next.dataset.targetWorkspace = WORKSPACE_ORDER[index + 1] || '';
+        }
+        if (primary) {
+            primary.dataset.targetElement = copy.primaryTarget;
+            primary.lastChild.textContent = ' ' + copy.primaryLabel;
+        }
+    }
 
     function activateWorkspace(name, shouldScroll) {
         const workspace = WORKSPACES[name] ? name : 'overview';
@@ -374,6 +537,12 @@
             button.classList.toggle('is-active', active);
             button.setAttribute('aria-pressed', active ? 'true' : 'false');
         });
+        document.querySelectorAll('.mlops-lifecycle [data-open-mlops-view]').forEach(function (button) {
+            const active = button.dataset.openMlopsView === workspace;
+            button.classList.toggle('is-active', active);
+            if (active) button.setAttribute('aria-current', 'step');
+            else button.removeAttribute('aria-current');
+        });
 
         const kicker = getElement('mlops-workspace-kicker');
         const title = getElement('mlops-workspace-title');
@@ -386,6 +555,7 @@
             const total = document.querySelectorAll('[data-mlops-panel="' + workspace + '"]').length;
             count.textContent = total + (total === 1 ? ' section' : ' sections');
         }
+        updateRunbook(workspace);
 
         if (shouldScroll) {
             const heading = document.querySelector('.mlops-workspace-heading');
@@ -400,6 +570,25 @@
                 activateWorkspace(workspace, true);
             });
         });
+
+        ['mlops-runbook-previous', 'mlops-runbook-next'].forEach(function (id) {
+            const button = getElement(id);
+            if (!button) return;
+            button.addEventListener('click', function () {
+                if (button.dataset.targetWorkspace) activateWorkspace(button.dataset.targetWorkspace, true);
+            });
+        });
+        const primary = getElement('mlops-runbook-primary');
+        if (primary) {
+            primary.addEventListener('click', function () {
+                const target = getElement(primary.dataset.targetElement);
+                if (!target) return;
+                target.scrollIntoView({ block: 'start' });
+                const focusTarget = target.matches('button, input, select, a')
+                    ? target : target.querySelector('button, input, select, a');
+                if (focusTarget) focusTarget.focus();
+            });
+        }
 
         const hashWorkspace = {
             '#operations-queue': 'overview',
@@ -455,6 +644,7 @@
         description.textContent = next.description;
         action.textContent = next.action;
         action.dataset.openMlopsView = next.workspace;
+        updateRunbook(state.activeWorkspace);
     }
 
     function stopJobPolling() {
@@ -472,7 +662,7 @@
     }
 
     // ============================================
-    // Inline reason panel (replaces browser dialogs)
+    // Shared accessible confirmation dialog (replaces browser dialogs)
     // ============================================
 
     function openActionPanel(title, execute) {
@@ -483,15 +673,32 @@
         if (!panel || !titleNode || !reasonInput) return;
         titleNode.textContent = title;
         reasonInput.value = '';
+        setNote('registry-action-note', '', null);
         panel.hidden = false;
-        panel.scrollIntoView({ block: 'nearest' });
-        reasonInput.focus();
+        if (window.ModalStack) {
+            window.ModalStack.open(panel, {
+                backdropClose: true,
+                onClose: function () {
+                    panel.hidden = true;
+                    state.pendingAction = null;
+                }
+            });
+        } else {
+            panel.style.display = 'flex';
+            reasonInput.focus();
+        }
     }
 
     function closeActionPanel() {
-        state.pendingAction = null;
         const panel = getElement('registry-action-panel');
-        if (panel) panel.hidden = true;
+        if (!panel) return;
+        if (window.ModalStack && window.ModalStack.isOpen(panel)) {
+            window.ModalStack.close(panel);
+        } else {
+            panel.style.display = 'none';
+            panel.hidden = true;
+            state.pendingAction = null;
+        }
     }
 
     async function confirmPendingAction() {
@@ -500,7 +707,8 @@
         if (!pending || !reasonInput) return;
         const reason = reasonInput.value.trim();
         if (reason.length < 3) {
-            setNote('mode-action-note', 'A reason of at least 3 characters is required.', 'bad');
+            setNote('registry-action-note', 'Enter a reason of at least 3 characters so this action can be audited.', 'bad');
+            reasonInput.focus();
             return;
         }
         closeActionPanel();
@@ -536,8 +744,19 @@
     function renderCardError(id, err) {
         const body = getElement(id);
         if (!body) return;
-        const box = el('div', 'mlops-note note-bad',
-            'Failed to load: ' + toText(err && err.message, 'unknown error'));
+        const box = el('div', 'mlops-error-state');
+        box.setAttribute('role', 'alert');
+        const heading = el('strong', null, 'Could not load this section');
+        heading.prepend(faIcon('fas fa-circle-exclamation'));
+        box.appendChild(heading);
+        box.appendChild(el('p', null, toText(err && err.message, 'Unknown error.')));
+        box.appendChild(el('p', 'mlops-error-recovery', 'Next step: ' + recoveryForError(err)));
+        if (err && (err.code || err.requestId)) {
+            const technical = [];
+            if (err.code) technical.push('Error code: ' + err.code);
+            if (err.requestId) technical.push('Request ID: ' + err.requestId);
+            box.appendChild(el('small', null, technical.join(' · ')));
+        }
         body.replaceChildren(box);
     }
 
@@ -643,7 +862,7 @@
                 loadOverview();
             } catch (err) {
                 if (err.aborted) return;
-                setNote('mode-action-note', toText(err.message, 'pause failed'), 'bad');
+                setNote('mode-action-note', formatActionError('Could not pause ML', err), 'bad');
             }
         });
     }
@@ -727,9 +946,10 @@
                 const option = document.createElement('option');
                 option.value = toText(t.model_type);
                 const trainable = t.trainable === true;
-                option.textContent = toText(t.model_type) + (trainable
+                option.textContent = friendlyModelType(t.model_type) + (trainable
                     ? ' — Available'
                     : ' — Reserved / Future · not trainable');
+                option.title = 'Internal type: ' + toText(t.model_type);
                 option.dataset.trainable = trainable ? 'true' : 'false';
                 if (id === 'training-model-type' && !trainable) option.disabled = true;
                 frag.appendChild(option);
@@ -755,7 +975,7 @@
         const algorithm = getElement('training-algorithm');
         if (algorithm && contract && algorithm.dataset.modelType !== contract.model_type) {
             const options = (contract.algorithms || []).map(function (name) {
-                const option = el('option', null, toText(name));
+                const option = el('option', null, friendlyAlgorithm(name));
                 option.value = toText(name);
                 if (name === contract.default_algorithm) option.selected = true;
                 return option;
@@ -795,7 +1015,7 @@
             for (const field of ['configured', 'implemented', 'dependency_available', 'operational']) {
                 const cell = el('td');
                 const on = toBoolean(status[field]);
-                cell.appendChild(chip(on ? 'yes' : 'no', on ? 'ok' : 'bad'));
+                cell.appendChild(chip(on ? 'Yes' : 'No', on ? 'ok' : 'bad'));
                 row.appendChild(cell);
             }
             tbody.appendChild(row);
@@ -818,13 +1038,14 @@
         if (!select) return;
         const previous = select.value;
         const frag = document.createDocumentFragment();
-        const all = el('option', null, 'all models');
+        const all = el('option', null, 'All models');
         all.value = '';
         frag.appendChild(all);
         items.forEach(function (m) {
             if (!m || !m.id) return;
-            const option = el('option', null, toText(m.model_type) + ' v' + formatMetric(m.version) + ' · ' + toText(m.stage));
+            const option = el('option', null, friendlyModelType(m.model_type) + ' v' + formatMetric(m.version) + ' · ' + humanizeToken(m.stage));
             option.value = String(m.id);
+            option.title = 'Internal type: ' + toText(m.model_type);
             frag.appendChild(option);
         });
         select.replaceChildren(frag);
@@ -841,21 +1062,30 @@
             });
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
+            state.models = items;
             renderEvidenceModelFilter(items);
             const frag = document.createDocumentFragment();
             if (!items.length) {
                 const row = el('tr');
-                const cell = el('td', null, 'No models registered yet — train a candidate first.');
+                const cell = el('td');
                 cell.colSpan = 9;
+                const empty = el('div', 'mlops-empty-state');
+                empty.appendChild(el('div', null, 'No models registered yet. Train a candidate to begin review.'));
+                const openPrepare = el('button', 'mlops-btn mlops-btn-primary', 'Open Prepare & train');
+                openPrepare.type = 'button';
+                openPrepare.addEventListener('click', function () { activateWorkspace('prepare', true); });
+                empty.appendChild(openPrepare);
+                cell.appendChild(empty);
                 row.appendChild(cell);
                 frag.appendChild(row);
             }
             for (const model of items) frag.appendChild(modelRow(model));
             tbody.replaceChildren(frag);
+            updateRunbook(state.activeWorkspace);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             const row = el('tr');
-            const cell = el('td', 'mlops-note note-bad', 'Failed to load models: ' + toText(err.message));
+            const cell = el('td', 'mlops-note note-bad', formatActionError('Could not load models', err));
             cell.colSpan = 9;
             row.appendChild(cell);
             tbody.replaceChildren(row);
@@ -871,15 +1101,17 @@
 
     function modelRow(model) {
         const row = el('tr');
-        row.appendChild(el('td', null, toText(model.model_type)));
+        const typeCell = el('td', null, friendlyModelType(model.model_type));
+        typeCell.title = 'Internal type: ' + toText(model.model_type);
+        row.appendChild(typeCell);
         row.appendChild(el('td', null, formatMetric(model.version)));
         const stageCell = el('td');
-        stageCell.appendChild(chip(toText(model.stage), stageTone(model.stage)));
+        stageCell.appendChild(chip(humanizeToken(model.stage), stageTone(model.stage)));
         row.appendChild(stageCell);
-        row.appendChild(el('td', null, toText(model.algorithm)));
-        row.appendChild(el('td', null, toText(model.score_type)));
-        row.appendChild(el('td', null, toBoolean(model.is_probability) ? 'yes' : 'no'));
-        row.appendChild(el('td', null, toText(model.calibration_status)));
+        row.appendChild(el('td', null, friendlyAlgorithm(model.algorithm)));
+        row.appendChild(el('td', null, humanizeToken(model.score_type)));
+        row.appendChild(el('td', null, toBoolean(model.is_probability) ? 'Yes' : 'No'));
+        row.appendChild(el('td', null, humanizeToken(model.calibration_status)));
         row.appendChild(el('td', null, formatDateTime(model.created_at)));
 
         const actions = el('td');
@@ -898,7 +1130,7 @@
             approveBtn.type = 'button';
             approveBtn.addEventListener('click', function () {
                 openActionPanel(
-                    'Approve ' + toText(model.model_type) + ' v' + formatMetric(model.version)
+                    'Approve ' + friendlyModelType(model.model_type) + ' v' + formatMetric(model.version)
                     + ' into SHADOW (rules stay live; the approval record persists on the model row)',
                     function (reason) { return approveShadow(model.id, reason); });
             });
@@ -911,7 +1143,7 @@
             rejectBtn.type = 'button';
             rejectBtn.addEventListener('click', function () {
                 openActionPanel(
-                    'Reject ' + toText(model.model_type) + ' v' + formatMetric(model.version),
+                    'Reject ' + friendlyModelType(model.model_type) + ' v' + formatMetric(model.version),
                     function (reason) { return rejectModel(model.id, reason); });
             });
             actions.appendChild(rejectBtn);
@@ -925,13 +1157,12 @@
             await api('/api/ml/models/' + encodeURIComponent(modelId) + '/shadow-approve', {
                 method: 'POST', body: { reason: reason, intended_scope: 'all_pipelines' }
             });
-            setNote('mode-action-note', 'Model approved into shadow. Rules remain the decision system.', 'ok');
+            setNote('registry-note', 'Model approved into Shadow observation. Rules remain the live decision system. Continue to Monitor.', 'ok');
             loadModels();
             loadOverview();
         } catch (err) {
             if (err.aborted) return;
-            setNote('mode-action-note',
-                toText(err.code, 'ERROR') + ': ' + toText(err.message, 'shadow approval failed'), 'bad');
+            setNote('registry-note', formatActionError('Shadow approval failed', err), 'bad');
         }
     }
 
@@ -940,12 +1171,12 @@
             await api('/api/ml/models/' + encodeURIComponent(modelId) + '/reject', {
                 method: 'POST', body: { reason: reason }
             });
-            setNote('mode-action-note', 'Model rejected.', 'ok');
+            setNote('registry-note', 'Model rejected and the reason was recorded in Audit.', 'ok');
             loadModels();
             loadOverview();
         } catch (err) {
             if (err.aborted) return;
-            setNote('mode-action-note', toText(err.message, 'rejection failed'), 'bad');
+            setNote('registry-note', formatActionError('Model rejection failed', err), 'bad');
         }
     }
 
@@ -956,13 +1187,13 @@
                     const result = await api('/api/ml/shadow/stop', {
                         method: 'POST', body: { reason: reason }
                     });
-                    setNote('mode-action-note', toText(result && result.note, 'shadow stopped'), 'ok');
+                    setNote('registry-note', toText(result && result.note, 'Shadow stopped. Rules remain live.'), 'ok');
                     loadModels();
                     loadOverview();
                     loadShadowSummary();
                 } catch (err) {
                     if (err.aborted) return;
-                    setNote('mode-action-note', toText(err.message, 'shadow stop failed'), 'bad');
+                    setNote('registry-note', formatActionError('Could not stop shadow', err), 'bad');
                 }
             });
     }
@@ -1322,12 +1553,14 @@
         const btn = getElement('run-drift-btn');
         if (btn) btn.disabled = true;
         try {
+            setNote('drift-action-note', 'Scheduling drift analysis…', null);
             const result = await api('/api/ml/drift/run', { method: 'POST' });
             renderJobStatus(result, 'Drift check scheduled');
+            setNote('drift-action-note', 'Drift check scheduled. Open Overview to follow progress; this report cannot deploy or retrain a model.', 'ok');
             await refreshJobs();
         } catch (err) {
             if (!err.aborted) {
-                setNote('mode-action-note', 'Drift run failed: ' + toText(err.message), 'bad');
+                setNote('drift-action-note', formatActionError('Drift check failed', err), 'bad');
             }
         } finally {
             syncJobControls();
@@ -1469,7 +1702,11 @@
             const empty = el('div', 'mlops-empty-state');
             const inner = el('div');
             inner.appendChild(faIcon('fas fa-inbox'));
-            inner.appendChild(el('div', null, 'No ML jobs yet. Start a workflow below to create the first durable run.'));
+            inner.appendChild(el('div', null, 'No ML jobs yet. Prepare data or train a candidate to create the first durable run.'));
+            const start = el('button', 'mlops-btn mlops-btn-primary', 'Open Prepare & train');
+            start.type = 'button';
+            start.addEventListener('click', function () { activateWorkspace('prepare', true); });
+            inner.appendChild(start);
             empty.appendChild(inner);
             frag.appendChild(empty);
             body.replaceChildren(frag);
@@ -1499,7 +1736,7 @@
             const title = el('div', 'mlops-job-title');
             title.appendChild(faIcon(presentation.icon));
             title.appendChild(el('span', null, presentation.label));
-            title.appendChild(chip(status,
+            title.appendChild(chip(humanizeToken(status),
                 status === 'completed' ? 'ok'
                     : ((status === 'failed' || status === 'cancelled') ? 'bad' : 'warn')));
             identity.appendChild(title);
@@ -1548,7 +1785,8 @@
 
             if (task.error_code || task.error_message) {
                 row.appendChild(el('div', 'mlops-job-error',
-                    toText(task.error_code, 'ERROR') + ' · ' + toText(task.error_message, 'Job failed')));
+                    toText(task.error_code, 'ERROR') + ' · ' + toText(task.error_message, 'Job failed')
+                    + ' Next step: review this job’s details and request ID, correct the cause, then rerun it.'));
             }
             list.appendChild(row);
         });
@@ -1631,7 +1869,8 @@
         if (hasActiveJob('training')) return;
         const contract = selectedModelTypeContract();
         if (contract && contract.trainable !== true) {
-            renderJobStatus(null, toText(contract.model_type) + ' is a reserved interface (Reserved / Future) — not trainable in this release.');
+            setNote('training-action-note', friendlyModelType(contract.model_type)
+                + ' is reserved for a future release. Choose a model type marked Available.', 'bad');
             return;
         }
         const typeSelect = getElement('training-model-type');
@@ -1655,7 +1894,7 @@
             let parsed = null;
             try { parsed = JSON.parse(hpRaw); } catch (_) { parsed = null; }
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-                renderJobStatus(null, 'Hyperparameters must be a JSON object, e.g. {"n_estimators": 200}');
+                setNote('training-action-note', 'Hyperparameters must be a JSON object, for example {"n_estimators": 200}. Correct the value and retry.', 'bad');
                 return;
             }
             body.hyperparameters = parsed;
@@ -1664,13 +1903,13 @@
         try {
             const result = await api('/api/ml/training-jobs', { method: 'POST', body: body });
             renderJobStatus(result, 'Training scheduled');
+            setNote('training-action-note', 'Training scheduled. Open Overview to follow every stage. Completion creates a candidate for Review models; it does not deploy it.', 'ok');
             await refreshJobs();
         } catch (err) {
             if (startBtn) startBtn.disabled = false;
             updateTrainingAvailability();
             if (err.aborted) return;
-            renderJobStatus(null,
-                toText(err.code, 'ERROR') + ': ' + toText(err.message, 'training failed to schedule'));
+            setNote('training-action-note', formatActionError('Training could not be scheduled', err), 'bad');
         }
     }
 
@@ -1690,7 +1929,7 @@
         } catch (err) {
             if (!err.aborted) {
                 setNote('data-readiness-note',
-                    toText(err.code, 'ERROR') + ': ' + toText(err.message, 'collection failed'), 'bad');
+                    formatActionError('Feature collection failed', err), 'bad');
             }
         } finally {
             syncJobControls();
@@ -1736,6 +1975,9 @@
                         + formatMetric(ex.cap) + ' and the policy is refuse — narrow the range or choose a sampling policy';
                 } else if (err.status === 422 && extra) {
                     message += ' — validation did not pass';
+                }
+                if (message === toText(err.message, 'dataset build failed')) {
+                    message = formatActionError('Dataset build failed', err);
                 }
                 renderDatasetsMessage(message, 'bad');
             }
@@ -1875,7 +2117,7 @@
             resultNode.replaceChildren(frag);
         } catch (err) {
             if (!err.aborted) resultNode.replaceChildren(el('div', 'mlops-note note-bad',
-                toText(err.code, 'EVALUATION_FAILED') + ': ' + toText(err.message)));
+                formatActionError('Evaluation failed', err)));
         } finally {
             if (button) button.disabled = false;
         }
@@ -2554,7 +2796,17 @@
     function applyTooltips() {
         Object.keys(TOOLTIPS).forEach(function (id) {
             const node = getElement(id);
-            if (node && !node.title) node.title = TOOLTIPS[id];
+            if (!node) return;
+            if (!node.title) node.title = TOOLTIPS[id];
+            const descriptionId = 'mlops-tip-' + id;
+            if (!getElement(descriptionId)) {
+                const description = el('span', 'mlops-sr-only', TOOLTIPS[id]);
+                description.id = descriptionId;
+                document.body.appendChild(description);
+            }
+            const describedBy = (node.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
+            if (!describedBy.includes(descriptionId)) describedBy.push(descriptionId);
+            node.setAttribute('aria-describedby', describedBy.join(' '));
         });
     }
 
@@ -2584,7 +2836,9 @@
             const header = card.querySelector('.mlops-card-header');
             const key = card.getAttribute('data-help');
             if (!header || !HELP[key] || header.querySelector('.mlops-help-btn')) return;
-            const btn = el('button', 'mlops-help-btn', '?');
+            const btn = el('button', 'mlops-help-btn');
+            btn.appendChild(faIcon('fas fa-circle-question'));
+            btn.appendChild(el('span', null, 'Guide'));
             btn.type = 'button';
             btn.title = 'What is this section and what do its actions do?';
             btn.setAttribute('aria-label', 'Help: ' + HELP[key].title);
@@ -2672,6 +2926,13 @@
             const frag = document.createDocumentFragment();
             frag.appendChild(el('div', 'mlops-mode-desc', toText(data.note)));
             if (!items.length) frag.appendChild(el('div', 'mlops-mode-desc', 'No calls recorded yet.'));
+            if (items.length) {
+                const header = el('div', 'mlops-call-row mlops-call-header');
+                ['Time', 'Request ID', 'Method', 'Route', 'Status', 'Duration', 'Outcome'].forEach(function (label) {
+                    header.appendChild(el('strong', null, label));
+                });
+                frag.appendChild(header);
+            }
             for (const c of items) {
                 const status = toFiniteNumber(c.status);
                 const row = el('div', 'mlops-call-row' + (status !== null && status >= 400 ? ' call-error' : ''));
@@ -2695,7 +2956,7 @@
             body.replaceChildren(frag);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            body.replaceChildren(el('div', 'mlops-note note-bad', 'Failed to load calls: ' + toText(err.message)));
+            renderCardError('calls-body', err);
         }
     }
 

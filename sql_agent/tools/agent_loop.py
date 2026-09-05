@@ -583,7 +583,11 @@ _LANGUAGE_REQUEST = re.compile(
     r"(?:\b(?:in|to|into)\s+(?P<en_lang>arabic|english)\b|"
     r"\b(?P<en_lang2>arabic|english)\s+(?:version|translation)\b|"
     r"(?P<ar_ar>بالعربي(?:ة)?|إلى العربية|الى العربية|للعربية)|"
-    r"(?P<ar_en>بالإنجليزي(?:ة)?|بالانجليزي(?:ة)?|إلى الإنجليزية|الى الانجليزية))",
+    r"(?P<ar_en>بالإنجليزي(?:ة)?|بالانجليزي(?:ة)?|إلى الإنجليزية|الى الانجليزية)|"
+    # Bare, for "make it Arabic" - no preposition, still a language request.
+    # It is the reference to the report that makes it one, and that is
+    # required below either way.
+    r"\b(?P<en_lang3>arabic|english)\b)",
     re.I)
 _REFERS_TO_REPORT = re.compile(
     r"(\breport\b|\bit\b|\bthat\b|\bthis\b|\bsame\b|\bthe result\b|\bthe answer\b|"
@@ -603,7 +607,8 @@ def wants_translation(user_text: str) -> Optional[str]:
         return "ar"
     if match.group("ar_en"):
         return "en"
-    lang = (match.group("en_lang") or match.group("en_lang2") or "").lower()
+    lang = (match.group("en_lang") or match.group("en_lang2")
+            or match.group("en_lang3") or "").lower()
     return "ar" if lang == "arabic" else "en"
 
 
@@ -1191,6 +1196,27 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                         "report: translating instead of %s", name)
             name = "translate_document"
             arguments = {"document_id": "", "language": target_language}
+
+        if (name in ("translate_document", "translate_artifact")
+                and not target_language):
+            # The mirror of the rule above, and a fact either way: a
+            # translation is something the USER asks for. "report for
+            # tracking joey" - English, naming an enrolled person - was
+            # answered with an Arabic translation of the previous report,
+            # because the model proposed translate_document(language="ar")
+            # and only the "did they ask" direction was ever checked.
+            logger.info("[TOOL_LOOP] refused %s: no language was asked for",
+                        name)
+            rejections += 1
+            trace.append({"tool": name, "rejected": "no language was asked for",
+                          "observation": {"status": "rejected", "tool": name,
+                                          "reason_code": "NO_LANGUAGE_REQUESTED"}})
+            messages.append(HumanMessage(content=(
+                "The user did not ask for a translation or for another "
+                "language. Do not translate anything. Answer the message "
+                "they actually sent, querying the database if it asks for "
+                "data.")))
+            continue
 
         if name in ("query_database", "modify_active_query"):
             fact = companion_query(user_text, dialogue_state, identity_index)

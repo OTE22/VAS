@@ -95,6 +95,7 @@ must be embedded in a sandboxed iframe.
 
 ## Using the system (06–11)
 
+- **[94_MLOPS_OPERATOR_WORKFLOW.md](94_MLOPS_OPERATOR_WORKFLOW.md)** — guided run, verification, and recovery workflow for Admin → ML Operations
 - **[06_PROMOTE_AND_MERGE_GUIDE.md](06_PROMOTE_AND_MERGE_GUIDE.md)** — promoting and merging identities
 - **[07_UNKNOWN_FACES_CENTER_COMPLETE_GUIDE.md](07_UNKNOWN_FACES_CENTER_COMPLETE_GUIDE.md)** — the Unknown Faces Center, in full
 - **[08_IDENTITY_API_FRONTEND_GUIDE.md](08_IDENTITY_API_FRONTEND_GUIDE.md)** — identity features in the frontend

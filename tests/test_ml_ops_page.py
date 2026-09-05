@@ -137,13 +137,13 @@ def test_page_chrome_follows_the_house_rules():
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
     nav_at = html.find("js/navbar-loader.js?v=nav-7")
-    page_at = html.find("js/admin-ml-ops.js?v=mlops-14")
+    page_at = html.find("js/admin-ml-ops.js?v=mlops-16")
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-10" in html, "the page stylesheet is not version-pinned"
+    assert "admin-ml-ops.css?v=mlops-11" in html, "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 
@@ -203,6 +203,63 @@ def test_page_groups_the_lifecycle_into_guided_workspaces():
     assert "window.history.replaceState" in js
 
 
+def test_each_workspace_explains_run_verify_and_recovery():
+    html = read(HTML)
+    js = read(JS)
+    for element_id in (
+        "mlops-runbook-position", "mlops-runbook-status", "mlops-runbook-purpose",
+        "mlops-runbook-run", "mlops-runbook-verify", "mlops-runbook-recover",
+        "mlops-runbook-previous", "mlops-runbook-primary", "mlops-runbook-next",
+    ):
+        assert f'id="{element_id}"' in html
+    for workspace in ("overview", "prepare", "review", "monitor", "audit"):
+        block = js.split(f"        '{workspace}': {{", 1)[1].split("\n        }", 1)[0]
+        for field in ("purpose:", "run:", "verify:", "recover:", "primaryTarget:"):
+            assert field in block, f"{workspace} is missing {field} guidance"
+    assert "function workspaceStatus" in js
+    assert "function updateRunbook" in js
+    assert 'aria-current' in js
+    assert "What the status labels mean" in html
+
+
+def test_lifecycle_confirmation_is_accessible_and_never_filtered_out():
+    html = read(HTML)
+    js = read(JS)
+    panels_end = html.find('</div>\n        </div>\n    </main>')
+    dialog_at = html.find('id="registry-action-panel"')
+    assert dialog_at > panels_end > 0, "confirmation must live outside filtered workspaces"
+    assert 'role="alertdialog"' in html
+    assert 'aria-describedby="registry-action-description"' in html
+    assert 'id="registry-action-note"' in html
+    assert 'autofocus' in html
+    assert "window.ModalStack.open(panel" in js
+    assert "window.ModalStack.close(panel)" in js
+    assert "setNote('registry-action-note'" in js
+
+
+def test_plain_language_labels_and_local_action_feedback_are_present():
+    html = read(HTML)
+    js = read(JS)
+    assert "Behavior anomaly (person)" in html
+    assert "Median/MAD baseline" in html
+    assert "Probability output?" in html
+    assert "friendlyModelType" in js and "friendlyAlgorithm" in js
+    assert 'id="registry-note"' in html
+    assert 'id="drift-action-note"' in html
+    assert "setNote('registry-note'" in js
+    assert "setNote('drift-action-note'" in js
+
+
+def test_errors_include_recovery_and_request_correlation():
+    js = read(JS)
+    assert "function recoveryForError" in js
+    assert "function formatActionError" in js
+    assert "Request ID: " in js
+    assert "response.headers.get('X-Request-ID')" in js
+    assert "Next step:" in js
+    assert "function renderCardError" in js and "mlops-error-state" in js
+
+
 # ---------------------------------------------------------------------------
 # JS contracts
 # ---------------------------------------------------------------------------
@@ -220,6 +277,12 @@ def test_page_script_ships_with_debug_off_and_no_dialogs():
     assert re.search(r"const DEBUG = false", code), "DEBUG must ship false"
     for dialog in ("alert(", "confirm(", "prompt("):
         assert dialog not in code, f"browser dialog {dialog} used"
+
+
+def test_expired_session_redirects_to_the_real_signin_page():
+    code = code_only(read(JS))
+    assert "window.location.href = '/signin'" in code
+    assert "window.location.href = '/login'" not in code
 
 
 def test_page_script_uses_typed_normalizers_not_silent_coercion():
@@ -278,6 +341,9 @@ def test_every_card_has_section_help_and_the_modal_exists():
     assert 'id="mlops-help-modal"' in html and 'id="mlops-help-body"' in html
     assert 'id="calls-body"' in html and 'id="calls-errors-only"' in html
     assert "function installHelpButtons" in js and "function applyTooltips" in js
+    assert "mlops-sr-only" in js, "tooltips need screen-reader descriptions"
+    assert "aria-describedby" in js
+    assert "fa-circle-question" in js and "Guide" in js
     assert "function stageStrip" in js and "progress_percent" in js
     assert "onclick=" not in html
 

@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-10">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-11">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -119,6 +119,46 @@
                 </div>
                 <span class="mlops-workspace-count" id="mlops-workspace-count">3 sections</span>
             </section>
+
+            <section class="mlops-stage-runbook" aria-labelledby="mlops-runbook-title">
+                <div class="mlops-runbook-header">
+                    <div>
+                        <span class="mlops-guide-label" id="mlops-runbook-position">Step 1 of 5</span>
+                        <h2 id="mlops-runbook-title">How to complete this stage</h2>
+                    </div>
+                    <span class="mlops-chip chip-warn" id="mlops-runbook-status" role="status">Checking readiness</span>
+                </div>
+                <p class="mlops-runbook-purpose" id="mlops-runbook-purpose">Begin here before changing anything. Confirm that the control plane and worker can accept work and see which system makes live decisions.</p>
+                <ol class="mlops-runbook-steps">
+                    <li>
+                        <span class="mlops-runbook-number" aria-hidden="true">1</span>
+                        <div><strong>Run it</strong><ul id="mlops-runbook-run"><li>Select Refresh console.</li><li>Review active work, system health, and live decision mode.</li></ul></div>
+                    </li>
+                    <li>
+                        <span class="mlops-runbook-number" aria-hidden="true">2</span>
+                        <div><strong>Verify the result</strong><ul id="mlops-runbook-verify"><li>Console Connected, worker Healthy, and decision authority as expected.</li><li>Active jobs show a stage and progress value.</li></ul></div>
+                    </li>
+                    <li>
+                        <span class="mlops-runbook-number" aria-hidden="true">3</span>
+                        <div><strong>Recover if it fails</strong><ul id="mlops-runbook-recover"><li>Sign in again if the session expired.</li><li>Restore the worker and refresh; queued commands remain recorded and rules stay live.</li></ul></div>
+                    </li>
+                </ol>
+                <div class="mlops-runbook-actions">
+                    <button class="mlops-btn" id="mlops-runbook-previous" type="button"><i class="fas fa-arrow-left" aria-hidden="true"></i> Previous stage</button>
+                    <button class="mlops-btn mlops-btn-primary" id="mlops-runbook-primary" type="button"><i class="fas fa-location-arrow" aria-hidden="true"></i> Go to first task</button>
+                    <button class="mlops-btn" id="mlops-runbook-next" type="button">Next stage <i class="fas fa-arrow-right" aria-hidden="true"></i></button>
+                </div>
+            </section>
+
+            <details class="mlops-status-legend">
+                <summary><i class="fas fa-circle-info" aria-hidden="true"></i> What the status labels mean</summary>
+                <div>
+                    <span><b class="mlops-chip chip-ok">Ready</b> Safe to continue</span>
+                    <span><b class="mlops-chip chip-info">Running</b> Work is active; monitor it</span>
+                    <span><b class="mlops-chip chip-warn">Needs attention</b> Review before continuing</span>
+                    <span><b class="mlops-chip chip-bad">Blocked</b> Fix the stated problem first</span>
+                </div>
+            </details>
 
             <div class="mlops-container" id="mlops-workspace-panels">
 
@@ -244,22 +284,13 @@
                         </div>
                     </div>
                     <div class="mlops-card-body">
-                        <!-- Inline reason panel: destructive/lifecycle actions confirm here (no browser dialogs) -->
-                        <div class="mlops-action-panel" id="registry-action-panel" hidden>
-                            <div class="mlops-action-title" id="registry-action-title"></div>
-                            <label for="registry-action-reason">Reason (recorded in the audit log and, for shadow approval, on the model row):</label>
-                            <input type="text" id="registry-action-reason" maxlength="500" autocomplete="off">
-                            <div class="mlops-action-buttons">
-                                <button class="mlops-btn mlops-btn-primary" id="registry-action-confirm" type="button">Confirm</button>
-                                <button class="mlops-btn" id="registry-action-cancel" type="button">Cancel</button>
-                            </div>
-                        </div>
+                        <div class="mlops-note" id="registry-note" role="status" aria-live="polite"></div>
                         <div class="mlops-table-wrap">
                             <table class="mlops-table" aria-label="Model registry">
                                 <thead>
                                     <tr>
-                                        <th>Type</th><th>Ver</th><th>Stage</th><th>Algorithm</th>
-                                        <th>Score type</th><th>Probability?</th><th>Calibration</th>
+                                        <th>Model type</th><th>Version</th><th>Stage</th><th>Algorithm</th>
+                                        <th>Score type</th><th>Probability output?</th><th>Calibration</th>
                                         <th>Created</th><th>Actions</th>
                                     </tr>
                                 </thead>
@@ -359,6 +390,7 @@
                     <div class="mlops-card-body" id="drift-reports-body">
                         <div class="mlops-loading"><i class="fas fa-spinner fa-spin"></i> Loading…</div>
                     </div>
+                    <div class="mlops-note" id="drift-action-note" role="status" aria-live="polite"></div>
                 </div>
 
                 <!-- Training jobs + dataset builds (manual only) -->
@@ -375,18 +407,18 @@
                         <div class="mlops-form-row">
                             <label for="training-model-type">Model type:</label>
                             <select id="training-model-type" class="mlops-select">
-                                <option value="behavior_anomaly_model" selected>behavior_anomaly_model — Available</option>
-                                <option value="coappearance_anomaly_model">coappearance_anomaly_model — Available</option>
-                                <option value="social_graph_anomaly_model">social_graph_anomaly_model — Available</option>
-                                <option value="threat_ranking_model">threat_ranking_model — Available</option>
+                                <option value="behavior_anomaly_model" selected>Behavior anomaly (person) — Available</option>
+                                <option value="coappearance_anomaly_model">Coappearance anomaly (identity pair) — Available</option>
+                                <option value="social_graph_anomaly_model">Social graph anomaly (person) — Available</option>
+                                <option value="threat_ranking_model">Threat-review ranking (offline) — Available</option>
                             </select>
                         </div>
                         <div id="model-type-note" class="mlops-mode-desc" role="note"></div>
                         <div class="mlops-form-row">
                             <label for="training-algorithm">Algorithm:</label>
                             <select id="training-algorithm" class="mlops-select">
-                                <option value="isolation_forest" selected>isolation_forest</option>
-                                <option value="mad_baseline">mad_baseline</option>
+                                <option value="isolation_forest" selected>Isolation Forest</option>
+                                <option value="mad_baseline">Median/MAD baseline</option>
                             </select>
                         </div>
                         <div class="mlops-form-row">
@@ -420,8 +452,8 @@
                         <div class="mlops-form-row">
                             <label for="dataset-kind-select">Kind:</label>
                             <select id="dataset-kind-select" class="mlops-select">
-                                <option value="unsupervised" selected>unsupervised</option>
-                                <option value="supervised">supervised</option>
+                                <option value="unsupervised" selected>Unsupervised (features only)</option>
+                                <option value="supervised">Supervised (reviewed labels)</option>
                             </select>
                             <label for="dataset-definition-select">Definition:</label>
                             <select id="dataset-definition-select" class="mlops-select">
@@ -652,10 +684,32 @@
         </div>
     </div>
 
+    <!-- Shared confirmation stays visible even when its originating workspace is filtered out. -->
+    <div class="modal mlops-confirm-modal" id="registry-action-panel" role="alertdialog" aria-modal="true"
+         aria-labelledby="registry-action-title" aria-describedby="registry-action-description" hidden>
+        <div class="modal-content mlops-confirm-content">
+            <div class="modal-header">
+                <h3 class="mlops-action-title" id="registry-action-title">Confirm lifecycle action</h3>
+                <button class="mlops-btn mlops-btn-small" id="registry-action-cancel" type="button" aria-label="Cancel and close confirmation">
+                    <i class="fas fa-times" aria-hidden="true"></i> Cancel
+                </button>
+            </div>
+            <div class="modal-body">
+                <p id="registry-action-description">This change is recorded in the audit log. Live rules remain authoritative during shadow observation.</p>
+                <label for="registry-action-reason">Reason for this action <span aria-hidden="true">*</span></label>
+                <input type="text" id="registry-action-reason" maxlength="500" minlength="3" autocomplete="off" autofocus aria-describedby="registry-action-note">
+                <div class="mlops-note" id="registry-action-note" role="alert" aria-live="assertive"></div>
+                <div class="mlops-action-buttons">
+                    <button class="mlops-btn mlops-btn-primary" id="registry-action-confirm" type="button">Confirm action</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-14"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-16"></script>
 </body>
 </html>

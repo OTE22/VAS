@@ -105,10 +105,36 @@ _TRACK_PERSON_COMMAND = re.compile(
     r"(?P<subject>.+?)\s*[.!?؟]?\s*$",
     re.IGNORECASE,
 )
+#: "report for tracking joey", "tracking report for joey", "give me a report
+#: about joey". The same self-contained command with the noun instead of the
+#: verb - and the model handled it worse, not better: it reused the PREVIOUS
+#: turn's question and answered a request for a report with the one-line
+#: "last seen" sentence it had just given.
+_REPORT_ON_PERSON_COMMAND = re.compile(
+    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|hey\s+"
+    r"|give\s+me\s+|show\s+me\s+|i\s+(?:want|need)\s+|make\s+(?:me\s+)?"
+    r"|generate\s+|create\s+|prepare\s+"
+    r"|أعطني\s+|اعطني\s+|أريد\s+|اريد\s+|من\s+فضلك\s+|ممكن\s+|لو\s+سمحت\s+)*"
+    r"(?:a\s+|an\s+|the\s+)?"
+    r"(?:(?:tracking|movement|activity|detection)\s+)?(?:report|تقرير)\s+"
+    r"(?:for|about|on|of|عن|حول)?\s*"
+    r"(?:(?:tracking|track)\s+|تتبع\s+|تعقب\s+)?"
+    r"(?:person\s+|الشخص\s+)?"
+    r"(?P<subject>.+?)\s*[.!?؟]?\s*$",
+    re.IGNORECASE,
+)
 _CONTEXTUAL_TRACK_SUBJECTS = frozenset({
     "a person", "anyone", "her", "him", "it", "someone", "that person",
     "them", "this person",
+    # A report request pointing back at one we already made is a follow-up
+    # about that report, not a new command: "the report about that".
+    "that", "this", "the same", "the last one", "the previous one",
 })
+#: A report "in Arabic" is a TRANSLATION of the one we have. Recognised here
+#: only to keep this rule out of its way.
+_NAMES_A_LANGUAGE = re.compile(
+    r"(\barabic\b|\benglish\b|بالعربي|بالإنجليزي|بالانجليزي|العربية|الإنجليزية)",
+    re.IGNORECASE)
 _COMPOUND_TRACK_WORDS = re.compile(r"\b(?:also|and|then)\b", re.IGNORECASE)
 
 
@@ -122,8 +148,10 @@ def deterministic_request_plan(user_text: str) -> Optional[PlannedAction]:
     person after an empty result and all generated SQL still crosses the AST
     authorization gate.
     """
-    match = _TRACK_PERSON_COMMAND.fullmatch(str(user_text or ""))
-    if not match:
+    text = str(user_text or "")
+    match = (_TRACK_PERSON_COMMAND.fullmatch(text)
+             or _REPORT_ON_PERSON_COMMAND.fullmatch(text))
+    if not match or _NAMES_A_LANGUAGE.search(text):
         return None
 
     subject = match.group("subject").strip().strip("\"'\u201c\u201d\u2018\u2019")

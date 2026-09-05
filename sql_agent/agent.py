@@ -464,7 +464,11 @@ class SQLIntelligenceAgent:
                 turn_id,
                 previous.get("context_version"), current.get("context_version"),
                 (state.get("planned_action") or {}).get("action"),
-                committed_delta.get("field"),
+                # None on a turn that committed nothing (a translation, a
+                # clarification): calling .get on it raised inside this very
+                # log call and the handler then reported the commit as
+                # "skipped" - after it had already been written.
+                (committed_delta or {}).get("field"),
                 bool((state.get("planned_action") or {}).get("artifact_id")),
             )
         except Exception as e:

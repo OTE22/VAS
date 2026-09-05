@@ -757,6 +757,33 @@ held subject ("IRON MAN - tracking report", "تقرير تتبع - IRON MAN"), a
 candidate title that reads as a request ("can you…", "اجعل…") is refused.
 The `follow_up` and `artifacts` skills say the same to the model.
 
+**A report about a named person is the same command as "track X".** The
+deterministic seam recognised only the verb, so "report for tracking joey"
+went to the model, which paraphrased it as the PREVIOUS turn's question and
+answered a request for a report with that turn's one-line sentence.
+`_REPORT_ON_PERSON_COMMAND` accepts the noun forms in both languages
+("tracking report for joey", "تقرير عن جوي", "give me a report about X"),
+refusing the same things the verb form refuses — no subject, a subject
+needing resolution ("report for tracking him"), compound work, and anything
+naming a language, which is a translation. When a deterministic command is
+recognised, the request handed to SQL generation is the USER'S words, not
+the model's paraphrase of them (`tests/test_report_command.py`).
+
+The translation rule runs in BOTH directions, because both are facts about
+the message. A translation nobody asked for is refused: in the loop
+(`NO_LANGUAGE_REQUESTED`, unconditional) and again on the planner's plan
+(`_refuse_unrequested_translation`, which turns it back into the data
+request the router already recognised). "report for tracking joey" —
+English, naming an enrolled person — was executed as `translate_artifact`
+and came back as an Arabic rewrite of the previous report. For the same
+reason the reply's language is the language of the message, decided by the
+input pipeline from its script: a plan language is accepted only when this
+message asked for one (`_language_was_requested`), never carried over from
+the last turn. The request needs no preposition — "make it Arabic" is one —
+so `_LANGUAGE_REQUEST` also matches a bare language word, still gated on
+the reference to the report ("track joey in arabic" stays a new query).
+Tests: `test_translation_must_be_asked_for.py`.
+
 **Interactive correction: the question suspends the request, the answer
 resumes it.** An unknown person or camera name is matched against what
 exists (`_closest_names`, difflib at 0.6); a close match becomes "Did you
