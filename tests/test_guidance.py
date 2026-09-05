@@ -98,12 +98,3 @@ class _FakeLLM:
         return self.replies.pop(0) if self.replies else _Reply(None, {})
 
 
-def test_insisting_on_prose_for_a_data_request_ends_in_guidance():
-    llm = _FakeLLM([_Reply("answer_directly", {"answer": "The weather is nice."}),
-                    _Reply("answer_directly", {"answer": "The weather is nice."})])
-    call, trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="check him at the gate", context_block="", db=None,
-        dialogue_state=None, artifact_index=None, known_request=True)
-    assert call is None
-    assert sum(1 for e in trace
-               if e.get("rejected") == "answered data without a query") == 2

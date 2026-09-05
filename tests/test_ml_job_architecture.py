@@ -30,7 +30,7 @@ def test_worker_uses_database_leases_and_child_process_isolation():
     assert "fail_expired_queue_leases" in manager
     assert "create_subprocess_exec" in worker
     assert "cancel_requested" in worker
-    assert 'os.getenv("ML_WORKER_ID")' in worker
+    assert 'WORKER_ID = settings.ML_WORKER_ID or' in worker
     assert '"ML_JOB_MAINTENANCE_SECONDS"' in worker
 
 

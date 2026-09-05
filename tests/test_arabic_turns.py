@@ -15,7 +15,7 @@ the prompt's FACTS block into the answer.
 """
 
 from sql_agent.tools import agent_loop
-from sql_agent.tools.agent_loop import _says_yes, asked_for_an_action
+from sql_agent.tools.agent_loop import _says_yes
 
 
 class _Reply:
@@ -40,33 +40,10 @@ class _MustNotBeCalled:
 
 # ------------------------------------------------ the verdict is read
 
-def test_a_message_naming_a_camera_is_a_request_without_asking():
-    assert asked_for_an_action(_MustNotBeCalled(),
-                               "من تم رصده في كاميرا wezaret؟") is True
-    assert asked_for_an_action(_MustNotBeCalled(),
-                               "Who was detected at camera KSA?") is True
-
-
-def test_an_arabic_yes_is_a_yes():
-    for answer in ("نعم", "نعم.", "**YES**", "Yes, the user asks for data.",
-                   "yes"):
-        assert asked_for_an_action(_LLM(answer), "hello there friend") is True, answer
-
-
-def test_a_no_in_either_language_is_a_no():
-    for answer in ("NO", "لا", "No - it is a greeting.", "n"):
-        assert asked_for_an_action(_LLM(answer), "hello there friend") is False, answer
-
 
 def test_anything_unclear_fails_toward_no():
     assert _says_yes("Perhaps.") is False
     assert _says_yes("The user is greeting you.") is False
-
-
-def test_the_model_is_told_to_answer_in_one_english_word():
-    llm = _LLM("YES")
-    asked_for_an_action(llm, "hello there friend")
-    assert llm.calls == 1
 
 
 # ------------------------------------------------ the scaffold never leaks

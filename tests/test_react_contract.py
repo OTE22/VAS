@@ -98,36 +98,6 @@ def test_every_action_the_model_may_name_reaches_a_real_node(graph):
         assert node in graph_nodes, f"{action!r} routes to a missing {node!r}"
 
 
-def test_the_model_proposes_and_python_disposes():
-    """The property the whole design rests on.
-
-    Every committed tool call is re-validated before it can run. If this
-    stops being true, the model's judgement becomes the security boundary.
-    """
-    from sql_agent.tools import agent_loop
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(agent_loop.run_tool_loop)))
-    called = {n.func.attr for n in ast.walk(tree)
-              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-
-    assert "validate_call" in called, (
-        "the loop commits tool calls without validating them")
-
-
-def test_an_acting_tool_requires_that_the_user_asked_for_something():
-    """"hi" produced a PDF, then a query. Acting needs a request."""
-    from sql_agent.tools import agent_loop, tool_registry as tr
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(agent_loop.run_tool_loop)))
-    called = {n.func.id for n in ast.walk(tree)
-              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    assert "asked_for_an_action" in called, "the intent-fit gate is gone"
-
-    # Answering and asking must stay ungated: they are what a greeting needs.
-    assert set(tr.ALWAYS_SAFE_TOOLS) == {"answer_directly",
-                                         "ask_clarifying_question"}
-
-
 # --------------------------------------------------------- 3. OBSERVE
 
 @pytest.mark.parametrize("terminal", [

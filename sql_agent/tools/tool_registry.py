@@ -47,7 +47,7 @@ ACTION_TOOLS = ("query_database", "modify_active_query", "generate_document",
 # The two actions that are ALWAYS a safe response to anything. Answering and
 # asking are what a greeting, a thank-you or a question about the assistant
 # itself warrant; everything else DOES something and therefore has to have
-# been asked for (see `asked_for_an_action` in agent_loop).
+# been asked for (the interpreter's reading of the turn says whether it was).
 #
 # With a report in the session, "hi" produced first a PDF and then a database
 # query — both valid, neither requested.
@@ -127,10 +127,22 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
               "question as a concise English paraphrase for the SQL "
               "specialist; preserve every constraint and copy person/camera "
               "names exactly in the user's original script. The system "
-              "writes and runs SQL safely. Never write SQL yourself.",
+              "writes and runs SQL safely. Use this only for database facts, "
+              "not greetings, recall of an answer already in the conversation, "
+              "or questions about the assistant. Never write SQL yourself.",
               {"question": {"type": "string",
                             "description": "English paraphrase in plain words; "
-                                           "names and literal values unchanged"}},
+                                           "names and literal values unchanged"},
+               "response_shape": {
+                   "type": "string", "enum": ["answer", "report"],
+                   "description": "Use answer for one focused fact; use report "
+                                  "when the user wants all relevant detections, "
+                                  "cameras, and timestamps"},
+               "uses_context": {
+                   "type": "boolean",
+                   "description": "True only when the current message refers "
+                                  "to a person, camera, result, or constraint "
+                                  "from the conversation state"}},
               required=["question"]),
         _spec("modify_active_query",
               "Re-run the PREVIOUS question with something changed: a "
@@ -139,9 +151,14 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
                           "description": "e.g. only camera 3, or last week instead"}},
               required=["change"]),
         _spec("generate_document",
-              "Turn what was just produced into a downloadable file.",
-              {"format": {"type": "string", "enum": ["pdf", "word"]},
-               "language": {"type": "string", "enum": ["en", "ar"]}}),
+              "Turn an answer or report that already exists in this "
+              "conversation into a downloadable PDF or Word file. Do not use "
+              "when no result exists; ask what the user wants reported first.",
+              {"format": {"type": "string", "enum": ["pdf", "word"],
+                          "description": "The requested downloadable file type"},
+               "language": {"type": "string", "enum": ["en", "ar"],
+                            "description": "Optional output language; omit to "
+                                           "preserve the answer's language"}}),
         _spec("translate_document",
               "Restate an EXISTING document in another language.",
               {"language": {"type": "string", "enum": ["en", "ar"]},
@@ -162,9 +179,20 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
                          "description": "the new value; omit for REMOVE"}},
               required=["operation", "field"]),
         _spec("answer_directly",
-              "Answer conversationally, with no data lookup. Greetings, "
-              "thanks, questions about your own abilities.",
-              {"answer": {"type": "string"}},
+              "Choose a normal conversational response with no data lookup. "
+              "Use for greetings, thanks, brainstorming, explanations, and "
+              "questions about your abilities or what was already said. Set "
+              "uses_context=true only when the reply depends on earlier "
+              "conversation. Never assert a new person, camera, count, event, "
+              "or other database fact through this tool.",
+              {"answer": {"type": "string",
+                          "description": "A concise proposed reply in the "
+                                         "user's language; database claims are "
+                                         "not allowed"},
+               "uses_context": {
+                   "type": "boolean",
+                   "description": "True for recall or discussion of an earlier "
+                                  "message; false for standalone small talk"}},
               required=["answer"]),
         _spec("ask_clarifying_question",
               "LAST RESORT. Ask ONE short question only after a look-up "

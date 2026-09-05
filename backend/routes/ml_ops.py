@@ -220,6 +220,9 @@ class RejectRequest(BaseModel):
     reason: str = Field(..., min_length=3, max_length=1000)
 
 
+from backend.ml.run_spec import RunOptions, PipelineConfiguration
+
+
 class TrainingRequest(BaseModel):
     model_type: str = Field(default=MODEL_TYPE_BEHAVIOR_ANOMALY)
     algorithm: str = Field(default="isolation_forest", max_length=64)
@@ -230,6 +233,156 @@ class TrainingRequest(BaseModel):
     seed: Optional[int] = Field(default=None, ge=0, le=2**31 - 1)
     hyperparameters: Optional[Dict[str, Any]] = None
     sampling_policy: Optional[str] = Field(default=None, pattern="^(refuse|newest_first|oldest_first)$")
+    pipeline_id: Optional[uuid_mod.UUID] = None
+    run_options: RunOptions = Field(default_factory=RunOptions)
+
+
+class PipelineCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[\w .-]+$")
+    configuration: PipelineConfiguration
+
+
+class OfflinePromotionRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+    artifact_checksum: str = Field(pattern="^[a-f0-9]{64}$")
+
+
+@router.get("/api/ml/capabilities", tags=["ML Operations"])
+async def platform_capabilities(current_user=Depends(ML_MANAGE)):
+    from backend.ml.capabilities import capability_registry
+    from starlette.concurrency import run_in_threadpool
+    from config import settings
+    capabilities = await run_in_threadpool(capability_registry)
+    if capabilities["mlflow"]["operational"] and settings.MLFLOW_TRACKING_URI:
+        try:
+            from backend.ml.mlflow_tracking import client
+            c = await run_in_threadpool(client)
+            await run_in_threadpool(c.search_experiments, max_results=1)
+        except Exception:
+            capabilities["mlflow"].update(status="Misconfigured", operational=False,
+                action="Tracking service is unreachable or access was refused. Check HTTPS URL, service credentials and network access.")
+    return JSONResponse({"items": capabilities, "permissions": {"manage": "admin", "promote": "admin", "settings": "existing settings RBAC"},
+        "limits": {"threads": settings.ML_TRAIN_MAX_THREADS, "optuna_trials": settings.ML_OPTUNA_MAX_TRIALS,
+            "optuna_timeout_seconds": settings.ML_OPTUNA_TIMEOUT_SECONDS, "shap_rows": settings.ML_SHAP_MAX_ROWS},
+        "storage": {"datasets": "immutable registered snapshots", "tracking": "HTTPS service" if settings.MLFLOW_TRACKING_URI else "managed persistent SQL store", "dvc": "not used; existing snapshot storage is authoritative"}}, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/ml/pipelines", tags=["ML Operations"])
+async def list_pipeline_versions(db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE)):
+    from db_models import MLPipelineVersion
+    rows = (await db.execute(select(MLPipelineVersion).order_by(MLPipelineVersion.created_at.desc()).limit(100))).scalars().all()
+    return {"items": [{"id": str(r.id), "name": r.name, "version": r.version, "configuration": r.configuration} for r in rows]}
+
+
+@router.post("/api/ml/pipelines", tags=["ML Operations"], status_code=201)
+async def create_pipeline_version(body: PipelineCreateRequest, db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE),
+                                  _csrf=Depends(require_mlops_csrf), _rl=Depends(rate_limited("ml_ops"))):
+    from db_models import MLPipelineVersion
+    from sqlalchemy import text
+    # Version allocation is serialized per name; published configurations are never updated.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "ml-pipeline:" + body.name})
+    version = ((await db.execute(select(sa_func.max(MLPipelineVersion.version)).where(MLPipelineVersion.name == body.name))).scalar() or 0) + 1
+    row = MLPipelineVersion(id=uuid_mod.uuid4(), name=body.name, version=version, configuration=body.configuration.model_dump(), created_by=_actor_id(current_user))
+    db.add(row)
+    await ml_audit(db, action="pipeline_version_created", actor_username=_actor(current_user), actor_user_id=_actor_id(current_user),
+                   object_type="ml_pipeline", object_id=str(row.id), after={"name": row.name, "version": version, "configuration": row.configuration})
+    await db.commit()
+    return {"id": str(row.id), "name": row.name, "version": version, "configuration": row.configuration}
+
+
+@router.get("/api/ml/experiments", tags=["ML Operations"])
+async def list_experiments(db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE)):
+    from db_models import MLTrackingRun
+    from backend.ml.mlflow_tracking import serialize
+    rows = (await db.execute(select(MLTrackingRun).order_by(MLTrackingRun.updated_at.desc()).limit(100))).scalars().all()
+    return {"items": [serialize(row) for row in rows]}
+
+
+@router.get("/api/ml/comparisons", tags=["ML Operations"])
+async def compare_experiments(model_ids: List[uuid_mod.UUID] = Query(..., min_length=2, max_length=5), db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE)):
+    from db_models import MLModel
+    rows = (await db.execute(select(MLModel).where(MLModel.id.in_(model_ids)))).scalars().all()
+    if len(rows) != len(set(model_ids)):
+        raise _error(404, "MODEL_NOT_FOUND", "One or more selected models no longer exist")
+    contracts = {(str(r.dataset_id), r.model_type, ((r.training_config or {}).get("pipeline") or {}).get("target")) for r in rows}
+    return {"comparable": len(contracts) == 1, "note": "Compare the same dataset version, task and target; lower regression error is better. This comparison never approves deployment.",
+            "items": [{"id": str(r.id), "version": r.version, "algorithm": r.algorithm, "dataset_id": str(r.dataset_id), "metrics": r.evaluation_report, "stage": r.stage} for r in rows]}
+
+
+@router.post("/api/ml/experiments/{job_id}/retry", tags=["ML Operations"], status_code=202)
+async def retry_tracking(job_id: str, body: PauseRequest, db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE),
+                         _csrf=Depends(require_mlops_csrf), _rl=Depends(rate_limited("ml_ops", heavy=True))):
+    from db_models import MLTrackingRun
+    from backend.ml.job_service import enqueue_ml_job, MLJobConflict
+    if not await db.get(MLTrackingRun, job_id):
+        raise _error(404, "EXPERIMENT_NOT_FOUND", "No experiment exists for this job")
+    try:
+        out = await enqueue_ml_job(db, kind="tracking", payload={"training_job_id": job_id}, description="Administrator requested MLflow synchronization", created_by_user_id=_actor_id(current_user))
+    except MLJobConflict:
+        raise _error(409, "TRACKING_SYNC_ACTIVE", "A synchronization is already queued or running. Wait and refresh.")
+    await ml_audit(db, action="mlflow_retry_requested", actor_username=_actor(current_user), actor_user_id=_actor_id(current_user), object_type="ml_training_job", object_id=job_id, reason=body.reason)
+    await db.commit()
+    return out
+
+
+@router.post("/api/ml/models/{model_id}/promote", tags=["ML Operations"])
+async def promote_offline_model(model_id: uuid_mod.UUID, body: OfflinePromotionRequest, db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE),
+                                 _csrf=Depends(require_mlops_csrf), _rl=Depends(rate_limited("ml_ops"))):
+    from backend.ml.registry_service import registry_service, RegistryError, validate_artifact
+    from starlette.concurrency import run_in_threadpool
+    row = await registry_service.get_model(db, str(model_id))
+    if row is None:
+        raise _error(404, "MODEL_NOT_FOUND", "Model not found")
+    if get_model_spec(row.model_type).serving_mode not in ("offline_ranking", "offline_regression"):
+        raise _error(409, "PROMOTION_GATED", "Use the existing governed shadow approval for security anomaly models")
+    if body.artifact_checksum != row.artifact_hash:
+        raise _error(409, "ARTIFACT_CHECKSUM_MISMATCH", "Refresh the model and review the current artifact checksum")
+    try:
+        await run_in_threadpool(validate_artifact, row.artifact_path, expected_hash=row.artifact_hash, expected_feature_names=row.feature_names, expected_dependencies=row.dependency_versions)
+        return await registry_service.transition(db, str(row.id), to_stage="approved", actor=_actor(current_user), actor_user_id=_actor_id(current_user), reason=body.reason)
+    except RegistryError as exc:
+        raise _error(409, exc.code, exc.message)
+
+
+async def _explanation_file(db, model_id, filename):
+    from pathlib import Path
+    import hashlib
+    from config import settings
+    from db_models import MLModel
+    row = await db.get(MLModel, model_id)
+    if row is None:
+        raise _error(404, "MODEL_NOT_FOUND", "Model not found")
+    exports = ((row.evaluation_report or {}).get("shap") or {}).get("exports", {})
+    if filename not in exports:
+        raise _error(404, "EXPLANATION_NOT_RECORDED", "SHAP was not recorded for this run. Enable it on a compatible new training run.")
+    root = (Path(settings.ML_ARTIFACT_DIR).resolve() / "explanations").resolve()
+    path = (root / str(model_id) / filename).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise _error(409, "EXPLANATION_FILE_MISSING", "Restore explanation artifacts from backup or train a new run")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != exports[filename]:
+        raise _error(409, "EXPLANATION_CHECKSUM_MISMATCH", "Explanation artifact integrity check failed. Restore the original file.")
+    return path
+
+
+@router.get("/api/ml/models/{model_id}/explanations", tags=["ML Operations"])
+async def model_explanations(model_id: uuid_mod.UUID, sample: int = Query(0, ge=0, le=999), db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE)):
+    import json
+    path = await _explanation_file(db, model_id, "shap.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if sample >= data["rows"]:
+        raise _error(422, "EXPLANATION_SAMPLE_OUT_OF_RANGE", "Choose a recorded sample index")
+    return {"rows": data["rows"], "feature_names": data["feature_names"], "global_importance": data["global_importance"], "output_space": data["output_space"],
+            "sample": {"index": sample, "id": data["sample_ids"][sample], "contributions": data["values"][sample], "features": data["data"][sample],
+                       "base_value": data["base_values"][sample] if isinstance(data["base_values"], list) else data["base_values"]}}
+
+
+@router.get("/api/ml/models/{model_id}/explanations/download/{filename}", tags=["ML Operations"])
+async def download_explanation(model_id: uuid_mod.UUID, filename: str, db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE)):
+    from fastapi.responses import FileResponse
+    if filename not in ("shap.json", "shap-global.png", "shap-individual-0.png"):
+        raise _error(404, "EXPORT_NOT_FOUND", "Select a recorded SHAP export")
+    path = await _explanation_file(db, model_id, filename)
+    return FileResponse(path, filename=filename, media_type="application/json" if filename.endswith("json") else "image/png", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 class RelationalScoreRequest(BaseModel):
@@ -828,6 +981,46 @@ async def archive_dataset_endpoint(
         raise _safe_500("dataset archive", e)
 
 
+@router.get("/api/ml/datasets/{dataset_id}/explorer", tags=["ML Operations"])
+@router.get("/api/ml/datasets/{dataset_id}/validation-report", tags=["ML Operations"])
+async def dataset_explorer(
+    request: Request,
+    dataset_id: uuid_mod.UUID,
+    page: int = Query(1, ge=1, le=4000),
+    page_size: int = Query(25, ge=1, le=100),
+    split: Optional[str] = Query(None, pattern="^(train|val|test)$"),
+    label: Optional[str] = Query(None, pattern="^(positive|negative|unknown|unlabelled)$"),
+    q: str = Query("", max_length=200),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(ML_MANAGE),
+):
+    """Bounded artifact preview; downloads contain the original validation report."""
+    from db_models import MLDataset
+    from backend.ml.dataset_explorer import explore_dataset
+    from starlette.concurrency import run_in_threadpool
+    from config import settings
+
+    row = (await db.execute(select(MLDataset).where(MLDataset.id == dataset_id))).scalar_one_or_none()
+    if row is None:
+        raise _error(404, "DATASET_NOT_FOUND", "No such dataset. Refresh the dataset list.")
+    if request.url.path.endswith("/validation-report"):
+        return JSONResponse(jsonable({"dataset_id": str(row.id), "version": row.version,
+            "checksum": row.checksum, "validation_report": row.quality_report,
+            "missing_value_report": row.missing_value_report}), headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="validation-{dataset_id}.json"'})
+    try:
+        result = await run_in_threadpool(explore_dataset, row, settings.ML_ARTIFACT_DIR,
+                                        page=page, page_size=page_size, split=split, label=label, query=q)
+        return JSONResponse(jsonable(result), headers={"Cache-Control": "no-store"})
+    except FileNotFoundError:
+        raise _error(409, "DATASET_FILE_MISSING", "Artifact unavailable. Restore it from backup or build a new dataset version; the saved validation report remains available.")
+    except ValueError:
+        raise _error(409, "DATASET_UNREADABLE", "Dataset cannot be inspected. Check artifact integrity or build a new version.")
+    except Exception as exc:
+        raise _safe_500("dataset explorer", exc)
+
+
 @router.get("/api/ml/datasets/{dataset_id}", tags=["ML Operations"], summary="Dataset Detail")
 async def dataset_detail(
     dataset_id: str,
@@ -880,7 +1073,24 @@ async def create_training_job(
     _rl: None = Depends(rate_limited("ml_ops", heavy=True)),
 ):
     """Persist training for the independent worker; never execute it in the API."""
-
+    pipeline = None
+    if body.pipeline_id:
+        from db_models import MLPipelineVersion
+        saved = await db.get(MLPipelineVersion, body.pipeline_id)
+        if saved is None:
+            raise _error(404, "PIPELINE_NOT_FOUND", "Refresh pipeline configurations and select an existing version")
+        config = PipelineConfiguration.model_validate(saved.configuration)
+        body.model_type, body.algorithm = config.model_type, config.algorithm
+        pipeline = {**config.model_dump(), "id": str(saved.id), "name": saved.name, "version": saved.version}
+    if body.model_type == "tabular_regression_model" and (not pipeline or not body.dataset_id):
+        raise _error(422, "REGRESSION_CONFIGURATION_REQUIRED", "Regression needs a saved pipeline with an explicit numeric target and a dataset version")
+    try:
+        from backend.ml.registry_service import RegistryError
+        body.run_options.check_capabilities(body.algorithm)
+        from backend.ml.trainer import resolve_hyperparameters
+        resolve_hyperparameters(body.algorithm, body.hyperparameters)
+    except RegistryError as exc:
+        raise _error(422, exc.code, exc.message)
     if body.model_type not in MODEL_TYPES:
         raise _error(422, "UNKNOWN_MODEL_TYPE",
                      f"model_type must be one of {MODEL_TYPES}")
@@ -901,6 +1111,7 @@ async def create_training_job(
             "dataset_id": body.dataset_id, "seed": body.seed,
             "hyperparameters": body.hyperparameters,
             "sampling_policy": body.sampling_policy,
+            "pipeline": pipeline, "run_options": body.run_options.model_dump(),
         }
         try:
             outcome = await enqueue_ml_job(
@@ -921,7 +1132,8 @@ async def create_training_job(
                               "algorithm": body.algorithm,
                               "dataset_id": body.dataset_id,
                               "seed": body.seed,
-                              "hyperparameters": body.hyperparameters})
+                              "hyperparameters": body.hyperparameters, "pipeline": pipeline,
+                              "run_options": body.run_options.model_dump()})
         await db.commit()
         return JSONResponse(status_code=202, content=outcome)
     except HTTPException:
@@ -1112,6 +1324,10 @@ async def get_model(
         raise HTTPException(status_code=404, detail="Model not found")
     payload = serialize_model_row(row)
     payload["thresholds"] = [serialize_threshold(t) for t in await threshold_service.list_for_model(db, row.id)]
+    from db_models import MLTrackingRun
+    from backend.ml.mlflow_tracking import serialize as serialize_tracking
+    tracking = await db.get(MLTrackingRun, row.training_job_id) if row.training_job_id else None
+    payload["tracking"] = serialize_tracking(tracking) if tracking else {"status": "not_recorded"}
     return payload
 
 

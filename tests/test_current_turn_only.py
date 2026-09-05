@@ -21,8 +21,6 @@ untrue about this one?
 
 import pytest
 
-from sql_agent.tools.agent_loop import names_a_stranger
-
 
 def _tools(monkeypatch, last_ai_text="A previous answer about Joey, at length."):
     import sql_agent.tools.agent_tools as module
@@ -42,47 +40,6 @@ def _tools(monkeypatch, last_ai_text="A previous answer about Joey, at length.")
 
 
 # ------------------------------------------- surface 1: the question we ask
-
-@pytest.mark.parametrize("question,user_text,stale", [
-    ("Can you clarify what you mean by Joey?", "track iron man", "Joey"),
-    ("Did you mean the Weekly Report?", "make it Arabic", "Weekly Report"),
-    ("Which of Ali Abbas's detections?", "how many cameras", "Ali Abbas"),
-])
-def test_a_clarification_may_not_name_someone_the_user_did_not(
-        question, user_text, stale):
-    """THE reported bug: asked about Iron Man, asked back about Joey.
-
-    The model authors these and sees the whole transcript, so it can ask
-    about whoever dominates it rather than whoever was just mentioned.
-    """
-    assert names_a_stranger(question, user_text) == stale
-
-
-@pytest.mark.parametrize("question,user_text", [
-    ("Could you clarify which person you meant by Zoltan Kaszubowski?",
-     "track Zoltan Kaszubowski"),
-    ("Which camera did you mean?", "only camera 3"),
-    ("Could you tell me a little more about what you need?", "hi"),
-    ("Which person do you mean?", "track someone"),
-    ("Do you want the report as a PDF or Word?", "make that a document"),
-])
-def test_a_grounded_question_is_left_alone(question, user_text):
-    """The negative control. Rejecting every question would also 'fix' it.
-
-    A guard that fires on legitimate clarifications would remove the one
-    behaviour that stops the agent guessing at somebody's identity.
-    """
-    assert names_a_stranger(question, user_text) is None
-
-
-def test_the_check_is_factual_not_a_phrasebook():
-    """It asks "is this string in what they typed?", nothing more.
-
-    The same name is fine or stale depending ONLY on the user's message, so
-    there is no list of words to maintain and nothing language-specific.
-    """
-    assert names_a_stranger("Do you mean Joey?", "track Joey") is None
-    assert names_a_stranger("Do you mean Joey?", "track Ali") == "Joey"
 
 
 # ------------------------------------------- surface 2: the document title

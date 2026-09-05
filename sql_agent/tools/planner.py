@@ -89,82 +89,9 @@ class PlannedAction:
         return f"PlannedAction({self.action}, source={self.source})"
 
 
-# A small deterministic seam for commands whose domain intent is explicit.
-# This is deliberately not a general keyword classifier: only a complete,
-# self-contained imperative with a named subject qualifies. Contextual
-# references ("track him") and compound work ("track Ali and make a PDF")
-# still need the tool loop because they require resolution or several actions.
-#: Politeness is not content. "can you track joey" was paraphrased by the
-#: model as the PREVIOUS turn's question and answered with a report about
-#: pipelines; stripped of "can you", it is the exact command this rule
-#: exists for. English and Arabic prefixes and verbs.
-_TRACK_PERSON_COMMAND = re.compile(
-    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|hey\s+"
-    r"|هل\s+(?:يمكنك|تستطيع|تقدر)\s+|من\s+فضلك\s+|ممكن\s+|لو\s+سمحت\s+)*"
-    r"(?:track|تتبع|تعقب|تابع)\s+(?:person\s+|الشخص\s+)?"
-    r"(?P<subject>.+?)\s*[.!?؟]?\s*$",
-    re.IGNORECASE,
-)
-#: "report for tracking joey", "tracking report for joey", "give me a report
-#: about joey". The same self-contained command with the noun instead of the
-#: verb - and the model handled it worse, not better: it reused the PREVIOUS
-#: turn's question and answered a request for a report with the one-line
-#: "last seen" sentence it had just given.
-_REPORT_ON_PERSON_COMMAND = re.compile(
-    r"^\s*(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+|hey\s+"
-    r"|give\s+me\s+|show\s+me\s+|i\s+(?:want|need)\s+|make\s+(?:me\s+)?"
-    r"|generate\s+|create\s+|prepare\s+"
-    r"|أعطني\s+|اعطني\s+|أريد\s+|اريد\s+|من\s+فضلك\s+|ممكن\s+|لو\s+سمحت\s+)*"
-    r"(?:a\s+|an\s+|the\s+)?"
-    r"(?:(?:tracking|movement|activity|detection)\s+)?(?:report|تقرير)\s+"
-    r"(?:for|about|on|of|عن|حول)?\s*"
-    r"(?:(?:tracking|track)\s+|تتبع\s+|تعقب\s+)?"
-    r"(?:person\s+|الشخص\s+)?"
-    r"(?P<subject>.+?)\s*[.!?؟]?\s*$",
-    re.IGNORECASE,
-)
-_CONTEXTUAL_TRACK_SUBJECTS = frozenset({
-    "a person", "anyone", "her", "him", "it", "someone", "that person",
-    "them", "this person",
-    # A report request pointing back at one we already made is a follow-up
-    # about that report, not a new command: "the report about that".
-    "that", "this", "the same", "the last one", "the previous one",
-})
-#: A report "in Arabic" is a TRANSLATION of the one we have. Recognised here
-#: only to keep this rule out of its way.
-_NAMES_A_LANGUAGE = re.compile(
-    r"(\barabic\b|\benglish\b|بالعربي|بالإنجليزي|بالانجليزي|العربية|الإنجليزية)",
-    re.IGNORECASE)
-_COMPOUND_TRACK_WORDS = re.compile(r"\b(?:also|and|then)\b", re.IGNORECASE)
 
 
-def deterministic_request_plan(user_text: str) -> Optional[PlannedAction]:
-    """Recognise only unambiguous, self-contained domain commands.
 
-    A small tool-calling model may answer ``track Iron Man`` conversationally
-    even though the command is an exact database operation. Deterministic
-    routing is appropriate here because the verb, object and application
-    domain jointly remove ambiguity. The SQL pipeline still resolves the
-    person after an empty result and all generated SQL still crosses the AST
-    authorization gate.
-    """
-    text = str(user_text or "")
-    match = (_TRACK_PERSON_COMMAND.fullmatch(text)
-             or _REPORT_ON_PERSON_COMMAND.fullmatch(text))
-    if not match or _NAMES_A_LANGUAGE.search(text):
-        return None
-
-    subject = match.group("subject").strip().strip("\"'\u201c\u201d\u2018\u2019")
-    folded = " ".join(subject.casefold().split())
-    if (not folded or folded in _CONTEXTUAL_TRACK_SUBJECTS
-            or _COMPOUND_TRACK_WORDS.search(subject)):
-        return None
-
-    return PlannedAction(
-        action="query_database", confidence=1.0, source="deterministic")
-
-
-# ------------------------------------------------------------ JSON recovery
 
 def extract_json_object(raw: str) -> Optional[dict]:
     """Pull the first complete JSON object out of a model's reply.

@@ -355,6 +355,9 @@ class SQLIntelligenceAgent:
                                      else "open_question"),
                             "original_intent": state.get("intent") or "SQL_QUERY",
                             "original_query": str(user_input)[:200],
+                            # The question itself, so the next turn's reading
+                            # sees what the answer is answering.
+                            "question": str(state.get("clarify_question") or "")[:300],
                             "field": "person",
                             # The misspelled token, so the answer can be
                             # substituted into the original words.

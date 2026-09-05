@@ -75,22 +75,16 @@ def test_nginx_caps_sql_agent_request_bodies_at_the_edge():
         assert "client_max_body_size 32k" in text[stream:stream + 500]
 
 
-def test_skill_composition_is_connected_to_both_planning_entries():
-    from sql_agent.tools import agent_loop
-    from sql_agent.tools.agent_tools import SQLAgentTools
-
-    loop_source = inspect.getsource(agent_loop.run_tool_loop)
-    planner_source = inspect.getsource(SQLAgentTools.plan_action)
-    assert "skill_resolver.compose" in loop_source
-    assert "skill_resolver.compose" in planner_source
-
-
-def test_planner_fallback_uses_the_intent_model_not_the_sql_model():
+def test_the_reading_is_the_only_way_a_turn_is_planned():
+    """The single-shot planner fallback is gone: plan_action reads the turn
+    through the interpreter and never consults the SQL model to plan."""
     from sql_agent.tools.agent_tools import SQLAgentTools
 
     source = inspect.getsource(SQLAgentTools.plan_action)
-    assert "prompt | self.llm | StrOutputParser()" in source
-    assert "prompt | self.sql_llm | StrOutputParser()" not in source
+    assert "_read_the_turn(" in source and "_plan_from_reading(" in source
+    assert "self.sql_llm" not in source
+    assert "run_tool_loop" not in source
+    assert "deterministic_request_plan" not in source
 
 
 def test_cancelled_rest_workers_keep_isolation_until_they_exit():

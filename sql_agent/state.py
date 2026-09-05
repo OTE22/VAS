@@ -168,6 +168,14 @@ class AgentState(TypedDict):
     camera_matched: Optional[str]
     # "thank you" / "ok" / "شكرا": answered with a fixed phrase, no model.
     acknowledgement: Optional[bool]
+    # The model read this turn as questioning the last answer; the
+    # chat node re-runs the check instead of answering from prose.
+    confirmation_challenge: Optional[bool]
+    # The validated reading of this turn (interpreter.Interpretation).
+    interpretation: Optional[Dict]
+    # True when the model decided the answer is already in this conversation
+    # and the chat node should use recent context rather than run a new query.
+    recall: Optional[bool]
     # The one routing decision for the turn: "data", "chat" or "undecided".
     turn_kind: Optional[str]
     # The misspelled token a "Did you mean X?" question is about; stored
@@ -226,10 +234,9 @@ class AgentState(TypedDict):
     # A short operational summary of the goal, for the audit line. Capped
     # hard: an action summary, deliberately NOT a place for reasoning text.
     reasoning_goal: Optional[str]
-    # Whether this turn ASKS for anything, judged once by
-    # `agent_loop.asked_for_an_action`. None when it was never needed (the
-    # model went straight to answering). The chat node reads it to decide
-    # whether the prior-turns block is relevant at all.
+    # Whether this turn ASKS for anything: the interpreter's reading is
+    # anything but `chat`. The chat node reads it to decide whether the
+    # prior-turns block is relevant at all.
     turn_is_a_request: Optional[bool]
     # Actions taken this turn while pursuing the request. The graph's router
     # reads it, so the ceiling is arithmetic rather than a matter of the model

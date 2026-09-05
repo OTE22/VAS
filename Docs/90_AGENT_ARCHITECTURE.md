@@ -60,6 +60,116 @@ observe_and_replan ──┬─ corrected query          → check_schema
 `check_schema` is untouched, and a modified query rejoins it at
 `validate_and_fix_sql` — the same AST authorization guard, by the same edge.
 
+### Understanding the message is the model's job
+
+The agent had been growing a phrase list per bug: `track X`, then
+`report for tracking X`; "in Arabic" but not "make it Arabic"; then "are
+you sure". Each new way of saying the same thing was a new defect, because
+the WORDS were being matched instead of the meaning. That never converges.
+
+So the primary path is a bounded model/tool conversation
+(`sql_agent/tools/agent_loop.py`). The model may inspect task state, resolve a
+person, or list the caller's documents; each bounded result comes back as an
+observation before it chooses one final action. Providers that cannot complete
+native or prompted tool calling fall back to one small structured reading
+(`sql_agent/tools/interpreter.py`):
+
+```
+{wants: data|translation|document|confirmation|chat,
+ shape: report|answer, question, people[], camera, language, format,
+ about_previous}
+```
+
+The prompt carries the situation (who is under discussion, the question
+just answered, whether an answer is on hand) and the CLOSED lists of
+enrolled names and real cameras, and asks the model to copy names from
+them exactly.
+
+Authority stays in Python, but it now checks the model's ANSWER against the
+world instead of checking the user's sentence against a regex:
+
+- a name must be in the identity index, and the STORED spelling wins
+  ("joey" → `JOEY`); anything else becomes `unknown_people`, which is what
+  the did-you-mean path works from;
+- a camera must exist, else it is an invented filter;
+- `translation` with nothing held is not a translation, and neither is one
+  with no target language;
+- `language` is applied only to a translation or a document — the reply's
+  language is the language the message was WRITTEN in, which the input
+  pipeline settles from its script. (The model returned `"ar"` on plain
+  English questions and they were answered in Arabic.)
+- an unusable reply is asked once more with the choice narrowed to the
+  label; if that fails too, the user is asked to say it another way
+  (`_ask_to_rephrase`). There is no other path. The model's own synonyms
+  (`query`, `translate`, `export`) are folded onto the closed set; that
+  normalises the MODEL's vocabulary, never the user's words.
+
+**A `confirmation` reading is settled on the message alone.** The full
+reading sees the recent conversation, and once a verification sentence is
+in it the dev model reads the next short message as another doubt ("make
+it Arabic", "thank you"). Two yes/no questions about the message by itself
+(`LANGUAGE_QUESTION`, `DOUBT_QUESTION`) settle it; when the reading and
+the message disagree — "doubt" from one, "neither" from the other — the
+turn ASKS which was meant rather than picking (a wrong translation or a
+fabricated "yes, I am sure" is worse than one short question).
+
+Two more checks on the reading, both structural (2026-09-05, from the
+admin's live session): an answer to our open question that names an
+enrolled person is a data turn — the suspended request resumes for that
+person ("i mean alio abbass or similar" had been read as `recall`, and the
+chat model announced "no records of Alio Abbass" without looking); and a
+`clarify` whose question quotes one of the user's own earlier messages
+back is the transcript, not a question ("hi" had been answered with
+"could you clarify what you mean by '<their earlier message>'"). The chat
+prompt also says plainly that with no FACTS block nothing was checked, so
+a chat turn never asserts whether a record exists. And a `data` reading
+whose every slot came from the situation — none of the names it filled
+appear in the message ("thank you" after two data turns, read as data with
+the held camera copied in) — is put one closed question: does the message
+ask for anything at all? NO makes it chat.
+
+**What the live runs showed about the model.** On the dev reader
+(llama-3.2-11b via NIM) the short follow-ups flip between readings from
+run to run: the same "make it Arabic" was read as translation in one round
+and as a doubt in the next, and each variant of the settle question worked
+in one round and failed in another. The reading is model-bound; the
+production reader should be a more capable model than the dev one, and
+must be replayed live the same way before it is trusted. NIM also timed
+out repeatedly during the last runs, which surfaces as the closed failure
+phrase after rows were already fetched.
+
+**The phrase router is gone (2026-09-05).** `route_turn`, acknowledgement and
+continuation word lists, deterministic `track X` commands, and paraphrase
+keyword guards do not decide semantic intent. `run_tool_loop` is model-led:
+Python only exposes schemas, validates arguments, executes owner-scoped
+read-only look-ups, enforces hard budgets, and dispatches the committed
+action through the existing security boundaries. `interpreter.py` is a
+model-driven compatibility fallback, not a keyword classifier.
+
+**Asking is an outcome of the reading, not a failure of it.** The model may
+answer `clarify` with the question it would put to the user, and every
+reading carries a `confidence`; below `CONFIDENCE_FLOOR` (0.5) a data
+reading is not acted on but turned into that question (or into the
+guidance text). A request naming someone who is not enrolled is asked
+about, with the closest enrolled names, and SUSPENDED so the answer resumes
+it (`_suspend_for_unknown_name`, the same resume as the typo path) — the
+alternative was a query that matched nothing and an answer about somebody
+else. `recall` — "what did you tell me about Ali earlier" — is answered
+from the transcript with no query. The reading sees the RECENT CONVERSATION
+(eight bounded lines) and the open question it is waiting on, which is
+what "the second one" and "the report you gave before" resolve against.
+
+`shape` decides how much comes back, so "report for tracking joey" is not
+answered with the one-line sentence from the previous turn, and
+`confirmation` is answered by re-running the held query through the same
+guard and re-counting the subject's detections — being asked "are you
+sure?" is a request for evidence, not for prose.
+
+Nothing here decides what is ALLOWED. The SQL guard, the camera scope,
+ownership and name fidelity are untouched and still run on everything
+downstream. Tests: `tests/test_model_driven_tool_loop.py` and
+`tests/test_interpreter.py`.
+
 ### The planner states intent; Python holds authority
 
 This is the rule the whole design rests on. Every turn runs three stages:
@@ -67,9 +177,9 @@ This is the rule the whole design rests on. Every turn runs three stages:
 1. **Deterministic resolution.** Python builds a closed candidate set from
    working memory and the caller's own artifacts. An explicit UUID in the
    user's text is accepted only if it is already in that set.
-2. **The model chooses.** It picks one action and, at most, points at one of
-   the candidates it was handed. It is never asked to remember or rediscover
-   state.
+2. **The model collaborates with tools.** It may perform bounded, read-only
+   look-ups, observe their results, and then choose one action. It never gets
+   SQL, file paths, user ids, or authorization controls.
 3. **Deterministic validation.** Every field is re-checked: the action against
    a fixed vocabulary, `format`/`language` against allow-lists, and
    `artifact_id` against the candidate set — then against the **database**.
@@ -653,7 +763,15 @@ prompt.
 
 ---
 
-## Clarification is a last resort
+## Historical implementation notes: retired phrase-router version
+
+The material in this section records the pre-2026-09-05 implementation and
+the failures that motivated the model-led loop. Names such as `route_turn`,
+`is_a_continuation`, and `wants_translation` are intentionally no longer part
+of current semantic routing. They remain documented here as regression
+history, not as the active design.
+
+### Clarification was a last resort
 
 `ask_clarifying_question` ends the turn before anything is tried, which makes
 it the cheapest tool for a model under pressure and the most damaging one to
@@ -724,7 +842,7 @@ gate can be consulted. "with whom she was", asked right after "when was joey
 last seen", was judged "not a request" on its four words and answered with a
 greeting while the loop model had already proposed the right query.
 
-## One decision per turn: chat, or query needed
+### One decision per turn: chat, or query needed (retired)
 
 `route_turn` (`agent_loop.py`) makes the decision once, at planning time,
 and the loop obeys it. Facts first, each one something Python holds:

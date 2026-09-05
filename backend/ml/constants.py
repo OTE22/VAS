@@ -49,6 +49,7 @@ MODEL_TYPES = (
     MODEL_TYPE_COAPPEARANCE_ANOMALY,
     MODEL_TYPE_SOCIAL_GRAPH_ANOMALY,
     MODEL_TYPE_THREAT_RANKING,
+    "tabular_regression_model",
 )
 ANOMALY_MODEL_TYPES = tuple(t for t in MODEL_TYPES if "anomaly" in t)
 
@@ -131,35 +132,14 @@ _OPTIONAL_DEPS = {
 }
 
 # Which optional integrations have a real consuming code path this release.
-_IMPLEMENTED = {"mlflow": False, "optuna": False, "xgboost": False, "shap": False}
+_IMPLEMENTED = {"mlflow": True, "optuna": True, "xgboost": True, "shap": True}
 
-_warned_unavailable = set()
-
-
-def optional_capability_status(name: str) -> Dict[str, bool]:
-    """Four distinct statuses — a flag existing does NOT mean available.
-
-    configured: the env flag is on; implemented: this release ships a code
-    path that would use it; dependency_available: the package imports;
-    operational: all three (end-to-end usable).
-    """
-    flag_key, module_name = _OPTIONAL_DEPS[name]
-    configured = bool(getattr(settings, flag_key))
-    implemented = _IMPLEMENTED.get(name, False)
-    dependency_available = importlib.util.find_spec(module_name) is not None
-    operational = configured and implemented and dependency_available
-    if configured and not dependency_available and name not in _warned_unavailable:
-        _warned_unavailable.add(name)
-        logger.warning("%s optional integration %s is configured but its package "
-                       "is not installed — capability unavailable; the application "
-                       "continues in rules mode unaffected", LOG_MLOPS, name)
-    return {
-        "configured": configured,
-        "implemented": implemented,
-        "dependency_available": dependency_available,
-        "operational": operational,
-    }
+def optional_capability_status(name: str) -> Dict[str, Any]:
+    from backend.ml.capabilities import capability_registry
+    return capability_registry()[name]
 
 
 def all_optional_capabilities() -> Dict[str, Dict[str, bool]]:
-    return {name: optional_capability_status(name) for name in _OPTIONAL_DEPS}
+    from backend.ml.capabilities import capability_registry
+    registry = capability_registry()
+    return {name: registry[name] for name in _OPTIONAL_DEPS}

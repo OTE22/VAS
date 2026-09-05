@@ -23,50 +23,11 @@ from pathlib import Path
 import pytest
 
 from sql_agent import reasoning as r
-from sql_agent.tools.agent_loop import names_a_camera
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 # ------------------------------------------------- the loop guard
-
-@pytest.mark.parametrize("name,text", [
-    ("MD5AL_3EIN_7LWE", "Who was detected at camera MD5AL_3EIN_7LWE?"),
-    ("camera MD5AL_3EIN_7LWE", "Who was detected at camera MD5AL_3EIN_7LWE?"),
-    ("KSA", "how many detections at cam KSA yesterday"),
-    ("gate-3", "Pipeline gate-3 activity"),
-])
-def test_a_token_after_the_word_camera_is_a_camera(name, text):
-    assert names_a_camera(name, text)
-
-
-@pytest.mark.parametrize("name,text", [
-    ("Joey", "track joey"),
-    ("Ali Abbass", "who is ali abbass"),
-    ("Joey", "which camera saw Joey"),   # a person near the word, not after it
-    ("", "camera KSA"),
-])
-def test_a_person_is_still_a_person(name, text):
-    assert not names_a_camera(name, text)
-
-
-def test_a_camera_id_from_the_previous_turn_is_a_stranger_too():
-    """Live, second turn of the same session: the model asked
-    "What camera is MD5AL_3EIN_7LWE?" in reply to a question about
-    camera wezaret. Name-shaped words were guarded; identifiers were not."""
-    from sql_agent.tools.agent_loop import names_a_stranger
-
-    assert names_a_stranger("What camera is MD5AL_3EIN_7LWE?",
-                            "Who was detected at camera wezaret?") == "MD5AL_3EIN_7LWE"
-    # the same id is fine when the user actually typed it...
-    assert names_a_stranger("What camera is MD5AL_3EIN_7LWE?",
-                            "Who was detected at camera MD5AL_3EIN_7LWE?") is None
-    # ...or when a look-up offered it this turn
-    assert names_a_stranger("Did you mean cam-01 or cam-02?", "track the gate",
-                            known_names=["cam-01", "cam-02"]) is None
-    # plain words and years are not identifiers
-    assert names_a_stranger("Which day in 2026 did you mean?",
-                            "detections last week") is None
 
 
 # ------------------------------------------- the observation knows cameras

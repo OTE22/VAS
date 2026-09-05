@@ -85,7 +85,7 @@ WORKDIR /app
 # requirements-base.txt is REQUIRED: requirements-gpu.txt starts with
 # `-r requirements-base.txt`, resolved relative to the file, so the build fails
 # immediately without it.
-COPY requirements-base.txt requirements-gpu.txt requirements-dev.txt ./
+COPY requirements-base.txt requirements-gpu.txt requirements-dev.txt requirements-ml.txt ./
 # BuildKit cache mount — same rationale as Dockerfile.cpu: wheel downloads
 # survive cache busts and killed builds; image content is unchanged.
 RUN --mount=type=cache,target=/root/.cache/pip \

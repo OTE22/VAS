@@ -39,6 +39,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Retention tools panel
     bindRetentionTools();
+    loadMLCapabilities();
 });
 
 // ---------------------------------------------------------------------------
@@ -570,3 +571,26 @@ window.closeSettingModal = closeSettingModal;
 Actions.register({
     closeSettingModal,
 });
+
+// Capability health uses the existing authenticated settings request helper.
+async function loadMLCapabilities() {
+    const area = document.getElementById('ml-capability-health');
+    if (!area) return;
+    area.textContent = 'Checking ML capability availability?';
+    try {
+        const data = await apiFetch('/api/ml/capabilities');
+        const table = document.createElement('table'); table.className = 'settings-audit-table';
+        table.setAttribute('aria-label', 'ML capability registry');
+        const head = document.createElement('tr');
+        for (const label of ['Capability', 'Status', 'Action']) { const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = label; head.append(cell); }
+        const thead = document.createElement('thead'); thead.append(head); table.append(thead);
+        const body = document.createElement('tbody');
+        for (const [name, item] of Object.entries(data.items || {})) {
+            const row = document.createElement('tr');
+            for (const value of [name, item.status, item.action]) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
+            body.append(row);
+        }
+        table.append(body); area.replaceChildren(table);
+        if (!body.children.length) area.textContent = 'No capabilities reported. Refresh after checking the API version.';
+    } catch (error) { area.textContent = 'ML capability status could not load: ' + error.message + '. Restore ML management access and refresh.'; }
+}

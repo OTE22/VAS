@@ -121,36 +121,4 @@ def test_a_turn_that_asked_nothing_stores_nothing():
 
 # ------------------------------------------- the answer counts as a request
 
-def test_an_answer_to_an_open_question_is_treated_as_a_request():
-    """"yes" asks for nothing ALONE. That is not the situation it is in."""
-    from sql_agent.tools import agent_loop
 
-    class _Llm:
-        def __init__(self):
-            self.prompts = []
-
-        def invoke(self, messages):
-            self.prompts.append(
-                "\n".join(str(getattr(m, "content", "")) for m in messages))
-
-            class _Reply:
-                content = "YES"
-            return _Reply()
-
-    llm = _Llm()
-    assert agent_loop.asked_for_an_action(llm, "yes", question_pending=True)
-    assert "question" in llm.prompts[0].lower(), (
-        "the judge was never told a question was outstanding")
-
-
-def test_without_an_open_question_the_judgement_is_unchanged():
-    """The control: a bare greeting must still be refused an action."""
-    from sql_agent.tools import agent_loop
-
-    class _No:
-        def invoke(self, messages):
-            class _Reply:
-                content = "NO"
-            return _Reply()
-
-    assert not agent_loop.asked_for_an_action(_No(), "hi")

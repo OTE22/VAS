@@ -255,7 +255,15 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "ML_DRIFT_REPORT_RETENTION_DAYS": SettingMeta("integer", "days", 7, 3650, None, _JOB),
     "ML_MAX_ARTIFACT_MB": SettingMeta("integer", "MB", 1, 4096, None, _DYN),
     "MLFLOW_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN,
-        description="Flag only — reported operational only when the dependency imports and the backend responds"),
+        description="MLflow experiment/registry synchronization; failures retain local evidence and can be retried"),
+    "MLFLOW_TRACKING_URI": SettingMeta("string", apply_mode=_JOB, allow_empty=True),
+    "MLFLOW_EXPERIMENT_NAME": SettingMeta("string", apply_mode=_JOB),
+    "ML_DRIFT_MONITORING_ENABLED": SettingMeta("boolean", "on/off", apply_mode="worker_restart"),
+    "ML_TRAIN_MAX_THREADS": SettingMeta("integer", "threads", 1, 32, None, _JOB),
+    "ML_OPTUNA_MAX_TRIALS": SettingMeta("integer", "trials", 1, 200, None, _JOB),
+    "ML_OPTUNA_TIMEOUT_SECONDS": SettingMeta("integer", "seconds", 10, 7200, None, _JOB),
+    "ML_SHAP_MAX_ROWS": SettingMeta("integer", "rows", 1, 1000, None, _JOB),
+    "ML_SHAP_BACKGROUND_ROWS": SettingMeta("integer", "rows", 1, 200, None, _JOB),
     "OPTUNA_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "XGBOOST_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "SHAP_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
@@ -445,6 +453,15 @@ def typed_parse(key: str, raw: Optional[str], category: Optional[str] = None) ->
         raise SettingValidationError(f"{key}: a value is required")
 
     raw = raw.strip()
+
+    if key == "MLFLOW_TRACKING_URI" and raw:
+        from urllib.parse import urlsplit
+        try:
+            parsed = urlsplit(raw)
+        except ValueError:
+            raise SettingValidationError("MLFLOW_TRACKING_URI: use a valid credential-free HTTPS URL")
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise SettingValidationError("MLFLOW_TRACKING_URI: use a credential-free HTTPS URL or leave empty for managed storage")
 
     if meta.value_type == "boolean":
         low = raw.lower()

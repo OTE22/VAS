@@ -141,7 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fcc3d4e5f6a7}
       DATABASE_URL: postgresql+asyncpg://fr_migrator:${FR_MIGRATOR_PASSWORD:?set FR_MIGRATOR_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD: ${FR_MIGRATOR_PASSWORD}
@@ -229,7 +229,7 @@ services:
 
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fcc3d4e5f6a7}
 
       DETECTION_MODEL: /app/weights/det_10g.onnx
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
@@ -368,7 +368,7 @@ services:
       # configuration and remains unreachable from the edge network.
       CONFIG_PREFLIGHT: "0"
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fcc3d4e5f6a7}
       DATABASE_URL: postgresql+asyncpg://fr_app:${FR_APP_PASSWORD:?set FR_APP_PASSWORD in .env}@postgres:5432/face_recognition
       POSTGRES_USER: fr_app
       POSTGRES_PASSWORD: ${FR_APP_PASSWORD}

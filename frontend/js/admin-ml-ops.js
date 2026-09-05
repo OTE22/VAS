@@ -368,7 +368,10 @@
             });
         } catch (err) {
             window.clearTimeout(timer);
-            if (err && err.name === 'AbortError') throw ApiError('Request cancelled', { aborted: true });
+            if (err && err.name === 'AbortError') {
+                if (timeoutCtl.signal.aborted) throw ApiError('Request timed out. Retry after checking the service connection.', { status: 408, code: 'REQUEST_TIMEOUT' });
+                throw ApiError('Request cancelled', { aborted: true });
+            }
             throw ApiError('Network error — backend unreachable', { status: 0 });
         }
         window.clearTimeout(timer);
@@ -453,6 +456,8 @@
         consoleStatus: 'connecting',
         pendingAction: null    // { title, execute(reason) }
     };
+
+    let workflow = null, platform = null;
 
     function replaceList(id, items) {
         const node = getElement(id);
@@ -997,36 +1002,11 @@
     function renderOptionalCapabilities(caps) {
         const body = getElement('optional-capabilities-body');
         if (!body) return;
-        if (!caps) { renderCardError('optional-capabilities-body', { message: 'no data' }); return; }
-        const wrap = el('div', 'mlops-table-wrap');
-        const table = el('table', 'mlops-table');
-        const thead = el('thead');
-        const headRow = el('tr');
-        for (const label of ['Integration', 'Configured', 'Implemented', 'Dependency', 'Operational']) {
-            headRow.appendChild(el('th', null, label));
-        }
-        thead.appendChild(headRow);
-        table.appendChild(thead);
-        const tbody = el('tbody');
-        for (const name of Object.keys(caps)) {
-            const status = caps[name] || {};
-            const row = el('tr');
-            row.appendChild(el('td', null, name));
-            for (const field of ['configured', 'implemented', 'dependency_available', 'operational']) {
-                const cell = el('td');
-                const on = toBoolean(status[field]);
-                cell.appendChild(chip(on ? 'Yes' : 'No', on ? 'ok' : 'bad'));
-                row.appendChild(cell);
-            }
-            tbody.appendChild(row);
-        }
-        table.appendChild(tbody);
-        wrap.appendChild(table);
-        const frag = document.createDocumentFragment();
-        frag.appendChild(wrap);
-        frag.appendChild(el('div', 'mlops-mode-desc',
-            'A flag being on does not make a capability available: all four statuses must hold before it is operational.'));
-        body.replaceChildren(frag);
+        if (!caps) { renderCardError('optional-capabilities-body', { message: 'No capabilities reported. Refresh the console.' }); return; }
+        body.replaceChildren(simpleTable(['Capability', 'Status', 'Next action'], Object.entries(caps).map(function ([name, item]) {
+            return [name, item.status || (item.operational ? 'Available' : !item.configured ? 'Disabled' : !item.dependency_available ? 'Unavailable' : 'Misconfigured'), item.action || 'Check Admin Settings.'];
+        })));
+        const link = el('a', 'mlops-btn', 'Manage integrations and limits in Admin Settings'); link.href = '/admin/settings'; body.append(link);
     }
 
     // ============================================
@@ -1063,6 +1043,7 @@
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
             state.models = items;
+            if (workflow) workflow.sync('models');
             renderEvidenceModelFilter(items);
             const frag = document.createDocumentFragment();
             if (!items.length) {
@@ -1086,6 +1067,7 @@
             if (err.aborted || !req.isCurrent()) return;
             const row = el('tr');
             const cell = el('td', 'mlops-note note-bad', formatActionError('Could not load models', err));
+            if (workflow) workflow.loadError('models', err);
             cell.colSpan = 9;
             row.appendChild(cell);
             tbody.replaceChildren(row);
@@ -1810,10 +1792,13 @@
 
     async function refreshJobs() {
         stopJobPolling();
+        const req = beginRequest('jobs');
         try {
-            const data = await api('/api/ml/jobs', { params: { limit: 20 } });
+            const data = await api('/api/ml/jobs', { params: { limit: 20 }, signal: req.signal });
+            if (!req.isCurrent()) return;
             const items = data && Array.isArray(data.items) ? data.items : [];
             state.recentJobs = items;
+            if (workflow) workflow.sync('jobs');
             state.mlWorker = data && data.worker ? data.worker : null;
             state.activeJobs.clear();
             items.forEach(function (job) {
@@ -1838,7 +1823,8 @@
             }
             state.lastTerminalJobSignature = terminalSignature;
         } catch (err) {
-            if (err.aborted) return;
+            if (err.aborted || !req.isCurrent()) return;
+            if (workflow) workflow.loadError('jobs', err);
             state.jobPollFailures += 1;
             setConsoleConnection('offline', 'Control plane unavailable');
             setSummaryValue('summary-worker', 'Unavailable', 'danger', toText(err.message));
@@ -1870,7 +1856,7 @@
         const contract = selectedModelTypeContract();
         if (contract && contract.trainable !== true) {
             setNote('training-action-note', friendlyModelType(contract.model_type)
-                + ' is reserved for a future release. Choose a model type marked Available.', 'bad');
+                + ' is currently unavailable. Check Admin Settings or choose an available model type.', 'bad');
             return;
         }
         const typeSelect = getElement('training-model-type');
@@ -1901,6 +1887,7 @@
         }
         if (startBtn) startBtn.disabled = true;
         try {
+            if (platform) platform.configureRun(body);
             const result = await api('/api/ml/training-jobs', { method: 'POST', body: body });
             renderJobStatus(result, 'Training scheduled');
             setNote('training-action-note', 'Training scheduled. Open Overview to follow every stage. Completion creates a candidate for Review models; it does not deploy it.', 'ok');
@@ -2348,6 +2335,7 @@
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
             state.datasets = items;
+            if (workflow) workflow.sync('datasets');
             const frag = document.createDocumentFragment();
             frag.appendChild(el('div', 'mlops-subheading',
                 'Recent datasets (' + formatMetric(data.total) + ' total)'));
@@ -2395,6 +2383,7 @@
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderDatasetsMessage('Failed to load datasets: ' + toText(err.message), 'bad');
+            if (workflow) workflow.loadError('datasets', err);
         }
     }
 
@@ -2676,15 +2665,15 @@
         },
         capabilities: {
             title: 'Available capabilities',
-            what: 'Optional ML libraries (MLflow, Optuna, XGBoost, SHAP). Each is reported with one of four honest statuses; none is used this release.',
-            read: ['"flag_off" means not enabled; "not_installed" means the package is absent; nothing is downloaded automatically (offline deployment).'],
+            what: 'MLflow records experiments and model versions; XGBoost is an available algorithm family; Optuna tunes parameters; SHAP explains predictions. Availability is managed in Admin Settings, while tuning and SHAP also require a per-run selection.',
+            read: ['Available: the capability can be selected. Disabled: enable it in Admin Settings if needed. Unavailable: its dependency is missing or cannot import. Misconfigured: repair the reported storage or integration setting.', 'An available integration does not mean a model is ready for deployment. Check each run and its saved evidence.'],
             actions: [], progress: ''
         },
         registry: {
             title: 'Models awaiting review',
             what: 'Every trained model with its stage. Lifecycle: training → validated (quality gates passed) → shadow (explicit administrator approval) → archived. Anomaly models can never reach approved/production this release.',
             read: ['Exactly one model per type can be in SHADOW; approving a second one archives the first and retires its threshold set.', 'Detail shows full lineage: dataset id + both hashes, training configuration as run, code version, artifact sha256, whether the artifact file is present, dependency versions, evaluation and the descriptive comparison with the incumbent.'],
-            actions: ['Approve for SHADOW (observation only): the only promotion; requires a reason; binds to the artifact checksum; grants NO decision authority.', 'Reject: records a reason and retires thresholds.', 'Stop shadow: rollback — archives the shadow model; rules keep deciding.'],
+            actions: ['Approve for SHADOW: eligible anomaly models observe alongside rules after checksum-bound administrator review. Approve artifact for offline use: eligible ranking/regression candidates can be reviewed for offline use. Neither action grants live decision authority.', 'Reject: records a reason and retires thresholds.', 'Stop shadow: rollback — archives the shadow model; rules keep deciding.'],
             progress: 'Training produces a VALIDATED candidate, never a live model.'
         },
         shadow: {
@@ -2705,12 +2694,12 @@
             title: 'Data and prediction drift',
             what: 'PSI / KS / JS divergence of recent feature snapshots against the preceding window, plus prediction drift (score distribution, fallback and failure rates, latency). Observations only.',
             read: ['insufficient_data below ML_DRIFT_MIN_SAMPLES is honest, not a failure.', 'Severity follows the configured PSI thresholds; drift never triggers retraining or mode changes.'],
-            actions: ['Run drift check now: enqueues a durable report-only job; the worker also schedules periodic checks.'],
+            actions: ['Run drift check now: enqueues a durable report-only job; automatic checks remain gated; production drift is deferred until deployed inference evidence exists.'],
             progress: 'Track the run in the Durable Job Queue.'
         },
         training: {
             title: 'Build and train',
-            what: 'Builds an immutable Parquet dataset (or reuses one you pick) and trains a CANDIDATE. Stages: loading/building dataset → training → evaluating → saving candidate → registering. Success = a VALIDATED model awaiting your shadow approval.',
+            what: 'Builds an immutable Parquet dataset (or reuses one you pick) and trains a CANDIDATE. Stages: loading/building dataset → training → evaluating → saving candidate → registering. Inspect the resulting candidate and quality gates. Eligible anomaly models may be reviewed for shadow; ranking/regression artifacts may be reviewed for offline use.',
             read: ['The stage strip and percent come from the job record; a failed job shows its stable error code (e.g. DATASET_FILE_HASH_MISMATCH, QUALITY_GATES_FAILED).', 'Datasets: definition/version, extraction audit (candidate / selected / excluded rows and the cap policy), logical checksum and Parquet file hash. "legacy build" rows predate extraction auditing and are reported, never rewritten.', 'Seed and hyperparameters you enter are persisted verbatim as the model\'s training configuration.'],
             actions: ['Start training: background job; only one at a time.', 'Build dataset: explicit definition, optional time range, and what to do above the cap (refuse by default).', 'Verify legacy datasets: records a file hash only when the reloaded rows reproduce the registered checksum.', 'Archive: releases the Parquet bytes of a dataset no model was trained from (lineage row and manifest stay).'],
             progress: 'Watch the Durable Job Queue; the job id links the run to the audit log and call log.'
@@ -2772,7 +2761,7 @@
         'label-assessment-id': 'Anchor the outcome to a RESOLVED assessment so it links to that assessment\u2019s shadow prediction exactly (otherwise the link is by subject and event day).',
         'label-notes': 'Free text for reviewers. Stored on the label only; never written to the call log.',
         'shadow-model-select': 'Restrict the evidence report to one registered model version.',
-        'training-algorithm': 'isolation_forest (sklearn, seeded) or mad_baseline (robust median/MAD). Both unsupervised.',
+        'training-algorithm': 'Choose an algorithm supported by the selected task. Start with its default; supervised ranking and numeric regression also offer XGBoost when available.',
         'training-dataset-select': 'Reuse a built dataset (verified by checksum AND Parquet file hash) instead of building a new one.',
         'training-seed-input': 'Random seed recorded with the model (default 42).',
         'training-hyperparameters-input': 'JSON overrides, e.g. {"n_estimators": 200}. Unknown keys are refused, not ignored.',
@@ -3063,6 +3052,12 @@
 
     function init() {
         debugLog('ml-ops init');
+        if (window.MLOpsPlatform) platform = window.MLOpsPlatform({ api, el, kvList, simpleTable, jsonBlock, state, formatActionError, openActionPanel, refreshConsole, updateTrainingAvailability, fillTrainingDatasetPicker });
+        if (window.MLOpsWorkflow) workflow = window.MLOpsWorkflow({
+            api, beginRequest, el, kvList, simpleTable, jsonBlock, formatMetric,
+            formatActionError, state, activateWorkspace, openDatasetDetail, loadModelDetail, refreshConsole,
+            platformResults: model => platform && platform.results(model)
+        });
         installWorkspaceNavigation();
         on('system-notes-btn', 'click', openReleaseNotes);
         installHelpButtons();
@@ -3130,7 +3125,7 @@
         });
         on('create-label-btn', 'click', createLabel);
         on('policy-model-type', 'change', loadPolicy);
-        on('training-model-type', 'change', updateTrainingAvailability);
+        on('training-model-type', 'change', function () { updateTrainingAvailability(); fillTrainingDatasetPicker(state.datasets || []); });
         on('audit-prev', 'click', function () {
             if (state.auditPage > 1) { state.auditPage -= 1; loadAudit(); }
         });

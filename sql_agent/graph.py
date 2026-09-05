@@ -88,10 +88,6 @@ def create_sql_agent(conversation_memory=None, db=None) -> StateGraph:
     def route_after_ingestion(state: AgentState) -> str:
         if state.get("input_normalization_error"):
             return "reject"
-        # "thank you" / "ok": nothing to scan, plan or look up. The chat
-        # node answers with a fixed phrase and consults no model.
-        if state.get("acknowledgement"):
-            return "acknowledge"
         return "continue"
 
     workflow.add_conditional_edges(

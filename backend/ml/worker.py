@@ -180,10 +180,15 @@ async def _supervise(job: Dict[str, Any]) -> None:
 async def _enqueue_scheduled_drift_if_due() -> None:
     """Replace the API-process drift loop with a durable scheduled command."""
     from backend.ml.job_service import enqueue_ml_job, MLJobConflict
+    if not settings.ML_DRIFT_MONITORING_ENABLED:
+        return
 
     interval = _seconds("ML_DRIFT_CHECK_INTERVAL_HOURS", 24, 1) * 3600
     cutoff = datetime.utcnow() - timedelta(seconds=interval)
     async with db_manager.get_session() as db:
+        from backend.ml.monitoring_contract import production_inference_ready
+        if not await production_inference_ready(db, settings.ML_DRIFT_MIN_SAMPLES):
+            return
         recent = (await db.execute(
             select(BackgroundTaskHistory.id)
             .where(
@@ -228,6 +233,8 @@ async def run_worker(*, once: bool = False) -> None:
         if now - last_maintenance >= maintenance_seconds:
             await task_history_manager.fail_expired_queue_leases(queue_name=ML_QUEUE)
             await _enqueue_scheduled_drift_if_due()
+            from backend.ml.mlflow_tracking import enqueue_pending
+            await enqueue_pending()
             last_maintenance = monotonic()
         job = await task_history_manager.claim_next_queued_job(
             queue_name=ML_QUEUE, lease_owner=WORKER_ID, lease_seconds=lease_seconds
@@ -257,6 +264,15 @@ async def execute_job(job_id: str) -> int:
     payload = job.get("payload") or {}
     task_type = job.get("task_type")
     try:
+        from backend.core.runtime_settings import hydrate_from_db
+        async with db_manager.get_session() as db:
+            await hydrate_from_db(db)
+        if task_type == "ml_tracking_sync":
+            from backend.ml.mlflow_tracking import sync_job
+            result = await sync_job(payload["training_job_id"])
+            await task_history_manager.finish_job(job_id, success=result.get("status") in ("synchronized", "disabled"), result=result,
+                error_code="MLFLOW_SYNC_FAILED" if result.get("status") == "failed" else None)
+            return 0 if result.get("status") in ("synchronized", "disabled") else 2
         if task_type == "ml_training":
             from backend.ml import trainer
             busy = trainer.try_acquire_training(job_id)
@@ -271,6 +287,8 @@ async def execute_job(job_id: str) -> int:
                 seed=payload.get("seed"),
                 hyperparameters=payload.get("hyperparameters"),
                 sampling_policy=payload.get("sampling_policy"),
+                pipeline=payload.get("pipeline"),
+                run_options=payload.get("run_options"),
             )
             final = await task_history_manager.get_task_by_job_id(job_id)
             return 0 if final and final.get("status") == "completed" else 2
@@ -287,7 +305,7 @@ async def execute_job(job_id: str) -> int:
                     full_rebuild=bool(payload.get("full_rebuild")),
                     progress_cb=progress,
                 )
-            await task_history_manager.finish_job(job_id, success=True, result=result)
+            await task_history_manager.finish_job(job_id, success=result.get("status") != "failed", result=result, error_code="MLFLOW_SYNC_FAILED" if result.get("status") == "failed" else None, error_message=result.get("last_error"))
             return 0
 
         if task_type == "ml_dataset_build":

@@ -233,27 +233,6 @@ def test_agent_state_declares_turn_failed():
 
 # =================================================== 6. offered names
 
-def test_names_the_system_offered_are_not_strangers():
-    from sql_agent.tools.agent_loop import _names_offered, names_a_stranger
-
-    trace = [{"tool": "resolve_person",
-              "clarification_candidates": [{"display_name": "Ali Abbass"},
-                                           {"display_name": "Ali Hassan"}]}]
-    known = _names_offered(trace, None)
-    assert known == ["Ali Abbass", "Ali Hassan"]
-
-    question = "Did you mean Ali Abbass or Ali Hassan?"
-    assert names_a_stranger(question, "track ali") is not None  # unchanged
-    assert names_a_stranger(question, "track ali", known_names=known) is None
-
-
-def test_a_real_stranger_is_still_caught():
-    from sql_agent.tools.agent_loop import names_a_stranger
-
-    assert names_a_stranger("Can you clarify what you mean by Joey?",
-                            "track iron man",
-                            known_names=["Iron Man"]) == "Joey"
-
 
 # ================================================= 7. window is bounded
 

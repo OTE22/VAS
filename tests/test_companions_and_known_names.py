@@ -16,7 +16,6 @@ mean by Joey?") is refused.
 import pytest
 
 from sql_agent.tools import agent_loop
-from sql_agent.tools.agent_loop import names_a_known_person
 from sql_agent.tools.agent_tools import SQLAgentTools as T
 
 INDEX = [{"identity_id": "1", "display_name": "JOEY"},
@@ -24,13 +23,6 @@ INDEX = [{"identity_id": "1", "display_name": "JOEY"},
 
 
 # ------------------------------------------------- an enrolled name
-
-def test_an_enrolled_name_in_the_message_is_found_whole_word():
-    assert names_a_known_person("does joey was alone the last time shwe was seen", INDEX) == "JOEY"
-    assert names_a_known_person("track ali abbass please", INDEX) == "Ali Abbass"
-    assert names_a_known_person("joeys report", INDEX) is None       # not a whole word
-    assert names_a_known_person("hello there", INDEX) is None
-    assert names_a_known_person("track joey", None) is None
 
 
 class _Reply:
@@ -64,40 +56,11 @@ class _FakeLLM:
         return self.replies.pop(0) if self.replies else _Reply(None, {})
 
 
-def test_naming_an_enrolled_person_makes_a_direct_answer_a_refusal():
-    llm = _FakeLLM([
-        _Reply("answer_directly", {"answer": "I am not aware of Joey or Shwe."}),
-        _Reply("query_database", {"question": "was JOEY alone at her last detection"}),
-    ])
-    call, trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="does joey was alone the last time shwe was seen",
-        context_block="", db=None, dialogue_state=None, artifact_index=None,
-        identity_index=INDEX)
-
-    assert call["name"] == "query_database"
-    assert llm.fit_prompts == []
-    assert any(e.get("rejected") == "answered data without a query" for e in trace)
-
-
 # ------------------------------------------------- resolved, then asked
 
 class _Db:
     def execute_query(self, sql):
         return {"success": True, "rows": [{"name": "JOEY"}]}
-
-
-def test_a_clarification_about_a_resolved_person_is_refused():
-    llm = _FakeLLM([
-        _Reply("resolve_person", {"name": "joey"}),
-        _Reply("ask_clarifying_question", {"question": "Can you clarify what you mean by Joey?"}),
-        _Reply("query_database", {"question": "when was JOEY last seen and where"}),
-    ])
-    call, trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="when joey last seen and where", context_block="",
-        db=_Db(), dialogue_state=None, artifact_index=None, identity_index=INDEX)
-
-    assert call["name"] == "query_database"
-    assert any(e.get("rejected") == "asked about a resolved person" for e in trace)
 
 
 # ------------------------------------------------- companions
@@ -151,69 +114,6 @@ def test_the_latest_detection_is_the_one_described():
     assert "2026-08-23 11:11:54" in answer and "2026-08-20" not in answer
 
 
-def test_a_companion_question_is_settled_before_any_model_step():
-    """Live, "with whom she was" spent four rejections (clarify, a pronoun
-    look-up, clarify, clarify) and the planner then wrote "people detected
-    with Joey today". The subject is held, so the query is a fact."""
-    from sql_agent.tools.agent_loop import companion_query
-
-    held = {"fields": {"referenced_entity": {"value": ["JOEY"]}}}
-    call = companion_query("with whom she was", held, INDEX)
-    assert call == {"name": "query_database", "arguments": {
-        "question": "all detections of JOEY with camera name and timestamp, most recent first"}}
-    assert companion_query("مع من كانت", held, INDEX)["arguments"]["question"].startswith(
-        "all detections of JOEY")
-    assert companion_query("who was with ali abbass", None, INDEX)["arguments"]["question"].startswith(
-        "all detections of Ali Abbass")
-    assert companion_query("where was joey last seen", held, INDEX) is None
-    assert companion_query("with whom she was", None, INDEX) is None
-
-
-def test_naming_an_enrolled_person_makes_them_the_turns_subject():
-    """Committed to dialogue state from `resolved_entities`, which only a
-    look-up used to fill: "does joey was alone" held nothing, and the next
-    "with whom she was" was answered about IRON MAN."""
-    state = {"identity_index": INDEX}
-    assert T._note_named_person(state, "does joey was alone the last time shwe was seen") == "JOEY"
-    assert state["resolved_entities"] == [
-        {"kind": "person", "canonical_name": "JOEY", "source": "identity_index"}]
-    T._note_named_person(state, "track joey again")
-    assert len(state["resolved_entities"]) == 1
-    assert T._note_named_person({"identity_index": INDEX}, "with whom she was") is None
-
-
-def test_a_companion_question_queries_the_subjects_detections():
-    """The enrichment runs on the subject's rows, so that is the query."""
-    llm = _FakeLLM([_Reply("query_database", {"question": "list all cameras"})])
-    call, _trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="هل كانت وحدها", context_block="", db=None,
-        dialogue_state={"fields": {"referenced_entity": {"value": ["JOEY"]}}},
-        artifact_index=None, identity_index=INDEX)
-    assert call["name"] == "query_database"
-    assert call["arguments"]["question"] == (
-        "all detections of JOEY with camera name and timestamp, most recent first")
-
-
-def test_a_pronoun_is_not_looked_up_as_a_person():
-    from sql_agent.tools.agent_loop import is_pronoun_or_empty
-
-    for bad in ("she", "him", "", "{}", "هي", "them"):
-        assert is_pronoun_or_empty(bad), bad
-    for good in ("JOEY", "Ali Abbass", "iron man"):
-        assert not is_pronoun_or_empty(good), good
-
-    llm = _FakeLLM([
-        _Reply("resolve_person", {"name": "she"}),
-        _Reply("query_database", {"question": "who was with JOEY"}),
-    ])
-    call, trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="with whom she was", context_block="", db=None,
-        dialogue_state={"fields": {"referenced_entity": {"value": ["JOEY"]}}},
-        artifact_index=None, identity_index=INDEX)
-    assert call["name"] == "query_database"
-    assert any(e.get("rejected") == "not a name" for e in trace)
-
-
 def test_an_empty_or_pronoun_filter_asks_instead_of_not_found():
     tools = T.__new__(T)
     tools.db = _Db()
@@ -223,19 +123,6 @@ def test_an_empty_or_pronoun_filter_asks_instead_of_not_found():
     assert route == "chat_response"
     assert state.get("entity_not_found") is None
     assert state["reasoning_exhausted"] is True
-
-
-def test_a_companion_modification_becomes_the_subjects_query():
-    """As a MODIFICATION of the previous query the model wrote six
-    subqueries deep and was refused; the subject's detections are the
-    query, whatever action the model proposed."""
-    llm = _FakeLLM([_Reply("modify_active_query", {"change": "her companions"})])
-    call, _trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="مع من كانت", context_block="", db=None,
-        dialogue_state={"fields": {"referenced_entity": {"value": ["JOEY"]}}},
-        artifact_index=None, identity_index=INDEX, has_result=True)
-    assert call["name"] == "query_database"
-    assert call["arguments"]["question"].startswith("all detections of JOEY")
 
 
 class _CamDb:

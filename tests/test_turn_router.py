@@ -15,7 +15,7 @@ user asked about, and a translated echo of the FACTS block is stripped.
 
 import pytest
 
-from sql_agent.tools.agent_loop import CHAT, DATA, UNDECIDED, route_turn
+from sql_agent.tools.agent_loop import CHAT, DATA, UNDECIDED
 
 INDEX = [{"identity_id": "1", "display_name": "JOEY"}]
 
@@ -23,34 +23,6 @@ INDEX = [{"identity_id": "1", "display_name": "JOEY"}]
 def _held(**fields):
     return {"fields": {k: {"value": v, "source": "tool_result"}
                        for k, v in fields.items()}}
-
-
-@pytest.mark.parametrize("text,kind,reason", [
-    ("hi", CHAT, "greeting"),
-    ("thank you", CHAT, "acknowledgement"),
-    ("شكرا", CHAT, "acknowledgement"),
-    ("track joey", DATA, "a track command"),
-    ("هل يمكنك تتبع joey", DATA, "a track command"),
-    ("who was detected at camera KSA", DATA, "names a camera"),
-    ("does joey was alone the last time shwe was seen", DATA, "names an enrolled person"),
-    ("check the situation", UNDECIDED, "no fact settles it"),
-    ("what happened", UNDECIDED, "no fact settles it"),
-])
-def test_facts_route_without_a_model(text, kind, reason):
-    got_kind, got_reason = route_turn(text, identity_index=INDEX)
-    assert (got_kind, got_reason) == (kind, reason), text
-
-
-def test_a_continuation_is_data_only_when_there_is_a_task_to_continue():
-    assert route_turn("with whom she was", dialogue_state=_held(referenced_entity=["JOEY"]))[0] == DATA
-    assert route_turn("with whom she was", has_result=True)[0] == DATA
-    assert route_turn("with whom she was")[0] == UNDECIDED
-
-
-def test_an_answer_to_our_question_is_data():
-    assert route_turn("yes", clarification_answered=True)[0] == DATA
-    assert route_turn("the second one",
-                      dialogue_state=_held(pending_clarification={"type": "x"}))[0] == DATA
 
 
 # ------------------------------------------------------------ scope guard

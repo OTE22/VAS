@@ -1727,3 +1727,44 @@
         max-width: 100%;
     }
 }
+/* Guided workflow uses the console's shared controls, tables and evidence views. */
+.mlops-workflow { background: #111e30; color: #e5edf6; border: 1px solid #476079; border-radius: 14px; padding: 24px; margin-bottom: 24px; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.mlops-workflow h3 { margin: 20px 0 12px; font-size: 1.15rem; }
+.mlops-workflow p { line-height: 1.6; color: #c4d2e2; }
+.mlops-workflow-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 16px 0; }
+.mlops-workflow-controls label { display: flex; flex: 1 1 180px; flex-direction: column; gap: 8px; font-weight: 600; }
+.mlops-workflow select, .mlops-workflow input { background: #16273b; color: #f1f5f9; border: 1px solid #7991ab; border-radius: 6px; padding: 10px; width: 100%; min-width: 0; }
+.mlops-workflow button { min-height: 44px; white-space: normal; }
+.mlops-workflow :focus-visible { outline: 3px solid #7dd3fc; outline-offset: 3px; }
+.mlops-workflow-pipeline { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.mlops-workflow-pipeline button { display: flex; flex-direction: column; align-items: start; text-align: left; gap: 10px; height: 100%; width: 100%; border: 1px solid #526880; background: #17283d; color: #e7f0fb; padding: 12px; overflow-wrap: anywhere; }
+.mlops-workflow-pipeline button[aria-pressed="true"] { background: #164368; border: 2px solid #7dd3fc; }
+.workflow-number { border: 1px solid #a4bfd8; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; }
+.mlops-workflow-pipeline small { color: #c7dced; line-height: 1.4; }
+.workflow-evidence { margin: 12px 0; border: 1px solid #476079; border-radius: 6px; padding: 12px; overflow-wrap: anywhere; }
+.workflow-evidence summary { cursor: pointer; min-height: 28px; }
+.workflow-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.workflow-results > h3, .workflow-results > p, .workflow-results > .mlops-table-wrap, .workflow-results > details { grid-column: 1 / -1; }
+.workflow-result { padding: 16px; border: 1px solid #476079; border-radius: 8px; min-width: 0; }
+.workflow-result meter, #workflow-progress progress { display: block; width: 100%; height: 14px; margin: 10px 0; accent-color: #38bdf8; }
+.workflow-lineage { padding-left: 24px; }
+.mlops-workflow pre { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mlops-workflow .mlops-kv-value { overflow-wrap: anywhere; }
+#workflow-explorer-body { overflow-x: auto; }
+#workflow-stage, #workflow-summary { border-top: 1px solid #476079; margin-top: 18px; padding-top: 8px; }
+@media (max-width: 1100px) { .mlops-workflow-pipeline { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .mlops-workflow { padding: 14px; } .mlops-workflow-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); } .workflow-results { grid-template-columns: minmax(0, 1fr); } }
+@media (prefers-reduced-motion: reduce) { .mlops-workflow * { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
+
+.workflow-platform-results { grid-column: 1 / -1; min-width: 0; }
+.workflow-shap-bar meter { display: block; width: 100%; height: 16px; }
+#platform-space { width: 100%; min-width: 0; max-width: 100%; background: var(--bg-primary, #0f172a); color: inherit; border: 1px solid #64748b; border-radius: 4px; padding: 8px; }
+#workflows fieldset label { display: block; margin: 10px 0; }
+#workflows input[type="checkbox"] { min-width: 18px; width: 18px; accent-color: #38bdf8; }
+.workflow-platform-results .mlops-btn { margin: 5px; }
+
+.workflow-instructions { border-left: 3px solid #7dd3fc; line-height: 1.6; }
+.workflow-instructions p { margin: 8px 0; }
+.mlops-workflow dt { font-weight: 700; margin-top: 12px; }
+.mlops-workflow dd { margin: 4px 0 10px; }
+.mlops-workflow aside li { margin-bottom: 10px; }

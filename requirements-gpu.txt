@@ -12,6 +12,9 @@
 
 -r requirements-base.txt
 
+# CUDA-capable XGBoost. The worker probes actual GPU usability and falls back to CPU.
+xgboost==3.2.0
+
 # ---------------------------------------------------------------------------
 # ONNX Runtime — the CUDA build. This is the acceleration that matters:
 # SCRFD detection and ArcFace recognition both run on ONNX Runtime.

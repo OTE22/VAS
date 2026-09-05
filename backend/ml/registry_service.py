@@ -56,11 +56,7 @@ REQUIRED_SHADOW_APPROVAL_FIELDS = (
 )
 
 
-class RegistryError(Exception):
-    def __init__(self, code: str, message: str):
-        super().__init__(message)
-        self.code = code
-        self.message = message
+from backend.ml.scoring import RegistryError, preprocess_feature_vector, score_with_payload
 
 
 def _sha256_file(path: str) -> str:
@@ -75,11 +71,22 @@ def current_dependency_versions() -> Dict[str, str]:
     import platform
     import numpy
     import sklearn
-    return {
+    versions = {
         "python": platform.python_version(),
         "sklearn": sklearn.__version__,
         "numpy": numpy.__version__,
     }
+    import importlib.metadata
+    for name in ("xgboost", "optuna", "shap", "mlflow"):
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            if name == "xgboost":
+                try:
+                    versions[name] = importlib.metadata.version("xgboost-cpu")
+                except importlib.metadata.PackageNotFoundError:
+                    pass
+    return versions
 
 
 def _artifact_root() -> str:
@@ -108,68 +115,6 @@ def _smoke_test(payload: Dict[str, Any]) -> None:
         raise RegistryError("SMOKE_TEST_FAILED", "artifact produced a non-finite score")
 
 
-def preprocess_feature_vector(payload: Dict[str, Any], features: Dict[str, Any]):
-    """The ONE train/serve preprocessing rule: present -> float(value);
-    missing -> the artifact's training median for that feature. Returns
-    (vector, missing_feature_names). Raises KeyError when the artifact has
-    no median for a scored feature (validate_artifact refuses such artifacts
-    before they are ever cached)."""
-    medians = payload["imputation_medians"]
-    vector, missing = [], []
-    for name in payload["feature_names"]:
-        if name in features and features[name] is not None:
-            vector.append(float(features[name]))
-        else:
-            missing.append(name)
-            vector.append(float(medians[name]))
-    return vector, missing
-
-
-def score_with_payload(payload: Dict[str, Any], matrix) -> List[float]:
-    """Model-family score in [0,1], through one train/serve implementation.
-
-    Unsupervised artifacts return relative anomaly scores. Classifier
-    artifacts return relative ranking scores; their model contract explicitly
-    prevents callers from presenting those values as calibrated threat
-    probabilities.
-    """
-    import numpy as np
-    algorithm = payload["algorithm"]
-    if algorithm == "isolation_forest":
-        raw = -payload["model"].score_samples(matrix)  # higher = more anomalous
-    elif algorithm == "mad_baseline":
-        params = payload["model"]  # {feature: {median, mad}}
-        names = payload["feature_names"]
-        z_scores = []
-        for row in np.asarray(matrix):
-            zs = []
-            for i, name in enumerate(names):
-                mad = params[name]["mad"]
-                if mad <= 0:
-                    continue
-                zs.append(abs(row[i] - params[name]["median"]) / (1.4826 * mad))
-            z_scores.append(max(zs) if zs else 0.0)
-        raw = np.array(z_scores)
-    elif algorithm in ("logreg", "random_forest", "gradient_boosting"):
-        # Classifier output is intentionally named a rank score by the model
-        # contract.  Without an independently validated calibration study it
-        # must not be presented as a probability of threat.
-        raw = payload["model"].predict_proba(matrix)[:, 1]
-        return [float(v) for v in raw]
-    else:
-        raise RegistryError("UNKNOWN_ALGORITHM", f"unsupported algorithm {algorithm!r}")
-    norm = payload["normalization"]
-    span = max(norm["max"] - norm["min"], 1e-9)
-    out = []
-    for v in raw:
-        value = float(v)
-        if not math.isfinite(value):
-            # NaN/inf must surface as a failure, never as the lowest band:
-            # max(0.0, nan) == 0.0 in CPython would silently band it "normal".
-            out.append(float("nan"))
-            continue
-        out.append(float(min(1.0, max(0.0, (value - norm["min"]) / span))))
-    return out
 
 
 def save_artifact(payload: Dict[str, Any], path: str) -> str:
@@ -334,10 +279,20 @@ class RegistryService:
         """Guarded stage transition. Raises RegistryError with a stable code."""
         from db_models import MLModel
 
-        row = await self.get_model(db, model_id)
+        try:
+            model_uuid = uuid_mod.UUID(str(model_id))
+        except (ValueError, TypeError):
+            raise RegistryError("MODEL_NOT_FOUND", "model not found")
+        row = (await db.execute(select(MLModel).where(MLModel.id == model_uuid).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
         if row is None:
             raise RegistryError("MODEL_NOT_FOUND", "model not found")
         allowed = STAGE_TRANSITIONS.get(row.stage, [])
+        if to_stage == "approved" and row.stage == "validated":
+            from backend.ml.model_specs import get_model_spec
+            if get_model_spec(row.model_type).serving_mode in ("offline_ranking", "offline_regression"):
+                allowed = [*allowed, "approved"]
+                if not reason or not (row.quality_gates or {}).get("passed"):
+                    raise RegistryError("APPROVAL_EVIDENCE_REQUIRED", "Offline approval requires passed quality gates and an explicit review reason")
         if to_stage not in allowed:
             raise RegistryError(
                 "INVALID_TRANSITION",
@@ -358,6 +313,13 @@ class RegistryService:
 
         now = datetime.utcnow()
         before_stage = row.stage
+
+        if to_stage == "approved":
+            validate_artifact(row.artifact_path, expected_hash=row.artifact_hash,
+                              expected_feature_names=row.feature_names,
+                              expected_dependencies=row.dependency_versions)
+            row.approved_at = now
+            row.approved_by = actor[:255]
 
         if to_stage == "shadow":
             # Explicit admin approval with the full persisted payload.
@@ -388,6 +350,8 @@ class RegistryService:
             if existing is not None and existing.id != row.id:
                 existing.stage = "archived"
                 existing.archived_at = now
+                from backend.ml.mlflow_tracking import mark_pending
+                await mark_pending(db, existing)
                 await db.flush()
                 # the displaced model's threshold set retires with it
                 await threshold_service.retire_model_thresholds(
@@ -427,6 +391,8 @@ class RegistryService:
                 reason=reason or f"model {to_stage}")
 
         row.stage = to_stage
+        from backend.ml.mlflow_tracking import mark_pending
+        await mark_pending(db, row)
         await ml_audit(db, action=f"model_{to_stage}", actor_username=actor,
                        actor_user_id=actor_user_id, object_type="ml_model",
                        object_id=str(row.id),

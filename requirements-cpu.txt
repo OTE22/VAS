@@ -6,6 +6,10 @@
 
 -r requirements-base.txt
 
+# Small CPU-only XGBoost wheel on Linux; never install alongside xgboost.
+xgboost-cpu==3.2.0; platform_system == "Linux"
+xgboost==3.2.0; platform_system != "Linux"
+
 # ---------------------------------------------------------------------------
 # PyTorch — CPU wheels, deliberately.
 #

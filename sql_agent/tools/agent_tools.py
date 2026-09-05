@@ -217,6 +217,9 @@ class SQLAgentTools:
         # which model serves each, applies the data-sensitivity policy, and
         # records any fallback.
         self.llm = create_llm(TaskType.CHAT)  # chat, intent, normalization, analysis
+        # The one call that reads what the user wants. Separate handle so a
+        # test that stubs the chat model does not silently consume it.
+        self.interpret_llm = create_llm(TaskType.CHAT)
         self.sql_llm = create_sql_llm(TaskType.SQL_GENERATION)  # generation and repair
         # ONE DatabaseManager per agent, shared with the graph's owner. The
         # tools used to build their own, so a policy bound on the agent's
@@ -267,30 +270,6 @@ class SQLAgentTools:
         state["input_language"] = envelope.input_language
         state["response_language"] = envelope.response_language
         state["input_normalization_error"] = None
-        # "thank you", "ok", "شكرا": nothing to plan, look up or narrate.
-        # Routed straight to the chat node, which answers with a fixed
-        # phrase and consults no model.
-        from .agent_loop import is_acknowledgement
-
-        # "yes" after "Did you mean WEZARET DEFA3?" is an ANSWER, not an
-        # acknowledgement: with a question pending, the words go to the
-        # router, which resumes the suspended request.
-        try:
-            from .. import dialogue_state as _ds
-
-            pending = _ds.get_value(
-                (state.get("working_context") or {}).get("dialogue_state") or {},
-                "pending_clarification")
-        except Exception:
-            pending = None
-        state["acknowledgement"] = (not pending
-                                    and is_acknowledgement(envelope.normalized_text))
-        if state["acknowledgement"]:
-            state["turn_is_a_request"] = False
-            state["planned_action"] = {"action": "chat",
-                                       "source": "acknowledgement",
-                                       "confidence": 1.0}
-            state["intent"] = "CHAT"
         logger.info(
             "[STAGE_0] Query accepted (normalized_chars=%d input_language=%s "
             "response_language=%s)",
@@ -407,6 +386,299 @@ class SQLAgentTools:
         "translate_artifact": "translate_artifact",
     }
 
+    def _read_the_turn(self, state: AgentState, user_text: str,
+                       candidates: dict, *, skip: bool = False):
+        """The model's one reading of this message, or None.
+
+        Skipped when the user picked from a list we offered: that is already
+        settled by state, not by interpretation.
+        """
+        from . import interpreter
+
+        if skip or getattr(self, "interpret_llm", None) is None:
+            return None
+        try:
+            from .. import dialogue_state as _ds
+
+            held = (state.get("working_context") or {}).get("dialogue_state") or {}
+            pending = _ds.get_value(held, "pending_clarification") or {}
+        except Exception:
+            held, pending = {}, {}
+        try:
+            cameras = [c.get("location") or c.get("camera") or ""
+                       for c in self._all_cameras()]
+        except Exception:
+            cameras = []
+        # The conversation so far, one line per message, so "the report you
+        # gave me earlier" has something to resolve against.
+        recent = []
+        try:
+            for m in self.conversation_memory.get_recent_messages(limit=8) or []:
+                role = "user" if getattr(m, "type", "") == "human" else "assistant"
+                recent.append(f"{role}: {getattr(m, 'content', '')}")
+        except Exception:
+            recent = []
+        return interpreter.interpret(
+            self.interpret_llm, user_text,
+            identity_index=state.get("identity_index") or [],
+            camera_names=[c for c in cameras if c],
+            dialogue_state=held,
+            has_result=bool(candidates.get("last_result")),
+            has_documents=bool(state.get("artifact_index")),
+            last_question=str(candidates.get("last_query") or ""),
+            question_pending=bool(pending),
+            pending_question=str((pending or {}).get("question") or ""),
+            pending_request=str((pending or {}).get("original_query") or ""),
+            recent_turns=recent,
+            message_language=state.get("response_language") or "en")
+
+    def _apply_model_tool_call(self, state: AgentState, call: dict,
+                               trace: list, candidates: dict):
+        """Commit a model-selected tool call to graph state.
+
+        The tool loop may *choose* an action, but the dispatcher still
+        validates it and graph nodes still execute it. This method also turns
+        lookup observations into the bounded structured state needed by later
+        actions in the same turn.
+        """
+        from . import agent_loop, interpreter
+
+        planned = agent_loop.action_to_planned(call, candidates)
+        if not planned:
+            return None
+        planned["source"] = "tool_loop"
+
+        state["tool_trace"] = list(trace)
+        state["reasoning_steps_used"] = (
+            int(state.get("reasoning_steps_used") or 0)
+            + sum(1 for entry in trace if entry.get("tool")))
+
+        observations = list(state.get("observations") or [])
+        resolved = list(state.get("resolved_entities") or [])
+        for entry in trace:
+            observation = entry.get("observation")
+            if observation:
+                observations.append({
+                    "sequence": len(observations) + 1,
+                    **observation,
+                    **({"signature": entry.get("signature")}
+                       if entry.get("signature") else {}),
+                })
+            entity = entry.get("resolved_entity")
+            if entity and not any(
+                    (known or {}).get("canonical_name")
+                    == entity.get("canonical_name") for known in resolved):
+                resolved.append(entity)
+            offered = entry.get("clarification_candidates")
+            if offered:
+                state["clarification_candidates"] = list(offered)
+        state["observations"] = observations[-_MAX_TURN_OBSERVATIONS:]
+        if resolved:
+            state["resolved_entities"] = resolved
+
+        committed = next((entry for entry in reversed(trace)
+                          if entry.get("committed")), None)
+        if committed and committed.get("signature"):
+            state["committed_signature"] = committed["signature"]
+
+        name = call.get("name")
+        arguments = call.get("arguments") or {}
+        action = planned.get("action")
+        is_chat = name == "answer_directly"
+        contextual_chat = is_chat and bool(arguments.get("uses_context"))
+        state["turn_kind"] = "chat" if is_chat or action == "clarify" else "data"
+        # The chat node withholds prior turns from standalone small talk, but
+        # recall and discussion of an earlier answer must retain that context.
+        state["turn_is_a_request"] = contextual_chat or not is_chat
+        if contextual_chat:
+            state["recall"] = True
+        state["planned_action"] = planned
+        state["intent"] = self._ACTION_TO_INTENT.get(action, "CHAT")
+        state["intent_confidence"] = float(planned.get("confidence") or 0.9)
+
+        if action == "clarify":
+            state["clarify_question"] = planned.get("clarify_question")
+
+        # Downstream generation and narration consume one structured reading.
+        # This is derived from the validated tool call and lookup results, not
+        # from a second semantic router.
+        wants_by_tool = {
+            "query_database": interpreter.DATA,
+            "modify_active_query": interpreter.DATA,
+            "generate_document": interpreter.DOCUMENT,
+            "translate_document": interpreter.TRANSLATION,
+            "answer_directly": (interpreter.RECALL if contextual_chat
+                                else interpreter.CHAT),
+            "ask_clarifying_question": interpreter.CLARIFY,
+            "update_task_state": interpreter.DATA,
+        }
+        question = str(arguments.get("question") or "")[:400]
+        people = [
+            entry.get("canonical_name") for entry in resolved
+            if entry.get("canonical_name")
+        ]
+        state["interpretation"] = interpreter.Interpretation(
+            wants=wants_by_tool.get(name, interpreter.CHAT),
+            question=question,
+            people=people,
+            language=arguments.get("language"),
+            format=arguments.get("format"),
+            shape=arguments.get("response_shape") or "answer",
+            about_previous=bool(
+                contextual_chat or arguments.get("uses_context")
+                or name in ("modify_active_query", "generate_document",
+                            "translate_document")),
+            confidence=float(planned.get("confidence") or 0.9),
+            question_for_user=(str(arguments.get("question") or "")[:400]
+                               if name == "ask_clarifying_question" else ""),
+        ).as_dict()
+
+        if name == "query_database" and question:
+            state["sql_generation_input"] = question[:500]
+
+        observability.observe_planner_action(action, "tool_loop")
+        return planner.PlannedAction(**{
+            key: value for key, value in planned.items()
+            if key in planner.PlannedAction.__slots__
+        })
+
+    def _suspend_for_unknown_name(self, state: AgentState, needle: str, reading):
+        """The request names someone who is not enrolled: ask, with the
+        closest enrolled names, and SUSPEND the request so the answer resumes
+        it (the same resume the typo path uses). The alternative was a query
+        that matched nothing, and an answer about somebody else."""
+        from .. import reasoning
+
+        suggestion = self._closest_names(
+            needle, [(e or {}).get("display_name")
+                     for e in (state.get("identity_index") or [])])
+        state["clarification_candidates"] = [
+            {"display_name": name} for name in suggestion]
+        state["typo_of"] = needle
+        state["clarify_question"] = (
+            self._did_you_mean(needle, suggestion, state) if suggestion
+            else self._not_enrolled_question(needle, state))
+        state["terminal_state"] = reasoning.CLARIFY
+        state["turn_kind"] = "chat"
+        plan = planner.PlannedAction(
+            "clarify", confidence=1.0,
+            source="typo_suggestion" if suggestion else "interpreter",
+            clarify_question=state["clarify_question"])
+        logger.info("[INTERPRET] unknown person in the request; asking "
+                    "(candidates=%d)", len(suggestion))
+        state["planned_action"] = plan.as_dict()
+        state["intent"] = self._ACTION_TO_INTENT.get(plan.action, "CHAT")
+        state["intent_confidence"] = plan.confidence
+        observability.observe_planner_action(plan.action, plan.source)
+        return plan
+
+    def _not_enrolled_question(self, needle: str, state: AgentState) -> str:
+        arabic = (state.get("response_language") or "en") == "ar"
+        known = self._known_person_names(state, limit=5)
+        listed = ("، ".join(known) if arabic else ", ".join(known))
+        if arabic:
+            return (f"لا يوجد شخص مسجل باسم «{needle}». "
+                    + (f"الأسماء المسجلة تشمل: {listed}. " if listed else "")
+                    + "من تقصد؟")
+        return (f"I have nobody enrolled named “{needle}”. "
+                + (f"Enrolled names include: {listed}. " if listed else "")
+                + "Who did you mean?")
+
+    def _plan_from_reading(self, state: AgentState, reading, candidates: dict):
+        """Turn a validated reading into this turn's action.
+
+        Every branch is a consequence of the reading plus what is held; no
+        message is pattern-matched here.
+        """
+        from . import interpreter
+
+        state["interpretation"] = reading.as_dict()
+        state["turn_kind"] = ("data" if reading.wants == interpreter.DATA
+                              else "chat")
+        state["turn_is_a_request"] = reading.wants != interpreter.CHAT
+
+        # The people the message named are this turn's subject, whether or
+        # not anything had to be looked up.
+        entries = list(state.get("resolved_entities") or [])
+        for name in reading.people:
+            if not any((e or {}).get("canonical_name") == name for e in entries):
+                entries.append({"kind": "person", "canonical_name": name,
+                                "source": "interpretation"})
+        if entries:
+            state["resolved_entities"] = entries
+
+        # The reply's language is the one the message was WRITTEN in - the
+        # input pipeline settled that from its script. The model's language
+        # slot says which language to restate an answer IN, so it applies to
+        # a translation or a document and to nothing else: it came back "ar"
+        # on plain English questions, and answered them in Arabic.
+        if reading.language and reading.wants in (interpreter.TRANSLATION,
+                                                  interpreter.DOCUMENT):
+            state["response_language"] = reading.language
+
+        # ASK RATHER THAN GUESS. Three facts settle it: the model said it
+        # could not tell; the request names someone who is not enrolled (so a
+        # query would match nothing and a guess would name someone else); or
+        # the reading is too uncertain to build a query on.
+        unresolved = [n for n in reading.unknown_people
+                      if not any(n.casefold() == p.casefold() for p in reading.people)]
+        if (reading.wants == interpreter.DATA and unresolved
+                and not reading.people):
+            return self._suspend_for_unknown_name(state, unresolved[0], reading)
+        if reading.wants == interpreter.CLARIFY or (
+                reading.wants == interpreter.DATA
+                and reading.confidence < interpreter.CONFIDENCE_FLOOR):
+            question = (reading.question_for_user or self._guidance(state))
+            state["clarify_question"] = question
+            state["turn_kind"] = "chat"
+            plan = planner.PlannedAction("clarify", confidence=0.95,
+                                         source="interpreter",
+                                         clarify_question=question)
+            logger.info("[INTERPRET] asking instead of guessing "
+                        "(confidence=%.2f, model_asked=%s)",
+                        reading.confidence, bool(reading.question_for_user))
+            state["planned_action"] = plan.as_dict()
+            state["intent"] = self._ACTION_TO_INTENT.get(plan.action, "CHAT")
+            state["intent_confidence"] = plan.confidence
+            observability.observe_planner_action(plan.action, plan.source)
+            return plan
+
+        if reading.wants == interpreter.DATA:
+            plan = planner.PlannedAction("query_database", confidence=0.95,
+                                         source="interpreter")
+            if reading.question:
+                state["sql_generation_input"] = reading.question[:500]
+        elif reading.wants == interpreter.RECALL:
+            # Already said in this conversation: the chat node answers from
+            # the transcript it is given. No query, so nothing is invented.
+            state["recall"] = True
+            plan = planner.PlannedAction("chat", confidence=0.9,
+                                         source="interpreter")
+        elif reading.wants == interpreter.TRANSLATION:
+            plan = planner.PlannedAction(
+                "generate_document" if reading.format else "translate_artifact",
+                confidence=0.95, source="interpreter",
+                language=reading.language, format=reading.format,
+                target="last_result")
+        elif reading.wants == interpreter.DOCUMENT:
+            plan = planner.PlannedAction(
+                "generate_document", confidence=0.95, source="interpreter",
+                format=reading.format or "pdf", language=reading.language,
+                target="last_result")
+        elif reading.wants == interpreter.CONFIRMATION:
+            state["confirmation_challenge"] = True
+            plan = planner.PlannedAction("chat", confidence=0.95,
+                                         source="interpreter")
+        else:
+            plan = planner.PlannedAction("chat", confidence=0.9,
+                                         source="interpreter")
+
+        state["planned_action"] = plan.as_dict()
+        state["intent"] = self._ACTION_TO_INTENT.get(plan.action, "CHAT")
+        state["intent_confidence"] = plan.confidence
+        observability.observe_planner_action(plan.action, plan.source)
+        return plan
+
     def plan_action(self, state: AgentState) -> AgentState:
         """STEP 2: Decide what the user is asking for.
 
@@ -469,19 +741,9 @@ class SQLAgentTools:
                     state["resumed_from_typo"] = True
                     user_text = corrected
 
-        # What THIS TURN has already established. Re-entering the loop for a
-        # second action used to start from nothing, so the agent could resolve
-        # a person and then immediately not know who they were.
-        prior_observations = state.get("observations") or []
-
         candidates = planner.resolve_candidates(
             state.get("working_context"), state.get("artifact_index"), user_text)
         state["planner_candidates"] = candidates
-        # Exact, self-contained domain commands get a deterministic backstop.
-        # The model may still use the tool loop to resolve the person, but it
-        # may not turn an explicit "track <person>" request into small talk.
-        deterministic_plan = planner.deterministic_request_plan(user_text)
-
         # MODE FIRST, chosen deterministically from the conversation's shape.
         # FAST is deliberately hard to reach: misreading a follow-up as a
         # fresh question is the expensive mistake, an extra model call is the
@@ -494,312 +756,134 @@ class SQLAgentTools:
         state.setdefault("reasoning_steps_used", 0)
         state.setdefault("failed_action_fingerprints", [])
 
-        plan = None
-        resolution = "planner"
+        # PRIMARY PATH: a bounded model/tool conversation. The model may
+        # inspect the current task, resolve a person, or list the caller's
+        # documents, observe those results, and only then choose whether to
+        # chat, query, modify, export, translate, or ask. No phrase list maps
+        # the user's wording to an action; Python only validates calls and
+        # enforces budgets/authority.
+        recent = self._recent_turn_texts(limit=8)
+        summary_text = None
         try:
-            # The rolling summary is a DERIVED CACHE: rebuilt whenever it is
-            # stale, corrupt or version-incompatible, never trusted blind and
-            # never consulted for exact values. It is the lowest-priority
-            # section in the envelope, so it yields before the authoritative
-            # state does.
-            summary_text = None
-            try:
-                from .. import dialogue_state as ds
-                context = state.get("working_context") or {}
-                cached = context.get("conversation_summary")
-                recent = self._recent_turn_texts(limit=8)
-                dialogue = ds.migrate_state(context.get("dialogue_state"))
-                if ds.needs_rebuild(cached, turn_count=len(recent),
-                                    context_version=int(
-                                        dialogue.get("context_version") or 0)):
-                    cached = ds.build_summary(recent, dialogue)
-                    if self.conversation_memory:
-                        self.conversation_memory.update_working_context(
-                            conversation_summary=cached)
-                summary_text = (cached or {}).get("text")
-            except Exception as summary_error:
-                logger.info("[SUMMARY] skipped: %s", summary_error)
+            from .. import dialogue_state as _summary_state
 
-            context_block = planner.build_planner_context(
-                candidates, conversation_summary=summary_text)
+            context = state.get("working_context") or {}
+            dialogue = _summary_state.migrate_state(context.get("dialogue_state"))
+            cached = context.get("conversation_summary")
+            if _summary_state.needs_rebuild(
+                    cached, turn_count=len(recent),
+                    context_version=int(dialogue.get("context_version") or 0)):
+                cached = _summary_state.build_summary(recent, dialogue)
+                if self.conversation_memory:
+                    self.conversation_memory.update_working_context(
+                        conversation_summary=cached)
+            summary_text = (cached or {}).get("text")
+        except Exception as summary_error:
+            logger.info("[SUMMARY] skipped: %s", summary_error)
 
-            # TOOL LOOP FIRST. It may perform read-only look-ups before
-            # committing, which is what stops the agent guessing at camera
-            # ids and misspelled names. It returns None whenever it does not
-            # commit to an action, and the single-shot planner below then
-            # runs exactly as it did before tools existed.
-            try:
-                from . import agent_loop
+        context_block = planner.build_planner_context(
+            candidates, recent_turns=recent,
+            conversation_summary=summary_text)
+        try:
+            from . import agent_loop
 
-                # The loop runs on EVERY turn. It used to be skipped in FAST
-                # mode, which meant the cheapest turns never reasoned at all
-                # and fell straight through to the single-shot planner — the
-                # opposite of deciding from the moment the prompt arrives.
-                #
-                # The mode now sets the BUDGET, not whether to think:
-                #   FAST        nothing to refer to, so one step is enough
-                #   CONTEXTUAL  the default room for a look-up then an action
-                #   MULTI_STEP  a compound request may need several look-ups
-                if mode == reasoning.ReasoningMode.FAST:
-                    step_budget = 1
-                elif mode == reasoning.ReasoningMode.MULTI_STEP:
-                    step_budget = int(settings.SQL_AGENT_MAX_REASONING_STEPS)
-                else:
-                    step_budget = tool_registry_max_steps()
-                # ONE routing decision per turn - chat, or query needed -
-                # from facts, made here and obeyed by the loop. Only when no
-                # fact settles it does the loop's single model judgement run.
-                dialogue_now = (state.get("working_context") or {}).get(
-                    "dialogue_state")
-                turn_kind, why = agent_loop.route_turn(
-                    user_text, dialogue_state=dialogue_now,
-                    identity_index=state.get("identity_index") or [],
-                    has_result=bool(candidates.get("last_result")),
-                    clarification_answered=bool(state.get("clarification_answered")))
-                state["turn_kind"] = turn_kind
-                logger.info("[ROUTE] kind=%s because %s", turn_kind, why)
-                self._note_named_person(state, user_text)
-                known_request = (True if turn_kind == agent_loop.DATA
-                                 else False if turn_kind == agent_loop.CHAT
-                                 else None)
-                fact_call = (agent_loop.companion_query(
-                    user_text, dialogue_now, state.get("identity_index") or [])
-                    if known_request is not False else None)
-                if fact_call:
-                    # A fact settles the action: no model step to spend.
-                    logger.info("[REACT] companion question: the subject's "
-                                "detections are the query")
-                    tool_call = fact_call
-                    tool_trace = [{"step": 0, "tool": fact_call["name"],
-                                   "signature": [fact_call["name"], json.dumps(
-                                       fact_call["arguments"], sort_keys=True)],
-                                   "committed": True, "source": "fact"}]
-                    turn_is_a_request = True
-                else:
-                    tool_call, tool_trace, turn_is_a_request = agent_loop.run_tool_loop(
-                        self.llm,
-                        user_text=user_text,
-                        context_block=context_block,
-                        db=self.db,
-                        dialogue_state=dialogue_now,
-                        artifact_index=state.get("artifact_index") or [],
-                        identity_index=state.get("identity_index") or [],
-                        max_steps=max(1, step_budget),
-                        prior_observations=prior_observations,
-                        known_request=known_request,
-                        has_result=bool(candidates.get("last_result")))
-
-                deterministic_override = False
-                if (deterministic_plan and tool_call
-                        and tool_call.get("name") == "answer_directly"):
-                    # Normalize the trace as well as the plan. Otherwise a
-                    # later action would remember that answer_directly was
-                    # committed even though query_database actually ran.
-                    logger.info(
-                        "[REACT] replacing conversational answer with "
-                        "deterministic explicit-request route")
-                    arguments = {"question": user_text[:500]}
-                    signature = [
-                        "query_database", json.dumps(arguments, sort_keys=True)]
-                    tool_call = {
-                        "name": "query_database", "arguments": arguments}
-                    for entry in reversed(tool_trace):
-                        if entry.get("committed"):
-                            entry["tool"] = "query_database"
-                            entry["signature"] = signature
-                            break
-                    turn_is_a_request = True
-                    deterministic_override = True
-
-                state["reasoning_steps_used"] = (
-                    int(state.get("reasoning_steps_used") or 0) + len(tool_trace))
-                state["tool_trace"] = tool_trace
-                # APPEND, never replace: a later action in the same turn
-                # must still see what the earlier ones found.
-                observations = list(state.get("observations") or [])
-                for e in tool_trace:
-                    if e.get("observation"):
-                        observations.append({
-                            "sequence": len(observations) + 1,
-                            **e["observation"]})
-                    elif e.get("tool") and "ok" in e:
-                        observations.append({
-                            "sequence": len(observations) + 1,
-                            "tool": e["tool"],
-                            "status": "ok" if e["ok"] else "error",
-                            "signature": e.get("signature")})
-                state["observations"] = observations[-_MAX_TURN_OBSERVATIONS:]
-
-                state["resolved_entities"] = list(
-                    state.get("resolved_entities") or []) + [
-                    e["resolved_entity"] for e in tool_trace
-                    if e.get("resolved_entity")]
-                for e in tool_trace:
-                    if e.get("committed") and e.get("signature"):
-                        # Kept so a later action in the same turn can tell
-                        # what has already been done, not merely that
-                        # something was.
-                        state["committed_signature"] = e["signature"]
-                    if e.get("clarification_candidates"):
-                        state["clarification_candidates"] =                             e["clarification_candidates"]
-                # Judged once, by a model call already paid for. Discarding it
-                # and letting the narrative re-guess from the transcript is
-                # how "hi" got answered with a surveillance summary.
-                state["turn_is_a_request"] = turn_is_a_request
-                if tool_call:
-                    planned = agent_loop.action_to_planned(tool_call, candidates)
-                    if planned:
-                        if deterministic_override:
-                            planned = deterministic_plan.as_dict()
-                        if (planned.get("action") == "query_database"
-                                and tool_call.get("name") == "query_database"):
-                            paraphrase = str(
-                                (tool_call.get("arguments") or {}).get(
-                                    "question") or "").strip()
-                            if deterministic_plan:
-                                # A deterministic command IS the request, in
-                                # the user's own words. The model paraphrased
-                                # "report for tracking joey" as the PREVIOUS
-                                # turn's question, so the report came back as
-                                # that turn's one-line answer.
-                                paraphrase = user_text.strip()
-                            if paraphrase:
-                                # A planning aid, not a replacement for the
-                                # authoritative normalized request.
-                                state["sql_generation_input"] = paraphrase[:500]
-                        state["planned_action"] = planned
-                        state["intent"] = self._ACTION_TO_INTENT.get(
-                            planned.get("action"), "CHAT")
-                        state["intent_confidence"] = planned.get("confidence", 0.9)
-                        if planned.get("action") == "clarify":
-                            state["clarify_question"] = planned.get(
-                                "clarify_question")
-                        if (planned.get("language")
-                                and self._language_was_requested(
-                                    state, planned, user_text)):
-                            state["response_language"] = planned["language"]
-                        logger.info(planner.audit_line(
-                            user_id=state.get("user_id"),
-                            conversation_id=state.get("conversation_id"),
-                            plan=planner.PlannedAction(**{
-                                k: v for k, v in planned.items()
-                                if k in planner.PlannedAction.__slots__}),
-                            executed=self._ACTION_TO_NODE.get(
-                                planned.get("action"), state["intent"]),
-                            resolution=f"tools:{len(tool_trace)}/{mode}",
-                            artifact_id=planned.get("artifact_id"),
-                            result_id=(candidates.get("last_result") or {}).get(
-                                "history_id")))
-                        return state
-            except (TypeError, AttributeError, NameError, KeyError) as bug:
-                # A CODE fault, not a model one. This catch-all previously
-                # reported every failure as "unavailable, using the planner",
-                # which reads like an expected condition — so a tuple-unpack
-                # error silently discarded a correct loop decision and let the
-                # planner override it for a whole round of testing. Programming
-                # errors get a traceback and ERROR level; the turn still
-                # degrades to the planner rather than failing the user.
-                logger.error("[TOOL_LOOP] BUG in the loop, falling back to the "
-                             "planner: %s", bug, exc_info=True)
-            except Exception as tool_error:
-                logger.warning("[TOOL_LOOP] unavailable, using the planner: %s",
-                               tool_error)
-            planner_prompt = skill_resolver.compose(
-                planner.PLANNER_SYSTEM_PROMPT,
-                has_result=bool(candidates.get("last_result")),
-                has_documents=bool(state.get("artifact_index")),
-            )
-            prompt = ChatPromptTemplate.from_messages([
-                SystemMessage(content=planner_prompt),
-                HumanMessage(content=(
-                    self._context_section(state)
-                    + "Conversation state:\n" + context_block
-                    + f"\n\nRequest: {user_text}\n\nJSON:"))
-            ])
-            self._trace_envelope("plan_action", prompt)
-            raw = (prompt | self.llm | StrOutputParser()).invoke({})
-            # DEBUG ONLY. If a model prepends prose to its JSON, that prose
-            # is its reasoning, and a production log is not a place for it.
-            if settings.DEBUG:
-                logger.debug("[STEP_2] planner response received (chars=%d)",
-                             len(str(raw)))
+            if mode == reasoning.ReasoningMode.FAST:
+                step_budget = 1
+            elif mode == reasoning.ReasoningMode.MULTI_STEP:
+                step_budget = int(settings.SQL_AGENT_MAX_REASONING_STEPS)
             else:
-                logger.info("[STEP_2] planner replied (%d chars)", len(str(raw)))
-            plan = planner.validate_plan(planner.extract_json_object(raw), candidates)
-        except Exception as e:
-            logger.error("[STEP_2] planner failed: %s", e, exc_info=True)
+                step_budget = tool_registry_max_steps()
+            tool_call, tool_trace = agent_loop.run_tool_loop(
+                self.llm,
+                user_text=user_text,
+                context_block=context_block,
+                db=self.db,
+                dialogue_state=(state.get("working_context") or {}).get(
+                    "dialogue_state"),
+                artifact_index=state.get("artifact_index") or [],
+                identity_index=state.get("identity_index") or [],
+                prior_observations=state.get("observations") or [],
+                has_result=bool(candidates.get("last_result")),
+                max_steps=step_budget,
+            )
+        except Exception as loop_error:
+            logger.warning("[TOOL_LOOP] orchestration failed (%s); using the "
+                           "structured model fallback", type(loop_error).__name__)
+            tool_call, tool_trace = None, []
 
-        # A failed planner or a conversational classification cannot erase an
-        # explicit domain command. A genuine clarification produced after a
-        # person look-up remains intact, so ambiguous identities are never
-        # silently selected.
-        if deterministic_plan and (plan is None or plan.action == "chat"):
-            plan = deterministic_plan
-            resolution = f"deterministic/{mode}"
-            state["sql_generation_input"] = user_text[:500]
-
-        if plan is None:
-            plan = planner.decide_on_failure(user_text, candidates)
-            resolution = ("failed->clarify" if plan else "failed->legacy") + f"/{mode}"
-
-        if plan is None:
-            # Both the loop and the planner declined. There used to be a
-            # third decision here — `classify_intent`, a binary CHAT vs
-            # SQL_QUERY call with no tools, no candidate set and no dialogue
-            # state. It was the weakest of the three and ran LAST, so it
-            # overrode better-informed decisions: one captured turn shows the
-            # planner deciding and then the classifier deciding again.
-            #
-            # Answering is the safe residual. A request that was clearly
-            # ABOUT held state has already become a clarification above
-            # (`decide_on_failure`), so what reaches here is an ordinary
-            # message that two better-informed stages could not turn into an
-            # action.
-            # ...but only for a message that ASKED for nothing. A data
-            # request that reaches here has been abandoned, and answering it
-            # conversationally reports success for work never done.
-            if state.get("turn_is_a_request"):
-                from .. import reasoning
-
-                logger.info("[REACT] terminal=%s reason=no_action_chosen",
-                            reasoning.MAX_ITERATIONS)
-                state["terminal_state"] = reasoning.MAX_ITERATIONS
-                state["planned_action"] = {"action": "chat",
-                                           "source": "exhausted"}
-                state["intent"] = "CHAT"
-                state["reasoning_exhausted"] = True
-                observability.observe_planner_action("chat", "exhausted")
+        if tool_call:
+            planned = self._apply_model_tool_call(
+                state, tool_call, tool_trace, candidates)
+            if planned:
+                logger.info(planner.audit_line(
+                    user_id=state.get("user_id"),
+                    conversation_id=state.get("conversation_id"),
+                    plan=planned,
+                    executed=self._ACTION_TO_NODE.get(
+                        planned.action, state.get("intent", "CHAT")),
+                    resolution=f"tool_loop/{mode}",
+                    artifact_id=planned.artifact_id,
+                    result_id=(candidates.get("last_result") or {}).get(
+                        "history_id")))
                 return state
 
-            logger.info("[STEP_2] no action chosen; answering directly")
-            state["planned_action"] = {"action": "chat", "source": "fallback"}
-            observability.observe_planner_action("chat", "fallback")
-            state["intent"] = "CHAT"
-            state["terminal_state"] = None
-            return state
+        # FALLBACK: another model-driven path, narrowed to one validated JSON
+        # reading. It is used when a provider cannot complete either native or
+        # prompted tool calling, never as a deterministic keyword router.
+        reading = self._read_the_turn(state, user_text, candidates,
+                                      skip=bool(chosen))
+        if reading is None:
+            if chosen:
+                # The user answered a question we asked by picking from the
+                # list we offered; the resume above already rewrote the
+                # request, so it is a data turn in their own words.
+                from . import interpreter
 
-        plan = self._refuse_unrequested_translation(state, plan, user_text)
-        state["planned_action"] = plan.as_dict()
-        observability.observe_planner_action(plan.action, plan.source)
-        state["intent"] = self._ACTION_TO_INTENT.get(plan.action, "CHAT")
-        state["intent_confidence"] = plan.confidence
-        if plan.action == "clarify":
-            state["clarify_question"] = plan.clarify_question
-        if plan.language and self._language_was_requested(state, plan, user_text):
-            state["response_language"] = plan.language
-
-        # `executed` names the NODE this turn will run, not the legacy intent:
-        # document actions map onto CHAT for compatibility, so logging the
-        # intent would record every translation as a chat turn.
-        executed = self._ACTION_TO_NODE.get(plan.action, state["intent"])
+                reading = interpreter.Interpretation(
+                    wants=interpreter.DATA, question=user_text[:400],
+                    people=[chosen.get("display_name")] if chosen.get("display_name") else [],
+                    shape="report")
+            else:
+                planned = self._ask_to_rephrase(state)
+                logger.info(planner.audit_line(
+                    user_id=state.get("user_id"),
+                    conversation_id=state.get("conversation_id"),
+                    plan=planned, executed="chat_response",
+                    resolution=f"unreadable/{mode}", artifact_id=None,
+                    result_id=(candidates.get("last_result") or {}).get("history_id")))
+                return state
+        planned = self._plan_from_reading(state, reading, candidates)
         logger.info(planner.audit_line(
-            user_id=state.get("user_id"), conversation_id=state.get("conversation_id"),
-            plan=plan, executed=executed,
-            resolution=(resolution if "/" in resolution
-                        else f"{resolution}/{mode}"),
-            artifact_id=plan.artifact_id,
+            user_id=state.get("user_id"),
+            conversation_id=state.get("conversation_id"),
+            plan=planned,
+            executed=self._ACTION_TO_NODE.get(planned.action,
+                                              state.get("intent", "CHAT")),
+            resolution=f"interpreter-fallback/{mode}",
+            artifact_id=planned.artifact_id,
             result_id=(candidates.get("last_result") or {}).get("history_id")))
         return state
+
+    def _ask_to_rephrase(self, state: AgentState):
+        """The reading failed twice: say so and ask, in the user's language.
+        Not a guess, not a fallback to something that matches words."""
+        arabic = (state.get("response_language") or "en") == "ar"
+        question = ("لم أفهم هذه الرسالة. هل يمكنك صياغتها بطريقة أخرى؟"
+                    if arabic else
+                    "I could not understand that message. Could you say it "
+                    "another way?")
+        state["clarify_question"] = question
+        state["turn_kind"] = "chat"
+        state["turn_is_a_request"] = False
+        plan = planner.PlannedAction("clarify", confidence=1.0,
+                                     source="unreadable",
+                                     clarify_question=question)
+        state["planned_action"] = plan.as_dict()
+        state["intent"] = "CHAT"
+        state["intent_confidence"] = 1.0
+        observability.observe_planner_action(plan.action, plan.source)
+        logger.info("[INTERPRET] no usable reading; asking the user to rephrase")
+        return plan
 
     def observe_and_replan(self, state: AgentState) -> AgentState:
         """OBSERVE what the action produced; decide whether to correct course.
@@ -1238,7 +1322,10 @@ class SQLAgentTools:
         r"(?:<<<FACTS.*?FACTS>>>|\[FACTS about this turn.*?\[end of facts\])\s*",
         re.S | re.I)
     _SCAFFOLD_LABELS = re.compile(
-        r"(?:<<<FACTS|FACTS>>>|\[(?:end of )?(?:facts|prior turns)[^\]]*\])\s*",
+        r"(?:<<<FACTS|FACTS>>>|\[(?:end of )?(?:facts|prior turns)[^\]]*\]"
+        # The one-line rule for a turn that ran nothing; the chat model
+        # returned it verbatim as its whole answer to "make it Arabic".
+        r"|\[Nothing was run or produced for this message[^\]]*\])\s*",
         re.I)
     #: A TRANSLATED echo of the block: a leading bracketed or bold-titled
     #: segment about "facts / this turn" in Arabic, up to the first blank
@@ -1665,6 +1752,12 @@ class SQLAgentTools:
         """'direct' for a point question with a handful of rows; 'report'
         otherwise. A fact about the question and the result, not a
         judgement about tone."""
+        # How much the user wanted back is part of what they said, so the
+        # reading decides it. "report for tracking joey" was answered with
+        # the one-line sentence from the previous turn.
+        asked_for = (state.get("interpretation") or {}).get("shape")
+        if asked_for == "report":
+            return "report"
         if row_count <= cls._DIRECT_MAX_ROWS and (
                 cls._is_point_question(state.get("normalized_input") or "")
                 or (cls._sql_limit(state) or 99) <= cls._DIRECT_MAX_ROWS):
@@ -1735,6 +1828,47 @@ class SQLAgentTools:
         except Exception as e:
             logger.warning("[REACT] could not count camera detections: %s", e)
             return 0
+
+    def _verification_answer(self, state: AgentState) -> str:
+        """Re-run what the last answer rested on and report what came back.
+
+        Not a restatement and not a model call: the same query, executed
+        again through the same guard, plus the subject's detection count.
+        Being asked "are you sure?" is a request for evidence.
+        """
+        arabic = (state.get("response_language") or "en") == "ar"
+        last = (state.get("working_context") or {}).get("last_result") or {}
+        sql = str(last.get("sql") or "")
+        rechecked = None
+        if sql:
+            try:
+                outcome = self.db.execute_query(sql) or {}
+                if outcome.get("success"):
+                    rows = outcome.get("rows") or []
+                    rechecked = int(outcome.get("row_count") or len(rows))
+            except Exception as e:
+                logger.warning("[VERIFY] could not re-run the held query: %s", e)
+
+        subject = self._subject_of(state, [])
+        recorded = self._detections_on_record(subject) if subject else None
+
+        parts = []
+        if rechecked is not None:
+            parts.append(f"أعدت تنفيذ نفس الاستعلام، وما زال يُرجع "
+                         f"{rechecked} صفًا." if arabic else
+                         f"I ran the same query again and it still returns "
+                         f"{rechecked} row(s).")
+        if subject and recorded is not None:
+            parts.append(f"لدى {subject} {recorded} عملية رصد مسجلة في قاعدة "
+                         f"البيانات." if arabic else
+                         f"{subject} has {recorded} detection(s) on record in "
+                         f"the database.")
+        if not parts:
+            return ("لا يوجد شيء من هذه المحادثة يمكنني إعادة التحقق منه. "
+                    "اسألني السؤال مرة أخرى وسأنفذه من جديد." if arabic else
+                    "I have nothing from this conversation to re-check. Ask "
+                    "the question again and I will run it fresh.")
+        return " ".join(parts)
 
     def _detections_on_record(self, canonical: str) -> int:
         """How many detections a resolved person has, through the guarded
@@ -1818,68 +1952,6 @@ class SQLAgentTools:
         underscore-versus-space that ids and labels disagree on."""
         return " ".join(str(text or "").replace("_", " ").split()).casefold()
 
-    #: Actions that rewrite an existing answer into another language.
-    _TRANSLATION_ACTIONS = ("translate_artifact", "translate_document")
-
-    @staticmethod
-    def _language_was_requested(state, plan, user_text: str) -> bool:
-        """Did THIS message ask for a language? The answer's language is
-        otherwise the message's own, decided by the input pipeline from its
-        script - never one the model proposed or the last turn happened to
-        use. A plan language always won, so an English request could be
-        answered in Arabic."""
-        from .agent_loop import wants_translation
-
-        if wants_translation(user_text):
-            return True
-        action = (plan.get("action") if isinstance(plan, dict)
-                  else getattr(plan, "action", ""))
-        # A document is rendered from a report whose language the render
-        # path already settled; that is not this turn's reply language.
-        return action == "generate_document"
-
-    def _refuse_unrequested_translation(self, state, plan, user_text: str):
-        """A translation nobody asked for is not an answer.
-
-        "report for tracking joey" was executed as translate_artifact and
-        came back as an Arabic rewrite of the previous report. Whether a
-        translation was asked for is a fact about the message, so it is
-        settled here rather than left to the model that proposed it.
-        """
-        from . import agent_loop
-
-        if (plan.action not in self._TRANSLATION_ACTIONS
-                or agent_loop.wants_translation(user_text)):
-            return plan
-        wanted_data = (state.get("turn_kind") == agent_loop.DATA
-                       or bool(state.get("turn_is_a_request")))
-        logger.info("[REACT] refused %s: no language was asked for; "
-                    "answering the message instead (data=%s)",
-                    plan.action, wanted_data)
-        plan.action = "query_database" if wanted_data else "chat"
-        plan.language = None
-        plan.artifact_id = None
-        plan.source = f"{plan.source}+translation-refused"
-        return plan
-
-    @staticmethod
-    def _note_named_person(state: AgentState, user_text: str) -> Optional[str]:
-        """An enrolled person named in the message is this turn's subject,
-        look-up or not. The subject was committed to dialogue state only
-        from `resolve_person` results, so "does joey was alone" (answered
-        without a look-up) held nothing, and "with whom she was" next had
-        no subject and was answered about IRON MAN."""
-        from .agent_loop import names_a_known_person
-
-        named = names_a_known_person(user_text, state.get("identity_index") or [])
-        if not named:
-            return None
-        entries = list(state.get("resolved_entities") or [])
-        if not any((e or {}).get("canonical_name") == named for e in entries):
-            entries.append({"kind": "person", "canonical_name": named,
-                            "source": "identity_index"})
-            state["resolved_entities"] = entries
-        return named
 
     def _camera_invented(self, state: AgentState, needle: str) -> bool:
         """Did the camera filter come from anywhere but the user? A fact:
@@ -2194,11 +2266,11 @@ Adapt them to match the user's specific question.
         # nothing to resolve, and handing it the transcript is how "show me
         # all detections from today" was generated as "...at WEZARET DEFA3
         # today" for a user who never mentioned a camera.
-        from .agent_loop import is_a_continuation
-
+        # Whether the message points back is the model's reading of it
+        # (`about_previous`), not a list of pronouns.
         conversation_context = state.get("conversation_context", "")
-        if conversation_context and not is_a_continuation(
-                state.get("normalized_input") or ""):
+        if conversation_context and not (
+                state.get("interpretation") or {}).get("about_previous"):
             logger.info("[STEP_4] self-contained question: prior turns "
                         "withheld from SQL generation")
             conversation_context = ""
@@ -2291,6 +2363,16 @@ If no query is possible:
                     "authoritative request wins on any conflict):\n"
                     f"{state['sql_generation_input']}\n")
                    if state.get("sql_generation_input") else "")
+                # How much was asked for comes from the reading, so a report
+                # is not answered with a one-row summary of itself: "report
+                # for tracking joey" produced a "last seen" query, and the
+                # report was written over that single row.
+                + (("\nTHIS IS A REPORT. Return EVERY matching row — one per "
+                    "detection, with the camera name and the timestamp — "
+                    "ordered by timestamp. Do not aggregate to a single row "
+                    "and do not use MAX(...) or LIMIT 1.\n")
+                   if (state.get("interpretation") or {}).get("shape") == "report"
+                   else "")
                 + "\nGenerate SQL that satisfies the authoritative request."
                 + self._correction_hint(state)))
         ])
@@ -2870,6 +2952,32 @@ Provide the corrected SQL:""")
                         f"عمليات رصد مسجلة لها.")
             return (f"Camera “{idle_camera}” exists, but has no detections "
                     f"recorded.")
+
+        # A question about TWO people is answered about both. "does ali
+        # abbass and iron man appeared at the same camera" came back as a
+        # remark about one of them, which is true and not an answer. The
+        # counts are facts; the reading is what says two people were named.
+        named = [n for n in ((state.get("interpretation") or {}).get("people") or [])]
+        if len(named) >= 2 and getattr(self, "db", None) is not None:
+            counts = [(name, self._detections_on_record(name)) for name in named[:3]]
+            empty = [name for name, n in counts if not n]
+            listed = ("، ".join(f"{name}: {n}" for name, n in counts) if arabic
+                      else ", ".join(f"{name}: {n}" for name, n in counts))
+            if empty:
+                who = "، ".join(empty) if arabic else " and ".join(empty)
+                if arabic:
+                    return (f"لا يوجد وقت ظهر فيه {who} مع الآخرين: لا توجد "
+                            f"أي عملية رصد مسجلة لـ {who}. "
+                            f"(عمليات الرصد المسجلة - {listed}.)")
+                return (f"They were never seen together: {who} has no "
+                        f"detections on record at all. "
+                        f"(Detections on record — {listed}.)")
+            if arabic:
+                return (f"لم يتم العثور على أي لقاء بينهم في نفس الكاميرا ضمن "
+                        f"نفس الفترة. (عمليات الرصد المسجلة - {listed}.)")
+            return (f"No shared appearance was found: they were not detected "
+                    f"at the same camera within the same window. "
+                    f"(Detections on record — {listed}.)")
 
         has_data = state.get("entity_has_data")
         if has_data:
@@ -3999,21 +4107,12 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
             state["final_response"] = state["input_normalization_error"]
             return state
 
-        # An acknowledgement gets an acknowledgement. No model: given the
-        # transcript it parroted the previous completion line, and given
-        # the FACTS block it asked what context the user was providing.
-        if state.get("acknowledgement"):
-            from .agent_loop import is_thanks
-
-            arabic = (state.get("response_language") or "en") == "ar"
-            thanks = is_thanks(state.get("normalized_input") or "")
-            if arabic:
-                state["final_response"] = ("على الرحب والسعة." if thanks
-                                           else "تمام.")
-            else:
-                state["final_response"] = ("You're welcome." if thanks
-                                           else "Noted.")
-            logger.info("[STEP_7] acknowledgement answered without a model")
+        # "Are you sure?" is answered by CHECKING. Handed to the chat model
+        # it became a new question, paraphrased out of the transcript, and
+        # was answered about a different person entirely.
+        if state.get("confirmation_challenge"):
+            state["final_response"] = self._verification_answer(state)
+            logger.info("[STEP_7] confirmation answered by re-running the check")
             return state
 
         # A SQL failure that exhausted its re-plans reaches this node too.
@@ -4114,7 +4213,10 @@ matter what an earlier message in the conversation asked for. If a previous
 request was for a change or a deletion, say plainly that it was not carried
 out because the assistant is read-only.
 
-Never claim an action succeeded unless the FACTS block below says it did."""),
+Never claim an action succeeded unless the FACTS block below says it did.
+If there is no FACTS block, nothing was checked on this turn: do not state
+whether any person, camera or record exists in the database, and do not
+say "we have no records" — say that you have not looked it up, or ask."""),
             HumanMessage(content=(
                 context_block
                 # A turn that asked for nothing and ran nothing gets no FACTS
@@ -4145,7 +4247,14 @@ Never claim an action succeeded unless the FACTS block below says it did."""),
             logger.info(f"[STEP_7] ✅ LLM final response received ({len(response)} chars)")
             logger.info("[STEP_7] Chat response received (chars=%d)",
                         len(str(response)))
-            state["final_response"] = self._strip_scaffolding(response)
+            cleaned = self._strip_scaffolding(response)
+            if not cleaned:
+                # The model returned nothing but scaffolding: say something
+                # true and short rather than an empty bubble.
+                cleaned = ("كيف يمكنني المساعدة؟"
+                           if (state.get("response_language") or "en") == "ar"
+                           else "How can I help?")
+            state["final_response"] = cleaned
             logger.info(f"[STEP_7] ✅ Final response set in state ({len(state['final_response'])} chars)")
             logger.info(f"✅ Chat response generated")
         except Exception as e:

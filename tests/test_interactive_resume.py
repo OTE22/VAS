@@ -108,21 +108,6 @@ def test_the_request_is_rebuilt_with_the_correction():
     assert T._resume_corrected_request("track him", "Jeoy", "JOEY") == "track him JOEY"
 
 
-def test_yes_is_an_answer_not_an_acknowledgement_while_a_question_is_pending():
-    """Live: "Did you mean WEZARET DEFA3?" - "yes" - "Noted." The ingest
-    stage had marked it an acknowledgement before the router could see the
-    pending question."""
-    tools = T.__new__(T)
-    pending = _pending("wezart", ["WEZARET DEFA3"], "who was at camera wezart")
-    state = {"original_input": "yes", "working_context": {"dialogue_state": pending}}
-    tools.ingest_query(state)
-    assert state["acknowledgement"] is False
-
-    state = {"original_input": "yes", "working_context": {"dialogue_state": ds.empty_state()}}
-    tools.ingest_query(state)
-    assert state["acknowledgement"] is True
-
-
 def test_agent_state_declares_the_resume_keys():
     from sql_agent.state import AgentState
 

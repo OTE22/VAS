@@ -19,7 +19,6 @@ narration is told to use it and held to it.
 """
 
 from sql_agent.tools import agent_loop
-from sql_agent.tools.agent_loop import carried_over
 from sql_agent.tools.agent_tools import SQLAgentTools as T
 
 
@@ -29,22 +28,6 @@ def _held(**fields):
 
 
 # ------------------------------------------------- the paraphrase
-
-def test_a_held_camera_in_the_paraphrase_is_a_leak_for_a_new_question():
-    assert carried_over("Show all detection events at WEZARET DEFA3 today",
-                        "أظهر لي كل عمليات الرصد اليوم",
-                        _held(active_camera=["WEZARET DEFA3"])) == "WEZARET DEFA3"
-
-
-def test_a_camera_the_user_typed_is_not_a_leak():
-    assert carried_over("detections at WEZARET DEFA3 today",
-                        "detections at wezaret_defa3 today",
-                        _held(active_camera=["WEZARET DEFA3"])) is None
-
-
-def test_nothing_held_means_nothing_can_leak():
-    assert carried_over("all detections today", "show all detections today",
-                        None) is None
 
 
 class _Reply:
@@ -64,32 +47,6 @@ class _FakeLLM:
 
     def invoke(self, messages):
         return self.replies.pop(0) if self.replies else _Reply(None, {})
-
-
-def test_the_loop_makes_the_model_paraphrase_the_new_question_alone():
-    llm = _FakeLLM([
-        _Reply("query_database", {"question": "all detections at WEZARET DEFA3 today"}),
-        _Reply("query_database", {"question": "all detections today"}),
-    ])
-    call, trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="Show me all detections from today", context_block="",
-        db=None, dialogue_state=_held(active_camera=["WEZARET DEFA3"]),
-        artifact_index=None, known_request=True, has_result=True)
-
-    assert call["arguments"]["question"] == "all detections today"
-    assert any(e.get("rejected") == "carried over context" for e in trace)
-
-
-def test_a_continuation_may_carry_the_camera():
-    llm = _FakeLLM([
-        _Reply("query_database", {"question": "all detections at WEZARET DEFA3 today"}),
-    ])
-    call, trace, _fit = agent_loop.run_tool_loop(
-        llm, user_text="same camera, today", context_block="",
-        db=None, dialogue_state=_held(active_camera=["WEZARET DEFA3"]),
-        artifact_index=None, known_request=True, has_result=True)
-    assert call["name"] == "query_database"
-    assert not any(e.get("rejected") for e in trace)
 
 
 # ------------------------------------------------- the stored camera name

@@ -41,7 +41,7 @@ WORKDIR /app
 # requirements-base.txt is REQUIRED here: requirements-cpu.txt starts with
 # `-r requirements-base.txt`, and pip resolves that relative to the file, so
 # the build fails immediately if the base file is not copied alongside it.
-COPY requirements-base.txt requirements-cpu.txt requirements-dev.txt ./
+COPY requirements-base.txt requirements-cpu.txt requirements-dev.txt requirements-ml.txt ./
 # BuildKit cache mount: downloaded wheels persist across builds and across a
 # KILLED build, so an interrupted build does not start from zero.
 # PIP_NO_CACHE_DIR is set globally above, so it is re-enabled for this RUN
@@ -133,4 +133,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # Entrypoint
 # =====================================================
 CMD ["gunicorn", "backend.main:app", "-c", "gunicorn.conf.py"]
-

@@ -152,29 +152,6 @@ def test_the_planner_cannot_supply_sql_or_a_path():
 
 # ------------------------------------------------- deterministic resolution
 
-@pytest.mark.parametrize("text", [
-    "track Iron Man",
-    "Track iron man!",
-    "please track person IRON MAN",
-])
-def test_a_self_contained_tracking_command_routes_without_model_guesswork(text):
-    plan = planner.deterministic_request_plan(text)
-
-    assert plan is not None
-    assert plan.action == "query_database"
-    assert plan.confidence == 1.0
-    assert plan.source == "deterministic"
-
-
-@pytest.mark.parametrize("text", [
-    "track",
-    "track him",
-    "track that person",
-    "track Iron Man and make a PDF",
-    "how do I track a person?",
-])
-def test_contextual_or_compound_tracking_stays_in_the_tool_loop(text):
-    assert planner.deterministic_request_plan(text) is None
 
 def test_an_id_the_user_typed_wins_but_only_if_it_is_theirs():
     cands = candidates(artifacts=index(ARTIFACT_A, ARTIFACT_B),

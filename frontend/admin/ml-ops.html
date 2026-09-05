@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-11">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-14">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -64,7 +64,48 @@
                 </article>
             </section>
 
-            <section class="mlops-guide" aria-labelledby="mlops-guide-title">
+            <section class="mlops-workflow" aria-labelledby="workflow-title">
+                <div class="mlops-card-header"><div><span class="mlops-guide-label">Guided workflow</span><h2 id="workflow-title">From dataset to deployment</h2><p>Choose a dataset or a saved model. Inspect each stage, then continue with the existing tools below.</p></div></div>
+                <aside class="workflow-evidence" aria-label="Getting started with ML operations">
+                    <strong>First time here?</strong>
+                    <p>Start with a dataset version, inspect its validation, train one model with default settings, then review the held-out results. The numbered stages explain each step. Selecting a stage only changes what you see; work starts when you submit an action.</p>
+                    <details><summary>Walk me through my first run</summary>
+                        <ol>
+                            <li><strong>Check the worker.</strong> Open Overview and confirm the console and worker are connected. Scheduled jobs wait for the worker.</li>
+                            <li><strong>Choose data.</strong> Select a dataset version above. If none exists, open Prepare, compute features and build a dataset. Inspect its source, dates, samples and validation report.</li>
+                            <li><strong>Configure one experiment.</strong> Open Training, then Configure training. Choose an available task and algorithm. Keep the seed and parameter defaults; leave tuning and explanations off for the first run.</li>
+                            <li><strong>Start and follow the job.</strong> Select Start training once. Follow progress in Overview. If it fails, read the error, correct its cause and submit a new run.</li>
+                            <li><strong>Review before approving.</strong> Select the resulting model and open Evaluation. Compare held-out metrics and the baseline, then inspect lineage and the allowed approval action.</li>
+                        </ol>
+                        <p>To inspect previous work, select a saved model instead. Run summary answers what data, transformations and algorithm it used, how it performed and its deployment status.</p>
+                    </details>
+                    <details><summary>Words used on this page</summary>
+                        <dl>
+                            <dt>Feature / predictor</dt><dd>A measurement the model receives as input, such as an appearance count.</dd>
+                            <dt>Target / label</dt><dd>The outcome a supervised model learns to predict. Ranking uses reviewed class labels; regression uses an explicitly selected numeric target. Anomaly models look for unusual patterns without outcome labels.</dd>
+                            <dt>Dataset version / snapshot</dt><dd>A saved set of records with an identity and checksums. Reusing the same version lets you compare runs on the same input data.</dd>
+                            <dt>Pipeline configuration / training run</dt><dd>The configuration is a reusable recipe. A run executes a recipe with a particular dataset, seed and parameters.</dd>
+                            <dt>Artifact / registry / lineage</dt><dd>The artifact is the saved model file. The registry records its version and status. Lineage traces it back to the data, settings and evaluation that produced it.</dd>
+                            <dt>Missing / not recorded / unavailable</dt><dd>Evidence is absent or a capability cannot currently be used. These labels do not mean a measured value of zero.</dd>
+                        </dl>
+                    </details>
+                </aside>
+                <div class="mlops-workflow-controls">
+                    <label>Dataset version <select id="workflow-dataset"><option value="">Loading datasets…</option></select></label>
+                    <label>Experiment / model <select id="workflow-model"><option value="">Loading models…</option></select></label>
+                    <label>Training run <select id="workflow-job"><option value="">Choose a training run</option></select></label>
+                    <button type="button" class="mlops-btn" id="workflow-refresh">Refresh evidence</button>
+                    <button type="button" class="mlops-btn" id="workflow-summary-button">Run summary</button>
+                </div>
+                <p id="workflow-notice" role="status" aria-live="polite">Loading workflow evidence…</p>
+                <ol id="workflow-pipeline" class="mlops-workflow-pipeline" aria-label="Pipeline execution order"></ol>
+                <div id="workflow-progress" aria-label="Training progress"></div>
+                <section id="workflow-stage" aria-labelledby="workflow-stage-title" tabindex="-1"></section>
+                <section id="workflow-summary" aria-label="Run summary" hidden tabindex="-1"></section>
+            </section>
+
+            <details class="mlops-guide" aria-labelledby="mlops-guide-title">
+                <summary>Workspace guide and recommended actions</summary>
                 <div class="mlops-guide-intro">
                     <span class="mlops-guide-label">Start here</span>
                     <h2 id="mlops-guide-title">Follow the model lifecycle from left to right</h2>
@@ -86,7 +127,7 @@
                     </div>
                     <button class="mlops-btn mlops-btn-primary" id="mlops-next-step-action" type="button" data-open-mlops-view="overview">Open overview</button>
                 </div>
-            </section>
+            </details>
 
             <nav class="mlops-section-nav" aria-label="Choose an ML operations workspace">
                 <span class="mlops-section-nav-label">Workspace</span>
@@ -402,7 +443,9 @@
                         </div>
                     </div>
                     <div class="mlops-card-body">
-                        <h3 class="mlops-form-section-title"><span>1</span> Train a candidate model</h3>
+                        <h3 class="mlops-form-section-title"><span>1</span> Project / pipeline configuration</h3>
+                        <div class="mlops-form-row"><label for="platform-pipeline">Saved configuration:</label><select id="platform-pipeline" class="mlops-select"><option value="">Use existing model defaults</option></select><button id="platform-refresh" class="mlops-btn" type="button">Refresh capabilities</button></div>
+                        <p id="platform-note" class="mlops-note" role="status" aria-live="polite">Loading pipeline configurations...</p>
                         <p class="mlops-form-section-copy">Select the model contract, algorithm, and dataset. Training creates a candidate for review—it does not deploy it.</p>
                         <div class="mlops-form-row">
                             <label for="training-model-type">Model type:</label>
@@ -421,18 +464,49 @@
                                 <option value="mad_baseline">Median/MAD baseline</option>
                             </select>
                         </div>
+                        <details class="workflow-evidence"><summary>Save a reusable pipeline version</summary>
+                            <p>Set the model and algorithm above. Each save creates a new immutable configuration; previous runs retain their settings.</p>
+                            <div class="mlops-form-row"><label for="platform-name">Pipeline name</label><input id="platform-name" maxlength="128" placeholder="My experiment"></div>
+                            <div class="mlops-form-row"><label for="platform-target">Target</label><input id="platform-target" aria-describedby="platform-target-reading" maxlength="128" placeholder="label, or numeric feature for regression" title="Regression requires a numeric feature target. It is excluded from predictors."></div>
+                            <div class="mlops-form-row"><label for="platform-features">Predictors, comma separated</label><input id="platform-features" aria-describedby="platform-target-reading" placeholder="Empty: all eligible features" title="Known dataset features only. Training fits imputation using the training split."></div>
+                            <div class="mlops-form-row"><label for="platform-metrics">Evaluation metrics, comma separated</label><input id="platform-metrics" placeholder="Empty: task defaults"></div>
+                            <p id="platform-target-reading">The target is what you want to predict; predictors are the measurements available when making that prediction. Use the explorer to find exact feature names. Empty predictors select eligible features automatically.</p>
+                            <p>Validation strategy: preserve the dataset's recorded train / validation / test split. Validation selects parameters; test data stays held out.</p>
+                            <button id="platform-save" type="button" class="mlops-btn">Save new pipeline version</button>
+                        </details>
+                        <details class="workflow-evidence"><summary>Which model and settings should I choose?</summary>
+                            <p><strong>Unusual behavior:</strong> choose the matching anomaly model for a person, identity pair or graph. Start with its default algorithm. Scores describe unusualness; they do not establish a threat.</p>
+                            <p><strong>Reviewed outcomes:</strong> use threat-review ranking when the reviewed-label gate is open. Compare classifiers on the same labeled dataset.</p>
+                            <p><strong>A numeric prediction:</strong> use tabular regression with an existing feature dataset and a saved pipeline declaring the numeric target. Do not include that target in predictors.</p>
+                            <p><strong>First experiment:</strong> leave predictors and metrics empty to use task defaults, retain seed 42 and leave parameter overrides empty. Save a named pipeline when you want to reuse a specific configuration.</p>
+                        </details>
+                        <h3>Training run</h3>
+                        <p id="training-run-reading">The dataset fixes the input records. The seed controls randomness; using the same seed helps repeat a run, but different hardware or libraries can still change results. Hyperparameters are algorithm settings such as tree count; keep defaults until you have a baseline.</p>
                         <div class="mlops-form-row">
-                            <label for="training-dataset-select">Dataset:</label>
+                            <label for="training-dataset-select">Immutable dataset version:</label>
                             <select id="training-dataset-select" class="mlops-select">
                                 <option value="" selected>Build a new dataset for this run</option>
                             </select>
                         </div>
                         <div class="mlops-form-row">
                             <label for="training-seed-input">Seed:</label>
-                            <input type="number" id="training-seed-input" min="0" step="1" placeholder="default 42" autocomplete="off">
+                            <input type="number" id="training-seed-input" aria-describedby="training-run-reading" min="0" step="1" placeholder="default 42" autocomplete="off">
                             <label for="training-hyperparameters-input">Hyperparameters (JSON):</label>
-                            <input type="text" id="training-hyperparameters-input" maxlength="500" autocomplete="off" placeholder='{"n_estimators": 200}'>
+                            <input type="text" id="training-hyperparameters-input" aria-describedby="training-run-reading" maxlength="500" autocomplete="off" placeholder='{"n_estimators": 200}'>
                         </div>
+                        <fieldset class="workflow-evidence"><legend>Optional run features</legend>
+                            <label><input type="checkbox" id="platform-optuna" aria-describedby="platform-options-reading platform-optuna-help" disabled> Tune XGBoost with Optuna</label>
+                            <p id="platform-optuna-help">Checking availability...</p>
+                            <p id="platform-options-reading">Optuna tries several parameter combinations and keeps the best validation result. Each trial costs training time; pruning stops an unpromising trial early. SHAP explains a finished model on a sample of test records and adds computation. Enable either only when you need that evidence.</p>
+                            <div id="platform-tuning" hidden>
+                                <div class="mlops-form-row"><label for="platform-trials">Maximum trials</label><input id="platform-trials" type="number" min="1" max="200" value="10"><label for="platform-timeout">Timeout (seconds)</label><input id="platform-timeout" type="number" min="10" max="7200" value="300"></div>
+                                <label><input id="platform-pruning" type="checkbox" checked> Prune unpromising trials using validation loss</label>
+                                <div class="mlops-form-row"><label for="platform-space">Search space (JSON)</label><textarea id="platform-space" rows="4" spellcheck="false">{"max_depth":{"type":"int","low":2,"high":6},"learning_rate":{"type":"float","low":0.01,"high":0.2,"log":true}}</textarea></div>
+                            </div>
+                            <label><input type="checkbox" id="platform-shap" aria-describedby="platform-options-reading platform-shap-help" disabled> Generate SHAP explanations</label><p id="platform-shap-help">Checking availability...</p>
+                            <label><input type="checkbox" id="platform-clean" aria-describedby="platform-clean-reading"> Require a clean, identifiable Git checkout</label><p id="platform-clean-reading">Advanced reproducibility control: this refuses a run if the source revision cannot be identified or has uncommitted changes. Leave it off for an initial run; code and environment evidence are still recorded.</p>
+                            <p>Dataset checksums, code identity, seed, parameters, dependencies and runtime are recorded on every run. SHAP uses a bounded holdout sample and does not establish causation.</p>
+                        </fieldset>
                         <div class="mlops-form-row">
                             <button class="mlops-btn mlops-btn-primary" id="start-training-btn" type="button">
                                 <i class="fas fa-brain"></i> Start training
@@ -710,6 +784,8 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-16"></script>
+    <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
+    <script src="/frontend/js/mlops-workflow.js?v=workflow-3"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-19"></script>
 </body>
 </html>

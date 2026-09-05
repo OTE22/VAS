@@ -1353,21 +1353,29 @@ class Settings(BaseSettings):
     # dependency is installed or operational (four distinct statuses are
     # reported: configured / implemented / dependency available / operational).
     MLFLOW_ENABLED: bool = Field(
-        default=False,
-        description="Optional MLflow experiment tracking (requires the mlflow package; app runs fully in rules mode without it). Default: False"
+        default=True,
+        description="Track experiments and mirror governed model versions to MLflow. Default: True"
     )
     OPTUNA_ENABLED: bool = Field(
         default=False,
         description="Optional Optuna hyperparameter tuning (requires the optuna package). Default: False"
     )
     XGBOOST_ENABLED: bool = Field(
-        default=False,
-        description="Optional XGBoost model family (requires the xgboost package). Default: False"
+        default=True,
+        description="XGBoost tabular classification and regression (requires the xgboost package). Default: True"
     )
     SHAP_ENABLED: bool = Field(
         default=False,
         description="Optional SHAP explanations (requires the shap package; native importances are the fallback). Default: False"
     )
+    MLFLOW_TRACKING_URI: str = Field(default="", description="Empty uses a durable SQL-backed MLflow store under ML_ARTIFACT_DIR; alternatively an administrator-managed HTTPS tracking service. Credentials belong in service environment, never this field.")
+    MLFLOW_EXPERIMENT_NAME: str = Field(default="ml-platform", description="MLflow experiment for governed training runs")
+    ML_TRAIN_MAX_THREADS: int = Field(default=2, ge=1, le=32)
+    ML_OPTUNA_MAX_TRIALS: int = Field(default=30, ge=1, le=200)
+    ML_OPTUNA_TIMEOUT_SECONDS: int = Field(default=600, ge=10, le=7200)
+    ML_SHAP_MAX_ROWS: int = Field(default=100, ge=1, le=1000)
+    ML_SHAP_BACKGROUND_ROWS: int = Field(default=50, ge=1, le=200)
+    ML_DRIFT_MONITORING_ENABLED: bool = Field(default=False, description="Deferred production drift scheduling; requires real production inference samples")
 
     # Risk platform: timezones, anomaly context, assessments, thresholds
     DEFAULT_SITE_TIMEZONE: str = Field(

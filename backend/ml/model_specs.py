@@ -29,7 +29,12 @@ class ModelSpec:
     def capability(self) -> dict:
         value = asdict(self)
         value.update({"status": "available", "trainable": True})
-        value["algorithms"] = list(self.algorithms)
+        from backend.ml.capabilities import capability_registry
+        xgb = capability_registry()["xgboost"]
+        value["algorithms"] = [a for a in self.algorithms if not a.startswith("xgboost") or xgb["operational"]]
+        value["algorithm_availability"] = {a: xgb if a.startswith("xgboost") else {"status": "Available"} for a in self.algorithms}
+        if not value["algorithms"]:
+            value.update(status="unavailable", trainable=False)
         return value
 
 
@@ -72,12 +77,20 @@ MODEL_SPECS: Dict[str, ModelSpec] = {
         model_type="threat_ranking_model", entity_type="person",
         feature_set_version=THREAT_RANKING_FEATURE_SET,
         dataset_definition="threat_ranking_person_labeled", dataset_kind="supervised",
-        algorithms=("logreg", "random_forest", "gradient_boosting"),
+        algorithms=("logreg", "random_forest", "gradient_boosting", "xgboost_classifier"),
         default_algorithm="logreg",
         model_purpose="analyst_review_ranking", score_type="risk_rank_score",
         calibration_status="not_calibrated", serving_mode="offline_ranking",
         note=("Supervised analyst-queue ranking from independently reviewed labels; "
               "the score is relative priority, not a threat probability or live decision."),
+    ),
+    "tabular_regression_model": ModelSpec(
+        model_type="tabular_regression_model", entity_type="person",
+        feature_set_version="", dataset_definition="behavior_anomaly_person",
+        dataset_kind="unsupervised", algorithms=("xgboost_regressor",),
+        default_algorithm="xgboost_regressor", model_purpose="offline_numeric_prediction",
+        score_type="numeric_prediction", serving_mode="offline_regression",
+        note="Explicit numeric target on immutable tabular snapshots. Offline evaluation and prediction only; never affects live security decisions.",
     ),
 }
 

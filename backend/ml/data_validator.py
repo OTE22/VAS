@@ -84,7 +84,7 @@ def validate_rows(rows: List[Dict[str, Any]], *, kind: str,
         for definition in safe_definitions:
             name = definition["name"]
             missing = sum(
-                1 for row in rows if name not in (row.get("features") or {}))
+                1 for row in rows if (row.get("features") or {}).get(name) is None)
             rate = missing / len(rows)
             if rate > worst_rate:
                 worst_feature, worst_rate = name, rate
@@ -105,7 +105,7 @@ def validate_rows(rows: List[Dict[str, Any]], *, kind: str,
     for row in rows:
         for name, value in (row.get("features") or {}).items():
             if name.endswith("_ratio") or name.endswith("_ratio_30d"):
-                if value is not None and not (0.0 <= float(value) <= 1.0):
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not (0.0 <= value <= 1.0)):
                     out_of_range += 1
     checks["ratio_ranges"] = _check(out_of_range, 0, out_of_range == 0)
 

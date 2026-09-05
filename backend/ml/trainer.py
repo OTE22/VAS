@@ -87,6 +87,9 @@ class DatasetRefusal(Exception):
 
 
 def resolve_hyperparameters(algorithm: str, overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if algorithm.startswith("xgboost"):
+        from backend.ml.tabular import xgb_parameters
+        return xgb_parameters(overrides)
     base = dict(DEFAULT_HYPERPARAMETERS.get(algorithm, {}))
     for key, value in (overrides or {}).items():
         if key not in base:
@@ -207,6 +210,10 @@ def _fit_supervised(algorithm: str, matrix, labels, seed: int,
     as a calibrated probability and never maps directly to threat severity.
     """
     hp = resolve_hyperparameters(algorithm, hyperparameters)
+    if algorithm == "xgboost_classifier":
+        from backend.ml.tabular import fit_xgboost
+        estimator, params, _ = fit_xgboost(algorithm, matrix, labels, seed, hp)
+        return estimator, params
     if algorithm == "logreg":
         from sklearn.linear_model import LogisticRegression
         model = LogisticRegression(C=float(hp["C"]), max_iter=int(hp["max_iter"]),
@@ -296,6 +303,7 @@ def _load_parquet_rows(storage_path: str) -> List[Dict[str, Any]]:
          "as_of": datetime.fromisoformat(r["as_of"]),
          "split": r["split"],
          "features": json.loads(r["features_json"]),
+         "label_event_time": datetime.fromisoformat(r["label_event_time"]) if r.get("label_event_time") else None,
          "label": r.get("label")}
         for r in table.to_pylist()
     ]
@@ -330,6 +338,8 @@ async def load_training_dataset(db, dataset_id: str, *, expected_kind: str,
     if not row.storage_path or not os.path.exists(row.storage_path):
         raise DatasetRefusal("DATASET_FILE_MISSING",
                              f"the Parquet file of dataset {row.name} v{row.version} is absent")
+    from backend.ml.registry_service import _assert_inside_artifact_dir
+    _assert_inside_artifact_dir(row.storage_path)
     stored_file_hash = getattr(row, "parquet_sha256", None)
     if not stored_file_hash:
         raise DatasetRefusal("DATASET_INTEGRITY_UNVERIFIABLE",
@@ -347,6 +357,13 @@ async def load_training_dataset(db, dataset_id: str, *, expected_kind: str,
         raise DatasetRefusal("DATASET_CHECKSUM_MISMATCH",
                              "canonical-row fingerprint of the reloaded rows differs from the "
                              "registry checksum")
+    from backend.ml.feature_store import feature_store
+    from backend.ml.data_validator import validate_rows
+    definitions = await feature_store.get_definitions_for_feature_set(db, row.feature_set_version)
+    observed = set().union(*(r["features"] for r in rows)) if rows else set()
+    report = validate_rows(rows, kind=expected_kind, definitions=[d for d in definitions if d["name"] in observed])
+    if not report["passed"]:
+        raise DatasetRefusal("DATASET_VALIDATION_FAILED", "Pre-training validation failed: " + ", ".join(report.get("failed_checks", [])))
     return row, rows
 
 
@@ -354,13 +371,16 @@ async def _train_supervised_ranking(
         db, job_id: str, *, model_type: str, algorithm: str,
         requested_by: Optional[int], dataset_id: Optional[str], seed: int,
         hyperparameters: Optional[Dict[str, Any]], sampling_policy: Optional[str],
-        stage) -> Dict[str, Any]:
+        stage, pipeline=None, options=None) -> Dict[str, Any]:
     """Train and register a review-queue ranker from reviewed labels only."""
     import numpy as np
     from backend.ml.labeling_service import labeling_service
 
     spec = get_model_spec(model_type)
-    stats = await labeling_service.label_stats(db)
+    regression = model_type == "tabular_regression_model"
+    if regression and not dataset_id:
+        raise RegistryError("REGRESSION_DATASET_REQUIRED", "Select an immutable dataset version for regression")
+    stats = await labeling_service.label_stats(db) if not regression else {"supervised_gate_open": True}
     if not stats["supervised_gate_open"]:
         refusal = labeling_service.supervised_refusal(stats)
         return {"failure": {"code": "INSUFFICIENT_REVIEWED_LABELS",
@@ -374,8 +394,8 @@ async def _train_supervised_ranking(
         await stage("loading_dataset", 15)
         try:
             dataset_row, rows = await load_training_dataset(
-                db, dataset_id, expected_kind="supervised",
-                expected_feature_set_version=spec.feature_set_version)
+                db, dataset_id, expected_kind=spec.dataset_kind,
+                expected_feature_set_version=spec.feature_set_version or None)
         except DatasetRefusal as refusal:
             return {"failure": {"code": refusal.code, "message": refusal.message}}
         dataset = {"dataset_id": str(dataset_row.id), "checksum": dataset_row.checksum,
@@ -399,12 +419,15 @@ async def _train_supervised_ranking(
             MLDataset.id == uuid_mod.UUID(dataset["dataset_id"])))).scalar_one()
         rows = _load_parquet_rows(dataset_row.storage_path)
 
+    await stage("validation", 30)
+    from backend.ml.tabular import prepare_rows
+    rows = prepare_rows(rows, pipeline or {}, regression=regression)
     train = [row for row in rows if row["split"] == "train"]
     val = [row for row in rows if row["split"] == "val"]
     test = [row for row in rows if row["split"] == "test"]
-    await stage("training", 45)
+    await stage("preprocessing", 35)
     feature_names, medians, matrix_of = _assemble_matrix(train)
-    y_train = np.asarray([1 if row.get("label") == "positive" else 0 for row in train])
+    y_train = np.asarray([row["target"] for row in train])
     gates: Dict[str, Dict[str, Any]] = {
         "minimum_train_rows": {"required": MIN_TRAIN_ROWS, "actual": len(train),
                                "passed": len(train) >= MIN_TRAIN_ROWS},
@@ -415,12 +438,23 @@ async def _train_supervised_ranking(
                                   "actual": sorted(set(y_train.tolist())),
                                   "passed": len(set(y_train.tolist())) == 2},
     }
+    if regression:
+        gates.pop("both_classes_in_train", None)
+        gates["minimum_usable_features"] = {"required": 1, "actual": len(feature_names), "passed": len(feature_names) >= 1}
     if not all(g["passed"] for g in gates.values()):
         return {"failure": {"code": "QUALITY_GATES_FAILED",
                             "message": json.dumps(gates)[:2000]}}
-    model_obj, resolved_hp = _fit_supervised(
-        algorithm, matrix_of(train), y_train, seed, resolved_hp)
-    train_scores = model_obj.predict_proba(matrix_of(train))[:, 1]
+    await stage("feature_engineering", 40)
+    train_matrix = matrix_of(train)
+    await stage("training", 45)
+    tuning_report = None
+    if algorithm.startswith("xgboost"):
+        from backend.ml.tabular import fit_xgboost
+        model_obj, resolved_hp, tuning_report = fit_xgboost(algorithm, train_matrix, y_train, seed, resolved_hp,
+            validation=(matrix_of(val), np.asarray([r["target"] for r in val])) if val else None, options=options)
+    else:
+        model_obj, resolved_hp = _fit_supervised(algorithm, train_matrix, y_train, seed, resolved_hp)
+    train_scores = model_obj.predict(matrix_of(train)) if regression else model_obj.predict_proba(matrix_of(train))[:, 1]
     gates["score_distribution_nondegenerate"] = {
         "required": "std > 0", "actual": float(np.std(train_scores)),
         "passed": float(np.std(train_scores)) > 0.0}
@@ -451,10 +485,54 @@ async def _train_supervised_ranking(
         if not part:
             evaluation["splits"][split_name] = {"rows": 0, "insufficient_data": True}
             continue
-        y = [1 if row.get("label") == "positive" else 0 for row in part]
-        evaluation["splits"][split_name] = _binary_ranking_metrics(
-            y, score_with_payload(payload, matrix_of(part)))
+        y = [row["target"] for row in part]
+        scores = score_with_payload(payload, matrix_of(part))
+        if regression:
+            from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+            baseline = np.full(len(y), float(np.mean(y_train)))
+            evaluation["splits"][split_name] = {"rows": len(y), "mae": float(mean_absolute_error(y, scores)),
+                "rmse": float(np.sqrt(mean_squared_error(y, scores))),
+                "r2": float(r2_score(y, scores)) if len(y) > 1 else None,
+                "baseline_mae": float(mean_absolute_error(y, baseline)), "baseline_rmse": float(np.sqrt(mean_squared_error(y, baseline)))}
+        else:
+            evaluation["splits"][split_name] = _binary_ranking_metrics(y, scores)
 
+    evaluation["baseline"] = {"strategy": "Training target mean" if regression else "Training label prevalence",
+        "reference_value": float(np.mean(y_train)), "splits": {}}
+    if not regression:
+        for split_name, part in (("train", train), ("val", val), ("test", test)):
+            if part:
+                evaluation["baseline"]["splits"][split_name] = _binary_ranking_metrics([r["target"] for r in part], [float(np.mean(y_train))] * len(part))
+    from backend.ml.evaluation_visuals import supervised_visuals
+    if not regression:
+        evaluation.update(supervised_visuals(model_obj, feature_names, matrix_of(test), [r["target"] for r in test]))
+    else:
+        evaluation["note"] = "Numeric regression on the declared target; baseline predicts the training-target mean on the same held-out rows. No live security decisions."
+    if algorithm.startswith("xgboost"):
+        history = model_obj.evals_result()
+        metric_name = next(iter(history["validation_0"]))
+        evaluation["training_curves"] = [{"iteration": i + 1, "training_loss": float(v),
+            **({"validation_loss": float(history["validation_1"][metric_name][i])} if "validation_1" in history else {})}
+            for i, v in enumerate(history["validation_0"][metric_name])]
+        evaluation["training_curves_context"] = "XGBoost " + metric_name + "; validation rows are evaluated but never fitted."
+        evaluation["feature_importance"] = dict(zip(feature_names, map(float, model_obj.feature_importances_)))
+    evaluation["optuna"] = tuning_report
+    evaluation["selected_metrics"] = (pipeline or {}).get("metrics")
+    model_identity = uuid_mod.uuid4()
+    if options and options.shap:
+        from backend.ml.explainability import explain
+        evaluation["shap"] = explain(payload, train_matrix, matrix_of(test),
+            [{"entity_id": r["entity_id"], "as_of": r["as_of"].isoformat()} for r in test],
+            os.path.join(str(settings.ML_ARTIFACT_DIR), "explanations", str(model_identity)))
+    from backend.ml.reproducibility import capture
+    reproducibility = capture(seed, resolved_hp, dataset={"id": str(dataset_row.id), "version": dataset_row.version,
+        "checksum": dataset_row.checksum, "parquet_sha256": dataset_row.parquet_sha256,
+        "storage_reference": "dataset:" + str(dataset_row.id), "split": dataset_row.split_config}, pipeline=pipeline,
+        require_clean=bool(options and options.require_clean_git))
+    reproducibility["run_options"] = options.model_dump() if options else {}
+    execution = getattr(model_obj, "_platform_execution", {"device": "cpu", "fallback_reason": None})
+    reproducibility["runtime"]["execution"] = execution
+    evaluation["execution"] = execution
     await stage("saving_candidate", 85)
     version = await registry_service.next_version(db, model_type)
     artifact_name = f"{model_type}-v{version}.pkl"
@@ -476,7 +554,7 @@ async def _train_supervised_ranking(
     from db_models import MLModel
     from backend.ml.readiness import PREPROCESSOR_VERSION, feature_schema_hash
     model_row = MLModel(
-        id=uuid_mod.uuid4(), model_type=model_type, version=version, stage="training",
+        id=model_identity, model_type=model_type, version=version, stage="training",
         algorithm=algorithm, model_purpose=spec.model_purpose,
         score_type=spec.score_type, is_probability=False,
         calibration_status=spec.calibration_status,
@@ -486,17 +564,19 @@ async def _train_supervised_ranking(
         feature_set_version=dataset_row.feature_set_version,
         feature_names=feature_names, dataset_id=uuid_mod.UUID(dataset["dataset_id"]),
         training_job_id=job_id, seed=seed, hyperparameters=resolved_hp,
-        training_config={"algorithm": algorithm, "seed": seed,
+        training_config={"algorithm": algorithm, "seed": seed, "pipeline": pipeline,
+                         "run_options": options.model_dump() if options else {}, "reproducibility": reproducibility,
                          "hyperparameters": resolved_hp,
                          "feature_schema_hash": feature_schema_hash(feature_names),
                          "preprocessor_version": PREPROCESSOR_VERSION,
+                         "imputation_medians": medians, "feature_names": feature_names,
                          "rows": {"train": len(train), "val": len(val), "test": len(test)},
                          "dataset_id": dataset["dataset_id"],
                          "dataset_checksum": dataset["checksum"],
                          "dataset_reused": dataset["reused"],
                          "serving_mode": spec.serving_mode,
                          "engineering_gate": "PASS" if gates_passed else "FAIL",
-                         "scientific_gate": "REQUIRES_CALIBRATION"},
+                         "scientific_gate": "OFFLINE_EVALUATION_ONLY" if regression else "REQUIRES_CALIBRATION"},
         code_version=_code_version(), metrics={"evaluation": evaluation},
         quality_gates={"passed": gates_passed, "gates": gates},
         evaluation_report=evaluation, submitted_at=datetime.utcnow(),
@@ -526,7 +606,9 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                            dataset_id: Optional[str] = None,
                            seed: Optional[int] = None,
                            hyperparameters: Optional[Dict[str, Any]] = None,
-                           sampling_policy: Optional[str] = None) -> None:
+                           sampling_policy: Optional[str] = None,
+                           pipeline: Optional[Dict[str, Any]] = None,
+                           run_options: Optional[Dict[str, Any]] = None) -> None:
     """dataset_id: train from that EXISTING built dataset (verified) instead
     of building a new one. seed / hyperparameters: experiment knobs, defaults
     are the release defaults; whatever was used is persisted verbatim."""
@@ -566,19 +648,30 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
         await _observe_training_outcome_async(job_id)
         return
 
+    from backend.ml.training_telemetry import TrainingTelemetry
+    telemetry = TrainingTelemetry(dataset_id)
+
     async def stage(name: str, percent: int):
         logger.info("[ML_OPS] job_id=%s training_stage=%s progress_percent=%s",
                     job_id, name, percent)
-        await task_history_manager.update_progress(job_id, percent, details={"stage": name})
+        await task_history_manager.update_progress(job_id, percent, details=telemetry.stage(name))
 
     try:
         async with db_manager.get_session() as db:
-            if spec.dataset_kind == "supervised":
+            from backend.ml.run_spec import RunOptions
+            from backend.ml.reproducibility import capture
+            from backend.ml.mlflow_tracking import record_start
+            options = RunOptions.model_validate(run_options or {}).check_capabilities(algorithm)
+            manifest = capture(seed, hyperparameters or {}, dataset={"id": dataset_id}, pipeline=pipeline, require_clean=options.require_clean_git)
+            await record_start(db, job_id, manifest)
+            from backend.ml.mlflow_tracking import sync_job
+            await sync_job(job_id)
+            if spec.dataset_kind == "supervised" or model_type == "tabular_regression_model":
                 outcome = await _train_supervised_ranking(
                     db, job_id, model_type=model_type, algorithm=algorithm,
                     requested_by=requested_by, dataset_id=dataset_id, seed=seed,
                     hyperparameters=hyperparameters, sampling_policy=sampling_policy,
-                    stage=stage)
+                    stage=stage, pipeline=pipeline, options=options)
                 failure = outcome.get("failure")
                 if failure:
                     await task_history_manager.finish_job(
@@ -586,6 +679,7 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                         error_message=failure["message"][:2000])
                 else:
                     outcome["duration_ms"] = int((time.monotonic() - started) * 1000)
+                    await stage("completed", 100)
                     await task_history_manager.finish_job(job_id, success=True, result=outcome)
                 return
             if algorithm not in UNSUPERVISED_ALGORITHMS:
@@ -641,13 +735,21 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                 rows = _load_parquet_rows(dataset_row.storage_path)
             if _cancelled(job_id):
                 raise asyncio.CancelledError()
+            telemetry.dataset_id = str(dataset_row.id)
+            await stage("validation", 30)
+            if pipeline and pipeline.get("features"):
+                selected = set(pipeline["features"])
+                known = set().union(*(r["features"] for r in rows))
+                if selected - known:
+                    raise RegistryError("PIPELINE_FEATURE_UNKNOWN", "Selected predictors are absent from the dataset")
+                rows = [{**r, "features": {k: v for k, v in r["features"].items() if k in selected}} for r in rows]
             feature_set_version = dataset_row.feature_set_version
             train = [r for r in rows if r["split"] == "train"]
             val = [r for r in rows if r["split"] == "val"]
             test = [r for r in rows if r["split"] == "test"]
 
             # ---- features + training --------------------------------------
-            await stage("training", 45)
+            await stage("preprocessing", 35)
             feature_names, medians, matrix_of = _assemble_matrix(train)
             gates: Dict[str, Dict[str, Any]] = {
                 "minimum_train_rows": {"required": MIN_TRAIN_ROWS,
@@ -664,7 +766,9 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                 return
 
             import numpy as np
+            await stage("feature_engineering", 40)
             train_matrix = matrix_of(train)
+            await stage("training", 45)
             model_obj, raw_train = _fit_unsupervised(algorithm, train_matrix, seed, resolved_hp)
             if raw_train is None:  # mad_baseline scores via payload path
                 keyed = {feature_names[i]: v for i, v in model_obj.items()}
@@ -879,8 +983,13 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                 hyperparameters=resolved_hp,
                 training_config={
                     "algorithm": algorithm, "seed": seed, "hyperparameters": resolved_hp,
+                    "pipeline": pipeline, "run_options": options.model_dump(),
+                    "reproducibility": capture(seed, resolved_hp, dataset={"id": str(dataset_row.id), "version": dataset_row.version,
+                        "checksum": dataset_row.checksum, "parquet_sha256": dataset_row.parquet_sha256,
+                        "storage_reference": "dataset:" + str(dataset_row.id), "split": dataset_row.split_config}, pipeline=pipeline),
                     "feature_schema_hash": feature_schema_hash(feature_names),
                     "preprocessor_version": PREPROCESSOR_VERSION,
+                    "imputation_medians": medians, "feature_names": feature_names,
                     "rows": {"train": len(train), "val": len(val), "test": len(test)},
                     "train_entities": len({r["entity_id"] for r in train}),
                     "engineering_gate": engineering["status"],
@@ -941,6 +1050,7 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
                 "awaiting_shadow_approval": gates_passed,
                 "duration_ms": int((time.monotonic() - started) * 1000),
             }
+            await stage("completed", 100)
             await task_history_manager.finish_job(job_id, success=True, result=result)
             logger.info("[ML_OPS] training complete job_id=%s model=%s v%s gates=%s",
                         job_id, model_type, version, gates_passed)
@@ -957,6 +1067,11 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
     finally:
         release_training(job_id)
         await _observe_training_outcome_async(job_id)
+        try:
+            from backend.ml.mlflow_tracking import defer_sync
+            await defer_sync(job_id)
+        except Exception:
+            logger.warning("[ML_OPS] tracking remains pending for job_id=%s; retry synchronization", job_id)
 
 
 async def _audit_training_event(action: str, job_id: str, requested_by: Optional[int],

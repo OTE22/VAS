@@ -70,6 +70,21 @@ services:
               count: 1
               capabilities: [gpu]
 
+  ml_worker:
+    build:
+      dockerfile: docker/Dockerfile.gpu
+    image: face-detector/api:dev-gpu
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
   ollama:
     # List form, matching cpu.yml. Do not switch to map form here.
     environment:

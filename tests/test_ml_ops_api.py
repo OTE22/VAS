@@ -21,6 +21,8 @@ import pytest
 BASE = "http://localhost:8000"
 
 GET_ROUTES = [
+    "/api/ml/datasets/00000000-0000-0000-0000-000000000000/explorer",
+    "/api/ml/datasets/00000000-0000-0000-0000-000000000000/validation-report",
     "/api/ml/overview",
     "/api/ml/jobs",
     "/api/ml/features/definitions",

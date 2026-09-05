@@ -24,11 +24,13 @@ ML_TASK_TYPES = (
     "ml_dataset_build",
     "ml_dataset_hash_backfill",
     "ml_drift_check",
+    "ml_tracking_sync",
 )
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ACTIVE_STATUSES = ("scheduled", "running")
 
 _JOB_DEFINITIONS = {
+    "tracking": {"prefix": "mlsync", "task_type": "ml_tracking_sync", "task_name": "MLflow evidence synchronization"},
     "training": {
         "prefix": "mltrain", "task_type": "ml_training",
         "task_name": "ML Anomaly Model Training",
@@ -113,7 +115,7 @@ async def enqueue_ml_job(
         description=description[:2000],
         scheduled_time=now,
         progress_percent=0,
-        details={"stage": "queued"},
+        details={"stage": "queued", "dataset_id": payload.get("dataset_id")},
         created_by_user_id=created_by_user_id,
         request_id=request_id,
         correlation_id=correlation_id or job_id,

@@ -4,7 +4,7 @@ Stores detection results in PostgreSQL for persistence
 """
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, Boolean, Enum as SQLEnum, text, CheckConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, Boolean, Enum as SQLEnum, text, CheckConstraint, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import backref, relationship
 from sqlalchemy.dialects.postgresql import JSONB as _PostgresJSONB, UUID, ARRAY
@@ -2421,6 +2421,33 @@ class MLModel(Base):
         CheckConstraint("previous_production_id IS NULL OR previous_production_id <> id",
                         name='ck_ml_models_prev_not_self'),
     )
+
+
+class MLPipelineVersion(Base):
+    """Append-only pipeline configurations; training freezes a copy in its payload."""
+    __tablename__ = "ml_pipeline_versions"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(128), nullable=False)
+    version = Column(Integer, nullable=False)
+    configuration = Column(JSONB, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_by = Column(Integer, nullable=True)
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_ml_pipeline_version"),)
+
+
+class MLTrackingRun(Base):
+    """Durable MLflow synchronization state, independent of transient job retention."""
+    __tablename__ = "ml_tracking_runs"
+    job_id = Column(String(64), primary_key=True)
+    model_id = Column(UUID(as_uuid=True), ForeignKey("ml_models.id", ondelete="SET NULL"), nullable=True, unique=True)
+    run_id = Column(String(64), nullable=True)
+    registered_name = Column(String(128), nullable=True)
+    registered_version = Column(String(32), nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    manifest = Column(JSONB, nullable=False, default=dict)
+    last_error = Column(String(500), nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class MLModelThreshold(Base):
