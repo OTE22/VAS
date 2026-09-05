@@ -14,6 +14,7 @@ from .database import DatabaseManager
 from .knowledge_base import SQLKnowledgeBase
 from .conversation_memory import ConversationMemory
 from .graph import create_sql_agent
+from .run_control import controlled
 
 # Setup logger for SQL Agent
 logger = logging.getLogger(__name__)
@@ -477,6 +478,7 @@ class SQLIntelligenceAgent:
         except Exception as e:
             logger.warning("[SQL_AGENT] dialogue-state commit skipped: %s", e)
 
+    @controlled()
     def query(self, user_input: str, learn: bool = True, cancel_event=None):
         """
         Process a user query and return a human-friendly response.
@@ -572,6 +574,7 @@ class SQLIntelligenceAgent:
             # Closed phrase, and NOT committed to memory.
             return _UNEXPECTED_FAILURE, {"turn_failed": True}
 
+    @controlled(stream=True)
     def query_stream(self, user_input: str, learn: bool = True, cancel_event=None):
         """
         Process a user query and stream progress updates.

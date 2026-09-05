@@ -411,6 +411,7 @@ def build_observation(state: dict) -> Dict[str, Any]:
             return observation
         observation["success"] = True
         observation["artifact_id"] = artifact_id
+        observation["artifact_stage"] = "registered" if artifact_id else "rendered_pending"
         return observation
 
     # --- conversational actions have no result contract
@@ -511,7 +512,8 @@ def check_invariants(observation: Dict[str, Any]) -> Dict[str, Any]:
         return observation
 
     action = observation.get("action")
-    if action in _REQUIRES_ARTIFACT and not observation.get("artifact_id"):
+    if (action in _REQUIRES_ARTIFACT and not observation.get("artifact_id")
+            and observation.get("artifact_stage") != "rendered_pending"):
         violated = "reported success without a registered artifact"
     elif (action in _REQUIRES_RESULT
           and observation.get("row_count") is None):

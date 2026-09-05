@@ -61,7 +61,7 @@ def _inc(name: str, documentation: str, labelnames, labelvalues) -> None:
 
 _ACTIONS = {"chat", "query_database", "modify_previous_query",
             "generate_document", "translate_artifact", "clarify", "legacy"}
-_SOURCES = {"planner", "deterministic", "fallback", "legacy",
+_SOURCES = {"planner", "deterministic", "fallback", "legacy", "tool_loop", "interpreter",
             "planner+replanned", "deterministic+replanned", "fallback+replanned"}
 
 
@@ -72,6 +72,25 @@ def observe_planner_action(action: str, source: str) -> None:
          ("action", "source"),
          (action if action in _ACTIONS else "other",
           source if source in _SOURCES else "other"))
+
+
+def observe_run(status, seconds, tokens, cost):
+    """Low-cardinality run totals for the existing Prometheus registry."""
+    try:
+        from prometheus_client import Histogram, REGISTRY
+        name = "fr_agent_run_duration_seconds"
+        metric = REGISTRY._names_to_collectors.get(name)
+        if metric is None:
+            metric = Histogram(name, "Agent run duration", ("status",),
+                               buckets=(1, 5, 15, 30, 60, 120, 300, 600))
+        metric.labels(status).observe(seconds)
+        for name, doc, amount in (
+            ("fr_agent_run_tokens_total", "Reported agent tokens", tokens),
+            ("fr_agent_run_cost_total", "Estimated agent cost in USD", cost),
+        ):
+            _counter(name, doc, ("status",)).labels(status).inc(amount)
+    except Exception:
+        pass
 
 
 def observe_provenance(source: str) -> None:

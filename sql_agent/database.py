@@ -111,6 +111,8 @@ class DatabaseManager:
         """Create a new database connection."""
         try:
             logger.debug(f"[DB] Connecting to database: {self.config.db_name}@{self.config.db_host}:{self.config.db_port}")
+            from .run_control import remaining_seconds
+            statement_ms = max(1, int(remaining_seconds(30.0) * 1000))
             conn = psycopg2.connect(
                 host=self.config.db_host,
                 port=self.config.db_port,
@@ -122,7 +124,7 @@ class DatabaseManager:
                 # Server-side hardening: any LLM-generated query is killed by
                 # Postgres after 30s, and the whole session is read-only at the
                 # database level (defense in depth beyond _validate_query).
-                options="-c statement_timeout=30000 -c default_transaction_read_only=on",
+                options=f"-c statement_timeout={statement_ms} -c default_transaction_read_only=on",
             )
             logger.debug("[DB] Database connection established successfully")
             return conn  # Return the OPEN connection

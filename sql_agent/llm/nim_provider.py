@@ -110,8 +110,9 @@ class NIMChatModel(BaseChatModel):
     def _timeout(self) -> httpx.Timeout:
         # Same shape as the Ollama adapter: bounded connect phase so an
         # unreachable endpoint fails in seconds, not the whole response budget.
-        return httpx.Timeout(self.timeout_seconds,
-                             connect=min(20.0, self.timeout_seconds))
+        from ..run_control import remaining_seconds
+        seconds = remaining_seconds(self.timeout_seconds)
+        return httpx.Timeout(seconds, connect=min(20.0, seconds))
 
     # ---- invoke -----------------------------------------------------------
 

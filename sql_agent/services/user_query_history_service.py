@@ -467,6 +467,17 @@ class UserQueryHistoryService:
         Returns:
             UserConversationMemory instance
         """
+        from ..memory_policy import MemoryWrite, expiry
+        validated = MemoryWrite(memory_type=memory_type.value,
+                                memory_key=memory_key, memory_value=memory_value,
+                                importance_score=importance_score, expires_at=expires_at)
+        expires_at = expiry(validated.expires_at)
+        memory_value = dict(validated.memory_value)
+        memory_value["_provenance"] = {
+            "source": "explicit_user", "version": 1,
+            "updated_at": datetime.utcnow().isoformat(),
+            "source_query_id": source_query_id, "source_session_id": source_session_id,
+        }
         try:
             # Check if memory with same key exists
             existing = await db.execute(
@@ -480,6 +491,8 @@ class UserQueryHistoryService:
             existing_memory = existing.scalar_one_or_none()
             
             if existing_memory:
+                previous = (existing_memory.memory_value or {}).get("_provenance") or {}
+                memory_value["_provenance"]["version"] = int(previous.get("version") or 0) + 1
                 # Update existing memory
                 existing_memory.memory_value = memory_value
                 existing_memory.importance_score = importance_score
@@ -515,7 +528,8 @@ class UserQueryHistoryService:
         user_id: int,
         memory_type: Optional[MemoryType] = None,
         min_importance: int = 0,
-        include_expired: bool = False
+        include_expired: bool = False,
+        explicit_only: bool = False
     ) -> List[UserConversationMemory]:
         """
         Get user's memories with filters.
@@ -553,8 +567,10 @@ class UserQueryHistoryService:
                 desc(UserConversationMemory.last_accessed_at)
             )
             
-            result = await db.execute(query)
-            return result.scalars().all()
+            result = await db.execute(query.limit(100))
+            return [m for m in result.scalars().all()
+                    if not explicit_only or ((m.memory_value or {}).get("_provenance") or {}).get("source")
+                    == "explicit_user"]
             
         except Exception as e:
             self.logger.error(f"[MEMORY] Error getting memories: {e}", exc_info=True)
@@ -1079,7 +1095,7 @@ class UserQueryHistoryService:
             # Get relevant memories
             self.logger.debug(f"[CONTEXT] Step 2: Fetching relevant memories (limit={memory_limit})...")
             memories = await self.get_user_memories(
-                db, user_id, min_importance=30, include_expired=False
+                db, user_id, min_importance=30, include_expired=False, explicit_only=True
             )
             context["memories"] = [
                 {
@@ -1130,63 +1146,12 @@ class UserQueryHistoryService:
         response_text: str,
         session_id: Optional[str] = None
     ):
-        """
-        Extract important information from query/response and save as memories.
-        
-        This is a simplified extraction. For production, you might want to use
-        LLM-based extraction or more sophisticated NLP.
-        
-        Args:
-            db: Database session
-            user_id: User ID
-            query_id: Query history ID
-            query_text: User's query
-            response_text: AI response
-            session_id: Session ID
-        """
-        try:
-            # Extract preferences (simplified - look for patterns)
-            preferences = []
-            
-            # Check for date range preferences
-            if "last 7 days" in query_text.lower() or "past week" in query_text.lower():
-                preferences.append({
-                    "type": "preference",
-                    "key": "preferred_date_range",
-                    "value": {"range": "7_days", "description": "User prefers 7-day date ranges"},
-                    "importance": 60
-                })
-            
-            # Check for common query patterns
-            if "track" in query_text.lower() or "follow" in query_text.lower():
-                preferences.append({
-                    "type": "pattern",
-                    "key": "query_pattern_tracking",
-                    "value": {"pattern": "tracking_queries", "count": 1},
-                    "importance": 40
-                })
-            
-            # Save extracted memories
-            for pref in preferences:
-                memory_type = MemoryType(pref["type"])
-                await self.save_memory(
-                    db=db,
-                    user_id=user_id,
-                    memory_type=memory_type,
-                    memory_key=pref["key"],
-                    memory_value=pref["value"],
-                    importance_score=pref["importance"],
-                    source_query_id=query_id,
-                    source_session_id=session_id
-                )
-            
-            if preferences:
-                self.logger.debug(f"[MEMORY] Extracted {len(preferences)} memories from query {query_id}")
-                
-        except Exception as e:
-            self.logger.warning(f"[MEMORY] Error extracting memories: {e}", exc_info=True)
-            # Don't fail the main operation if memory extraction fails
+        """Compatibility hook: implicit extraction is intentionally disabled.
 
+        Use save_memory through an explicit authenticated user action. Query
+        wording is task context, not a durable preference or personal profile.
+        """
+        return None
 
 # Global service instance
 user_query_history_service = UserQueryHistoryService()

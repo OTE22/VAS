@@ -43,6 +43,8 @@ def execute_read_only(name: str, arguments: Dict[str, Any], *,
     the whole turn collapse. Callers must have already run validate_call.
     """
     try:
+        from .tool_registry import validate_call
+        arguments = validate_call(name, arguments)
         if name == "list_cameras":
             return _list_cameras(db)
         if name == "resolve_person":
@@ -54,8 +56,11 @@ def execute_read_only(name: str, arguments: Dict[str, Any], *,
             return _list_documents(artifact_index)
         return {"error": f"{name} is not a read-only tool"}
     except Exception as e:
-        logger.warning("[TOOL] %s failed: %s", name, e)
-        return {"error": f"the {name} look-up failed"}
+        from .tool_registry import ToolCallRejected
+        logger.warning("[TOOL] lookup failed (%s)", type(e).__name__)
+        code = ("INVALID_ARGUMENTS" if isinstance(e, ToolCallRejected) else
+                "TIMEOUT" if isinstance(e, TimeoutError) else "DEPENDENCY_UNAVAILABLE")
+        return {"error": "The lookup could not be completed", "error_code": code}
 
 
 def _rows(db, sql: str, cap: Optional[int] = None) -> List[dict]:

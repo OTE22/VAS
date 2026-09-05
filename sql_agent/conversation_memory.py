@@ -243,6 +243,10 @@ class ConversationMemory:
                 # Default session-based
                 session_id = f"session_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
 
+        if not is_safe_session_id(session_id):
+            raise ValueError("Unsafe session id")
+        self.messages = []
+        self.working_context = migrate_working_context(None)
         self.current_session_id = session_id
         
         # Try to load existing session for user-based memory
@@ -333,6 +337,8 @@ class ConversationMemory:
         if not is_safe_session_id(session_id):
             logger.warning("[MEMORY] refused an unsafe session id")
             return False
+        self.messages = []
+        self.working_context = migrate_working_context(None)
         session_file = self.storage_dir / f"{session_id}.json"
 
         if not session_file.exists():
@@ -341,6 +347,9 @@ class ConversationMemory:
         try:
             with open(session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                from .memory_policy import expired_session
+                if not isinstance(data, dict) or expired_session(data):
+                    return False
                 self.messages = messages_from_dict(data.get("messages", []))
                 self.working_context = migrate_working_context(data.get("working_context"))
                 self.current_session_id = session_id
@@ -392,7 +401,7 @@ class ConversationMemory:
         Returns:
             True if saved successfully, False otherwise
         """
-        if not self.current_session_id:
+        if not self.current_session_id or not is_safe_session_id(self.current_session_id):
             return False
 
         session_file = self.storage_dir / f"{self.current_session_id}.json"
@@ -404,7 +413,8 @@ class ConversationMemory:
                     try:
                         with open(session_file, 'r', encoding='utf-8') as f:
                             loaded = json.load(f)
-                        if isinstance(loaded, dict):
+                        from .memory_policy import expired_session
+                        if isinstance(loaded, dict) and not expired_session(loaded):
                             existing = loaded
                     except Exception:
                         # A corrupt file must not block the conversation; it is
@@ -442,6 +452,7 @@ class ConversationMemory:
                     "created_at": (existing.get("created_at")
                                    or datetime.utcnow().isoformat()),
                     "message_count": len(self.messages),
+                    "updated_at": datetime.utcnow().isoformat(),
                     "messages": [message_to_dict(msg) for msg in self.messages],
                     "working_context": merged_context,
                 })
@@ -470,11 +481,18 @@ class ConversationMemory:
         object after a restart or an LRU eviction, and the file is authoritative.
         """
         if reload and self.current_session_id:
+            self.working_context = migrate_working_context(None)
+            if not is_safe_session_id(self.current_session_id):
+                return self.working_context
             session_file = self.storage_dir / f"{self.current_session_id}.json"
             if session_file.exists():
                 try:
                     with open(session_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
+                    from .memory_policy import expired_session
+                    if not isinstance(data, dict) or expired_session(data):
+                        self.messages = []
+                        return self.working_context
                     self.working_context = migrate_working_context(data.get("working_context"))
                 except Exception as e:
                     logger.warning("⚠️ Could not reload working context: %s", e)

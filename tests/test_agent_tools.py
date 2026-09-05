@@ -144,8 +144,11 @@ def test_look_ups_never_interpolate_user_input_into_sql():
     bug becomes an injection.
     """
     db = _FakeDb([{"name": "JOEY"}, {"name": "ALI"}])
-    tx.execute_read_only("resolve_person", {"name": "Robert'); DROP TABLE--"},
-                         db=db)
+    rejected = tx.execute_read_only("resolve_person", {"name": "Robert'); DROP TABLE--"},
+                                    db=db)
+    assert rejected["error_code"] == "INVALID_ARGUMENTS"
+    assert db.executed == []
+    tx.execute_read_only("resolve_person", {"name": "Robert O'Brien"}, db=db)
     assert db.executed, "no query ran"
     for sql in db.executed:
         assert "DROP" not in sql.upper()

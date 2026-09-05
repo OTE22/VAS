@@ -229,9 +229,14 @@ def _coerce(tool: str, key: str, value: Any, prop: dict) -> Any:
     if kind == "boolean":
         if isinstance(value, bool):
             return value
-        return str(value).strip().lower() in ("true", "1", "yes")
+        normalized = str(value).strip().lower()
+        if normalized not in ("true", "false", "1", "0", "yes", "no"):
+            raise ToolCallRejected(f"{tool}: {key} must be a boolean")
+        return normalized in ("true", "1", "yes")
     if kind == "string":
-        text = str(value).strip()
+        if not isinstance(value, str):
+            raise ToolCallRejected(f"{tool}: {key} must be a string")
+        text = value.strip()
         if len(text) > _MAX_STRING_ARG:
             raise ToolCallRejected(f"{tool}: {key} is too long")
         if _SQL_SMELL.search(text):
@@ -327,6 +332,8 @@ def parse_tool_response(raw: Any) -> Optional[Dict[str, Any]]:
         extra = getattr(raw, "additional_kwargs", None) or {}
         calls = extra.get("tool_calls")
     if calls:
+        if len(calls) != 1:
+            return {"name": "__multiple_calls__", "arguments": {}}
         first = calls[0]
         if isinstance(first, dict):
             function = first.get("function") or {}

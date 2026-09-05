@@ -406,6 +406,14 @@ class Settings(BaseSettings):
     # SQL agent isolation
     SQL_AGENT_MAX_CONCURRENT: int = Field(default=2)
     SQL_AGENT_TOTAL_TIMEOUT: int = Field(default=300)
+    SQL_AGENT_MAX_MODEL_CALLS: int = Field(default=24, ge=1, le=100,
+        description="Total model attempts per agent run, including retries and fallback")
+    SQL_AGENT_MAX_TOOL_CALLS: int = Field(default=12, ge=1, le=50,
+        description="Maximum selected tools per agent run")
+    SQL_AGENT_MAX_RUN_TOKENS: int = Field(default=65536, ge=1024, le=1000000,
+        description="Reported token budget; checked before each subsequent model/tool call")
+    SQL_AGENT_MEMORY_RETENTION_DAYS: int = Field(default=30, ge=1, le=365,
+        description="Maximum lifetime of explicit user memories and idle conversation context")
     SQL_AGENT_MAX_QUERY_CHARS: int = Field(
         default=8000,
         ge=256,

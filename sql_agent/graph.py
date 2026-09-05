@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, END, START
 from config import settings
 from .state import AgentState
 from .tools import SQLAgentTools
+from .run_control import traced_node
 
 logger = logging.getLogger(__name__)
 
@@ -41,23 +42,23 @@ def create_sql_agent(conversation_memory=None, db=None) -> StateGraph:
     workflow = StateGraph(AgentState)
 
     # Add nodes
-    workflow.add_node("ingest_query", tools.ingest_query)
-    workflow.add_node("detect_malicious_intent", tools.detect_malicious_intent)
-    workflow.add_node("plan_action", tools.plan_action)
-    workflow.add_node("check_schema", tools.check_schema)
-    workflow.add_node("retrieve_examples", tools.retrieve_examples)  # RAG retrieval
-    workflow.add_node("generate_sql", tools.generate_sql)
-    workflow.add_node("modify_sql", tools.modify_sql)
-    workflow.add_node("validate_and_fix_sql", tools.validate_and_fix_sql)
-    workflow.add_node("prepare_sql_for_execution", tools.prepare_sql_for_execution)
-    workflow.add_node("execute_sql", tools.execute_sql)
-    workflow.add_node("observe_and_replan", tools.observe_and_replan)
-    workflow.add_node("enrich_co_appearance", tools.enrich_co_appearance)
-    workflow.add_node("story_response", tools.generate_story_response)
-    workflow.add_node("learn_from_query", tools.learn_from_query)  # Learning step
-    workflow.add_node("chat_response", tools.handle_chat)
-    workflow.add_node("render_artifact", tools.render_artifact)
-    workflow.add_node("translate_artifact", tools.translate_artifact)
+    workflow.add_node("ingest_query", traced_node("ingest_query", tools.ingest_query))
+    workflow.add_node("detect_malicious_intent", traced_node("detect_malicious_intent", tools.detect_malicious_intent))
+    workflow.add_node("plan_action", traced_node("plan_action", tools.plan_action))
+    workflow.add_node("check_schema", traced_node("check_schema", tools.check_schema))
+    workflow.add_node("retrieve_examples", traced_node("retrieve_examples", tools.retrieve_examples))  # RAG retrieval
+    workflow.add_node("generate_sql", traced_node("generate_sql", tools.generate_sql))
+    workflow.add_node("modify_sql", traced_node("modify_sql", tools.modify_sql))
+    workflow.add_node("validate_and_fix_sql", traced_node("validate_and_fix_sql", tools.validate_and_fix_sql))
+    workflow.add_node("prepare_sql_for_execution", traced_node("prepare_sql_for_execution", tools.prepare_sql_for_execution))
+    workflow.add_node("execute_sql", traced_node("execute_sql", tools.execute_sql))
+    workflow.add_node("observe_and_replan", traced_node("observe_and_replan", tools.observe_and_replan))
+    workflow.add_node("enrich_co_appearance", traced_node("enrich_co_appearance", tools.enrich_co_appearance))
+    workflow.add_node("story_response", traced_node("story_response", tools.generate_story_response))
+    workflow.add_node("learn_from_query", traced_node("learn_from_query", tools.learn_from_query))  # Learning step
+    workflow.add_node("chat_response", traced_node("chat_response", tools.handle_chat))
+    workflow.add_node("render_artifact", traced_node("render_artifact", tools.render_artifact))
+    workflow.add_node("translate_artifact", traced_node("translate_artifact", tools.translate_artifact))
 
     # Define routing function
     def route_by_action(state: AgentState) -> str:

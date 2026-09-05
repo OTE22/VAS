@@ -128,6 +128,8 @@ class LLMCallRecord:
     error_type: Optional[str] = None
     attempts: int = 1
     fell_back_from: Optional[str] = None
+    run_id: Optional[str] = None
+    estimated_cost: float = 0.0
 
 
 class ProviderUnavailable(RuntimeError):

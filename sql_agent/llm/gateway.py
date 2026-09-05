@@ -91,6 +91,16 @@ class UsageLedger:
         self._lock = threading.Lock()
 
     def record(self, entry: LLMCallRecord) -> None:
+        from ..run_control import current_run, event
+        run = current_run.get()
+        entry.run_id = run.run_id if run else None
+        event("model_finished", provider=entry.provider, model=entry.model_id,
+              status="ok" if entry.succeeded else "error",
+              reason_code=entry.error_type, attempt=entry.attempts,
+              duration_ms=round(entry.duration_seconds * 1000, 2),
+              tokens=entry.usage.total_tokens, cost=entry.estimated_cost)
+        if run:
+            run.usage(entry.usage.total_tokens, entry.estimated_cost)
         with self._lock:
             self._records.append(entry)
             if len(self._records) > self._max_records:
@@ -215,13 +225,16 @@ class LLMGateway:
                     "[LLM] Task %s fell back from %s to %s",
                     task.value, preferred.model_id, spec.model_id,
                 )
-            return _InstrumentedModel(model, spec, task, self)
+            remaining = candidates[candidates.index(spec) + 1:]
+            return _InstrumentedModel(model, spec, task, self,
+                                      fallbacks=remaining, overrides=overrides)
 
         raise ProviderUnavailable(
             f"Every candidate for task={task.value} failed: {'; '.join(errors)}"
         )
 
-    def call_with_retries(self, spec: ModelSpec, task: TaskType, fn: Callable[[], Any]) -> Any:
+    def call_with_retries(self, spec: ModelSpec, task: TaskType, fn: Callable[[], Any],
+                          *, deadline=None, fell_back_from=None) -> Any:
         """Run `fn`, retrying transient failures with jittered backoff.
 
         Retries are bounded by a TOTAL budget, not just a count. With
@@ -235,10 +248,18 @@ class LLMGateway:
         started = time.monotonic()
         last_error: Optional[Exception] = None
         budget = self.total_budget_seconds(spec)
+        from ..run_control import current_run, RunStopped
+        run = current_run.get()
 
         for attempt in range(spec.max_retries + 1):
+            if run:
+                run.reserve("model")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ProviderUnavailable("MODEL_DEADLINE_EXCEEDED")
             try:
                 result = fn()
+            except RunStopped:
+                raise
             except Exception as e:
                 last_error = e
                 self.breaker.record_failure(key)
@@ -246,7 +267,16 @@ class LLMGateway:
                 if attempt < spec.max_retries:
                     delay = _backoff_delay(attempt)
                     # Only retry if another full attempt could still fit.
-                    if elapsed + delay + spec.timeout_seconds > budget:
+                    remaining = budget - elapsed
+                    if deadline is not None:
+                        remaining = min(remaining, deadline - time.monotonic())
+                    if run:
+                        remaining = min(remaining, run.remaining())
+                    # Invalid/authentication requests cannot be repaired by
+                    # repeating them against the same provider.
+                    status_code = getattr(getattr(e, "response", None), "status_code", None)
+                    permanent = status_code in (400, 401, 403, 404, 422)
+                    if permanent or delay + spec.timeout_seconds > remaining:
                         logger.warning(
                             "[LLM] %s attempt %d/%d failed (%s); no retry — "
                             "%.0fs elapsed of %.0fs budget",
@@ -264,6 +294,7 @@ class LLMGateway:
                     provider=spec.provider, model_id=spec.model_id, task=task.value,
                     duration_seconds=time.monotonic() - started,
                     succeeded=False, error_type=type(e).__name__, attempts=attempt + 1,
+                    fell_back_from=fell_back_from,
                 ))
                 raise
 
@@ -272,6 +303,8 @@ class LLMGateway:
                 provider=spec.provider, model_id=spec.model_id, task=task.value,
                 duration_seconds=time.monotonic() - started,
                 usage=_usage_from_response(result), attempts=attempt + 1,
+                estimated_cost=_usage_from_response(result).cost(spec),
+                fell_back_from=fell_back_from,
             ))
             return result
 
@@ -323,19 +356,49 @@ class _InstrumentedModel(_RunnableBase):
     nodes never learn this exists.
     """
 
-    def __init__(self, inner: Any, spec: ModelSpec, task: TaskType, gateway: LLMGateway):
+    def __init__(self, inner: Any, spec: ModelSpec, task: TaskType, gateway: LLMGateway,
+                 *, fallbacks=None, overrides=None):
         self._inner = inner
         self._spec = spec
         self._task = task
         self._gateway = gateway
+        self._fallbacks = tuple(fallbacks or ())
+        self._overrides = dict(overrides or {})
 
     # -- the two methods the agent actually calls -------------------------
 
     def invoke(self, input=None, config=None, **kwargs):
-        return self._gateway.call_with_retries(
-            self._spec, self._task,
-            lambda: self._inner.invoke(input, config=config, **kwargs),
-        )
+        from ..run_control import current_run, RunStopped, event
+        run = current_run.get()
+        budget = self._gateway.total_budget_seconds(self._spec)
+        if run:
+            run.check()
+            budget = min(budget, run.remaining())
+        deadline = time.monotonic() + budget
+        last_error = None
+        for index, spec in enumerate((self._spec,) + self._fallbacks):
+            if time.monotonic() >= deadline:
+                break
+            if index and self._gateway.breaker.is_open(f"{spec.provider}/{spec.model_id}"):
+                continue
+            try:
+                inner = (self._inner if index == 0 else
+                         self._gateway.providers[spec.provider].build(spec, **self._overrides))
+                if index:
+                    event("model_fallback", provider=spec.provider, model=spec.model_id,
+                          reason_code="PROVIDER_UNAVAILABLE")
+                return self._gateway.call_with_retries(
+                    spec, self._task,
+                    lambda: inner.invoke(input, config=config, **kwargs),
+                    deadline=deadline,
+                    fell_back_from=self._spec.model_id if index else None)
+            except RunStopped:
+                raise
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise ProviderUnavailable("MODEL_DEADLINE_EXCEEDED")
 
     def stream(self, input=None, config=None, **kwargs):
         yield from self._stream_instrumented(input, config, **kwargs)

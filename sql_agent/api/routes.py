@@ -358,10 +358,10 @@ def _register_request(request_id: str, user_id, cancel_event: threading.Event) -
         if evicted is not None:
             _ACTIVE_REQUESTS.pop(evicted, None)
         else:
-            dropped_id, _ = _ACTIVE_REQUESTS.popitem(last=False)
-            logger.warning(
-                "[SQL_AGENT_API] request registry full of RUNNING entries; "
-                "dropped %s — its cancel handle is gone", dropped_id)
+            raise HTTPException(status_code=503, detail={
+                "code": "AGENT_CAPACITY", "message": _BUSY_MESSAGE,
+                "retryable": True})
+    cancel_event.agent_request_id = request_id
     _ACTIVE_REQUESTS[request_id] = {
         "cancel_event": cancel_event,
         "user_id": user_id,
@@ -615,7 +615,10 @@ def _start_stream_thread(agent_instance, query: str,
             except RuntimeError:
                 pass
 
-    threading.Thread(target=_pump, name="sql-agent-stream", daemon=True).start()
+    from contextvars import copy_context
+    context = copy_context()
+    threading.Thread(target=context.run, args=(_pump,),
+                     name="sql-agent-stream", daemon=True).start()
     return q, worker_done
 
 # Holds strong references to fire-and-forget background tasks. The event loop only
@@ -899,13 +902,8 @@ async def _enrich_query_history(user_id, query_history_id, query, response, sess
     """
     try:
         async with db_manager.get_session() as db:
-            try:
-                await user_query_history_service.extract_and_save_memories(
-                    db=db, user_id=user_id, query_id=query_history_id,
-                    query_text=query, response_text=response, session_id=session_id,
-                )
-            except Exception as mem_err:
-                logger.warning(f"[HISTORY_ENRICH] memory extraction failed for query {query_history_id}: {mem_err}")
+            # Ordinary queries are not consent to a persistent preference.
+            # Explicit memory writes use the validated /memory endpoint.
             try:
                 embedding = await user_query_history_service.generate_query_embedding(query)
                 if embedding:
@@ -3633,17 +3631,17 @@ async def create_memory(
     try:
         from db_models import MemoryType
         
-        memory_type = MemoryType(request.get("memory_type", "fact"))
-        memory_key = request.get("memory_key")
-        memory_value = request.get("memory_value", {})
-        importance_score = request.get("importance_score", 50)
-        expires_at = request.get("expires_at")
-        
-        if not memory_key:
-            raise HTTPException(status_code=400, detail="memory_key is required")
-        
-        if expires_at:
-            expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+        from ..memory_policy import MemoryWrite, expiry
+        from pydantic import ValidationError
+        try:
+            parsed = MemoryWrite.model_validate(request)
+            expires_at = expiry(parsed.expires_at)
+        except (ValidationError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid memory fields or expiry")
+        memory_type = MemoryType(parsed.memory_type)
+        memory_key = parsed.memory_key
+        memory_value = parsed.memory_value
+        importance_score = parsed.importance_score
         
         async with db_manager.get_session() as db:
             memory = await user_query_history_service.save_memory(
