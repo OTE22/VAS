@@ -90,6 +90,29 @@ def test_model_observes_a_person_lookup_before_committing_to_a_query():
     assert "OBSERVATION FROM resolve_person" in model.prompts[-1]
 
 
+def test_database_lookup_cannot_be_smuggled_out_as_chat_answer():
+    model = _Model([
+        _Reply(name="list_cameras", arguments={}),
+        _Reply(name="answer_directly", arguments={
+            "answer": "There are 18 registered cameras.",
+            "uses_context": False,
+        }),
+        _Reply(name="query_database", arguments={
+            "question": "count all registered cameras",
+            "response_shape": "answer",
+        }),
+    ])
+
+    call, trace = _run(
+        model, user_text="how many cameras are registered?", max_steps=1)
+
+    assert call["name"] == "query_database"
+    assert trace[1]["rejected"] is True
+    assert (trace[1]["observation"]["reason_code"]
+            == "DATABASE_FACT_REQUIRES_QUERY")
+    assert "cannot present database facts" in model.prompts[-1]
+
+
 def test_invalid_tool_call_is_explained_and_the_model_can_correct_it():
     model = _Model([
         _Reply(name="query_database", arguments={}),

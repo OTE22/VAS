@@ -97,6 +97,15 @@ _NATIVE_DEMOTED_AT: Dict[str, float] = {}
 _NATIVE_REPROBE_SECONDS = 600.0
 _MAX_REJECTIONS = 2
 
+# These tools inspect live database catalog/identity data, but their results
+# are planning observations, not a second answer path.  A small model may see
+# ``list_cameras -> 18 rows`` and try to answer a database question through
+# ``answer_directly``.  That would bypass the normal SQL/result provenance
+# path (and the chat node does not receive the private observation anyway).
+# Reject that *tool transition*, independent of the user's wording, and let
+# the model correct itself to ``query_database`` or clarification.
+_DATABASE_PLANNING_TOOLS = frozenset(("list_cameras", "resolve_person"))
+
 
 _MAX_STORED_CANDIDATES = 5
 
@@ -219,6 +228,7 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
             + "\nDo not repeat them; continue the unfinished request.")))
 
     lookups = 0
+    lookup_tools = set()
     rejections = 0
     iterations = 0
     # One final action is allowed after the lookup budget, plus bounded
@@ -295,6 +305,26 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 "observation and choose a different step or final action.")))
             continue
 
+        if (name == "answer_directly"
+                and lookup_tools.intersection(_DATABASE_PLANNING_TOOLS)):
+            rejections += 1
+            trace.append({
+                "tool": name,
+                "rejected": True,
+                "observation": {"status": "rejected", "tool": name,
+                                "reason_code":
+                                    "DATABASE_FACT_REQUIRES_QUERY"},
+            })
+            if rejections > _MAX_REJECTIONS:
+                return None, trace
+            messages.append(HumanMessage(content=(
+                "That action was rejected because this turn inspected live "
+                "database planning data. answer_directly cannot present "
+                "database facts. Use query_database with the user's complete "
+                "question, or ask one focused clarification if it cannot be "
+                "answered safely.")))
+            continue
+
         if name in tr.ACTION_TOOLS:
             trace.append({"tool": name, "committed": True,
                           "signature": list(signature)})
@@ -320,6 +350,7 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
             name, arguments, db=db, dialogue_state=dialogue_state,
             artifact_index=artifact_index, identity_index=identity_index)
         lookups += 1
+        lookup_tools.add(name)
         entry = {"tool": name, "ok": "error" not in result,
                  "signature": list(signature),
                  "observation": {

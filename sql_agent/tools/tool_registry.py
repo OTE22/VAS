@@ -184,7 +184,9 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
               "questions about your abilities or what was already said. Set "
               "uses_context=true only when the reply depends on earlier "
               "conversation. Never assert a new person, camera, count, event, "
-              "or other database fact through this tool.",
+              "or other database fact through this tool, even if a read-only "
+              "planning tool exposed that fact. Database answers must use "
+              "query_database so authorization and provenance are retained.",
               {"answer": {"type": "string",
                           "description": "A concise proposed reply in the "
                                          "user's language; database claims are "
