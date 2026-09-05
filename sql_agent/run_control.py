@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
 import json
+import hashlib
 import logging
 import threading
 import time
@@ -38,6 +39,8 @@ class RunControl:
     tool_calls: int = 0
     cost: float = 0.0
     outcome: str = "completed"
+    events: list = field(default_factory=list)
+    evidence: list = field(default_factory=list)
     lock: object = field(default_factory=threading.Lock, repr=False)
 
     def remaining(self):
@@ -67,6 +70,15 @@ class RunControl:
             self.tokens += max(0, int(tokens))
             self.cost += max(0.0, float(cost))
 
+    def summary(self):
+        with self.lock:
+            return {"version": 1, "run_id": self.run_id, "prompt_version": PROMPT_VERSION,
+                    "status": self.outcome, "model_calls": self.model_calls,
+                    "tool_calls": self.tool_calls, "tokens": self.tokens,
+                    "estimated_cost_usd": self.cost,
+                    "duration_ms": round((time.monotonic() - self.started) * 1000, 2),
+                    "events": list(self.events), "evidence": list(self.evidence)}
+
 
 def event(kind, **fields):
     """Closed field allowlist: unknown fields (including raw content) are dropped."""
@@ -77,7 +89,13 @@ def event(kind, **fields):
     payload = {"event": kind, "run_id": run.run_id if run else None,
                "prompt_version": PROMPT_VERSION}
     payload.update({k: v for k, v in fields.items() if k in allowed})
+    if run:
+        with run.lock:
+            if len(run.events) < 200:
+                run.events.append(dict(payload))
     logger.info("%s", json.dumps(payload, ensure_ascii=True, default=str))
+    from .observability import observe_event
+    observe_event(kind, fields.get("status"), fields.get("reason_code"))
 
 
 def remaining_seconds(default):
@@ -100,6 +118,8 @@ def run_scope(cancel_event=None):
     run_id = getattr(cancel_event, "agent_request_id", None)
     run = RunControl(run_id or (inherited if inherited != "-" else uuid.uuid4().hex),
                      cancel_event=cancel_event)
+    if cancel_event is not None:
+        cancel_event.agent_run = run
     token = current_run.set(run)
     log_token = request_id_var.set(run.run_id)
     status = "completed"
@@ -107,13 +127,15 @@ def run_scope(cancel_event=None):
     try:
         yield run
     except BaseException as exc:
-        status = "cancelled" if isinstance(exc, GeneratorExit) else "failed"
+        status = "cancelled" if (isinstance(exc, GeneratorExit) or
+                                  getattr(exc, "code", None) == "CANCELLED") else "failed"
         event("run_error", status=status,
               reason_code=getattr(exc, "code", type(exc).__name__))
         raise
     finally:
         if status == "completed":
             status = run.outcome
+        run.outcome = status
         elapsed = time.monotonic() - run.started
         event("run_finished", status=status, duration_ms=round(elapsed * 1000, 2),
               tokens=run.tokens, cost=run.cost, count=run.model_calls)
@@ -156,10 +178,18 @@ def traced_node(name, fn):
             run.check()
         started = time.monotonic()
         event("node_started", node=name, status="running")
+        from .tools.contracts import policy
+        action_tool = {"execute_sql": "query_database", "render_artifact": "generate_document",
+                       "translate_artifact": "translate_document"}.get(name)
+        deadline_token = None
+        if action_tool:
+            deadline_token = operation_deadline.set(started + policy(action_tool).timeout_seconds)
         try:
             result = fn(state)
             if run:
                 run.check()
+            if action_tool and time.monotonic() - started > policy(action_tool).timeout_seconds:
+                raise RunStopped("TOOL_DEADLINE_EXCEEDED")
         except BaseException as exc:
             if run:
                 run.outcome = "cancelled" if getattr(exc, "code", None) == "CANCELLED" else "failed"
@@ -167,8 +197,26 @@ def traced_node(name, fn):
                   reason_code=getattr(exc, "code", type(exc).__name__),
                   duration_ms=round((time.monotonic() - started) * 1000, 2))
             raise
+        finally:
+            if deadline_token is not None:
+                operation_deadline.reset(deadline_token)
         if run and (result.get("turn_failed") or result.get("security_block_user")):
             run.outcome = "failed"
+        if result.get("security_block_user"):
+            event("guardrail_intervention", node=name, status="error", reason_code="SECURITY_DENIAL")
+        if action_tool:
+            event("tool_finished", tool=action_tool,
+                  status="error" if result.get("turn_failed") or result.get("error") else "ok",
+                  duration_ms=round((time.monotonic() - started) * 1000, 2))
+        if run and name == "execute_sql" and (result.get("query_result") or {}).get("success"):
+            query_result = result["query_result"]
+            sql = result.get("validated_sql") or state.get("validated_sql")
+            # Stored only in owner-authorized query history, never log SQL/rows.
+            with run.lock:
+                run.evidence.append({"kind": "database_result", "sql": sql,
+                    "row_count": query_result.get("row_count", len(query_result.get("rows") or [])),
+                    "result_sha256": hashlib.sha256(json.dumps(query_result.get("rows") or [],
+                        sort_keys=True, default=str).encode()).hexdigest()})
         event("node_finished", node=name,
               status="failed" if result.get("turn_failed") else "completed",
               duration_ms=round((time.monotonic() - started) * 1000, 2))

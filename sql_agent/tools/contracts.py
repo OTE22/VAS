@@ -14,6 +14,71 @@ class ToolResult(BaseModel):
                         "DEPENDENCY_UNAVAILABLE", "PERMISSION_DENIED"] | None = None
 
 
+class Camera(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    id: str | None = None
+    camera: str | None = None
+    location: str | None = None
+    active: bool | None = None
+
+
+class Cameras(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    cameras: list[Camera] = Field(max_length=25)
+    count: int = Field(default=0, ge=0, le=25)
+    note: str = ""
+
+
+class PersonResult(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    status: Literal["resolved", "ambiguous", "not_found"]
+    query: str = ""
+    matches: list[str] = Field(default_factory=list, max_length=5)
+    count: int = Field(default=0, ge=0, le=5)
+    identity: dict | None = None
+    candidates: list[dict] = Field(default_factory=list, max_length=5)
+    note: str = ""
+
+
+class TaskResult(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    task_state: dict
+    earlier_tasks: list[dict] = Field(default_factory=list, max_length=3)
+    context_version: int = Field(default=0, ge=0)
+    note: str = ""
+
+
+class Document(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    document_id: str | None = None
+    title: str | None = None
+    language: str | None = None
+    type: str | None = None
+
+
+class Documents(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    documents: list[Document] = Field(max_length=5)
+    count: int = Field(default=0, ge=0, le=5)
+    note: str = ""
+
+
+class ActionObservation(BaseModel):
+    """Graph-produced output, not a model's promise that an action succeeded."""
+    model_config = ConfigDict(extra="allow", strict=True)
+    action: str
+    success: bool
+    error_type: str | None = None
+    row_count: int | None = Field(default=None, ge=0)
+    artifact_id: str | None = None
+    result_id: int | None = None
+    retryable: bool = False
+
+
+OUTPUTS = {"list_cameras": Cameras, "resolve_person": PersonResult,
+           "get_task_state": TaskResult, "list_my_documents": Documents}
+
+
 @dataclass(frozen=True)
 class ToolPolicy:
     version: str = "1.0"
@@ -89,14 +154,16 @@ def validate_result(name, result):
     if name == "resolve_person" and result["status"] not in (
             "resolved", "ambiguous", "not_found"):
         return {"error": "Tool returned an invalid result", "error_code": "INVALID_RESULT"}
-    clean = sanitize_data(result)
-    ToolResult(status="ok", tool=name, data=clean)
-    return clean
+    try:
+        return OUTPUTS[name].model_validate(sanitize_data(result)).model_dump(exclude_none=True)
+    except (ValidationError, KeyError):
+        return {"error": "Tool returned an invalid result", "error_code": "INVALID_RESULT"}
 
 
 def manifest():
     from dataclasses import asdict
     from .tool_registry import tool_specs
     return [{**spec["function"], "policy": asdict(policy(spec["function"]["name"])),
-             "output_schema": ToolResult.model_json_schema()}
+             "output_schema": OUTPUTS.get(spec["function"]["name"], ActionObservation).model_json_schema(),
+             "error_schema": ToolResult.model_json_schema()}
             for spec in tool_specs()]

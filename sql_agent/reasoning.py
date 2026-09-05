@@ -508,6 +508,14 @@ def check_invariants(observation: Dict[str, Any]) -> Dict[str, Any]:
     somebody their report is ready when it does not exist. This defends
     against our own executors, not just against the model.
     """
+    from .tools.contracts import ActionObservation
+    from pydantic import ValidationError
+    try:
+        ActionObservation.model_validate(observation)
+    except ValidationError:
+        return {**observation, "success": False,
+                "error_type": ErrorType.INVARIANT_VIOLATION,
+                "retryable": False, "sanitized_detail": "Invalid action observation"}
     if not observation.get("success"):
         return observation
 

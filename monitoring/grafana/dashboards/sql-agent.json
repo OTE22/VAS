@@ -1,0 +1,21 @@
+{
+  "uid": "sql-agent-runs",
+  "title": "SQL Agent — Runs and Safety",
+  "tags": ["face-detector", "sql-agent"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Run outcomes / second", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+     "targets": [{"refId": "A", "expr": "sum by (status) (rate(fr_agent_run_duration_seconds_count[5m]))", "legendFormat": "{{status}}"}]},
+    {"id": 2, "type": "timeseries", "title": "Run p95 duration (seconds)", "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+     "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(fr_agent_run_duration_seconds_bucket[5m])))"}]},
+    {"id": 3, "type": "timeseries", "title": "Tool failures, retries, fallbacks and interventions", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+     "targets": [{"refId": "A", "expr": "sum by (event, status) (rate(fr_agent_events_total{event=~\"tool_finished|model_retry|model_fallback|guardrail_intervention\"}[5m]))", "legendFormat": "{{event}} {{status}}"}]},
+    {"id": 4, "type": "timeseries", "title": "Reported / estimated tokens per second", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+     "targets": [{"refId": "A", "expr": "sum(rate(fr_agent_run_tokens_total[5m]))"}]},
+    {"id": 5, "type": "stat", "title": "Estimated model cost (USD, selected range)", "description": "Zero for configured local/free models; not a billing reconciliation.", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 4},
+     "targets": [{"refId": "A", "expr": "sum(increase(fr_agent_run_cost_total[$__range]))"}]}
+  ]
+}

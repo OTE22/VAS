@@ -1,4 +1,25 @@
 groups:
+  - name: sql-agent
+    rules:
+      - alert: SQLAgentHighFailureRate
+        expr: |
+          sum(rate(fr_agent_run_duration_seconds_count{status="failed"}[10m]))
+          / clamp_min(sum(rate(fr_agent_run_duration_seconds_count[10m])), 0.001) > 0.2
+          and sum(increase(fr_agent_run_duration_seconds_count[10m])) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SQL agent is failing more than 20% of runs"
+          description: "Inspect run_id events, provider health, and deterministic guardrail errors. Do not widen permissions to recover."
+      - alert: SQLAgentFallbackSustained
+        expr: sum(increase(fr_agent_events_total{event="model_fallback"}[10m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SQL agent repeatedly falls back from its preferred model"
+          description: "Check provider availability and model installation. Fallback preserves data-sensitivity restrictions."
   # ==========================================================================
   # Availability
   # ==========================================================================

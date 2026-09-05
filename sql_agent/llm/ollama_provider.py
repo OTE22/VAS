@@ -70,6 +70,12 @@ class OllamaProvider(LLMProvider):
         # absent so no code path can accidentally build an unbounded client.
         client_kwargs = dict(overrides.pop("client_kwargs", None) or {})
         client_kwargs.setdefault("timeout", self._client_timeout(response_timeout))
+        from ..run_control import current_run, remaining_seconds
+        if current_run.get():
+            timeout = client_kwargs["timeout"]
+            read_timeout = getattr(timeout, "read", timeout)
+            bounded = remaining_seconds(min(response_timeout, float(read_timeout or response_timeout)))
+            client_kwargs["timeout"] = self._client_timeout(bounded)
 
         return ChatOllama(
             base_url=overrides.pop("base_url", self.base_url),

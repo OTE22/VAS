@@ -248,7 +248,7 @@ class LLMGateway:
         started = time.monotonic()
         last_error: Optional[Exception] = None
         budget = self.total_budget_seconds(spec)
-        from ..run_control import current_run, RunStopped
+        from ..run_control import current_run, RunStopped, event
         run = current_run.get()
 
         for attempt in range(spec.max_retries + 1):
@@ -284,11 +284,17 @@ class LLMGateway:
                             type(e).__name__, elapsed, budget,
                         )
                     else:
+                        event("model_retry", provider=spec.provider, model=spec.model_id,
+                              attempt=attempt + 1, reason_code="TRANSIENT_PROVIDER_ERROR")
                         logger.warning(
                             "[LLM] %s attempt %d/%d failed (%s); retrying in %.2fs",
                             key, attempt + 1, spec.max_retries + 1, type(e).__name__, delay,
                         )
-                        time.sleep(delay)
+                        if run and run.cancel_event is not None:
+                            run.cancel_event.wait(delay)
+                            run.check()
+                        else:
+                            time.sleep(delay)
                         continue
                 self.ledger.record(LLMCallRecord(
                     provider=spec.provider, model_id=spec.model_id, task=task.value,
@@ -379,7 +385,7 @@ class _InstrumentedModel(_RunnableBase):
         for index, spec in enumerate((self._spec,) + self._fallbacks):
             if time.monotonic() >= deadline:
                 break
-            if index and self._gateway.breaker.is_open(f"{spec.provider}/{spec.model_id}"):
+            if self._gateway.breaker.is_open(f"{spec.provider}/{spec.model_id}"):
                 continue
             try:
                 inner = (self._inner if index == 0 else
@@ -389,7 +395,7 @@ class _InstrumentedModel(_RunnableBase):
                           reason_code="PROVIDER_UNAVAILABLE")
                 return self._gateway.call_with_retries(
                     spec, self._task,
-                    lambda: inner.invoke(input, config=config, **kwargs),
+                    lambda: self._invoke_attempt(inner, spec, input, config, kwargs, deadline),
                     deadline=deadline,
                     fell_back_from=self._spec.model_id if index else None)
             except RunStopped:
@@ -400,6 +406,24 @@ class _InstrumentedModel(_RunnableBase):
             raise last_error
         raise ProviderUnavailable("MODEL_DEADLINE_EXCEEDED")
 
+    def _invoke_attempt(self, inner, spec, input, config, kwargs, deadline):
+        from ..run_control import operation_deadline
+        previous = operation_deadline.get()
+        token = operation_deadline.set(min(previous, deadline) if previous else deadline)
+        try:
+            return self._bounded_inner(inner, spec).invoke(input, config=config, **kwargs)
+        finally:
+            operation_deadline.reset(token)
+
+    def _bounded_inner(self, inner, spec):
+        from ..run_control import current_run, remaining_seconds
+        if current_run.get() and spec.provider == "ollama":
+            # New per-call client: never mutate another user's shared Runnable.
+            overrides = dict(self._overrides)
+            overrides["timeout"] = remaining_seconds(float(overrides.get("timeout", spec.timeout_seconds)))
+            return self._gateway.providers[spec.provider].build(spec, **overrides)
+        return inner
+
     def stream(self, input=None, config=None, **kwargs):
         yield from self._stream_instrumented(input, config, **kwargs)
 
@@ -408,22 +432,45 @@ class _InstrumentedModel(_RunnableBase):
         # would duplicate visible output. Failures are recorded instead.
         started = time.monotonic()
         key = f"{self._spec.provider}/{self._spec.model_id}"
+        from ..run_control import current_run, RunStopped
+        run = current_run.get()
+        if run:
+            run.reserve("model")
+        usage = TokenUsage()
+        output_bytes = 0
+        succeeded = False
+        error_type = None
         try:
-            for chunk in self._inner.stream(*args, **kwargs):
+            for chunk in self._bounded_inner(self._inner, self._spec).stream(*args, **kwargs):
+                measured = _usage_from_response(chunk)
+                output_bytes += len(str(getattr(chunk, "content", "")).encode("utf-8"))
+                usage.prompt_tokens = max(usage.prompt_tokens, measured.prompt_tokens)
+                usage.completion_tokens = max(usage.completion_tokens, measured.completion_tokens)
+                if run:
+                    run.check()
+                    from config import settings
+                    # A provider without stream usage still cannot emit forever.
+                    if run.tokens + max(usage.total_tokens, (output_bytes + 2) // 3) >= settings.SQL_AGENT_MAX_RUN_TOKENS:
+                        raise RunStopped("TOKEN_BUDGET_EXHAUSTED")
                 yield chunk
+            succeeded = True
+            self._gateway.breaker.record_success(key)
+        except RunStopped as e:
+            error_type = e.code
+            raise
         except Exception as e:
             self._gateway.breaker.record_failure(key)
+            error_type = type(e).__name__
+            raise
+        finally:
+            if not usage.completion_tokens:
+                usage.completion_tokens = (output_bytes + 2) // 3
             self._gateway.ledger.record(LLMCallRecord(
                 provider=self._spec.provider, model_id=self._spec.model_id,
                 task=self._task.value, duration_seconds=time.monotonic() - started,
-                succeeded=False, error_type=type(e).__name__,
+                succeeded=succeeded, error_type=error_type, usage=usage,
+                estimated_cost=usage.cost(self._spec),
             ))
-            raise
-        self._gateway.breaker.record_success(key)
-        self._gateway.ledger.record(LLMCallRecord(
-            provider=self._spec.provider, model_id=self._spec.model_id,
-            task=self._task.value, duration_seconds=time.monotonic() - started,
-        ))
 
     # -- everything else passes through -----------------------------------
 

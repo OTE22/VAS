@@ -605,7 +605,7 @@ def _start_stream_thread(agent_instance, query: str,
         except Exception as e:
             logger.error(f"[SQL_AGENT_API] Stream thread error: {e}", exc_info=True)
             try:
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": "The assistant could not complete this request.", "error_code": "AGENT_ERROR"})
             except RuntimeError:
                 pass  # loop closed
         finally:
@@ -1389,7 +1389,7 @@ async def sql_agent_query(
                     success=not result_dict.get("turn_failed"),
                     processing_time_ms=execution_time_ms,
                     metadata=metadata,
-                    request_label="query-sync",
+                    request_label=rest_request_id,
                 )
 
         body = {
@@ -1411,7 +1411,7 @@ async def sql_agent_query(
             status_code=500,
             content={
                 "success": False,
-                "error": f"Unexpected error: {str(e)}",
+                "error": "The assistant could not complete this request.",
                 "response": None
             }
         )
@@ -1962,7 +1962,7 @@ async def sql_agent_query_stream(
         # Exception targets are cleared when the except block exits. Capture
         # the safe text now so the async generator does not later raise
         # NameError while trying to report the original endpoint failure.
-        error_message = str(e)
+        error_message = "The assistant could not start this request. Please retry."
         async def error_stream():
             yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
@@ -2393,7 +2393,7 @@ async def sql_agent_websocket(websocket: WebSocket):
         try:
             await websocket.send_json({
                 "type": "error",
-                "message": f"WebSocket error: {str(e)}"
+                "message": "The assistant connection failed. Please reconnect."
             })
         except:
             pass
@@ -2500,7 +2500,7 @@ async def sql_agent_schema(
         }
     except Exception as e:
         logger.error(f"[SQL_AGENT_API] Schema retrieval error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.post("/session/new")
@@ -2752,6 +2752,13 @@ async def finalize_turn(agent_instance, *, user_id, query, response, session_id,
     resulting row id is recorded into working_context.last_result so a later
     "show me all of those" has a durable reference.
     """
+    metadata = dict(metadata or {})
+    entry = _ACTIVE_REQUESTS.get(request_label)
+    if entry and entry.get("user_id") == user_id:
+        run = getattr(entry.get("cancel_event"), "agent_run", None)
+        if run:
+            metadata["agent_run"] = run.summary()
+            metadata["agent_run"]["status"] = "completed" if success else "failed"
     saved_history_id = await await_persistence_despite_disconnect(
         persist_query_history(
             user_id=user_id, query=query, response=response,
@@ -3407,7 +3414,7 @@ async def get_query_by_id(
         raise
     except Exception as e:
         logger.error(f"[HISTORY] Error getting query: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.delete("/history/{query_id}")
@@ -3438,7 +3445,7 @@ async def delete_query_from_history(
         raise
     except Exception as e:
         logger.error(f"[HISTORY] Error deleting query: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 # =====================================================
@@ -3479,7 +3486,7 @@ async def list_user_sessions(
             }
     except Exception as e:
         logger.error(f"[SESSIONS] Error listing sessions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.post("/sessions/create")
@@ -3515,7 +3522,7 @@ async def create_session(
             }
     except Exception as e:
         logger.error(f"[SESSIONS] Error creating session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.put("/sessions/{session_id}")
@@ -3559,7 +3566,7 @@ async def update_session(
         raise
     except Exception as e:
         logger.error(f"[SESSIONS] Error updating session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 # =====================================================
@@ -3616,7 +3623,7 @@ async def get_user_memories(
         raise
     except Exception as e:
         logger.error(f"[MEMORY] Error getting memories: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.post("/memory")
@@ -3669,7 +3676,7 @@ async def create_memory(
         raise
     except Exception as e:
         logger.error(f"[MEMORY] Error creating memory: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.delete("/memory/{memory_id}")
@@ -3698,7 +3705,7 @@ async def delete_memory(
         raise
     except Exception as e:
         logger.error(f"[MEMORY] Error deleting memory: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")
 
 
 @router.get("/context")
@@ -3724,4 +3731,4 @@ async def get_query_context(
             }
     except Exception as e:
         logger.error(f"[CONTEXT] Error getting context: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="The operation could not be completed. Contact an administrator with the request ID.")

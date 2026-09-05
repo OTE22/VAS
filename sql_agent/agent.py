@@ -829,7 +829,7 @@ class SQLIntelligenceAgent:
                         yield {"type": "complete", "message": "Stream ended with error - no response generated", "step": "done", "success": False}
                 except Exception as e:
                     logger.error(f"[SQL_AGENT] Error getting final response via invoke: {str(e)}", exc_info=True)
-                    yield {"type": "error", "message": f"No response generated: {str(e)}", "step": "error"}
+                    yield {"type": "error", "message": "No response could be generated. Please retry.", "step": "error"}
                 
         except Exception as e:
             logger.error(f"[SQL_AGENT] Error in streaming query: {str(e)}", exc_info=True)

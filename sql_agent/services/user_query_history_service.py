@@ -20,6 +20,7 @@ from db_models import (
     UserConversationSession,
     UserConversationMemory,
     UserQueryEmbedding,
+    User,
     MemoryType
 )
 
@@ -472,6 +473,7 @@ class UserQueryHistoryService:
                                 memory_key=memory_key, memory_value=memory_value,
                                 importance_score=importance_score, expires_at=expires_at)
         expires_at = expiry(validated.expires_at)
+        memory_key = validated.memory_key
         memory_value = dict(validated.memory_value)
         memory_value["_provenance"] = {
             "source": "explicit_user", "version": 1,
@@ -479,6 +481,12 @@ class UserQueryHistoryService:
             "source_query_id": source_query_id, "source_session_id": source_session_id,
         }
         try:
+            # Serialize upserts per owner across workers without a schema change.
+            # Existing legacy duplicates are not silently deleted by this upgrade.
+            owner = (await db.execute(select(User.id).where(User.id == user_id)
+                                      .with_for_update())).scalar_one_or_none()
+            if owner is None:
+                raise ValueError("MEMORY_OWNER_NOT_FOUND")
             # Check if memory with same key exists
             existing = await db.execute(
                 select(UserConversationMemory).where(
@@ -495,6 +503,7 @@ class UserQueryHistoryService:
                 memory_value["_provenance"]["version"] = int(previous.get("version") or 0) + 1
                 # Update existing memory
                 existing_memory.memory_value = memory_value
+                existing_memory.memory_type = memory_type
                 existing_memory.importance_score = importance_score
                 existing_memory.last_accessed_at = datetime.utcnow()
                 existing_memory.access_count += 1
@@ -553,6 +562,9 @@ class UserQueryHistoryService:
                 query = query.where(UserConversationMemory.memory_type == memory_type)
             
             query = query.where(UserConversationMemory.importance_score >= min_importance)
+            if explicit_only:
+                query = query.where(UserConversationMemory.memory_value["_provenance"]["source"].astext
+                                    == "explicit_user")
             
             if not include_expired:
                 query = query.where(
@@ -741,7 +753,7 @@ class UserQueryHistoryService:
                 
                 self.logger.info(f"[EMBEDDING] ✅ Step 3: Embedding generated successfully")
                 self.logger.info(f"[EMBEDDING] 📊 Embedding stats: dimension={len(embedding_list)}, dtype={type(embedding_list[0]).__name__}")
-                self.logger.debug(f"[EMBEDDING] 🎯 Embedding sample (first 5 values): {embedding_list[:5]}")
+                self.logger.debug("[EMBEDDING] Vector values omitted from telemetry")
                 
                 return embedding_list
             except Exception as e:

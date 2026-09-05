@@ -302,6 +302,7 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
         signature = (name, json.dumps(arguments, sort_keys=True,
                                       ensure_ascii=False, default=str))
         if signature in seen:
+            event("guardrail_intervention", tool=name, status="error", reason_code="DUPLICATE_TOOL_CALL")
             rejections += 1
             trace.append({
                 "tool": name,
@@ -356,7 +357,6 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
                 "you have and choose one final action or clarification.")))
             continue
 
-        seen.add(signature)
         lookup_started = time.monotonic()
         deadline_token = operation_deadline.set(time.monotonic() + policy(name).timeout_seconds)
         try:
@@ -368,6 +368,8 @@ def run_tool_loop(llm, *, user_text: str, context_block: str,
         if time.monotonic() - lookup_started > policy(name).timeout_seconds:
             result = {"error": "Tool deadline exceeded", "error_code": "TIMEOUT"}
         result = validate_result(name, result)
+        if not result.get("error"):
+            seen.add(signature)
         event("tool_finished", tool=name, status="error" if result.get("error") else "ok",
               reason_code=result.get("error_code"),
               duration_ms=round((time.monotonic() - lookup_started) * 1000, 2))

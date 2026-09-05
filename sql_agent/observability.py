@@ -93,6 +93,18 @@ def observe_run(status, seconds, tokens, cost):
         pass
 
 
+def observe_event(kind, status=None, reason=None):
+    # No run ids, user ids, names or arbitrary error strings as metric labels.
+    kinds = {"run_started", "run_finished", "run_error", "node_started", "node_finished",
+             "tool_selected", "tool_finished", "model_finished", "model_retry",
+             "model_fallback", "retrieval_finished", "memory_read", "memory_write",
+             "guardrail_intervention"}
+    statuses = {"running", "ok", "error", "completed", "failed", "cancelled"}
+    if kind in kinds:
+        _inc("fr_agent_events_total", "Categorical agent execution events",
+             ("event", "status"), (kind, status if status in statuses else "none"))
+
+
 def observe_provenance(source: str) -> None:
     """Where modify_sql took its base query from: artifact | last_result | none.
 

@@ -56,6 +56,9 @@ def execute_read_only(name: str, arguments: Dict[str, Any], *,
             return _list_documents(artifact_index)
         return {"error": f"{name} is not a read-only tool"}
     except Exception as e:
+        from ..run_control import RunStopped
+        if isinstance(e, RunStopped):
+            raise
         from .tool_registry import ToolCallRejected
         logger.warning("[TOOL] lookup failed (%s)", type(e).__name__)
         code = ("INVALID_ARGUMENTS" if isinstance(e, ToolCallRejected) else

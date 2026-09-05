@@ -308,6 +308,9 @@ class ConversationMemory:
         if not self.current_session_id:
             return True
 
+        if not is_safe_session_id(self.current_session_id):
+            return False
+
         session_file = self.storage_dir / f"{self.current_session_id}.json"
         with _lock_for(session_file):
             try:
@@ -482,6 +485,7 @@ class ConversationMemory:
         """
         if reload and self.current_session_id:
             self.working_context = migrate_working_context(None)
+            self.messages = []
             if not is_safe_session_id(self.current_session_id):
                 return self.working_context
             session_file = self.storage_dir / f"{self.current_session_id}.json"
@@ -494,6 +498,7 @@ class ConversationMemory:
                         self.messages = []
                         return self.working_context
                     self.working_context = migrate_working_context(data.get("working_context"))
+                    self.messages = messages_from_dict(data.get("messages", []))
                 except Exception as e:
                     logger.warning("⚠️ Could not reload working context: %s", e)
         return self.working_context

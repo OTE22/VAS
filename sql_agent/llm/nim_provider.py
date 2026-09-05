@@ -50,8 +50,19 @@ def _to_openai_messages(messages: List[BaseMessage]) -> List[dict]:
             # Multimodal blocks are never produced by this agent; flatten
             # defensively instead of sending a shape NIM may reject.
             content = json.dumps(content)
-        converted.append({"role": _ROLE.get(message.type, "user"),
-                          "content": content})
+        item = {"role": _ROLE.get(message.type, "user"), "content": content}
+        if message.type == "tool":
+            item["tool_call_id"] = message.tool_call_id
+        if message.type == "ai":
+            calls = getattr(message, "tool_calls", None)
+            if calls:
+                item["tool_calls"] = [
+                    {"id": call["id"], "type": "function", "function": {
+                        "name": call["name"], "arguments": json.dumps(call["args"])}}
+                    for call in calls]
+            elif message.additional_kwargs.get("tool_calls"):
+                item["tool_calls"] = message.additional_kwargs["tool_calls"]
+        converted.append(item)
     return converted
 
 
