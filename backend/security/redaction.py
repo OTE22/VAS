@@ -26,6 +26,9 @@ SECRET_SETTINGS = frozenset({
     # not, a bearer key rendered into /api/settings or a config-guard report
     # is a leaked credential.
     "NVIDIA_NIM_API_KEY",
+    # Development-only Opik tracing credential (self-hosted, authenticated
+    # instances only). Same rule: a rendered key is a leaked key.
+    "OPIK_API_KEY",
     # Distributed to every camera, so the least-protected secret in the
     # deployment — and the one most likely to end up pasted into a support
     # ticket if a report ever renders it.

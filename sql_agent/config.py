@@ -86,6 +86,16 @@ class Config:
     nim_timeout: int = field(default_factory=lambda: settings.NVIDIA_NIM_TIMEOUT)
     is_production: bool = field(default_factory=lambda: settings.is_production)
 
+    # Development-only per-turn tracing (Opik). sql_agent/tracing.py refuses
+    # to attach a tracer in production regardless of these values, and the
+    # production config guard fails the boot. See the SQL_AGENT_OPIK_ENABLED
+    # block in the central config for the full policy.
+    opik_enabled: bool = field(default_factory=lambda: settings.SQL_AGENT_OPIK_ENABLED)
+    opik_url: str = field(default_factory=lambda: settings.OPIK_URL_OVERRIDE)
+    opik_api_key: str = field(default_factory=lambda: settings.OPIK_API_KEY)
+    opik_workspace: str = field(default_factory=lambda: settings.OPIK_WORKSPACE)
+    opik_project_name: str = field(default_factory=lambda: settings.OPIK_PROJECT_NAME)
+
     # PostgreSQL
     db_url: str = field(default_factory=lambda: settings.DATABASE_URL)
     db_host: str = field(default_factory=lambda: settings.DB_HOST)

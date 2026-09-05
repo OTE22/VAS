@@ -138,6 +138,10 @@ SECURITY_CRITICAL_KEYS = frozenset({
     # boot would apply it (at_boot lifts the apply-mode gate) — routing SQL
     # agent prompts to an external endpoint without touching the environment.
     "LLM_DEV_PROVIDER", "NVIDIA_NIM_API_KEY", "NVIDIA_NIM_BASE_URL",
+    # The development-only tracing switch, for the same reason: persisted to
+    # the settings table, the next boot would start shipping every prompt,
+    # answer and result row of the SQL agent to a tracing store.
+    "SQL_AGENT_OPIK_ENABLED", "OPIK_URL_OVERRIDE", "OPIK_API_KEY",
 })
 
 
@@ -435,6 +439,35 @@ def collect_violations(
                 "but a live credential on a box that must not call out is an "
                 "accident waiting for a caller.",
                 "Remove NVIDIA_NIM_API_KEY from the production environment.",
+                severity="warn",
+            ))
+
+        # The development-only Opik tracer records every turn in full — the
+        # user's question, the names it resolves, the SQL, the result rows —
+        # into a store outside the application's retention and audit rules.
+        # Same class as the hosted provider above, same answer: no
+        # acknowledgement escape. (sql_agent/tracing.py independently attaches
+        # nothing in production; this rule makes the misconfiguration stop
+        # the boot instead of being silently ignored. The `opik` package is a
+        # development extra, so a production image cannot honour the flag
+        # anyway.)
+        if _truthy(getattr(cfg, "SQL_AGENT_OPIK_ENABLED", False)):
+            add(ConfigViolation(
+                "SQL_AGENT_TRACING_IN_PRODUCTION", "SQL_AGENT_OPIK_ENABLED",
+                "SQL_AGENT_OPIK_ENABLED is on. Opik tracing copies every SQL "
+                "agent turn — user text, subjects' names, SQL and result rows "
+                "— to a tracing store outside the audit and retention rules, "
+                "and the SDK itself reports to external endpoints.",
+                "Unset SQL_AGENT_OPIK_ENABLED. Tracing is a development tool; "
+                "production observability is the Prometheus metrics.",
+            ))
+        if str(getattr(cfg, "OPIK_API_KEY", "") or "").strip():
+            add(ConfigViolation(
+                "SQL_AGENT_TRACING_API_KEY_PRESENT", "OPIK_API_KEY",
+                "A credential for a tracing service is configured in "
+                "production. Nothing uses it while SQL_AGENT_OPIK_ENABLED is "
+                "off, but it has no business on this box.",
+                "Remove OPIK_API_KEY from the production environment.",
                 severity="warn",
             ))
 

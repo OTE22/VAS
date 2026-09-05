@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "opik-mcp": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["opik-mcp"],
+      "env": {
+        "COMET_URL_OVERRIDE": "http://localhost:5173",
+        "OPIK_URL": "http://localhost:5173/api",
+        "OPIK_DEFAULT_PROJECT_NAME": "face-detector-sql-agent",
+        "OPIK_MCP_ANALYTICS_ENABLED": "false",
+        "OPIK_MCP_ANALYTICS_SOURCE": ""
+      }
+    }
+  }
+}

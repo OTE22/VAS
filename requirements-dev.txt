@@ -25,3 +25,17 @@ pytest==9.1.1
 # transitively — the same accident that made pyarrow and cryptography look
 # installed until the packages that dragged them in were removed.
 PyYAML
+
+# Per-turn tracing of the SQL agent into a SELF-HOSTED Opik (see
+# sql_agent/tracing.py and Docs/90_AGENT_ARCHITECTURE.md, "Tracing a turn
+# with Opik"). Development only, and deliberately not a runtime package:
+#   * it pulls in litellm, openai, boto3 stubs, tiktoken and tree-sitter
+#     (~20 packages) for a feature production never runs;
+#   * the SDK reports its own errors to a hard-coded Sentry DSN and sends
+#     usage analytics to Comet unless told not to — outbound traffic that
+#     has no place in an image documented as fully offline.
+# The production config guard refuses SQL_AGENT_OPIK_ENABLED (exit 78) and
+# sql_agent/tracing.py degrades to "no tracing" when this import is absent.
+# Resolved against the runtime set on 2026-09-05: adds new packages only,
+# changes no existing pin.
+opik==2.2.52

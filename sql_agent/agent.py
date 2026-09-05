@@ -15,6 +15,7 @@ from .knowledge_base import SQLKnowledgeBase
 from .conversation_memory import ConversationMemory
 from .graph import create_sql_agent
 from .run_control import controlled
+from . import tracing
 
 # Setup logger for SQL Agent
 logger = logging.getLogger(__name__)
@@ -36,20 +37,25 @@ class TurnCancelled(RuntimeError):
     """Raised after a cooperative cancellation reaches a graph boundary."""
 
 
-def _invoke_cancellable(graph, initial_state: dict, cancel_event=None) -> dict:
+def _invoke_cancellable(graph, initial_state: dict, cancel_event=None,
+                        config=None) -> dict:
     """Run the graph while making node boundaries cancellation points.
 
     LangGraph nodes and the local model are synchronous, so an in-progress
     model call cannot be interrupted safely. The returned state is committed
     only after the whole graph finishes; a cancelled turn is discarded.
+
+    ``config`` is the LangGraph run config — None, or the callbacks that
+    attach a development tracer (see ``tracing.graph_config``). None keeps
+    the call exactly as it was before tracing existed.
     """
     if cancel_event is None:
-        return graph.invoke(initial_state)
+        return graph.invoke(initial_state, config=config)
     if cancel_event.is_set():
         raise TurnCancelled("turn cancelled before execution")
 
     accumulated = dict(initial_state)
-    for chunk in graph.stream(initial_state):
+    for chunk in graph.stream(initial_state, config=config):
         if cancel_event.is_set():
             raise TurnCancelled("turn cancelled at graph boundary")
         for node_output in chunk.values():
@@ -96,6 +102,15 @@ class SQLIntelligenceAgent:
         self.db = DatabaseManager(config)
         self.agent = create_sql_agent(conversation_memory=self.conversation_memory,
                                       db=self.db)
+        # Node topology for the development tracer (drawn next to each trace
+        # in Opik). Computed once; None when the graph cannot describe itself,
+        # which costs only the picture.
+        self._graph_definition = None
+        if tracing.tracing_status(config) == tracing.READY:
+            try:
+                self._graph_definition = self.agent.get_graph(xray=True)
+            except Exception as exc:  # pragma: no cover - cosmetic only
+                logger.debug("[SQL_AGENT] graph definition unavailable: %s", exc)
         self.kb = SQLKnowledgeBase(config)
         # The caller's recent documents, refreshed by the API layer before
         # each turn. Ids, titles and languages only — never content, and never
@@ -479,6 +494,26 @@ class SQLIntelligenceAgent:
             logger.warning("[SQL_AGENT] dialogue-state commit skipped: %s", e)
 
     @controlled()
+    def _graph_config(self, entrypoint: str):
+        """LangGraph run config for one turn: the development tracer, or None.
+
+        None is the pre-tracing behaviour, so a production build — where the
+        tracer is refused and the SDK is not even installed — runs the graph
+        exactly as before. The conversation session id becomes the Opik
+        thread, so one conversation's turns sit together in the UI.
+        """
+        try:
+            return tracing.turn_config(
+                config,
+                thread_id=getattr(self.conversation_memory, "current_session_id", None),
+                user_id=getattr(self.conversation_memory, "user_id", None),
+                graph=self._graph_definition,
+                tags=[entrypoint],
+            )
+        except Exception as exc:  # observability must never fail a turn
+            logger.warning("[SQL_AGENT] tracer config skipped: %s", exc)
+            return None
+
     def query(self, user_input: str, learn: bool = True, cancel_event=None):
         """
         Process a user query and return a human-friendly response.
@@ -513,7 +548,8 @@ class SQLIntelligenceAgent:
                          len(initial_state.get("original_input") or ""))
             
             result = _invoke_cancellable(
-                self.agent, initial_state, cancel_event=cancel_event)
+                self.agent, initial_state, cancel_event=cancel_event,
+                config=self._graph_config("query"))
             
             logger.info(f"[SQL_AGENT] ✅ Agent workflow completed")
             logger.debug(f"[SQL_AGENT] Result keys: {list(result.keys())}")
@@ -628,7 +664,8 @@ class SQLIntelligenceAgent:
             # Process all chunks from the stream
             stream_ended_early = False
             try:
-                for chunk in self.agent.stream(initial_state):
+                for chunk in self.agent.stream(
+                        initial_state, config=self._graph_config("query_stream")):
                     # Cancellation (client disconnect / timeout): stop at the node
                     # boundary instead of running the remaining LLM calls.
                     if cancel_event is not None and cancel_event.is_set():
@@ -802,7 +839,9 @@ class SQLIntelligenceAgent:
                 # Last resort: use invoke to get the final response
                 logger.warning("[SQL_AGENT] Final response not found in stream, trying invoke as fallback")
                 try:
-                    result = self.agent.invoke(initial_state)
+                    result = self.agent.invoke(
+                        initial_state,
+                        config=self._graph_config("query_stream_fallback"))
                     final_response = result.get("final_response", "")
                     if final_response:
                         logger.info(f"[SQL_AGENT] Final response retrieved via invoke ({len(final_response)} chars)")
@@ -911,7 +950,8 @@ class SQLIntelligenceAgent:
             self.conversation_memory.get_conversation_context(limit=6)
 
         try:
-            return self.agent.invoke(initial_state)
+            return self.agent.invoke(
+                initial_state, config=self._graph_config("query_with_details"))
         except Exception as e:
             initial_state["error"] = str(e)
             return initial_state

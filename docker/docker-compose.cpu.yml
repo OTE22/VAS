@@ -154,6 +154,12 @@ services:
         INSTALL_DEV: "true"
     container_name: face_recognition_api
     user: "1000:1000"
+    # The development-only Opik tracer (below) posts to an Opik instance
+    # running on the WORKSTATION, not in this stack. host.docker.internal is
+    # not resolvable inside the container by default (verified 2026-09-05);
+    # host-gateway maps it to the host on Docker Desktop and Linux alike.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # This is the DEVELOPMENT stack: plain HTTP, permissive config, seeded
       # test credentials. The fail-closed preflight in
@@ -286,6 +292,18 @@ services:
       # Per-call ceiling sized for the 7B on CPU (a planner-sized prompt
       # measures >120s here). See SQL_AGENT_TOTAL_TIMEOUT above.
       OLLAMA_TIMEOUT: "300"
+      # Development-only per-turn tracing of the SQL agent into a SELF-HOSTED
+      # Opik (one trace per turn: every node, every prompt and answer, every
+      # tool proposal, timings). Off by default; enable in docker/.env:
+      #   SQL_AGENT_OPIK_ENABLED=true
+      # and run Opik on the workstation (git clone comet-ml/opik; .\opik.ps1
+      # or ./opik.sh; UI at http://localhost:5173). Claude Code reads the
+      # traces back through .mcp.json (opik-mcp). Production REFUSES this
+      # flag at boot (config guard, exit 78) and its image does not even
+      # carry the SDK — do not copy these lines to a prod file.
+      SQL_AGENT_OPIK_ENABLED: ${SQL_AGENT_OPIK_ENABLED:-false}
+      OPIK_URL_OVERRIDE: ${OPIK_URL_OVERRIDE:-http://host.docker.internal:5173/api/}
+      OPIK_PROJECT_NAME: ${OPIK_PROJECT_NAME:-face-detector-sql-agent}
       # Development-only hosted LLM for the SQL agent (NVIDIA NIM, free tier
       # at build.nvidia.com). Off by default; enable by setting BOTH in
       # docker/.env:

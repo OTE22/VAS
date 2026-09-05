@@ -1551,6 +1551,48 @@ class Settings(BaseSettings):
         description="Per-attempt timeout in seconds for NIM calls")
 
     # =====================================================
+    # Development-only LLM tracing (Opik) for the SQL Agent
+    # =====================================================
+    # Records one trace per agent turn — every node, every model call with
+    # its full prompt and answer, every tool proposal, timings — into a
+    # self-hosted Opik instance, and lets Claude Code read them back through
+    # the Opik MCP server (.mcp.json). See sql_agent/tracing.py and
+    # Docs/90_AGENT_ARCHITECTURE.md "Tracing a turn with Opik".
+    #
+    # DEVELOPMENT ONLY, fail-closed, the same three layers as LLM_DEV_PROVIDER:
+    #   1. sql_agent/tracing.py attaches no tracer when settings.is_production,
+    #   2. the config guard fails a production boot (exit 78) when
+    #      SQL_AGENT_OPIK_ENABLED is on — no acknowledgement escape,
+    #   3. the keys are SECURITY_CRITICAL, so they cannot be persisted through
+    #      the admin settings API and applied at a later boot.
+    # A trace contains the user's words, the names of people under
+    # surveillance, the SQL and its rows: the very content the audit rules
+    # keep out of logs. The hosted service (comet.com) is refused everywhere;
+    # only a self-hosted Opik is accepted, and the `opik` package itself is a
+    # development extra (requirements-dev.txt) that production images never
+    # carry.
+    SQL_AGENT_OPIK_ENABLED: bool = Field(
+        default=False,
+        description="Attach an Opik tracer to every SQL-agent turn. "
+                    "Development only — refused in production.")
+    OPIK_URL_OVERRIDE: str = Field(
+        default="http://host.docker.internal:5173/api/",
+        description="API URL of a SELF-HOSTED Opik. The container reaches the "
+                    "workstation's instance through host.docker.internal. "
+                    "comet.com is refused.")
+    OPIK_API_KEY: str = Field(
+        default="",
+        description="Only for an authenticated self-hosted Opik; the "
+                    "open-source instance needs none. Never logged; redacted "
+                    "wherever a setting is rendered.")
+    OPIK_WORKSPACE: str = Field(
+        default="default",
+        description="Open-source Opik has exactly one workspace, 'default'.")
+    OPIK_PROJECT_NAME: str = Field(
+        default="face-detector-sql-agent",
+        description="Opik project the agent's traces are filed under.")
+
+    # =====================================================
     # SQL Agent Configuration
     # =====================================================
     CHROMADB_PATH: str = Field(
