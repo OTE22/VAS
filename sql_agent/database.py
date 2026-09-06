@@ -33,7 +33,7 @@ class DatabaseManager:
                 "columns": [
                     {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "description": "Primary key"},
                     {"column_name": "detection_id", "data_type": "integer", "is_nullable": "NO", "description": "Foreign key to detections table"},
-                    {"column_name": "name", "data_type": "varchar", "is_nullable": "YES", "description": "Recognized person's name"},
+                    {"column_name": "name", "data_type": "varchar", "is_nullable": "YES", "description": "Recognized person's name. NULL, 'Unknown' and 'person_<n>' are PLACEHOLDERS for a face that was NOT identified: exclude them when counting, listing or comparing identified people (WHERE name IS NOT NULL AND LOWER(name) NOT LIKE 'unknown%' AND LOWER(name) NOT LIKE 'person_%')"},
                     {"column_name": "similarity", "data_type": "float", "is_nullable": "YES", "description": "Face recognition similarity score (0-1)"},
                     {"column_name": "bbox_x1", "data_type": "integer", "is_nullable": "YES", "description": "Bounding box top-left X coordinate"},
                     {"column_name": "bbox_y1", "data_type": "integer", "is_nullable": "YES", "description": "Bounding box top-left Y coordinate"},
@@ -89,7 +89,9 @@ class DatabaseManager:
             "detections.pipeline_id → pipelines.pipeline_id (varchar to varchar - Many detections belong to one camera/pipeline)",
             "Complete chain: faces → detections → pipelines allows tracking which camera detected which person",
             "COUNTS AND RANKINGS come from the detections table (COUNT(d.id) GROUP BY the camera), never from pipelines.total_detections, which is a lagging cache",
-            "IMPORTANT: detections.pipeline_id is VARCHAR and joins to pipelines.pipeline_id (VARCHAR), NOT pipelines.id (INTEGER)"
+            "IMPORTANT: detections.pipeline_id is VARCHAR and joins to pipelines.pipeline_id (VARCHAR), NOT pipelines.id (INTEGER)",
+            "ABSENCE ('never seen', 'no detections in the last N days', 'has not recorded') needs pipelines LEFT JOIN detections ... GROUP BY ... HAVING MAX(d.timestamp) IS NULL OR MAX(d.timestamp) < cutoff, or NOT EXISTS - an inner join can never return a camera with nothing",
+            "DURATIONS in minutes: EXTRACT(EPOCH FROM (later_ts - earlier_ts)) / 60. Never divide an interval by an interval, and reference only the columns the CTE or subquery actually exposes"
         ]
     }
 

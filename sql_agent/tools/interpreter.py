@@ -92,7 +92,7 @@ Reply with a single JSON object and nothing else:
  "shape": "answer",
  "about_previous": false}
 
-Pick ONE value for "wants" out of: data, chat, recall, clarify, translation, document, confirmation. Pick ONE for "shape" out of: report, answer. Never return a list of options or a value with "|" in it.
+Pick ONE value for "wants" out of: data, chat, recall, clarify, translation, document, confirmation. Pick ONE for "shape" out of: report, summary, answer. Never return a list of options or a value with "|" in it.
 
 What each "wants" means:
 - data: they want something out of the database - a report on someone, a count, when or where somebody was seen, who was at a camera, whether two people were seen together.
@@ -105,7 +105,8 @@ What each "wants" means:
 
 "shape" is how much they want back:
 - report: everything you have on someone or something ("track X", "a report on X", "تقرير عن X"). The "question" must then ask for ALL of it - every detection, with camera name and timestamp.
-- answer: one fact ("when was X last seen", "how many", "which camera").
+- summary: a computed figure, ranking or comparison ("which camera has the most", "how many per day", "the average gap", "what share", "which cameras never saw X"). The "question" must say what to compute and how to group or compare.
+- answer: one stored fact ("when was X last seen", "which camera saw X last").
 
 Rules:
 - Copy names EXACTLY as spelled in ENROLLED and CAMERAS. If the message names nobody on those lists, use [] and null - do not invent or correct names.
@@ -311,7 +312,7 @@ def validate(parsed: dict, *, names: List[str], cameras: List[str],
     shape = str(parsed.get("shape") or "").strip().lower()
     # Same echo problem as the label: "report|answer" means neither.
     shape = next((s for s in shape.replace(",", "|").split("|")
-                  if s.strip() in ("report", "answer")), "answer").strip()
+                  if s.strip() in ("report", "summary", "answer")), "answer").strip()
     about_previous = bool(parsed.get("about_previous"))
 
     # --- what the world permits ----------------------------------------
@@ -343,6 +344,12 @@ def validate(parsed: dict, *, names: List[str], cameras: List[str],
         # low-confidence reading and let the caller ask its own question.
         confidence = min(confidence, CONFIDENCE_FLOOR - 0.01)
         wants = DATA if question else CHAT
+    if wants in (CHAT, RECALL, CLARIFY) and (people or camera) and question             and not question_pending:
+        # The message names an enrolled person or a real camera and the
+        # model still read it as chat, recall or a question back: a named
+        # subject plus a question is a data request.
+        wants = DATA
+        confidence = max(confidence, CONFIDENCE_FLOOR)
     if (question_pending and people and wants in (CHAT, RECALL, CLARIFY)):
         # We asked which person was meant and the answer names one who is
         # enrolled: that IS the answer, and the suspended request resumes

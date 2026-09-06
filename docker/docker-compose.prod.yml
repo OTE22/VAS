@@ -281,6 +281,13 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: qwen2.5:1.5b
       OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
+      # The model that READS each chatbot turn; empty = OLLAMA_MODEL. Bind a
+      # larger local model here than the chat one (e.g. qwen2.5:7b) once it
+      # has been replayed live; the reading decides everything downstream.
+      OLLAMA_INTERPRETER_MODEL: ${OLLAMA_INTERPRETER_MODEL:-}
+      # Storing question->SQL pairs after execution: OFF until learning is
+      # gated on user feedback (a wrong answer learned once is served back).
+      SQL_AGENT_LEARN_FROM_QUERIES: ${SQL_AGENT_LEARN_FROM_QUERIES:-false}
       CHROMADB_PATH: /app/database/chromadb
     secrets:
       - jwt_secret

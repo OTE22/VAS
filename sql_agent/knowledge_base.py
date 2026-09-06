@@ -131,7 +131,7 @@ ORDER BY d.timestamp DESC""",
             "question": "Get average similarity score per person",
             "sql": """SELECT name, COUNT(*) as detection_count, AVG(similarity) as avg_similarity
 FROM faces
-WHERE name IS NOT NULL
+WHERE name IS NOT NULL AND name <> '' AND LOWER(name) NOT LIKE 'unknown%' AND LOWER(name) NOT LIKE 'person_%'
 GROUP BY name
 ORDER BY detection_count DESC""",
             "purpose": "Aggregate face recognition statistics by person"
@@ -145,8 +145,27 @@ ORDER BY timestamp DESC LIMIT 100""",
         },
         {
             "question": "Find unrecognized faces",
-            "sql": "SELECT id, detection_id, similarity FROM faces WHERE name IS NULL OR name = '' ORDER BY id DESC",
-            "purpose": "Find faces that were not recognized"
+            "sql": "SELECT id, detection_id, name, similarity FROM faces WHERE name IS NULL OR name = '' OR LOWER(name) LIKE 'unknown%' OR LOWER(name) LIKE 'person_%' ORDER BY id DESC",
+            "purpose": "Faces that were not recognized: NULL, empty, 'Unknown' and 'person_<n>' are all placeholders for an unidentified face"
+        },
+        {
+            "question": "What share of all face detections are unidentified? Give the percentage",
+            "sql": """SELECT COUNT(*) AS total_faces,
+    COUNT(*) FILTER (WHERE name IS NULL OR name = '' OR LOWER(name) LIKE 'unknown%' OR LOWER(name) LIKE 'person_%') AS unidentified_faces,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE name IS NULL OR name = '' OR LOWER(name) LIKE 'unknown%' OR LOWER(name) LIKE 'person_%') / NULLIF(COUNT(*), 0), 1) AS unidentified_percent
+FROM faces""",
+            "purpose": "Share of unidentified faces: counts the placeholder names (NULL, empty, 'Unknown', 'person_<n>') against all faces and returns one computed row"
+        },
+        {
+            "question": "For every identified person give the first time seen, the last time seen and how many different cameras saw them",
+            "sql": """SELECT f.name, MIN(d.timestamp) AS first_seen, MAX(d.timestamp) AS last_seen,
+    COUNT(DISTINCT d.pipeline_id) AS cameras_seen, COUNT(*) AS detections
+FROM faces f
+JOIN detections d ON f.detection_id = d.id
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
+GROUP BY f.name
+ORDER BY f.name""",
+            "purpose": "One row per IDENTIFIED person (placeholders excluded) with first/last sighting and distinct camera count"
         },
         {
             "question": "Get detection count by day",
@@ -184,10 +203,96 @@ LIMIT 50""",
     MAX(d.timestamp) as last_seen
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
-WHERE f.name IS NOT NULL
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 ORDER BY times_detected DESC""",
             "purpose": "Track detection frequency per person"
+        },
+        # The three shapes the capability check (2026-09-06) showed the SQL
+        # model cannot build unaided: an anti-join for "no detections in a
+        # period", a duration in minutes from a window function, and a
+        # same-camera time window around one person's detections.
+        {
+            "question": "Which cameras have not recorded any detection in the last 30 days",
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name,
+    MAX(d.timestamp) AS last_detection
+FROM pipelines p
+LEFT JOIN detections d ON d.pipeline_id = p.pipeline_id
+GROUP BY p.pipeline_id, p.location_name
+HAVING MAX(d.timestamp) IS NULL OR MAX(d.timestamp) < NOW() - INTERVAL '30 days'
+ORDER BY last_detection DESC NULLS LAST""",
+            "purpose": "Cameras with no detections in a period: a LEFT JOIN with HAVING, never an inner join, so cameras that have never detected anything are included"
+        },
+        {
+            "question": "What is the average gap in minutes between a person's consecutive detections",
+            "sql": """WITH ordered AS (
+    SELECT d.timestamp AS ts,
+        LAG(d.timestamp) OVER (ORDER BY d.timestamp) AS prev_ts
+    FROM faces f
+    JOIN detections d ON f.detection_id = d.id
+    WHERE LOWER(f.name) = LOWER('PERSON_NAME')
+)
+SELECT ROUND((AVG(EXTRACT(EPOCH FROM (ts - prev_ts)) / 60))::numeric, 1) AS avg_gap_minutes,
+    COUNT(*) AS gaps
+FROM ordered
+WHERE prev_ts IS NOT NULL""",
+            "purpose": "Average time between consecutive detections in minutes: EXTRACT(EPOCH FROM (later - earlier)) / 60, computed only from the CTE's own columns"
+        },
+        {
+            "question": "Who else was detected at the same camera within 10 minutes of a person's detections",
+            "sql": """SELECT DISTINCT f2.name AS other_person,
+    COALESCE(p.location_name, p.pipeline_id) AS camera_name,
+    d2.timestamp AS seen_at,
+    d1.timestamp AS subject_seen_at
+FROM faces f1
+JOIN detections d1 ON f1.detection_id = d1.id
+JOIN detections d2 ON d2.pipeline_id = d1.pipeline_id
+JOIN faces f2 ON f2.detection_id = d2.id
+JOIN pipelines p ON p.pipeline_id = d1.pipeline_id
+WHERE LOWER(f1.name) = LOWER('PERSON_NAME')
+    AND f2.name IS NOT NULL AND f2.name <> '' AND LOWER(f2.name) NOT LIKE 'unknown%' AND LOWER(f2.name) NOT LIKE 'person_%'
+    AND LOWER(f2.name) <> LOWER('PERSON_NAME')
+    AND LOWER(f2.name) NOT LIKE 'unknown%'
+    AND ABS(EXTRACT(EPOCH FROM (d2.timestamp - d1.timestamp))) <= 600
+ORDER BY subject_seen_at""",
+            "purpose": "Other identified people at the same camera within N minutes of each of one person's detections: a self-join on pipeline_id with an epoch window"
+        },
+        {
+            "question": "Which cameras have seen PERSON_NAME but have never seen OTHER_PERSON",
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name,
+    COUNT(*) AS person_name_detections
+FROM pipelines p
+JOIN detections d ON d.pipeline_id = p.pipeline_id
+JOIN faces f ON f.detection_id = d.id
+WHERE LOWER(f.name) LIKE LOWER('%PERSON_NAME%')
+  AND NOT EXISTS (
+      SELECT 1 FROM detections d2 JOIN faces f2 ON f2.detection_id = d2.id
+      WHERE d2.pipeline_id = p.pipeline_id AND LOWER(f2.name) LIKE LOWER('%OTHER_PERSON%'))
+GROUP BY p.pipeline_id, p.location_name
+ORDER BY person_name_detections DESC, camera_name""",
+            "purpose": "Cameras that saw one person and never the other: one row per camera (a set difference with NOT EXISTS), counting only the first person's detections there - never every detection at the camera"
+        },
+        {
+            "question": "On which day was PERSON_NAME detected the most times, and how many times that day",
+            "sql": """SELECT DATE(d.timestamp) AS day, COUNT(*) AS detections
+FROM faces f
+JOIN detections d ON f.detection_id = d.id
+WHERE LOWER(f.name) LIKE LOWER('%PERSON_NAME%')
+GROUP BY DATE(d.timestamp)
+ORDER BY detections DESC, day
+LIMIT 1""",
+            "purpose": "The busiest day for one person: one count per day across all cameras (grouping by camera as well would split the day's total), highest first"
+        },
+        {
+            "question": "How many different identified people has each camera seen, from most to fewest",
+            "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name,
+    COUNT(DISTINCT CASE WHEN f.name IS NOT NULL AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%' THEN f.name END) AS identified_people
+FROM pipelines p
+LEFT JOIN detections d ON d.pipeline_id = p.pipeline_id
+LEFT JOIN faces f ON f.detection_id = d.id
+GROUP BY p.pipeline_id, p.location_name
+ORDER BY identified_people DESC, camera_name""",
+            "purpose": "Distinct IDENTIFIED people per camera: NULL, 'Unknown' and 'person_<n>' are placeholders for unidentified faces and are never counted as people"
         },
         {
             "question": "Show high resource usage periods",
@@ -213,7 +318,7 @@ ORDER BY d.timestamp DESC""",
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE f.name IS NOT NULL
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY p.pipeline_id, p.location_name, f.name
 ORDER BY detection_count DESC""",
             "purpose": "List all cameras and the people they detected"
@@ -231,7 +336,7 @@ ORDER BY d.timestamp ASC""",
         {
             "question": "Which camera is most active",
             "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name, COUNT(d.id) as total_detections,
-    COUNT(DISTINCT f.name) as unique_people,
+    COUNT(DISTINCT CASE WHEN f.name IS NOT NULL AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%' THEN f.name END) as unique_people,
     MAX(d.timestamp) as last_detection
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
@@ -270,7 +375,7 @@ ORDER BY first_seen ASC""",
             "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) as camera_name,
     COUNT(DISTINCT DATE(d.timestamp)) as active_days,
     COUNT(d.id) as total_detections,
-    COUNT(DISTINCT f.name) as unique_people,
+    COUNT(DISTINCT CASE WHEN f.name IS NOT NULL AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%' THEN f.name END) as unique_people,
     ROUND(COUNT(d.id)::numeric / NULLIF(COUNT(DISTINCT DATE(d.timestamp)), 0), 2) as avg_detections_per_day
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
@@ -379,7 +484,7 @@ JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE LOWER(p.location_name) LIKE LOWER('%CAMERA_NAME%')
     AND DATE(d.timestamp) = CURRENT_DATE
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 ORDER BY detection_count DESC""",
             "purpose": "List all people detected at the named camera today"
@@ -404,7 +509,7 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE DATE(d.timestamp) = CURRENT_DATE
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 HAVING COUNT(DISTINCT p.pipeline_id) > 1
 ORDER BY cameras_visited DESC, total_detections DESC""",
@@ -416,7 +521,7 @@ ORDER BY cameras_visited DESC, total_detections DESC""",
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE f.name IS NOT NULL
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name, p.pipeline_id, p.location_name, f.similarity, d.timestamp
 HAVING d.timestamp = (SELECT MAX(d2.timestamp) FROM detections d2 JOIN faces f2 ON d2.id = f2.detection_id WHERE f2.name = f.name)
 ORDER BY last_seen DESC""",
@@ -428,11 +533,11 @@ ORDER BY last_seen DESC""",
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE LOWER(f.name) LIKE LOWER('%{name}%')
-    AND d.timestamp >= '{start_time}'::timestamp
-    AND d.timestamp <= '{end_time}'::timestamp
+WHERE LOWER(f.name) = LOWER('PERSON_NAME')
+    AND d.timestamp >= '2026-08-20 00:00:00'::timestamp
+    AND d.timestamp <= '2026-08-23 23:59:59'::timestamp
 ORDER BY d.timestamp ASC""",
-            "purpose": "Track person's movement within a specific time window"
+            "purpose": "Track a person's movement within a specific time window (substitute the person and the two timestamps the user gave)"
         },
         {
             "question": "Find suspicious activity multiple detections same person short time",
@@ -442,7 +547,7 @@ ORDER BY d.timestamp ASC""",
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE f.name IS NOT NULL
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
     AND d.timestamp > NOW() - INTERVAL '1 hour'
 GROUP BY f.name, p.pipeline_id, p.location_name
 HAVING COUNT(*) > 5 AND MAX(d.timestamp) - MIN(d.timestamp) < INTERVAL '10 minutes'
@@ -456,7 +561,7 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE d.timestamp > NOW() - INTERVAL '15 minutes'
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name, p.pipeline_id, p.location_name
 ORDER BY last_seen DESC""",
             "purpose": "List people detected in the last 15 minutes (currently present)"
@@ -469,7 +574,7 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE DATE(d.timestamp) = CURRENT_DATE
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 HAVING MAX(d.timestamp) > NOW() - INTERVAL '2 hours'
 ORDER BY last_detection DESC""",
@@ -518,8 +623,8 @@ JOIN pipelines p1 ON d1.pipeline_id = p1.pipeline_id
 JOIN faces f2 ON f2.detection_id != f1.detection_id
 JOIN detections d2 ON f2.detection_id = d2.id
 JOIN pipelines p2 ON d2.pipeline_id = p2.pipeline_id
-WHERE f1.name IS NOT NULL 
-    AND f2.name IS NOT NULL
+WHERE f1.name IS NOT NULL AND f1.name <> '' AND LOWER(f1.name) NOT LIKE 'unknown%' AND LOWER(f1.name) NOT LIKE 'person_%' 
+    AND f2.name IS NOT NULL AND f2.name <> '' AND LOWER(f2.name) NOT LIKE 'unknown%' AND LOWER(f2.name) NOT LIKE 'person_%'
     AND f1.name != f2.name
     AND p1.pipeline_id = p2.pipeline_id
     AND ABS(EXTRACT(EPOCH FROM (d1.timestamp - d2.timestamp))) <= 5
@@ -572,11 +677,11 @@ ORDER BY d1.timestamp DESC""",
             "question": "Find detections with missing data",
             "sql": """SELECT d.id, d.timestamp, d.pipeline_id, 
     COUNT(f.id) as face_count,
-    COUNT(CASE WHEN f.name IS NULL THEN 1 END) as unnamed_faces
+    COUNT(CASE WHEN f.name IS NULL OR f.name = '' OR LOWER(f.name) LIKE 'unknown%' OR LOWER(f.name) LIKE 'person_%' THEN 1 END) as unidentified_faces
 FROM detections d
 LEFT JOIN faces f ON d.id = f.detection_id
 GROUP BY d.id, d.timestamp, d.pipeline_id
-HAVING COUNT(f.id) = 0 OR COUNT(CASE WHEN f.name IS NULL THEN 1 END) > 0
+HAVING COUNT(f.id) = 0 OR COUNT(CASE WHEN f.name IS NULL OR f.name = '' OR LOWER(f.name) LIKE 'unknown%' OR LOWER(f.name) LIKE 'person_%' THEN 1 END) > 0
 ORDER BY d.timestamp DESC LIMIT 50""",
             "purpose": "Find detections with no faces or unrecognized faces"
         },
@@ -619,7 +724,7 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE DATE(d.timestamp) = CURRENT_DATE
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 HAVING COUNT(*) > 10
 ORDER BY detection_count DESC""",
@@ -629,7 +734,7 @@ ORDER BY detection_count DESC""",
             "question": "Show detections by hour of day",
             "sql": """SELECT EXTRACT(HOUR FROM d.timestamp) as hour_of_day,
     COUNT(*) as detection_count,
-    COUNT(DISTINCT f.name) as unique_people,
+    COUNT(DISTINCT CASE WHEN f.name IS NOT NULL AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%' THEN f.name END) as unique_people,
     COUNT(DISTINCT p.pipeline_id) as active_cameras
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
@@ -645,7 +750,7 @@ ORDER BY hour_of_day""",
     COUNT(d.id) as total_detections,
     COUNT(DISTINCT DATE(d.timestamp)) as active_days,
     ROUND(COUNT(d.id)::numeric / NULLIF(COUNT(DISTINCT DATE(d.timestamp)), 0), 2) as avg_per_day,
-    COUNT(DISTINCT f.name) as unique_people_detected
+    COUNT(DISTINCT CASE WHEN f.name IS NOT NULL AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%' THEN f.name END) as unique_people_detected
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
 LEFT JOIN faces f ON d.id = f.detection_id
@@ -664,7 +769,7 @@ JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE LOWER(p.pipeline_id) LIKE LOWER('%{camera}%')
     AND DATE(d.timestamp) = CURRENT_DATE
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 ORDER BY detection_count DESC""",
             "purpose": "List all people detected at a specific camera today"
@@ -701,7 +806,7 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE d.timestamp >= CURRENT_DATE - INTERVAL '7 days'
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 ORDER BY detection_count DESC
 LIMIT 20""",
@@ -725,8 +830,8 @@ ORDER BY d.timestamp ASC""",
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE f.name IS NOT NULL
-GROUP BY f.name, d.timestamp, p.pipeline_id
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
+GROUP BY f.name, d.timestamp, p.pipeline_id, p.location_name
 HAVING COUNT(*) > 1
 ORDER BY d.timestamp DESC""",
             "purpose": "Find duplicate face detections (same person, same time, same camera)"
@@ -751,10 +856,10 @@ ORDER BY hour DESC""",
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
-WHERE EXTRACT(HOUR FROM d.timestamp) BETWEEN {start_hour} AND {end_hour}
+WHERE EXTRACT(HOUR FROM d.timestamp) BETWEEN 8 AND 17
     AND DATE(d.timestamp) = CURRENT_DATE
 ORDER BY d.timestamp ASC""",
-            "purpose": "Find detections during specific hours of the day"
+            "purpose": "Find detections during specific hours of the day (substitute the hours the user gave; 8 AND 17 is an example)"
         },
         {
             "question": "Show person's first and last detection today",
@@ -789,7 +894,7 @@ ORDER BY d.timestamp DESC""",
 FROM pipelines p
 JOIN detections d ON p.pipeline_id = d.pipeline_id
 WHERE DATE(d.timestamp) = CURRENT_DATE
-GROUP BY p.pipeline_id, EXTRACT(HOUR FROM d.timestamp)
+GROUP BY p.pipeline_id, p.location_name, EXTRACT(HOUR FROM d.timestamp)
 ORDER BY p.pipeline_id, hour""",
             "purpose": "Create hourly activity heatmap for each camera"
         },
@@ -800,7 +905,7 @@ FROM faces f
 JOIN detections d ON f.detection_id = d.id
 JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE DATE(d.timestamp) = CURRENT_DATE
-    AND f.name IS NOT NULL
+    AND f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 HAVING COUNT(DISTINCT p.pipeline_id) = (SELECT COUNT(*) FROM pipelines WHERE is_active = 1)
 ORDER BY cameras_visited DESC""",
@@ -815,7 +920,7 @@ ORDER BY cameras_visited DESC""",
     MIN(d.timestamp) as first_seen, MAX(d.timestamp) as last_seen
 FROM faces f
 JOIN detections d ON f.detection_id = d.id
-WHERE f.name IS NOT NULL
+WHERE f.name IS NOT NULL AND f.name <> '' AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%'
 GROUP BY f.name
 ORDER BY total_detections DESC""",
             "purpose": "Calculate detection frequency statistics per person"

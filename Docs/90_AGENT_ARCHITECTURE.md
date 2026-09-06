@@ -128,6 +128,34 @@ appear in the message ("thank you" after two data turns, read as data with
 the held camera copied in) — is put one closed question: does the message
 ask for anything at all? NO makes it chat.
 
+**The reader has its own model task.** `TaskType.INTERPRETATION` is bound
+by `OLLAMA_INTERPRETER_MODEL` (production) or `NVIDIA_NIM_INTERPRETER_MODEL`
+(development); unset, the reader is the chat model. Set it to a larger
+model than the chat one — the reading decides everything downstream and a
+small reader flips on short follow-ups — and replay the live scripts
+against it before trusting it. Hosted readers are never registered in
+production (`tests/test_interpreter_model_task.py`).
+
+`shape` has three values: `report` (every row about a subject), `summary`
+(a computed figure, ranking or comparison — the SQL prompt tells the
+generator to aggregate) and `answer` (one stored fact). The every-row
+instruction used to fire on "which camera has the most" too, so counts came
+back as row dumps. The tool loop carries the same three values in
+`query_database.response_shape`; with only `answer|report` there, "which
+camera has recorded the most detections" was answered from a 174-row join
+preview (161 claimed, 50 true). The report instruction says what a report
+IS - every row the request is about, never a `LIMIT 1` - and no longer
+"one row per detection": with that wording, "which cameras have seen IRON
+MAN but never JOEY" and "which cameras have no detection in 30 days" came
+back as per-detection dumps (260 rows; the 0.97-similar absence seed was
+ignored) even though the right query is one row per camera. A report of a
+set is one row per member, computed as the condition needs. The tool
+schema's `report` now reads "the detection events themselves". A
+`uses_context` claim on a message is believed only when the planner
+candidates hold something to refer to (a result, a query, a document); on
+a fresh session the failure planner had read a first question as a
+modification of a previous one.
+
 **What the live runs showed about the model.** On the dev reader
 (llama-3.2-11b via NIM) the short follow-ups flip between readings from
 run to run: the same "make it Arabic" was read as translation in one round
@@ -233,6 +261,17 @@ reference all reached the user as if they were the answer.
    not only against the model.
 3. **`reasoning.decide_next`** — a fixed table over the error taxonomy:
    ANSWER, REPLAN, CLARIFY or RETRY_EXECUTION, subject to the budgets.
+   A REPLAN after the database or the validator rejected the QUERY TEXT
+   (`SQL_INVALID`, `SQL_GENERATION_ERROR`,
+   `SQL_EXECUTION_ERROR_CORRECTABLE`) is a regeneration of the same
+   `query_database` plan with the driver's complaint as the correction
+   hint, decided in Python without a model call: the plan was right and
+   the SQL was wrong. Asking the model to "choose a DIFFERENT tool" there
+   made it reach for `modify_active_query`, which had no previous query,
+   and a correctable "missing FROM-clause entry" ended as "I don't have a
+   previous query to adjust" (Opik 01a0757d-083f). `failed_sql_hashes`
+   still refuses an identical rewrite, and `SQL_AGENT_MAX_REPLANS` bounds
+   the attempts.
 4. On REPLAN only, **one** model call, whose proposal goes through
    `validate_call` and `action_to_planned` — the same validation as any other
    action.
@@ -247,6 +286,74 @@ Three independent, deterministic bounds, all settings:
 
 Termination is arithmetic: the routing functions read the counters, and only
 `observe_and_replan` increments them. A confused model cannot loop.
+
+**Two repeats are refused structurally (2026-09-06, from Opik traces of
+the capability check).** After a successful action the turn asks the model
+whether the whole request is done; when it said no and the loop then
+committed the SAME action — identical signature to one recorded as done
+this turn — the query ran three times until the 300 s run deadline. That
+commit is now refused (`repeat_refused`) and the turn answers from what it
+already produced. And a regenerated SQL candidate equal, up to whitespace
+and case, to one that already failed this turn (`failed_sql_hashes`) is
+refused before validation, with the earlier reason restated: the action
+fingerprint hashes the question, not the SQL, so a repair reproducing the
+rejected query had counted as a new attempt.
+
+**What the ten-question capability check taught (2026-09-06, Opik traces).**
+Besides the two repeat refusals above: the execute_sql branch of the
+stream generator yielded a terminal `error` on any SQL execution failure,
+so the route closed the stream and cancelled the graph mid-repair — it now
+reports a status ("repairing") and the graph's own end narrates a real
+failure. The knowledge base had learned the test account's wrong answers
+(17 purged); a `summary` reading that returned more than
+`_SUMMARY_MAX_ROWS` rows is a dump and is not learned. The schema text now
+says `NULL`/`Unknown`/`person_<n>` are placeholders, not identified people
+(every per-camera count was one too high). A summary of at most
+`_SUMMARY_DIRECT_MAX_ROWS` rows is read out as figures, never narrated as
+events (one aggregate row had become "1 detection event, 100%"). And a
+tool-call `question` that is a strict prefix of the user's message is the
+message cut short (the model's JSON broke at an apostrophe), so the full
+message is used. The report narrator was told to "calculate real
+statistics" from a preview of the rows and answered "260 events" for a
+person with 8 detections; it may now state only a count of the rows shown
+or a figure a row contains, and says the total is unknown for a slice.
+Every seed that counts or lists people excludes the placeholders
+(`NULL`, empty, `Unknown`, `person_<n>`): the seeds outrank the schema
+note for a similar question, and four of them counted `DISTINCT f.name`,
+so "identified people per camera" was one too high in every pass, "share
+of unidentified faces" was 0.0% (only NULL/empty counted, against 93.3%
+true), and "for every identified person" listed Unknown as a person.
+Seeds carry the SQL shapes the model could not build unaided: an
+absence anti-join ("no detections in the last N days"), a duration in
+minutes from `LAG` via `EXTRACT(EPOCH …)/60`, a same-camera window
+around one person's detections, identified people per camera, the
+unidentified share, and first/last/cameras per identified person; the schema text states both Postgres
+facts (an inner join can never return a camera with nothing; never divide
+interval by interval).
+
+**Pass 3 of the capability check (2026-09-06) added five more rules, all
+structural.** (1) A query that SUCCEEDED this turn is the data part of the
+answer: a second `query_database` in the same turn is refused as a repeat
+and the turn answers with what it has — the first query had returned the
+exact one-row answer ("MAD5AL AMEN (1), 50"), "is the whole request done?"
+said no, and a second, different query dumped 165 rows. (2) The report
+narrator receives counts computed in Python from ALL returned rows
+(`_row_facts`: rows per camera/person/day), so it never counts a 100-row
+preview or extrapolates. When the query's AST groups or aggregates
+(`_sql_aggregates`), each row is a computed group, so the facts SUM the
+integer columns per key instead of counting rows: "IRON MAN per day, split
+by camera" had two rows for one day with 1 and 2 detections, and counting
+rows told the narrator "2" against 3. (3) Learning from queries is OFF by default
+(`SQL_AGENT_LEARN_FROM_QUERIES`): the bot learned its own wrong answers and
+they outranked the corrected schema for the same question; it stays off
+until learning is gated on a positive signal from the user. (4) When the
+tool loop commits "answer directly" or "ask the user" for a message that
+names an enrolled person or a real camera, the commit is refused on that
+fact and the turn is read again; a reading of chat/recall/clarify that
+carries a named subject and a question is promoted to data; and a plain
+"answer directly" gets the reading as a second opinion, which wins when it
+says data with confidence. (5) One computed row (no time-and-place
+columns) is read out as a fact whatever shape was asked for.
 
 **Re-planning is corrective, not repetitive.** Each attempt is fingerprinted
 (`action` + normalized arguments); a proposal matching one that already failed
@@ -931,9 +1038,9 @@ one is a pattern to recognise the next time a trace looks like it.
   recorded the most detections", "how many identities", "detections per
   day". Each came back as a raw row dump, and the narrator then *counted
   rows from a 100-row preview* — the "overall" top-5 showed 14 for a camera
-  that the "last month" answer credited with 20. Not fixed here: the
-  instruction exists for a real reason (a tracking report was once answered
-  with a `LIMIT 1`), and the right shape vocabulary is a design decision.
+  that the "last month" answer credited with 20. Closed since: `summary`
+  is a third shape (see "The reading"), and the report instruction
+  describes a set as one row per member rather than one row per detection.
 - **A reference misread as a name.** "who was seen most often on that top
   camera?" was answered with `resolve_person(name="who was seen most
   often")` → not found → *"please provide the name of the person"*. The

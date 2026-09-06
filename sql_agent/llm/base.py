@@ -46,6 +46,11 @@ class TaskType(str, Enum):
     SQL_MODIFICATION = "sql_modification"
     SQL_REPAIR = "sql_repair"
     EXPLANATION = "explanation"
+    # Reading what the user wants (sql_agent/tools/interpreter.py). Its own
+    # task so a deployment can bind a stronger reader than the chat model:
+    # the reading is model-bound, and a small reader flips on short
+    # follow-ups. Falls back to the general model when none is configured.
+    INTERPRETATION = "interpretation"
 
 
 class DataSensitivity(str, Enum):

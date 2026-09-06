@@ -736,23 +736,28 @@ class SQLIntelligenceAgent:
                                 # this event interpolated the raw string, so
                                 # the same failure was sanitized over one
                                 # transport and verbatim over the other.
-                                from .tools.agent_tools import SQLAgentTools
-
+                                # NOT a terminal event. The route closes the
+                                # stream on `error` and cancels the graph -
+                                # while observe_and_replan, which has just
+                                # decided to REPAIR the query, is mid-call.
+                                # Every correctable SQL error in the capability
+                                # check (GROUP BY, interval / interval) died
+                                # this way in 15-40 s with the closed failure
+                                # phrase. The graph's own end narrates a real
+                                # failure (turn_failed) when the repairs are
+                                # spent; here the client only learns that a
+                                # repair is under way.
                                 detail = str(result.get("error") or "")
-                                logger.warning("[STREAM] query failed "
-                                               "(detail_chars=%d)", len(detail))
+                                logger.info("[STREAM] query failed; the graph "
+                                            "decides whether to repair "
+                                            "(detail_chars=%d)", len(detail))
+                                arabic = (node_output.get("response_language")
+                                          or "en") == "ar"
                                 yield {
-                                    "type": "error",
-                                    "message": SQLAgentTools._failure_narration({
-                                        "query_result": result,
-                                        "generated_sql": node_output.get(
-                                            "generated_sql"),
-                                        "planned_action": {
-                                            "action": "query_database"},
-                                        "response_language": (
-                                            node_output.get("response_language")
-                                            or "en"),
-                                    }),
+                                    "type": "status",
+                                    "message": ("الاستعلام لم ينجح؛ جارٍ تصحيحه..."
+                                                if arabic else
+                                                "The query failed; repairing it..."),
                                     "step": "execute"}
                         elif node_name == "story_response":
                             # When story_response node runs, it streams word-by-word via callback

@@ -134,10 +134,16 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
                             "description": "English paraphrase in plain words; "
                                            "names and literal values unchanged"},
                "response_shape": {
-                   "type": "string", "enum": ["answer", "report"],
-                   "description": "Use answer for one focused fact; use report "
-                                  "when the user wants all relevant detections, "
-                                  "cameras, and timestamps"},
+                   "type": "string", "enum": ["answer", "summary", "report"],
+                   "description": "Use answer for one stored fact (when was X "
+                                  "last seen); use summary for a computed "
+                                  "figure, ranking or comparison (which camera "
+                                  "has the most, how many per day, the average "
+                                  "gap, what share, which cameras never saw X) "
+                                  "- the query then aggregates; use report when "
+                                  "the user wants the detection events "
+                                  "themselves: every sighting of a subject "
+                                  "with its camera and timestamp"},
                "uses_context": {
                    "type": "boolean",
                    "description": "True only when the current message refers "

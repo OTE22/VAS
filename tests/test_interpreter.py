@@ -426,3 +426,238 @@ def test_a_misspelled_name_still_counts_as_naming_the_person():
                                ["user: i mean jeoy or similar to this name"])
     assert not _echoes_a_user_turn("Which camera do you mean?",
                                    ["user: i mean jeoy or similar to this name"])
+
+
+def test_a_computed_figure_is_a_summary_not_a_report():
+    """The every-row instruction fired on "which camera has the most", so
+    counts came back as row dumps. A summary aggregates."""
+    reading = _read({"wants": "data", "shape": "summary", "confidence": 0.9,
+                     "question": "count detections per camera, most first"},
+                    text="which camera has recorded the most detections")
+    assert reading.shape == "summary"
+    reading = _read({"wants": "data", "shape": "report|summary|answer",
+                     "question": "all detections of JOEY", "people": ["JOEY"]})
+    assert reading.shape == "report"
+
+
+def test_the_tool_loop_can_ask_for_a_summary_too():
+    """Q1 of the capability check ("which camera has the most detections")
+    went through the tool loop, whose response_shape knew only answer and
+    report, so no aggregation instruction reached SQL generation and the
+    narrator counted a 174-row join preview (161 vs the true 50)."""
+    from sql_agent.tools import tool_registry as tr
+
+    spec = next(s for s in tr.tool_specs()
+                if (s.get("function") or s).get("name") == "query_database")
+    params = (spec.get("function") or spec)["parameters"]["properties"]
+    assert params["response_shape"]["enum"] == ["answer", "summary", "report"]
+
+
+def test_an_action_already_done_this_turn_is_not_done_again():
+    """Q2 of the capability check ran the identical 165-row query three
+    times: after each success the model said the request was not complete
+    and re-committed the same call. The finished action's signature was
+    recorded for exactly this check."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    tools = T.__new__(T)
+    call = {"name": "query_database", "arguments": {"question": "people per camera"}}
+    signature = ["query_database", '{"question": "people per camera"}']
+    trace = [{"tool": "query_database", "committed": True, "signature": signature}]
+    state = {"observations": [{"sequence": 1, "tool": "query_database",
+                               "status": "ok", "summary": "rows=165",
+                               "signature": signature}]}
+    assert tools._apply_model_tool_call(state, call, trace, {}) is None
+    assert state["repeat_refused"] is True
+
+    fresh = {"observations": []}
+    assert tools._apply_model_tool_call(fresh, call, trace, {}) is not None
+    assert fresh["committed_signature"] == signature
+
+
+def test_a_summary_that_returned_a_dump_is_not_learned():
+    """"Which camera has recorded the most detections" kept returning 174
+    rows in the capability check because its own first wrong answer had
+    been learned and outranked the seeds."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    class _Kb:
+        def learn_from_success(self, **kw):
+            raise AssertionError("a row dump must not be learned as a summary")
+
+    tools = T.__new__(T)
+    tools.kb = _Kb()
+    state = {"generated_sql": "SELECT camera_name, timestamp FROM detections LIMIT 500",
+             "should_learn": True, "interpretation": {"shape": "summary"},
+             "query_result": {"success": True, "row_count": 174, "rows": [{"x": 1}] * 3},
+             "normalized_input": "which camera has the most detections",
+             "sql_purpose": "list"}
+    assert T.learn_from_query(tools, state).get("should_learn") is False
+
+
+def test_a_small_summary_is_read_out_not_narrated_as_events():
+    """One aggregate row (total=165, unidentified=154) was reported as
+    "1 detection event, 100% unidentified" by the report narrator."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    assert T._answer_shape({"interpretation": {"shape": "summary"},
+                            "normalized_input": "what share is unidentified"}, 1) == "direct"
+    assert T._answer_shape({"interpretation": {"shape": "summary"},
+                            "normalized_input": "per camera"}, 7) == "direct"
+    assert T._answer_shape({"interpretation": {"shape": "summary"},
+                            "normalized_input": "per camera"}, 40) == "report"
+
+
+def test_a_truncated_paraphrase_yields_to_the_message():
+    """The tool-call JSON broke at the apostrophe in "IRON MAN's" and the
+    question arrived as a strict prefix of the message."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    tools = T.__new__(T)
+    call = {"name": "query_database",
+            "arguments": {"question": "What is the average gap in minutes between IRON MAN"}}
+    trace = [{"tool": "query_database", "committed": True, "signature": ["query_database", "{}"]}]
+    state = {"observations": [],
+             "normalized_input": "What is the average gap in minutes between IRON MAN's consecutive detections?"}
+    assert tools._apply_model_tool_call(state, call, trace, {}) is not None
+    assert state["sql_generation_input"] == state["normalized_input"]
+
+
+def test_the_report_narrator_may_not_estimate_totals():
+    """Q4 of the capability check named "260 events" and "57 times" for a
+    person with 8 detections: the narrator had been TOLD to calculate
+    statistics from a preview of the rows."""
+    import inspect
+
+    from sql_agent.tools import agent_tools
+
+    source = inspect.getsource(agent_tools)
+    assert "never estimate, extrapolate or" in source
+    assert "Calculate real statistics from the actual data" not in source
+
+
+def test_a_second_query_after_a_successful_one_is_refused():
+    """Pass 3, Q1: the first query returned the exact answer (one row,
+    MAD5AL AMEN (1), 50); "is the whole request done?" said no, a second
+    different query dumped 165 rows and the narrator answered "KSA, 57"."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    tools = T.__new__(T)
+    first = ["query_database", '{"question": "most detections per camera"}']
+    state = {"observations": [{"sequence": 1, "tool": "query_database",
+                               "status": "ok", "summary": "rows=1", "signature": first}]}
+    second = {"name": "query_database", "arguments": {"question": "all detections per camera"}}
+    trace = [{"tool": "query_database", "committed": True,
+              "signature": ["query_database", '{"question": "all detections per camera"}']}]
+    assert tools._apply_model_tool_call(state, second, trace, {}) is None
+    assert state["repeat_refused"] is True
+
+    # A different KIND of action after a successful query is still allowed.
+    doc = {"name": "generate_document", "arguments": {"format": "pdf"}}
+    trace = [{"tool": "generate_document", "committed": True,
+              "signature": ["generate_document", '{"format": "pdf"}']}]
+    state = {"observations": [{"sequence": 1, "tool": "query_database",
+                               "status": "ok", "summary": "rows=1", "signature": first}]}
+    assert tools._apply_model_tool_call(state, doc, trace, {"last_result": {"rows": []}}) is not None
+
+
+def test_row_facts_are_counted_in_python_for_the_narrator():
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    rows = ([{"camera_name": "KSA", "name": "Unknown", "timestamp": f"t{i}"} for i in range(25)]
+            + [{"camera_name": "MAD5AL AMEN  (1)", "name": "IRON MAN", "timestamp": f"u{i}"} for i in range(50)])
+    facts = T._row_facts(rows)
+    assert "rows returned: 75" in facts
+    assert "rows per camera_name: MAD5AL AMEN  (1): 50, KSA: 25" in facts
+    assert "rows per name: IRON MAN: 50, Unknown: 25" in facts
+    assert T._row_facts([{"total": 165, "unidentified": 154}]) == ""
+
+
+def test_learning_from_queries_is_off_unless_switched_on(monkeypatch):
+    """The bot learned its own wrong answers and they outranked every
+    correction for the same question. Executing is not being right."""
+    import sql_agent.tools.agent_tools as module
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    class _Kb:
+        def __init__(self):
+            self.learned = 0
+
+        def search_similar(self, *a, **kw):
+            return []
+
+        def learn_from_success(self, **kw):
+            self.learned += 1
+
+    tools = T.__new__(T)
+    tools.kb = _Kb()
+    good = {"generated_sql": "SELECT 1", "should_learn": True,
+            "query_result": {"success": True, "row_count": 1, "rows": [{"n": 1}]},
+            "normalized_input": "how many", "sql_purpose": "count"}
+    monkeypatch.setattr(module.settings, "SQL_AGENT_LEARN_FROM_QUERIES", False, raising=False)
+    assert T.learn_from_query(tools, dict(good)).get("should_learn") is False
+    assert tools.kb.learned == 0
+    monkeypatch.setattr(module.settings, "SQL_AGENT_LEARN_FROM_QUERIES", True, raising=False)
+    T.learn_from_query(tools, dict(good))
+    assert tools.kb.learned == 1
+
+
+def test_a_named_subject_makes_answer_directly_and_clarify_refusable():
+    """"What is the average gap between IRON MAN's detections" was answered
+    "I haven't looked up the information"; a complete per-person question
+    got "can you provide more information about the identified persons?"."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    tools = T.__new__(T)
+    state = {"observations": [], "identity_index": [{"display_name": "IRON MAN"}],
+             "normalized_input": "What is the average gap between IRON MAN's detections?"}
+    trace = [{"tool": "answer_directly", "committed": True,
+              "signature": ["answer_directly", "{}"]}]
+    call = {"name": "answer_directly", "arguments": {"answer": "I have not looked that up."}}
+    assert tools._apply_model_tool_call(state, call, trace, {}) is None
+    assert state["fact_refused"] == "answer_directly"
+
+    # Small talk that names nobody is still answered directly.
+    state = {"observations": [], "identity_index": [{"display_name": "IRON MAN"}],
+             "normalized_input": "hi there"}
+    assert tools._apply_model_tool_call(state, call, trace, {}) is not None
+
+
+def test_a_reading_with_a_named_subject_and_a_question_is_data():
+    reading = _read({"wants": "chat", "confidence": 0.9, "people": ["IRON MAN"],
+                     "question": "average gap between IRON MAN detections"},
+                    text="what is the average gap between iron man's detections")
+    assert reading.wants == interpreter.DATA
+    reading = _read({"wants": "clarify", "confidence": 0.8, "people": ["JOEY"],
+                     "question": "first and last seen for JOEY",
+                     "question_for_user": "which person?"},
+                    text="for joey give first and last seen")
+    assert reading.wants == interpreter.DATA
+    # A greeting naming nobody stays chat.
+    assert _read({"wants": "chat", "confidence": 1.0, "question": ""}, text="hi").wants == interpreter.CHAT
+
+
+def test_one_computed_row_is_read_out_whatever_shape_was_asked():
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    aggregate = {"interpretation": {"shape": "report"}, "normalized_input": "what share",
+                 "query_result": {"rows": [{"total": 165, "unidentified": 154}]}}
+    assert T._answer_shape(aggregate, 1) == "direct"
+    detection = {"interpretation": {"shape": "report"}, "normalized_input": "track joey",
+                 "query_result": {"rows": [{"name": "JOEY", "camera_name": "X", "timestamp": "t"}]}}
+    assert T._answer_shape(detection, 1) == "report"
+
+
+def test_a_refused_repeat_re_runs_the_held_query_instead_of_chatting():
+    """Pass 4: Q3's first query returned the right answer, the second was
+    refused as a repeat, and the turn went to chat - "I don't have any
+    information about IRON MAN". The held canonical SQL is re-run and
+    narrated; generate_sql does not call the model for it."""
+    from sql_agent.tools.agent_tools import SQLAgentTools as T
+
+    tools = T.__new__(T)
+    state = {"reuse_generated_sql": True, "generated_sql": "SELECT 1 AS n",
+             "normalized_input": "how many"}
+    out = T.generate_sql(tools, state)          # no llm attribute: must not be touched
+    assert out["generated_sql"] == "SELECT 1 AS n"
+    assert out["reuse_generated_sql"] is False

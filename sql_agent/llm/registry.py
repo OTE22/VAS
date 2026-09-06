@@ -199,4 +199,39 @@ def build_default_registry(cfg) -> ModelRegistry:
                  TaskType.EXPLANATION):
         registry.prefer(task, chat_order)
 
+    # The READER. The interpreter's one reading per turn decides everything
+    # downstream, and a small reader flips on short follow-ups, so a
+    # deployment may bind a stronger model to it than to chat. Unset, it is
+    # the chat order; set, that model is registered (if new) and preferred,
+    # with the chat order as the fallback.
+    reader_order = list(chat_order)
+    reader_local = str(getattr(cfg, "ollama_interpreter_model", "") or "").strip()
+    if reader_local and registry.get(reader_local) is None:
+        registry.register(ModelSpec(
+            provider="ollama",
+            model_id=reader_local,
+            display_name=f"{reader_local} (reader)",
+            capabilities=general_caps,
+            context_tokens=8192,
+            max_sensitivity=DataSensitivity.RESTRICTED,
+            timeout_seconds=float(cfg.ollama_timeout),
+        ))
+    if reader_local:
+        reader_order = [reader_local] + reader_order
+    if nim_enabled:
+        reader_nim = str(getattr(cfg, "nim_interpreter_model", "") or "").strip()
+        if reader_nim and registry.get(reader_nim) is None:
+            registry.register(ModelSpec(
+                provider="nim",
+                model_id=reader_nim,
+                display_name=f"{reader_nim} (NIM reader, development)",
+                capabilities=general_caps,
+                context_tokens=32768,
+                max_sensitivity=DataSensitivity.RESTRICTED,
+                timeout_seconds=float(cfg.nim_timeout),
+            ))
+        if reader_nim:
+            reader_order = [reader_nim] + reader_order
+    registry.prefer(TaskType.INTERPRETATION, list(dict.fromkeys(reader_order)))
+
     return registry

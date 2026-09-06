@@ -71,6 +71,9 @@ class Config:
     ollama_model: str = field(default_factory=lambda: settings.OLLAMA_MODEL)
     # SQL-specialist model used only for SQL generation/repair; empty = use ollama_model
     ollama_sql_model: str = field(default_factory=lambda: settings.OLLAMA_SQL_MODEL)
+    # The model that READS each turn (interpreter). Empty = the general model.
+    ollama_interpreter_model: str = field(
+        default_factory=lambda: getattr(settings, "OLLAMA_INTERPRETER_MODEL", ""))
     ollama_temperature: float = field(default_factory=lambda: settings.OLLAMA_TEMPERATURE)
     ollama_timeout: int = field(default_factory=lambda: settings.OLLAMA_TIMEOUT)
 
@@ -83,6 +86,8 @@ class Config:
     nim_api_key: str = field(default_factory=lambda: settings.NVIDIA_NIM_API_KEY)
     nim_model: str = field(default_factory=lambda: settings.NVIDIA_NIM_MODEL)
     nim_sql_model: str = field(default_factory=lambda: settings.NVIDIA_NIM_SQL_MODEL)
+    nim_interpreter_model: str = field(
+        default_factory=lambda: getattr(settings, "NVIDIA_NIM_INTERPRETER_MODEL", ""))
     nim_timeout: int = field(default_factory=lambda: settings.NVIDIA_NIM_TIMEOUT)
     is_production: bool = field(default_factory=lambda: settings.is_production)
 

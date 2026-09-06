@@ -75,16 +75,19 @@ def test_nginx_caps_sql_agent_request_bodies_at_the_edge():
         assert "client_max_body_size 32k" in text[stream:stream + 500]
 
 
-def test_the_reading_is_the_only_way_a_turn_is_planned():
-    """The single-shot planner fallback is gone: plan_action reads the turn
-    through the interpreter and never consults the SQL model to plan."""
+def test_no_phrase_list_plans_a_turn():
+    """Two model-driven paths plan a turn - the bounded tool loop and the
+    interpreter's reading - and nothing else: no word-list router, no
+    deterministic command regexes, and the SQL model never plans."""
     from sql_agent.tools.agent_tools import SQLAgentTools
 
     source = inspect.getsource(SQLAgentTools.plan_action)
     assert "_read_the_turn(" in source and "_plan_from_reading(" in source
     assert "self.sql_llm" not in source
-    assert "run_tool_loop" not in source
-    assert "deterministic_request_plan" not in source
+    for phrase_router in ("route_turn(", "deterministic_request_plan(",
+                          "wants_translation(", "is_acknowledgement(",
+                          "is_a_continuation("):
+        assert phrase_router not in source, phrase_router
 
 
 def test_cancelled_rest_workers_keep_isolation_until_they_exit():

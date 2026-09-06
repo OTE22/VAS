@@ -104,6 +104,21 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return False
 
 
+def _has_a_previous_turn(state: dict, candidates: dict) -> bool:
+    """Is there anything earlier in this conversation a message could refer to?
+
+    A fact about the session, not about the words: a result, a document, a
+    stored task or an earlier exchange. A first message has none of them,
+    so a model's "uses_context" on it is a guess and is not believed.
+    """
+    if planner.has_actionable_context(candidates or {}):
+        return True
+    for key in ("last_result", "last_query", "last_action", "last_artifact_id"):
+        if (candidates or {}).get(key):
+            return True
+    return False
+
+
 def _has_new_information(state: dict, planned: dict) -> bool:
     """Would re-running this action actually do something different?
 
@@ -217,9 +232,12 @@ class SQLAgentTools:
         # which model serves each, applies the data-sensitivity policy, and
         # records any fallback.
         self.llm = create_llm(TaskType.CHAT)  # chat, intent, normalization, analysis
-        # The one call that reads what the user wants. Separate handle so a
-        # test that stubs the chat model does not silently consume it.
-        self.interpret_llm = create_llm(TaskType.CHAT)
+        # The one call that reads what the user wants. Its own task, so a
+        # deployment can bind a stronger reader than the chat model
+        # (OLLAMA_INTERPRETER_MODEL / NVIDIA_NIM_INTERPRETER_MODEL); unset,
+        # the general model. Separate handle so a test that stubs the chat
+        # model does not silently consume it.
+        self.interpret_llm = create_llm(TaskType.INTERPRETATION)
         self.sql_llm = create_sql_llm(TaskType.SQL_GENERATION)  # generation and repair
         # ONE DatabaseManager per agent, shared with the graph's owner. The
         # tools used to build their own, so a policy bound on the agent's
@@ -479,9 +497,55 @@ class SQLAgentTools:
         committed = next((entry for entry in reversed(trace)
                           if entry.get("committed")), None)
         if committed and committed.get("signature"):
+            done_ok = [o for o in (state.get("observations") or [])
+                       if o.get("status") == "ok"]
+            done = [o.get("signature") for o in done_ok if o.get("signature")]
+            # A query that SUCCEEDED this turn is the data part of the
+            # answer. "Is the whole request done?" once said no to a
+            # correct one-row "MAD5AL AMEN (1), 50", and the loop ran a
+            # second, different query - a 165-row dump the narrator then
+            # answered from ("KSA, 57"). Anything else the request wanted
+            # must be a different KIND of action (a document, a
+            # translation); another query is refused as a repeat.
+            queried_ok = any(o.get("tool") == "query_database" for o in done_ok)
+            if (committed["signature"] in done
+                    or (committed.get("tool") == "query_database" and queried_ok)):
+                # "Is the whole request done?" said no, and the model then
+                # committed the SAME action again: one question ran an
+                # identical 165-row query three times until the 300 s run
+                # deadline. The finished action was recorded with its
+                # signature for exactly this check. Answer with what exists.
+                state["repeat_refused"] = True
+                logger.info("[REACT] repeated action refused; answering from "
+                            "what this turn already produced")
+                return None
             state["committed_signature"] = committed["signature"]
 
         name = call.get("name")
+        # A message that names an enrolled person or a real camera asks
+        # about the data. If the model still commits "answer directly" or
+        # "ask the user", the commit is refused on that fact and the turn is
+        # read again: "what is the average gap between IRON MAN's
+        # detections" was answered "I haven't looked up the information",
+        # and a complete per-person question was met with "can you provide
+        # more information about the identified persons?".
+        if name in ("answer_directly", "ask_clarifying_question"):
+            from . import interpreter as _interp
+
+            spoken = str(state.get("normalized_input") or "")
+            known = [str((e or {}).get("display_name") or "")
+                     for e in (state.get("identity_index") or [])]
+            try:
+                known += [c.get("location") or c.get("camera") or ""
+                          for c in self._all_cameras()]
+            except Exception:
+                pass
+            if _interp._mentions_any(spoken, [k for k in known if k]):
+                state["fact_refused"] = name
+                logger.info("[REACT] refused %s: the message names an "
+                            "enrolled person or a camera; reading the turn",
+                            name)
+                return None
         arguments = call.get("arguments") or {}
         action = planned.get("action")
         is_chat = name == "answer_directly"
@@ -524,16 +588,32 @@ class SQLAgentTools:
             language=arguments.get("language"),
             format=arguments.get("format"),
             shape=arguments.get("response_shape") or "answer",
+            # `uses_context` is a claim about the conversation state; when
+            # there is no state to refer to (a fresh session) it is unfounded,
+            # and the failure planner then read a first question as a
+            # modification of a previous one.
             about_previous=bool(
-                contextual_chat or arguments.get("uses_context")
-                or name in ("modify_active_query", "generate_document",
-                            "translate_document")),
+                (contextual_chat or arguments.get("uses_context")
+                 or name in ("modify_active_query", "generate_document",
+                             "translate_document"))
+                and _has_a_previous_turn(state, candidates)),
             confidence=float(planned.get("confidence") or 0.9),
             question_for_user=(str(arguments.get("question") or "")[:400]
                                if name == "ask_clarifying_question" else ""),
         ).as_dict()
 
         if name == "query_database" and question:
+            # A paraphrase that is a strict PREFIX of the user's own words is
+            # the message cut short - the model's tool-call JSON broke at
+            # the apostrophe in "IRON MAN's" and the question arrived as
+            # "...between IRON MAN". The full message is what was asked.
+            spoken = " ".join(str(state.get("normalized_input") or "").split())
+            asked = " ".join(str(question).split())
+            if (spoken and len(asked) < len(spoken)
+                    and spoken.casefold().startswith(asked.casefold())):
+                logger.info("[REACT] paraphrase is a truncated prefix of the "
+                            "message; using the message")
+                question = spoken
             state["sql_generation_input"] = question[:500]
 
         observability.observe_planner_action(action, "tool_loop")
@@ -814,6 +894,52 @@ class SQLAgentTools:
         if tool_call:
             planned = self._apply_model_tool_call(
                 state, tool_call, tool_trace, candidates)
+            if (planned is not None and tool_call.get("name") == "answer_directly"
+                    and getattr(planned, "action", None) == "chat"):
+                # Two model paths; when the loop says "answer directly" the
+                # reading - which sees the situation and the closed lists -
+                # gets the second opinion. "At what hour do most detections
+                # happen" was answered "I have not looked up the information".
+                from . import interpreter as _interp
+
+                second = self._read_the_turn(state, user_text, candidates,
+                                             skip=bool(chosen))
+                if (second is not None and second.wants == _interp.DATA
+                        and second.confidence >= _interp.CONFIDENCE_FLOOR):
+                    logger.info("[REACT] the reading says data; the direct "
+                                "answer is not used")
+                    planned = self._plan_from_reading(state, second, candidates)
+            if planned is None and state.get("repeat_refused"):
+                # The result this turn already has is the answer. Its rows
+                # were handed on as a preview only, so the held CANONICAL
+                # SQL is re-executed (guarded, deterministic, milliseconds)
+                # and narrated. Routed to chat, a correct "August 17, 5
+                # detections" had been replaced by "I don't have any
+                # information about IRON MAN".
+                held = (candidates.get("last_result") or {})
+                held_sql = str(held.get("sql") or "")
+                if held_sql:
+                    plan = planner.PlannedAction("query_database", confidence=1.0,
+                                                 source="repeat_refused")
+                    state["generated_sql"] = held_sql
+                    state["validated_sql"] = ""
+                    state["sql_purpose"] = str(held.get("purpose") or "")
+                    state["reuse_generated_sql"] = True
+                    state["intent"] = "SQL_QUERY"
+                else:
+                    plan = planner.PlannedAction("chat", confidence=1.0,
+                                                 source="repeat_refused")
+                    state["intent"] = "CHAT"
+                state["planned_action"] = plan.as_dict()
+                state["turn_is_a_request"] = True
+                observability.observe_planner_action(plan.action, plan.source)
+                logger.info(planner.audit_line(
+                    user_id=state.get("user_id"),
+                    conversation_id=state.get("conversation_id"),
+                    plan=plan, executed="chat_response",
+                    resolution=f"repeat_refused/{mode}", artifact_id=None,
+                    result_id=(candidates.get("last_result") or {}).get("history_id")))
+                return state
             if planned:
                 logger.info(planner.audit_line(
                     user_id=state.get("user_id"),
@@ -1173,6 +1299,18 @@ class SQLAgentTools:
             "sql": (state.get("generated_sql") or "")[:600],
             "reason": str(reason)[:200],
         }
+        failed = list(state.get("failed_sql_hashes") or [])
+        digest = SQLAgentTools._sql_digest(state.get("generated_sql") or "")
+        if digest and digest not in failed:
+            state["failed_sql_hashes"] = failed + [digest]
+
+    @staticmethod
+    def _sql_digest(sql: str) -> str:
+        """Identity of a SQL text up to whitespace and case."""
+        import hashlib
+
+        text = " ".join(str(sql or "").split()).lower()
+        return hashlib.sha1(text.encode("utf-8")).hexdigest() if text else ""
 
     def _resolve_entity_and_route(self, state: AgentState,
                                   observation: dict) -> str:
@@ -1493,6 +1631,12 @@ class SQLAgentTools:
                                 "step": "response"})
         return response_text + footer
 
+    #: A computed figure, ranking or comparison fits in this many rows; more
+    #: means the query dumped detections instead of aggregating them.
+    _SUMMARY_MAX_ROWS = 25
+    #: A summary this small is read out row by row, never narrated as a report.
+    _SUMMARY_DIRECT_MAX_ROWS = 12
+
     _SCOPE_LITERALS = re.compile(
         r"pipeline_id\s+IN\s*\(\s*'[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}'", re.IGNORECASE)
 
@@ -1756,13 +1900,31 @@ class SQLAgentTools:
         # reading decides it. "report for tracking joey" was answered with
         # the one-line sentence from the previous turn.
         asked_for = (state.get("interpretation") or {}).get("shape")
+        rows = ((state.get("query_result") or {}).get("rows") or [])
+        if row_count == 1 and rows and not cls._looks_like_detection_row(rows[0]):
+            # One computed row (total=165, unidentified=154) is a fact to read
+            # out, whatever shape was asked for; narrated as a report it
+            # became "1 detection event, 100% unidentified".
+            return "direct"
         if asked_for == "report":
             return "report"
+        if asked_for == "summary" and row_count <= cls._SUMMARY_DIRECT_MAX_ROWS:
+            # Computed rows (one per group) are read out, not narrated as
+            # events: a one-row "total=165, unidentified=154" had been
+            # reported as "1 detection event, 100% unidentified".
+            return "direct"
         if row_count <= cls._DIRECT_MAX_ROWS and (
                 cls._is_point_question(state.get("normalized_input") or "")
                 or (cls._sql_limit(state) or 99) <= cls._DIRECT_MAX_ROWS):
             return "direct"
         return "report"
+
+    @staticmethod
+    def _looks_like_detection_row(row) -> bool:
+        """A detection row carries a time and a place; an aggregate does not."""
+        keys = {str(k).lower() for k in (row or {}).keys()}
+        return bool(keys & {"timestamp", "time", "seen_at", "detected_at"}) and bool(
+            keys & {"camera_name", "location_name", "camera", "pipeline_id"})
 
     def _direct_prompt(self, state, rows, row_count: int):
         if self._answer_shape(state, row_count) != "direct":
@@ -1776,7 +1938,10 @@ class SQLAgentTools:
                 "lists, no title, no recommendations. Use only the rows "
                 "given. Copy names, camera names and timestamps exactly. "
                 "Do not compute or state totals, ranges or averages the "
-                "rows do not directly contain.")),
+                "rows do not directly contain. When the rows are computed "
+                "figures (counts, averages, shares, one row per group), "
+                "read the figures out as given: a row is a result, never "
+                "a detection event.")),
             HumanMessage(content=(
                 f"Question: {state.get('normalized_input', '')}\n\n"
                 f"Rows ({row_count} returned):\n{preview}\n"
@@ -2111,6 +2276,25 @@ class SQLAgentTools:
         # of the same action is a genuinely different attempt rather than the
         # same dice roll — see `_correction_hint`.
         self._attach_correction_hint(state, observation)
+        # The DATABASE rejecting the query text says the SQL was wrong, not
+        # the plan: the question was read correctly and `query_database`
+        # was the right tool. Re-choosing a tool here is the wrong layer -
+        # asked to "choose a DIFFERENT tool", the model reached for
+        # `modify_active_query`, which had no previous query to modify, and
+        # a correctable "missing FROM-clause entry" ended as "I don't have a
+        # previous query to adjust" (Opik 01a0757d-083f, 2026-09-06). The
+        # correction is a regeneration with the driver's own complaint as
+        # the hint; `failed_sql_hashes` refuses an identical rewrite.
+        if (previous.get("action") in ("query_database",
+                                       "modify_previous_query")
+                and observation.get("error_type") in (
+                    reasoning.ErrorType.SQL_INVALID,
+                    reasoning.ErrorType.SQL_GENERATION_ERROR,
+                    reasoning.ErrorType.SQL_EXECUTION_ERROR_CORRECTABLE)
+                and state.get("sql_correction_hint")):
+            logger.info("[REASONING] the database rejected the SQL, not the "
+                        "plan; regenerating with the correction hint")
+            return {**previous, "source": "sql_correction"}
 
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content=agent_loop.TOOL_SYSTEM_PROMPT),
@@ -2240,6 +2424,15 @@ class SQLAgentTools:
 
         Extraction decodes the structured envelope but never rewrites SQL.
         """
+        if state.get("reuse_generated_sql") and state.get("generated_sql"):
+            # A held canonical query is being re-run to narrate what this
+            # turn already found; generating again would only invite a
+            # different query.
+            state["reuse_generated_sql"] = False
+            logger.info("[STEP_4] re-using the held query (chars=%d)",
+                        len(state["generated_sql"]))
+            return state
+
         logger.info("[STEP_4] Generating SQL (query_chars=%d)",
                     len(state.get("normalized_input") or ""))
         logger.info("\n" + "="*60)
@@ -2363,15 +2556,26 @@ If no query is possible:
                     "authoritative request wins on any conflict):\n"
                     f"{state['sql_generation_input']}\n")
                    if state.get("sql_generation_input") else "")
-                # How much was asked for comes from the reading, so a report
-                # is not answered with a one-row summary of itself: "report
-                # for tracking joey" produced a "last seen" query, and the
-                # report was written over that single row.
-                + (("\nTHIS IS A REPORT. Return EVERY matching row — one per "
-                    "detection, with the camera name and the timestamp — "
-                    "ordered by timestamp. Do not aggregate to a single row "
-                    "and do not use MAX(...) or LIMIT 1.\n")
+                # How much was asked for comes from the reading. A report is
+                # every row about its subject ("report for tracking joey" had
+                # produced a "last seen" query); a summary is a computed
+                # figure, so it must aggregate - the every-row rule used to
+                # fire on "which camera has the most" too, and counts came
+                # back as row dumps.
+                + (("\nTHIS IS A REPORT. Return every row the request is "
+                    "about, never a single row with MAX(...) or LIMIT 1: "
+                    "for a tracked person that is one row per detection with "
+                    "the camera name and the timestamp, ordered by timestamp; "
+                    "for a set of cameras or people that meet a condition it "
+                    "is one row per camera or person, computed with GROUP BY "
+                    "/ HAVING / NOT EXISTS as the condition needs, following "
+                    "a matching knowledge-base example when one is given.\n")
                    if (state.get("interpretation") or {}).get("shape") == "report"
+                   else ("\nTHIS IS A SUMMARY. Compute the figure, ranking or "
+                         "comparison the request asks for (COUNT, AVG, GROUP "
+                         "BY, ordering, set difference, window functions as "
+                         "needed) and return only the computed rows.\n")
+                   if (state.get("interpretation") or {}).get("shape") == "summary"
                    else "")
                 + "\nGenerate SQL that satisfies the authoritative request."
                 + self._correction_hint(state)))
@@ -2400,6 +2604,25 @@ If no query is possible:
                 state["generated_sql"] = prepared["sql"]
                 state["validated_sql"] = ""
                 state["sql_purpose"] = prepared["purpose"]
+                # A repair that reproduces the query that just failed is not
+                # a repair. Refused here, before validation and execution,
+                # with the earlier reason restated so the next attempt has
+                # to differ: three identical GROUP BY errors had burnt the
+                # whole budget in 50 s.
+                digest = self._sql_digest(prepared["sql"])
+                if digest in (state.get("failed_sql_hashes") or []):
+                    earlier = (state.get("sql_correction_hint") or {}).get("reason") or ""
+                    state["generated_sql"] = ""
+                    state["sql_purpose"] = "identical to a query that already failed"
+                    state["sql_correction_hint"] = {
+                        "sql": prepared["sql"][:600],
+                        "reason": ("This is the SAME query that already failed "
+                                   "this turn" + (f": {earlier}" if earlier else "")
+                                   + ". Write a materially different query."),
+                    }
+                    logger.info("[STEP_4] identical candidate refused; asking "
+                                "for a different query")
+                    return state
                 logger.info("[STEP_4] SQL candidate extracted (length=%d)",
                             len(state["generated_sql"]))
                 logger.debug(f"[STEP_4] Transformations: {prepared['transformations']}")
@@ -3438,12 +3661,16 @@ Query purpose: {state.get('sql_purpose', 'Data retrieval')}
 
 ACTUAL RESULTS ({row_count} total rows):
 {results_preview}
-
+{self._row_facts(rows, state.get("generated_sql") or "")}
 {self._language_directive(state)}{self._fidelity_directive(state)}{self._limit_note(state)}
 
 Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual data provided above.
 - Extract all values EXACTLY as they appear in the data
-- Calculate real statistics from the actual data (count, sum, average, etc.)
+- A count you state must be a count of the rows shown, or a figure a row
+  itself contains. If the rows are a slice of a larger result (see the note
+  above), say the total is not known - never estimate, extrapolate or
+  round up a total. "260 events" and "57 times" were stated for a person
+  with 8 detections on record.
 - Do NOT invent or create fake values, names, or statistics
 - Use exact field names and values from the data
 - Present all findings with precise data points from the actual results
@@ -3556,6 +3783,101 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
                     processed_row[key] = value
             processed.append(processed_row)
         return processed
+
+    #: Columns whose values a reader counts by: a camera, a person, a day.
+    _COUNTABLE_COLUMNS = ("camera_name", "location_name", "camera", "name",
+                          "person_name", "person", "date", "detection_day",
+                          "day", "hour")
+    _ROW_FACTS_MAX_VALUES = 12
+
+    @staticmethod
+    def _sql_aggregates(sql: str) -> bool:
+        """Does the outermost SELECT group or aggregate? Read from the AST.
+
+        A grouped result's rows ARE figures: counting them per day answers
+        "how many groups", not "how many detections". Judged from the query
+        the database ran, never from column names or the user's words.
+        """
+        if not sql:
+            return False
+        try:
+            import sqlglot
+            from sqlglot import expressions as exp
+            tree = sqlglot.parse_one(sql, read="postgres")
+            outer = tree.this if isinstance(tree, exp.Subquery) else tree
+            if not isinstance(outer, exp.Select):
+                return False
+            if outer.args.get("group"):
+                return True
+            return any(isinstance(node, exp.AggFunc)
+                       for node in outer.expressions
+                       for node in node.walk())
+        except Exception:
+            return False
+
+    @classmethod
+    def _row_facts(cls, rows, sql: str = "") -> str:
+        """Counts computed in Python from ALL returned rows, for the narrator.
+
+        The preview it sees is capped at 100 rows and it was told to
+        "calculate statistics" from it: "KSA, 57" for a camera with 25,
+        "260 events" for a person with 8. These figures are exact for the
+        rows returned, and the note says so.
+
+        When the query itself aggregated, each row is a computed group and
+        carries its own figure, so the facts SUM the integer columns per
+        key instead of counting rows: "IRON MAN per day, split by camera"
+        had two rows for 2026-08-18 with 1 and 2 detections, and counting
+        rows told the narrator "2026-08-18: 2" (true: 3).
+        """
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        if len(rows) < 2:
+            return ""
+        aggregated = cls._sql_aggregates(sql)
+        figure_columns = [
+            column for column, value in rows[0].items()
+            if isinstance(value, int) and not isinstance(value, bool)
+            and column not in cls._COUNTABLE_COLUMNS
+            and all(isinstance(r.get(column), int)
+                    and not isinstance(r.get(column), bool) for r in rows)
+        ] if aggregated else []
+        lines = [f"- rows returned: {len(rows)}"
+                 + (" (each row is a computed group; its figures are in "
+                    "the row)" if aggregated else "")]
+        for column in cls._COUNTABLE_COLUMNS:
+            if column not in rows[0]:
+                continue
+            counts: Dict[str, int] = {}
+            sums: Dict[str, Dict[str, int]] = {f: {} for f in figure_columns}
+            for row in rows:
+                value = row.get(column)
+                if value is None or str(value).strip() == "":
+                    continue
+                key = str(value)
+                counts[key] = counts.get(key, 0) + 1
+                for figure in figure_columns:
+                    sums[figure][key] = sums[figure].get(key, 0) + int(row[figure])
+            if not counts or len(counts) == len(rows):
+                continue        # unique per row: nothing to count by
+            if aggregated:
+                for figure in figure_columns:
+                    ranked = sorted(sums[figure].items(),
+                                    key=lambda kv: (-kv[1], kv[0]))
+                    shown = ", ".join(f"{k}: {n}"
+                                      for k, n in ranked[:cls._ROW_FACTS_MAX_VALUES])
+                    more = (f" (+{len(ranked) - cls._ROW_FACTS_MAX_VALUES} more)"
+                            if len(ranked) > cls._ROW_FACTS_MAX_VALUES else "")
+                    lines.append(f"- {figure} summed per {column}: {shown}{more}")
+                continue
+            ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            shown = ", ".join(f"{k}: {n}" for k, n in ranked[:cls._ROW_FACTS_MAX_VALUES])
+            more = (f" (+{len(ranked) - cls._ROW_FACTS_MAX_VALUES} more)"
+                    if len(ranked) > cls._ROW_FACTS_MAX_VALUES else "")
+            lines.append(f"- rows per {column}: {shown}{more}")
+        if len(lines) == 1:
+            return ""
+        return ("\nCOUNTS COMPUTED FROM THE RETURNED ROWS (exact for these rows; "
+                "use these, do not recount the preview):\n" + "\n".join(lines) + "\n")
 
     def _extract_tracking_stats(self, rows: list) -> dict:
         """Extract actual statistics from tracking data."""
@@ -4314,9 +4636,30 @@ say "we have no records" — say that you have not looked it up, or ask."""),
                         "detection counter")
             state["should_learn"] = False
 
+        if not getattr(settings, "SQL_AGENT_LEARN_FROM_QUERIES", False):
+            # Executing is not being right. Learned examples outrank the
+            # schema and the seeds for the same question, so a wrong answer
+            # learned once is served back until purged. Off until learning
+            # is gated on a positive signal from the user.
+            logger.info("[STEP_7] learning from queries is disabled "
+                        "(SQL_AGENT_LEARN_FROM_QUERIES)")
+            state["should_learn"] = False
+
         if generated_sql and self._carries_scope_literals(generated_sql):
             logger.info("[STEP_7] not learning a query that carries a camera "
                         "scope IN-list")
+            state["should_learn"] = False
+
+        # A question that asked for a computed figure and got a row dump was
+        # answered wrongly, however many rows came back. Learned once, that
+        # dump outranks the schema and the seeds for the same question from
+        # then on: "which camera has recorded the most detections" kept
+        # returning 174 rows because its own first wrong answer had been
+        # learned.
+        shape = (state.get("interpretation") or {}).get("shape")
+        if shape == "summary" and rows_found > self._SUMMARY_MAX_ROWS:
+            logger.info("[STEP_7] not learning a summary that returned %d rows",
+                        rows_found)
             state["should_learn"] = False
 
         if (

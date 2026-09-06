@@ -1167,6 +1167,17 @@ class Settings(BaseSettings):
     )
     
     # Advanced Features
+    # The SQL agent may store a question→SQL pair after a successful
+    # execution and serve it to every later generation of a similar
+    # question. Executing is not being right: in the 2026-09-06 capability
+    # check the bot learned its own wrong answers (a 174-row dump for "which
+    # camera has the most detections", a count that included the 'Unknown'
+    # placeholder) and those learned examples outranked the corrected schema
+    # and seeds for the same questions from then on. OFF until learning is
+    # gated on a positive signal from the user (a feedback endpoint).
+    SQL_AGENT_LEARN_FROM_QUERIES: bool = Field(
+        default=False
+    )
     AUTO_THRESHOLD_LEARNING_ENABLED: bool = Field(
         default=True,
         description="Enable automatic learning of optimal thresholds per camera pair (default: True)"
@@ -1508,6 +1519,13 @@ class Settings(BaseSettings):
     OLLAMA_SQL_MODEL: str = Field(
         default=""
     )
+    # The model that READS each chatbot turn (sql_agent/tools/interpreter.py).
+    # Empty = OLLAMA_MODEL. The reading decides everything downstream and a
+    # small reader flips on short follow-ups, so this may be a larger model
+    # than the chat one.
+    OLLAMA_INTERPRETER_MODEL: str = Field(
+        default=""
+    )
     OLLAMA_TEMPERATURE: float = Field(
         default=0.1
     )
@@ -1549,6 +1567,10 @@ class Settings(BaseSettings):
     # empty) — mirrors the OLLAMA_MODEL / OLLAMA_SQL_MODEL split.
     NVIDIA_NIM_SQL_MODEL: str = Field(
         default="openai/gpt-oss-120b"
+    )
+    # Reader for development (see OLLAMA_INTERPRETER_MODEL). Empty = NVIDIA_NIM_MODEL.
+    NVIDIA_NIM_INTERPRETER_MODEL: str = Field(
+        default=""
     )
     NVIDIA_NIM_TIMEOUT: int = Field(
         default=60,

@@ -220,6 +220,16 @@ class AgentState(TypedDict):
     # Fingerprints of actions that already failed this turn, so a re-plan is
     # corrective rather than a repeat of the same failing call.
     failed_action_fingerprints: Optional[List[str]]
+    # Hashes of SQL candidates that failed validation or execution THIS
+    # turn. A regenerated candidate equal to one of them is refused before
+    # it runs: the action fingerprint hashes the question, not the SQL, so
+    # a repair that reproduced the rejected query counted as a new attempt.
+    failed_sql_hashes: Optional[List[str]]
+    # The tool loop committed an action identical to one that already
+    # succeeded this turn; the turn answers from what it has.
+    repeat_refused: Optional[bool]
+    # generate_sql keeps the held canonical SQL instead of calling the model.
+    reuse_generated_sql: Optional[bool]
     # What the LAST rejected attempt got wrong, fed back into generate_sql
     # so a retry is corrective rather than the same dice roll on the same
     # inputs: {sql, reason}. Machine output only — never model prose.

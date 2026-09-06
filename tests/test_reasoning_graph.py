@@ -456,10 +456,36 @@ def test_an_unparsable_replan_answers_honestly(monkeypatch):
     tools, _ = _tools(monkeypatch, llm_replies=["I think we should try again!"])
 
     out = tools.observe_and_replan(_state(
-        sql_validation_status="INVALID", sql_validation_error="syntax error"))
+        planned_action={"action": "translate_artifact", "artifact_id": "a1"},
+        artifact_payload={}, generated_sql=""))
 
     assert out["reasoning_next"] == "chat_response"
     assert out["replan_count"] == 0
+
+
+def test_a_rejected_sql_is_regenerated_not_replanned(monkeypatch):
+    """The database rejecting the query text faults the SQL, not the plan.
+
+    Asked to "choose a DIFFERENT tool" after a correctable execution error,
+    the model reached for modify_active_query, which had no previous query
+    to modify, and the user got "I don't have a previous query to adjust"
+    (Opik 01a0757d-083f, 2026-09-06). The correction is a regeneration with
+    the driver's complaint as the hint - no model call decides that.
+    """
+    tools, calls = _tools(monkeypatch, llm_replies=[json.dumps(
+        {"name": "modify_active_query", "arguments": {"change": "x"}})])
+
+    out = tools.observe_and_replan(_state(query_result={
+        "success": False, "rows": [], "row_count": 0,
+        "error": 'missing FROM-clause entry for table "f"'}))
+
+    assert out["reasoning_next"] == "check_schema", out.get("planned_action")
+    assert out["planned_action"]["action"] == "query_database"
+    assert out["planned_action"]["source"] == "sql_correction"
+    assert out["replan_count"] == 1
+    assert out["generated_sql"] == "", "the rejected SQL must be regenerated"
+    assert out["sql_correction_hint"]["reason"].startswith("missing FROM")
+    assert calls == [], "no model call re-chose the tool"
 
 
 def test_a_replan_commits_no_dialogue_state(monkeypatch):

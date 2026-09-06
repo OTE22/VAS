@@ -288,6 +288,11 @@ services:
       # Arctic-Text2SQL-R1-7B (Snowflake, 2025) only for SQL generation/repair
       OLLAMA_MODEL: qwen2.5:1.5b
       OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
+      # The model that READS each chatbot turn; empty = OLLAMA_MODEL.
+      OLLAMA_INTERPRETER_MODEL: ${OLLAMA_INTERPRETER_MODEL:-}
+      # Storing question->SQL pairs after execution: OFF - the bot learned
+      # its own wrong answers and they outranked every correction.
+      SQL_AGENT_LEARN_FROM_QUERIES: ${SQL_AGENT_LEARN_FROM_QUERIES:-false}
       OLLAMA_TEMPERATURE: "0.1"
       # Per-call ceiling sized for the 7B on CPU (a planner-sized prompt
       # measures >120s here). See SQL_AGENT_TOTAL_TIMEOUT above.
@@ -342,6 +347,8 @@ services:
       # catalogue models 404 ("Not found for account") — listed is not the
       # same as enabled. Re-run the probe before changing this.
       NVIDIA_NIM_MODEL: ${NVIDIA_NIM_MODEL:-meta/llama-3.2-11b-vision-instruct}
+      # The model that READS each chatbot turn in development; empty = NVIDIA_NIM_MODEL.
+      NVIDIA_NIM_INTERPRETER_MODEL: ${NVIDIA_NIM_INTERPRETER_MODEL:-}
       # openai/gpt-oss-120b stopped responding on this account
       # (2026-08-30: connects and authenticates, then hangs — measured
       # 150s+ with no response, while llama-3.2-11b answers the same
