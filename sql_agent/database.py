@@ -91,7 +91,8 @@ class DatabaseManager:
             "COUNTS AND RANKINGS come from the detections table (COUNT(d.id) GROUP BY the camera), never from pipelines.total_detections, which is a lagging cache",
             "IMPORTANT: detections.pipeline_id is VARCHAR and joins to pipelines.pipeline_id (VARCHAR), NOT pipelines.id (INTEGER)",
             "ABSENCE ('never seen', 'no detections in the last N days', 'has not recorded') needs pipelines LEFT JOIN detections ... GROUP BY ... HAVING MAX(d.timestamp) IS NULL OR MAX(d.timestamp) < cutoff, or NOT EXISTS - an inner join can never return a camera with nothing",
-            "DURATIONS in minutes: EXTRACT(EPOCH FROM (later_ts - earlier_ts)) / 60. Never divide an interval by an interval, and reference only the columns the CTE or subquery actually exposes"
+            "DURATIONS in minutes: EXTRACT(EPOCH FROM (later_ts - earlier_ts)) / 60. Never divide an interval by an interval, and reference only the columns the CTE or subquery actually exposes",
+            "MEDIAN: there is no MEDIAN() in Postgres; use PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) with no OVER clause. CONSECUTIVE-DAY STREAKS: day - ROW_NUMBER() OVER (ORDER BY day) groups a run of days. ",
         ]
     }
 

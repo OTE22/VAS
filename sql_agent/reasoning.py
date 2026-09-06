@@ -116,6 +116,10 @@ _TRANSIENT_SIGNS = (
 #: failure is correctable spends a re-plan on a rewrite that cannot help.
 _CORRECTABLE_SIGNS = (
     "operator does not exist", "does not exist", "syntax error",
+    # "OVER is not supported for ordered-set aggregate percentile_cont" -
+    # the validator had rewritten MEDIAN(x) into a window call; a shape
+    # mistake the model fixes given the text (2026-09-06).
+    "is not supported",
     "invalid input syntax", "is ambiguous", "cannot be matched",
     "must appear in the group by", "type mismatch", "cannot cast",
     # "function date_trunc(unknown) is not unique" - Postgres cannot
@@ -236,8 +240,22 @@ def _filtered_literals(sql: Optional[str], columns: frozenset) -> list:
     found: list = []
     try:
         for node in tree.walk():
-            if not isinstance(node, (exp.EQ, exp.Like, exp.ILike, exp.In,
-                                     exp.NEQ)):
+            if not isinstance(node, (exp.EQ, exp.Like, exp.ILike, exp.In)):
+                continue
+            # A NEGATED predicate excludes names; it never narrows the
+            # query to a person. The placeholder exclusion every verified
+            # seed carries (NOT LIKE 'unknown%' / NOT LIKE 'person_%') was
+            # read as a filter on "person", resolved against the enrolled
+            # test identities, and the user was asked "which one did you
+            # mean: seed_person_000, ..." for a question naming nobody
+            # (Opik 01a0760a-f0c0, 2026-09-06). `<>` is an exclusion too.
+            parent, negated = node.parent, False
+            while parent is not None and not isinstance(parent, exp.Select):
+                if isinstance(parent, exp.Not):
+                    negated = True
+                    break
+                parent = parent.parent
+            if negated:
                 continue
             matched = [c for c in node.find_all(exp.Column)
                        if c.name.lower() in columns]
@@ -288,8 +306,17 @@ def filtered_names(sql: Optional[str]) -> list:
     found = []
     try:
         for node in tree.walk():
-            if not isinstance(node, (exp.EQ, exp.Like, exp.ILike, exp.In,
-                                     exp.NEQ)):
+            if not isinstance(node, (exp.EQ, exp.Like, exp.ILike, exp.In)):
+                continue
+            # A NEGATED predicate excludes names; it never narrows the
+            # query to a person (see _filtered_literals). `<>` excludes too.
+            parent, negated = node.parent, False
+            while parent is not None and not isinstance(parent, exp.Select):
+                if isinstance(parent, exp.Not):
+                    negated = True
+                    break
+                parent = parent.parent
+            if negated:
                 continue
             # The column may be WRAPPED - LOWER(name), name::text,
             # TRIM(f.name) - so look for a name column anywhere inside the
@@ -308,7 +335,6 @@ def filtered_names(sql: Optional[str]) -> list:
                     found.append(value)
     except Exception:
         return found
-    return found
     return found
 
 

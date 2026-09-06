@@ -134,3 +134,20 @@ def test_a_re_query_happens_only_when_it_could_change_the_answer(
     query is worth running again.
     """
     assert reasoning.would_rerun_help(asked, stored) is rerun
+
+
+def test_negated_name_filters_name_nobody():
+    """NOT LIKE 'person_%' excludes; it never narrows the query to a person.
+
+    The placeholder exclusion every verified seed carries was read as a
+    filter on "person", resolved against the enrolled test identities, and
+    the user was asked "which one did you mean: seed_person_000, ..." for a
+    question that named nobody (Opik 01a0760a-f0c0, 2026-09-06).
+    """
+    sql = ("SELECT f.name, COUNT(*) FROM faces f WHERE f.name IS NOT NULL AND f.name <> '' "
+           "AND LOWER(f.name) NOT LIKE 'unknown%' AND LOWER(f.name) NOT LIKE 'person_%' "
+           "AND NOT LOWER(f.name) LIKE 'seed%' GROUP BY f.name")
+    assert reasoning.filtered_names(sql) == []
+    # A positive filter beside the exclusions still names the person.
+    assert reasoning.filtered_names(
+        sql.replace("GROUP BY", "AND LOWER(f.name) LIKE LOWER('%JOEY%') GROUP BY")) == ["JOEY"]

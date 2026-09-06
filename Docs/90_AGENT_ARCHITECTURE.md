@@ -331,6 +331,81 @@ unidentified share, and first/last/cameras per identified person; the schema tex
 facts (an inner join can never return a camera with nothing; never divide
 interval by interval).
 
+**The verified catalogs (2026-09-06).** A second, unseen ten-question
+battery scored 5.5/10 against a bot that had just scored 10/10 on the
+seeded one: the gap was seed coverage, not reasoning. The knowledge base
+therefore carries two catalogs beside the inline seeds, both part of
+`SEED_EXAMPLES` (same hash, same re-seed, source `seed`):
+
+- `sql_agent/seed_catalog.py` - ~220 hand-written shapes: the ten truths
+  of that battery, one-person questions (first/last, per camera, per day,
+  per hour, gaps, dwell, camera changes, first/last camera per day),
+  two-person questions (intersection, difference, co-presence, comparison),
+  one-camera and all-camera questions (rankings, silence, shares, idle time,
+  processing time, distance), time analytics (weekday, week, month,
+  day-over-day, running total, empty days via `generate_series`, night vs
+  day, weekend vs weekday), people overall, faces and similarity, and system
+  metrics.
+- `sql_agent/seed_catalog_generated.py` - ~765 composed pairs: 41 metrics
+  x 20 periods (today, yesterday, last N hours/days, this/last week/month,
+  this year, a date, a date range, since, before), each phrased distinctly;
+  nonsense combinations (a weekly trend of a single day) are skipped.
+
+Every entry is executed through the guard and the database before release
+(scratch `catalog_check.py`, placeholders `PERSON_NAME` / `OTHER_PERSON` /
+`CAMERA_NAME` substituted): 0 failures, 0 duplicate questions.
+`tests/test_seed_catalog_hygiene.py` pins the static rules (no
+placeholder-counting, no `pipelines.total_detections`, no duplicates, no
+nonsense periods). Seeding is batched (`_SEED_BATCH`, upsert of 200 at a
+time): the one-by-one path held the API unhealthy for ten minutes on 296
+seeds.
+
+**Retrieval reaches the seeds through their placeholders.** A placeholder
+embeds far from a real name: "Which camera saw JOEY, and how many minutes
+passed between JOEY's first and last detection there?" ranked its exact seed
+second (0.65) behind a learned "which camera detected Joey" (0.73), and the
+SQL model wrote its own broken self-join. `retrieve_examples` now asks a
+second time with the STORED names the message mentions swapped for
+`PERSON_NAME` / `OTHER_PERSON` / `CAMERA_NAME` (`_placeholder_query`: the
+names come from the database through the fixed-query executors, cached 60 s,
+never a word list) and merges both lists by similarity (`_merge_examples`).
+Two more fixes from the same run: `_sql_digest` ignores the validator's
+appended `LIMIT`, so a byte-identical rewrite of a rejected query is
+refused instead of run again; and the direct read-out prompt requires every
+row to appear (six weekday rows had become three).
+
+**The third battery (2026-09-06, shapes in no seed: camera-to-camera
+transitions, consecutive-day streaks, day-over-day peaks, per-person
+concentration, HAVING thresholds, anchored windows, medians) scored 1.5/10
+before any fix** - the honest number for the dev SQL model without
+coverage. The traces showed one structural defect and three model limits:
+`filtered_names` / `_filtered_literals` read the placeholder exclusion every
+verified seed carries (`NOT LIKE 'person_%'`) as a filter on "person",
+resolved it against the enrolled test identities and asked "which one did
+you mean: seed_person_000, ..." for questions naming nobody - a negated
+predicate excludes and never narrows, so both extractors now skip anything
+under a `NOT` (and `<>`). "OVER is not supported for ordered-set aggregate"
+was not a correctable sign (the validator had rewritten `MEDIAN()` into a
+window call). The schema text now states the two Postgres facts (median via
+`PERCENTILE_CONT(0.5) WITHIN GROUP`, streaks via day minus row number), and
+the ten truths joined the catalog.
+
+The rerun with those seeds scored 6/10, and its traces showed two more
+loop defects. (1) A verified seed at 0.94-0.97 similarity was still
+REWRITTEN under the shape instruction ("biggest increase over the previous
+day" came back grouped per camera; "faces per detection with at least 5
+detections" as a nested subquery that could not run). When the best
+retrieved example is a seed at or above `_EXACT_SEED_SIMILARITY` (0.9) the
+generator is told to reproduce it, substituting only the literals, and the
+shape instruction is dropped - similarity is a measured fact about the
+knowledge base, not a phrase rule. (2) After the right query had run, the
+loop's second action was `generate_document` and the user got "I've
+prepared ... as a PDF" for a question that asked for none. A document or
+translation action after a successful query now needs a reading of the
+WHOLE message (`_read_the_turn`) that wants a document or names a format;
+"track joey and make it a PDF" keeps its document, a plain question does
+not get one.
+
 **Pass 3 of the capability check (2026-09-06) added five more rules, all
 structural.** (1) A query that SUCCEEDED this turn is the data part of the
 answer: a second `query_database` in the same turn is refused as a repeat

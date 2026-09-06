@@ -14,6 +14,8 @@ import chromadb
 from chromadb.config import Settings
 
 from .config import Config
+from . import seed_catalog as _seed_catalog
+from . import seed_catalog_generated as _seed_catalog_generated
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -927,6 +929,12 @@ ORDER BY total_detections DESC""",
         }
     ]
 
+    # The verified catalog (sql_agent/seed_catalog.py) is part of the seed
+    # set: same hash, same re-seed, same 'seed' source. Every entry there
+    # has been executed against the schema before it was added.
+    SEED_EXAMPLES = (SEED_EXAMPLES + list(_seed_catalog.CATALOG)
+                     + list(_seed_catalog_generated.GENERATED))
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -1049,15 +1057,37 @@ ORDER BY total_detections DESC""",
             # No changes - skip initialization
             logger.info(f"✓ Knowledge base up-to-date ({self.collection.count()} total examples)")
 
+    #: Seeds are written in batches: one embedding call per batch instead of
+    #: a get + add + embedding per example. With 77 seeds the one-by-one path
+    #: was tolerable; with the verified catalogs (a thousand seeds) it held
+    #: the API unhealthy for many minutes at every seed change.
+    _SEED_BATCH = 200
+
     def _load_seed_examples(self):
-        """Load all seed examples into the knowledge base."""
+        """Load all seed examples into the knowledge base, in batches."""
+        added_at = datetime.utcnow().isoformat()  # naive UTC (storage convention)
+        ids, documents, metadatas = [], [], []
+        seen = set()
         for example in self.SEED_EXAMPLES:
-            self.add_example(
-                question=example["question"],
-                sql=example["sql"],
-                purpose=example["purpose"],
-                source="seed"
-            )
+            doc_id = self._generate_id(example["question"])
+            if doc_id in seen:
+                continue
+            seen.add(doc_id)
+            ids.append(doc_id)
+            documents.append(example["question"])
+            metadatas.append({
+                "sql": example["sql"],
+                "purpose": example["purpose"],
+                "source": "seed",
+                "added_at": added_at,
+                "index_version": "sql-examples-v2",
+                "document_version": 1,
+            })
+        for start in range(0, len(ids), self._SEED_BATCH):
+            stop = start + self._SEED_BATCH
+            self.collection.upsert(ids=ids[start:stop], documents=documents[start:stop],
+                                   metadatas=metadatas[start:stop])
+            logger.info("[KB] seeded %d/%d examples", min(stop, len(ids)), len(ids))
 
 
 

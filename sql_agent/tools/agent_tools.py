@@ -519,6 +519,30 @@ class SQLAgentTools:
                 logger.info("[REACT] repeated action refused; answering from "
                             "what this turn already produced")
                 return None
+            # The question has been answered by a query; turning it into a
+            # PDF is only right when the turn asked for a document. The
+            # reading of this turn says what was asked: "which pair of
+            # cameras ... how many times" got the right rows and then a
+            # second action produced "I've prepared ... as a PDF" (Opik
+            # 01a07628-edc7, 2026-09-06).
+            # Decided from a reading of the WHOLE message (the tool-derived
+            # reading only describes the first call), so "track joey and
+            # make it a PDF" keeps its document; with no reader available
+            # the action stands.
+            if (queried_ok
+                    and committed.get("tool") in ("generate_document",
+                                                  "translate_document")):
+                asked = self._read_the_turn(
+                    state, str(state.get("normalized_input") or ""), candidates)
+                if (asked is not None
+                        and asked.wants not in (interpreter.DOCUMENT,
+                                                interpreter.TRANSLATION)
+                        and not asked.format):
+                    state["repeat_refused"] = True
+                    logger.info("[REACT] %s refused: the turn asked a question, "
+                                "not for a document; answering from the query",
+                                committed.get("tool"))
+                    return None
             state["committed_signature"] = committed["signature"]
 
         name = call.get("name")
@@ -1310,6 +1334,11 @@ class SQLAgentTools:
         import hashlib
 
         text = " ".join(str(sql or "").split()).lower()
+        # The validator appends "LIMIT 500" to what it accepts, so the
+        # rejected SQL carried a LIMIT the regenerated candidate does not;
+        # the two never hashed alike and a byte-identical rewrite ran again
+        # (twice, for "average per active camera-day", 2026-09-06).
+        text = re.sub(r"\s+limit\s+\d+\s*;?\s*$", "", text)
         return hashlib.sha1(text.encode("utf-8")).hexdigest() if text else ""
 
     def _resolve_entity_and_route(self, state: AgentState,
@@ -1933,10 +1962,13 @@ class SQLAgentTools:
                              default=str)
         return ChatPromptTemplate.from_messages([
             SystemMessage(content=(
-                "You answer ONE question from surveillance data, in one to "
-                "three plain sentences. No headings, no sections, no bullet "
-                "lists, no title, no recommendations. Use only the rows "
-                "given. Copy names, camera names and timestamps exactly. "
+                "You answer ONE question from surveillance data, briefly and "
+                "in plain sentences. No headings, no sections, no title, no "
+                "recommendations. Every row given must appear in the answer "
+                "(six weekday rows are six figures, not three); when the "
+                "question asks which is highest, most or busiest, name it "
+                "from the rows. Use only the rows given. Copy names, camera "
+                "names and timestamps exactly. "
                 "Do not compute or state totals, ranges or averages the "
                 "rows do not directly contain. When the rows are computed "
                 "figures (counts, averages, shares, one row per group), "
@@ -2396,7 +2428,26 @@ class SQLAgentTools:
                 top_k=config.rag_top_k,
                 user_id=state.get("user_id"),
             )
-
+            # The verified seeds are written with PERSON_NAME / OTHER_PERSON /
+            # CAMERA_NAME placeholders, and a placeholder embeds far from a
+            # real name: "which camera saw JOEY, and how many minutes ..."
+            # ranked the exact seed second (0.65) behind a learned "which
+            # camera detected Joey" (0.73), and the model then wrote its own
+            # broken self-join. Asking a second time with the stored names
+            # the message mentions replaced by the placeholders lets the
+            # seed match on its shape; both result lists are merged by
+            # similarity, so literal-name examples still count.
+            placeholder_query = self._placeholder_query(state)
+            if placeholder_query and placeholder_query != state["normalized_input"]:
+                extra = self.kb.search_similar(
+                    query=placeholder_query,
+                    top_k=config.rag_top_k,
+                    user_id=state.get("user_id"),
+                )
+                examples = self._merge_examples(examples, extra, config.rag_top_k)
+                logger.info("[STEP_3.5] placeholder retrieval merged "
+                            "(top_similarities=%s)",
+                            [ex.get("similarity") for ex in examples[:3]])
             state["retrieved_examples"] = examples
             state["rag_context"] = self.kb.format_examples_for_prompt(examples)
 
@@ -2417,6 +2468,100 @@ class SQLAgentTools:
             logger.error(f"❌ Error: {state['error']}")
 
         return state
+
+    _NAME_POOL_TTL_SECONDS = 60
+    #: A verified seed at or above this similarity to the question is
+    #: reproduced rather than used as inspiration.
+    _EXACT_SEED_SIMILARITY = 0.9
+
+    @staticmethod
+    def _exact_seed_similarity(state) -> float:
+        """Similarity of the best retrieved VERIFIED example, else 0."""
+        examples = state.get("retrieved_examples") or []
+        if not examples:
+            return 0.0
+        best = examples[0]
+        if best.get("source") != "seed":
+            return 0.0
+        try:
+            return float(best.get("similarity") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _stored_names(self):
+        """Stored person names and camera names, cached briefly.
+
+        Data, not a word list: the names come from the database the query
+        will run against. Read through the fixed-query executors so no
+        interpolation is involved.
+        """
+        import time
+        from . import tool_executors
+
+        cached = getattr(self, "_stored_names_cache", None)
+        if cached and time.monotonic() - cached[0] < self._NAME_POOL_TTL_SECONDS:
+            return cached[1], cached[2]
+        people, cameras = [], []
+        try:
+            people = [n for n in tool_executors._known_names(self.db)
+                      if n and n.strip() and n.strip().lower() != "unknown"
+                      and not n.strip().lower().startswith("person_")]
+        except Exception as e:
+            logger.debug("[STEP_3.5] could not read stored names: %s", e)
+        try:
+            rows = self.db.execute_query(
+                "SELECT pipeline_id, location_name FROM pipelines LIMIT 500")
+            for row in (rows or {}).get("rows") or []:
+                for value in (row.get("location_name"), row.get("pipeline_id")):
+                    if value and str(value).strip():
+                        cameras.append(str(value).strip())
+        except Exception as e:
+            logger.debug("[STEP_3.5] could not read camera names: %s", e)
+        self._stored_names_cache = (time.monotonic(), people, cameras)
+        return people, cameras
+
+    def _placeholder_query(self, state) -> str:
+        """The message with the stored names it mentions replaced by the
+        seed placeholders (first person -> PERSON_NAME, second ->
+        OTHER_PERSON, camera -> CAMERA_NAME). Empty when nothing matched."""
+        text = str(state.get("normalized_input") or "")
+        if not text:
+            return ""
+        people, cameras = self._stored_names()
+        reading = state.get("interpretation") or {}
+        people = list(dict.fromkeys(list(reading.get("people") or []) + people))
+        if reading.get("camera"):
+            cameras = [reading["camera"]] + cameras
+        out = text
+        found_people = []
+        for name in sorted(set(people), key=len, reverse=True):
+            pattern = r"(?<!\w)" + re.escape(name) + r"(?:'s)?(?!\w)"
+            if re.search(pattern, out, flags=re.I):
+                found_people.append(name)
+        for index, name in enumerate(found_people[:2]):
+            token = "PERSON_NAME" if index == 0 else "OTHER_PERSON"
+            out = re.sub(r"(?<!\w)" + re.escape(name) + r"(?:'s)?(?!\w)",
+                         lambda m, t=token: t + ("'s" if m.group(0).lower().endswith("'s") else ""),
+                         out, flags=re.I)
+        for name in sorted(set(cameras), key=len, reverse=True):
+            if len(name) < 3:
+                continue
+            pattern = r"(?<!\w)" + re.escape(name) + r"(?!\w)"
+            if re.search(pattern, out, flags=re.I):
+                out = re.sub(pattern, "CAMERA_NAME", out, flags=re.I)
+                break
+        return out if out != text else ""
+
+    @staticmethod
+    def _merge_examples(first, second, top_k: int):
+        """Union of two retrieval lists by document, best similarity wins."""
+        merged = {}
+        for example in list(first or []) + list(second or []):
+            key = example.get("document_id") or example.get("question")
+            if key not in merged or (example.get("similarity") or 0) > (merged[key].get("similarity") or 0):
+                merged[key] = example
+        ranked = sorted(merged.values(), key=lambda ex: -(ex.get("similarity") or 0))
+        return ranked[:max(1, int(top_k or 5))]
 
     def generate_sql(self, state: AgentState) -> AgentState:
         """
@@ -2562,6 +2707,20 @@ If no query is possible:
                 # figure, so it must aggregate - the every-row rule used to
                 # fire on "which camera has the most" too, and counts came
                 # back as row dumps.
+                # A verified seed that matches the question nearly word for
+                # word IS the answer's shape: with the shape instruction on
+                # top of it, "biggest increase over the previous day" (seed
+                # at 0.97) came back grouped per camera, and "faces per
+                # detection with at least 5 detections" (0.94) as a nested
+                # subquery that could not run (2026-09-06). Similarity is a
+                # measured fact about the knowledge base, not a phrase rule.
+                + (("\nA VERIFIED EXAMPLE ANSWERS THIS EXACT QUESTION (Example 1, "
+                    f"similarity {self._exact_seed_similarity(state):.2f}). Reproduce its SQL "
+                    "as it is, substituting only the names, dates and periods "
+                    "the request gives; do not add grouping columns, joins, "
+                    "filters or subqueries the example does not have.\n")
+                   if self._exact_seed_similarity(state) >= self._EXACT_SEED_SIMILARITY
+                   else "")
                 + (("\nTHIS IS A REPORT. Return every row the request is "
                     "about, never a single row with MAX(...) or LIMIT 1: "
                     "for a tracked person that is one row per detection with "
@@ -2570,12 +2729,14 @@ If no query is possible:
                     "is one row per camera or person, computed with GROUP BY "
                     "/ HAVING / NOT EXISTS as the condition needs, following "
                     "a matching knowledge-base example when one is given.\n")
-                   if (state.get("interpretation") or {}).get("shape") == "report"
+                   if ((state.get("interpretation") or {}).get("shape") == "report"
+                       and self._exact_seed_similarity(state) < self._EXACT_SEED_SIMILARITY)
                    else ("\nTHIS IS A SUMMARY. Compute the figure, ranking or "
                          "comparison the request asks for (COUNT, AVG, GROUP "
                          "BY, ordering, set difference, window functions as "
                          "needed) and return only the computed rows.\n")
-                   if (state.get("interpretation") or {}).get("shape") == "summary"
+                   if ((state.get("interpretation") or {}).get("shape") == "summary"
+                       and self._exact_seed_similarity(state) < self._EXACT_SEED_SIMILARITY)
                    else "")
                 + "\nGenerate SQL that satisfies the authoritative request."
                 + self._correction_hint(state)))
