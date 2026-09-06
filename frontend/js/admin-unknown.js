@@ -982,153 +982,18 @@ function getCurrentPageGroups() {
 // Update a single identity card in place (without reloading page)
 function updateIdentityCard(identityId, updatedIdentity) {
     // Find the card element by identity ID
-    const card = document.querySelector(`[data-identity-id="${identityId}"]`);
+    const card = document.querySelector(`[data-identity-id="${CSS.escape(identityId)}"]`);
     
     if (!card) {
         return false; // Card not visible (on different page)
     }
     
-    // Update image if new one is provided
-    // Try to find image by data attribute first, then fallback to any img in card
-    let img = card.querySelector(`img[data-identity-image="${identityId}"]`);
-    if (!img) {
-        img = card.querySelector('img');
-    }
-    
+    // Replace the image in its stable frame; never stack absolute clones.
+    const img = card.querySelector('.identity-img');
     if (img && updatedIdentity.snapshot_url) {
-        // Check if snapshot_url is a data URI (base64 image)
-        const isDataUri = updatedIdentity.snapshot_url.startsWith('data:');
-        
-        // Normalize URLs for comparison (skip for data URIs)
-        const currentSrc = isDataUri ? img.src : img.src.replace(window.location.origin, '');
-        const newSrc = isDataUri 
-            ? updatedIdentity.snapshot_url
-            : (updatedIdentity.snapshot_url.startsWith('http') 
-                ? updatedIdentity.snapshot_url.replace(window.location.origin, '')
-                : updatedIdentity.snapshot_url);
-        
-        // Only update if URL is different (avoid unnecessary reloads)
-        if (currentSrc !== newSrc && currentSrc !== '/' + newSrc) {
-            // SMOOTH CROSSFADE: Preload new image, then swap with crossfade
-            // For data URIs, use them directly; for regular URLs, construct full URL
-            const fullUrl = isDataUri
-                ? updatedIdentity.snapshot_url
-                : (updatedIdentity.snapshot_url.startsWith('http') 
-                    ? updatedIdentity.snapshot_url 
-                    : (updatedIdentity.snapshot_url.startsWith('/') 
-                        ? window.location.origin + updatedIdentity.snapshot_url 
-                        : window.location.origin + '/' + updatedIdentity.snapshot_url));
-            
-            // Create new image element to preload
-            const newImg = new Image();
-            
-            // Set up crossfade transition
-            newImg.onload = () => {
-                // New image loaded - now do smooth crossfade
-                const imgContainer = img.parentElement;
-                if (!imgContainer) return;
-                
-                // Ensure container has position relative for absolute positioning
-                const containerStyle = window.getComputedStyle(imgContainer);
-                if (containerStyle.position === 'static') {
-                    imgContainer.style.position = 'relative';
-                }
-                
-                // Get computed dimensions from old image to ensure proper sizing
-                const imgRect = img.getBoundingClientRect();
-                const imgComputedStyle = window.getComputedStyle(img);
-                const containerRect = imgContainer.getBoundingClientRect();
-                
-                // Ensure container maintains its height during transition
-                if (!imgContainer.style.minHeight) {
-                    imgContainer.style.minHeight = containerRect.height + 'px';
-                }
-                
-                // Style the new image (same as old one) - carry the CSS class too,
-                // the card image is class-styled (.identity-img), not inline-styled
-                newImg.className = img.className;
-                newImg.style.cssText = img.style.cssText;
-                newImg.style.position = 'absolute';
-                newImg.style.top = '0';
-                newImg.style.left = '0';
-                newImg.style.width = '100%';
-                newImg.style.height = '100%';
-                newImg.style.opacity = '0';
-                newImg.style.transition = 'opacity 0.5s ease-in-out';
-                newImg.style.zIndex = '2';
-                newImg.style.objectFit = imgComputedStyle.objectFit || 'contain';
-                newImg.style.display = 'block';
-                newImg.setAttribute('data-identity-image', identityId);
-                newImg.setAttribute('alt', img.alt || 'Identity');
-                newImg.setAttribute('loading', 'lazy');
-                
-                // Copy event handlers from old image
-                if (img.onmouseenter) newImg.onmouseenter = img.onmouseenter;
-                if (img.onmouseleave) newImg.onmouseleave = img.onmouseleave;
-                if (img.onload) newImg.onload = img.onload;
-                if (img.onerror) newImg.onerror = img.onerror;
-                if (img.onclick) newImg.onclick = img.onclick;
-                if (img.ondblclick) newImg.ondblclick = img.ondblclick;
-                
-                // CRITICAL: Insert new image FIRST (invisible) before fading out old one
-                imgContainer.appendChild(newImg);
-                
-                // Force a reflow to ensure new image is in DOM and rendered
-                void newImg.offsetHeight;
-                
-                // Double-check new image is actually in DOM and has dimensions
-                const newImgRect = newImg.getBoundingClientRect();
-                if (newImgRect.width === 0 || newImgRect.height === 0) {
-                    // New image not properly sized, wait a bit more
-                    setTimeout(() => {
-                        startCrossfade();
-                    }, 50);
-                } else {
-                    startCrossfade();
-                }
-                
-                function startCrossfade() {
-                    // Now start both transitions simultaneously
-                    requestAnimationFrame(() => {
-                        requestAnimationFrame(() => {
-                            // Fade out old image
-                            img.style.transition = 'opacity 0.5s ease-in-out';
-                            img.style.opacity = '0';
-                            img.style.zIndex = '1';
-                            
-                            // Fade in new image at the same time
-                            newImg.style.opacity = '1';
-                        });
-                    });
-                    
-                    // Remove old image after transition completes
-                    setTimeout(() => {
-                        if (img && img.parentElement && newImg.parentElement) {
-                            img.remove();
-                        }
-                    }, 600); // Slightly longer than transition
-                }
-            };
-            
-            // Handle preload errors
-            newImg.onerror = () => {
-                // If preload fails, fallback to simple update
-                img.style.transition = 'opacity 0.3s ease';
-                img.style.opacity = '0.7';
-                img.src = fullUrl;
-                img.onload = () => {
-                    img.style.opacity = '1';
-                };
-                img.onerror = () => {
-                    img.style.opacity = '1';
-                };
-            };
-            
-            // Start preloading
-            newImg.src = fullUrl;
-        }
+        FaceImage.update(img, updatedIdentity.snapshot_url, card.querySelector('.face-placeholder'));
     }
-    
+
     // Update appearances count
     const countBadge = card.querySelector('[data-appearances-count]');
     if (countBadge) {
@@ -1309,7 +1174,7 @@ function renderPipelineGroupsPage() {
     grid.innerHTML = ''; // Clear existing content
 
     // Set grid style for pipeline groups
-    grid.style.cssText = 'display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 0.75rem; margin: 0.15rem 0 0 0;';
+    grid.style.cssText = 'display: grid; gap: 0.75rem; margin: 0.15rem 0 0 0;';
 
     // Pagination controls reflect the server's answer, not the group count.
     document.getElementById('current-page').textContent = currentPage;
@@ -1407,14 +1272,11 @@ function createPipelineGroup(pipelineId, identities) {
     groupGrid.className = 'pipeline-identities-grid';
     groupGrid.style.cssText = `
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        grid-auto-rows: 1fr;
         gap: 0.5rem;
         flex: 1;
         overflow-y: auto;
         overflow-x: hidden;
         padding: 0.5rem;
-        align-items: stretch;
         min-height: 0;
         max-height: 550px;
         width: 100%;
@@ -1475,24 +1337,15 @@ function createIdentityCard(identity) {
     const lastSeen = new Date(identity.last_seen_at || identity.first_seen_at);
 
     card.innerHTML = `
-        <div class="identity-media">
-            ${identity.snapshot_url ?
-                `<img
-                    class="identity-img"
-                    src="${identity.snapshot_url}"
-                    alt="Unknown identity"
-                    loading="lazy"
-                    data-identity-image="${identity.id}"
-                    data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'200\' height=\'200\'%3E%3Crect fill=\'%23333\' width=\'200\' height=\'200\'/%3E%3Ctext fill=\'%23999\' font-family=\'sans-serif\' font-size=\'14\' x=\'50%25\' y=\'50%25\' text-anchor=\'middle\' dy=\'.3em\'%3ENo Image%3C/text%3E%3C/svg%3E';"
-                >` :
-                `<div class="identity-no-image"><i class="fas fa-user-secret"></i><span>No snapshot</span></div>`
-            }
+        <div class="identity-media face-media">
+            <img class="identity-img face-preview" alt="Unknown identity snapshot" decoding="async" hidden>
+            <div class="face-placeholder">No image available</div>
+        </div>
+        <div class="identity-meta">
+            <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${lastSeen.toLocaleDateString()}</span>
             <div class="identity-badge" data-appearances-count="${sightings}" title="${sightings} sighting${sightings === 1 ? '' : 's'}">
                 <i class="fas fa-eye"></i>${sightings}
             </div>
-        </div>
-        <div class="identity-meta" data-last-seen title="Last seen">
-            <i class="fas fa-clock"></i>${lastSeen.toLocaleDateString()}
         </div>
         <div class="identity-actions">
             <button class="identity-action-primary" data-action="viewIdentityDetails" data-arg="${identity.id}" title="View details and create alerts">
@@ -1511,6 +1364,7 @@ function createIdentityCard(identity) {
             </div>
         </div>
     `;
+    FaceImage.update(card.querySelector('.identity-img'), identity.snapshot_url, card.querySelector('.face-placeholder'));
     return card;
 }
 

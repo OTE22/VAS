@@ -608,22 +608,15 @@
             item.dataset.pipeline = pipelineId;
             item.dataset.face = name;
 
-            const imgContainer = el('div', 'detection-image-container');
-            if (entry.best_image) {
-                const img = el('img', 'detection-image');
-                img.alt = name;
-                img.loading = 'lazy';
-                img.src = 'data:image/jpeg;base64,' + entry.best_image;
-                img.title = 'Click to view alert, double-click to view identity details';
-                // click behavior via delegation on #pipelineGrid (no inline handlers)
-                imgContainer.appendChild(img);
-            } else {
-                const placeholder = el('div', 'no-data');
-                placeholder.appendChild(icon('fa-user-slash'));
-                placeholder.appendChild(el('p', null, 'No image available'));
-                imgContainer.appendChild(placeholder);
-            }
-            imgContainer.appendChild(el('div', 'detection-image-overlay'));
+            const imgContainer = el('div', 'detection-image-container face-media');
+            const img = el('img', 'detection-image face-preview');
+            img.alt = name;
+            img.hidden = true;
+            img.decoding = 'async';
+            img.title = 'Click to view alert, double-click to view identity details';
+            // Keep the image node even without a snapshot: a later event can fill it.
+            imgContainer.appendChild(img);
+            imgContainer.appendChild(el('div', 'face-placeholder', 'No image available'));
             item.appendChild(imgContainer);
 
             const body = el('div', 'detection-item-content');
@@ -671,7 +664,7 @@
         const img = item.querySelector('.detection-image');
         if (img && entry.best_image) {
             const newSrc = 'data:image/jpeg;base64,' + entry.best_image;
-            if (img.src !== newSrc) crossfadeImage(img, newSrc);
+            FaceImage.update(img, newSrc, item.querySelector('.face-placeholder'));
         }
 
         const procEl = item.querySelector('.processing-time');
@@ -708,26 +701,6 @@
         if (hours > 0) out += `${hours}h `;
         if (minutes > 0 || hours > 0) out += `${minutes}m `;
         return (out + `${seconds}s`).trim();
-    }
-
-    /** Safe crossfade: preload, then swap src on the SAME element.
-     *  No cloned nodes, no copied executable attributes, no stacked images. */
-    function crossfadeImage(img, newSrc) {
-        if (img.dataset.pendingSrc === newSrc) return; // collapse rapid updates
-        img.dataset.pendingSrc = newSrc;
-        const pre = new Image();
-        pre.onload = () => {
-            if (destroyed || img.dataset.pendingSrc !== newSrc) return;
-            img.style.transition = 'opacity 0.35s ease-in-out';
-            img.style.opacity = '0.25';
-            trackTimeout(() => {
-                img.src = newSrc;
-                img.style.opacity = '1';
-                delete img.dataset.pendingSrc;
-            }, 200);
-        };
-        pre.onerror = () => { delete img.dataset.pendingSrc; }; // keep original image
-        pre.src = newSrc;
     }
 
     function updateUnknownBadge(card, pipelineId) {

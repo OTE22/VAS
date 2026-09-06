@@ -282,8 +282,11 @@ services:
       # in a container they only shred the logs.
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen2.5:1.5b
-      OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
+      # Model names come from docker/.env when set; the defaults are the two
+      # models the model manifest lists (deploy.sh stage 13 checks they are
+      # present in the ollama_models volume - nothing is pulled offline).
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+      OLLAMA_SQL_MODEL: ${OLLAMA_SQL_MODEL:-hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M}
       # The model that READS each chatbot turn; empty = OLLAMA_MODEL. Bind a
       # larger local model here than the chat one (e.g. qwen2.5:7b) once it
       # has been replayed live; the reading decides everything downstream.
@@ -291,6 +294,33 @@ services:
       # Storing question->SQL pairs after execution: OFF until learning is
       # gated on user feedback (a wrong answer learned once is served back).
       SQL_AGENT_LEARN_FROM_QUERIES: ${SQL_AGENT_LEARN_FROM_QUERIES:-false}
+      # Deployment mode and the data agent's local providers, forwarded from
+      # docker/.env (Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md). Every default
+      # is the offline one; the config guard refuses any value that points
+      # off the box (exit 78). Deliberately NOT forwarded, so a copied
+      # development .env cannot switch them on: LLM_DEV_PROVIDER, NVIDIA_NIM_*,
+      # SQL_AGENT_OPIK_ENABLED, OPIK_*, ALLOW_* (all stay at their refusing
+      # defaults inside the container).
+      OFFLINE_MODE: ${OFFLINE_MODE:-true}
+      OFFLINE_ALLOWED_HOSTS: ${OFFLINE_ALLOWED_HOSTS:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_SQL_MODEL: ${LLM_SQL_MODEL:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL_PATH: ${EMBEDDING_MODEL_PATH:-/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/model.onnx}
+      VECTOR_STORE: ${VECTOR_STORE:-chroma}
+      MILVUS_URI: ${MILVUS_URI:-}
+      MCP_SQL_URL: ${MCP_SQL_URL:-}
+      AGENT_ORCHESTRATOR: ${AGENT_ORCHESTRATOR:-langgraph}
+      STT_PROVIDER: ${STT_PROVIDER:-none}
+      STT_BASE_URL: ${STT_BASE_URL:-}
+      STT_MODEL_PATH: ${STT_MODEL_PATH:-}
+      OTEL_EXPORTER_ENDPOINT: ${OTEL_EXPORTER_ENDPOINT:-}
+      # A manifest path is checked INSIDE the container: leave it empty unless
+      # the bundle directory is mounted into the API container as well.
+      OFFLINE_BUNDLE_MANIFEST: ${OFFLINE_BUNDLE_MANIFEST:-}
       CHROMADB_PATH: /app/database/chromadb
     secrets:
       - jwt_secret

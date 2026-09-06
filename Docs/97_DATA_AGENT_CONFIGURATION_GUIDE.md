@@ -383,8 +383,8 @@ OFFLINE_MODE=true
 
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://ollama:11434
-OLLAMA_MODEL=qwen2.5:7b-instruct
-OLLAMA_SQL_MODEL=arctic-text2sql:7b
+OLLAMA_MODEL=qwen2.5:1.5b
+OLLAMA_SQL_MODEL=hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
 LLM_DEV_PROVIDER=
 NVIDIA_NIM_API_KEY=
 
@@ -399,13 +399,28 @@ SQL_AGENT_OPIK_ENABLED=false
 ALLOW_EXTERNAL_APIS=false
 ALLOW_MODEL_DOWNLOADS=false
 ALLOW_EXTERNAL_TELEMETRY=false
-OFFLINE_BUNDLE_MANIFEST=/opt/face_detector/bundle/manifest.json
+OFFLINE_BUNDLE_MANIFEST=
 HF_HUB_OFFLINE=1
 TRANSFORMERS_OFFLINE=1
 ```
 
 Model names must match what the bundle placed in the Ollama volume
-(`ollama list` inside the container shows them).
+(`ollama list` inside the container shows them); the two above are the ones
+the model manifest lists and deploy.sh stage 13 checks.
+
+Which lines reach the API container: `docker-compose.prod.yml` forwards
+`OFFLINE_MODE`, `OFFLINE_ALLOWED_HOSTS`, `LLM_PROVIDER`, `LLM_BASE_URL`,
+`LLM_MODEL`, `LLM_SQL_MODEL`, `EMBEDDING_*`, `VECTOR_STORE`, `MILVUS_URI`,
+`MCP_SQL_URL`, `AGENT_ORCHESTRATOR`, `STT_*`, `OTEL_EXPORTER_ENDPOINT`,
+`OFFLINE_BUNDLE_MANIFEST`, `OLLAMA_MODEL`, `OLLAMA_SQL_MODEL`,
+`OLLAMA_INTERPRETER_MODEL` and `SQL_AGENT_LEARN_FROM_QUERIES`, each with its
+offline default. It deliberately does **not** forward `LLM_DEV_PROVIDER`,
+`NVIDIA_NIM_*`, `SQL_AGENT_OPIK_ENABLED`, `OPIK_*` or `ALLOW_*`: inside the
+container they keep their refusing defaults whatever a copied development
+`.env` says (stage 06b refuses such a file anyway). `OFFLINE_BUNDLE_MANIFEST`
+is checked inside the container, so leave it empty unless the bundle
+directory is mounted into the API service; the host-side check is
+`scripts/verify_offline_bundle.sh`.
 
 ### 5.5 Start, and read the checklist
 

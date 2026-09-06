@@ -254,6 +254,18 @@ def default_gpu_probe() -> Tuple[bool, str]:
 # Storage probe
 # --------------------------------------------------------------------------
 
+def default_artifact_probe(path: str) -> bool:
+    """Whether a model file the offline policy requires is present.
+
+    A separate probe from `default_storage_probe`: that one answers "can I
+    write images under this DIRECTORY", and handed a model FILE it answers no
+    (a file is not a directory, and its parent is read-only), which reported
+    every weight as missing and refused a correct production boot.
+    """
+    import os
+    return os.path.isfile(path)
+
+
 def default_storage_probe(path: str) -> Tuple[bool, str]:
     """Whether the process can actually write face images to `path`.
 
@@ -302,6 +314,7 @@ def collect_violations(
     gpu_probe: Optional[GpuProbe] = None,
     env: Optional[Mapping[str, str]] = None,
     storage_probe: Optional[Callable[[str], Tuple[bool, str]]] = None,
+    artifact_probe: Optional[Callable[[str], bool]] = None,
 ) -> List[ConfigViolation]:
     """Every configuration problem, collected in a single pass.
 
@@ -1018,7 +1031,7 @@ def collect_violations(
         from backend.security import offline_policy as _offline
         for finding in _offline.collect_offline_violations(
                 cfg, production=production, env=env,
-                artifact_probe=(lambda path: storage_probe(path)[0]) if storage_probe else None):
+                artifact_probe=artifact_probe):
             add(ConfigViolation(finding.code, finding.key, finding.message,
                                 finding.fix, severity=finding.severity))
     except ImportError:
@@ -1180,7 +1193,8 @@ def enforce(cfg: Any = None, *, gpu_probe: Optional[GpuProbe] = None,
     import os as _os_env
     violations = collect_violations(cfg, gpu_probe=gpu_probe,
                                     env=_os_env.environ,
-                                    storage_probe=storage_probe or default_storage_probe)
+                                    storage_probe=storage_probe or default_storage_probe,
+                                    artifact_probe=default_artifact_probe)
     if fatal_only(violations):
         raise ConfigGuardError(violations)
 
@@ -1190,7 +1204,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     import os as _os_env
     violations = collect_violations(settings, env=_os_env.environ,
-                                    storage_probe=default_storage_probe)
+                                    storage_probe=default_storage_probe,
+                                    artifact_probe=default_artifact_probe)
     if violations:
         sys.stderr.write(format_report(violations))
     return EX_CONFIG if fatal_only(violations) else 0

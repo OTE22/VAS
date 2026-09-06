@@ -212,3 +212,37 @@ def test_the_guards_clean_production_config_stays_clean():
     cfg = SimpleNamespace(**_GOOD)
     offline_codes = [c for c in codes_of(collect_violations(cfg, env=ENV_OK)) if c.startswith("OFFLINE_")]
     assert offline_codes == [], offline_codes
+
+
+# ---------------------------------------------------------------------------
+# The boot guard must probe model FILES with a file probe. It once derived the
+# artifact probe from the storage (directory-writability) probe, which reports
+# a present weight file as absent, and a correct production boot exited 78.
+# ---------------------------------------------------------------------------
+def test_the_guard_probes_model_files_not_directories(tmp_path):
+    from backend.security import config_guard as cg
+
+    weight = tmp_path / "det_10g.onnx"
+    weight.write_bytes(b"onnx")
+    assert cg.default_artifact_probe(str(weight)) is True
+    assert cg.default_artifact_probe(str(tmp_path)) is False
+    assert cg.default_artifact_probe(str(tmp_path / "missing.onnx")) is False
+    # The storage probe, handed a file, says "no" - the reason the two must differ.
+    assert cg.default_storage_probe(str(weight))[0] is False
+
+
+def test_collect_violations_uses_the_explicit_artifact_probe():
+    from backend.security import config_guard as cg
+    from tests.test_config_guard import _GOOD
+
+    cfg = SimpleNamespace(**{**_GOOD, "ENVIRONMENT": "production",
+                             "DETECTION_MODEL": "/app/weights/det_10g.onnx",
+                             "RECOGNITION_MODEL": "/app/weights/w600k_r50.onnx",
+                             "EMBEDDING_MODEL_PATH": "/models/minilm/model.onnx"})
+    read_only_storage = lambda path: (False, "read-only")
+    codes = {v.code for v in cg.collect_violations(
+        cfg, env=ENV_OK, storage_probe=read_only_storage, artifact_probe=lambda path: True)}
+    assert "OFFLINE_ARTIFACT_MISSING" not in codes
+    codes = {v.code for v in cg.collect_violations(
+        cfg, env=ENV_OK, storage_probe=lambda p: (True, "ok"), artifact_probe=lambda path: False)}
+    assert "OFFLINE_ARTIFACT_MISSING" in codes

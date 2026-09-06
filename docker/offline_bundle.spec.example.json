@@ -3,8 +3,8 @@
   "items": [
     {"kind": "embedding", "src": "/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx",
      "dest": "/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx"},
-    {"kind": "llm", "src": "/var/lib/docker/volumes/docker_ollama_models/_data/models",
-     "dest": "/var/lib/docker/volumes/docker_ollama_models/_data/models"},
+    {"kind": "llm", "src": "/home/<you>/.ollama/models",
+     "dest": "/var/lib/docker/volumes/face_detector_prod_ollama_models/_data/models"},
     {"kind": "other", "src": "./weights", "dest": "/app/weights"},
     {"kind": "wheel", "src": "./wheels", "dest": ""},
     {"kind": "frontend", "src": "./frontend/vendor", "dest": "/app/frontend/vendor"},
