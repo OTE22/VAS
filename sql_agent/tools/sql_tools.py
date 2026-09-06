@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
 
@@ -18,8 +18,8 @@ except ImportError:  # pragma: no cover - deployment requires sqlglot
     sqlglot = None
 
 
-def _json_object(text: str) -> Optional[dict]:
-    """Return the first decodable JSON object without a greedy regex.
+def _json_objects(text: str) -> List[dict]:
+    """Every top-level decodable JSON object in the text, in order.
 
     `strict=False`: a model that lays its SQL out on several lines INSIDE
     the JSON string emits raw newlines there, which strict JSON forbids.
@@ -33,16 +33,44 @@ def _json_object(text: str) -> Optional[dict]:
     # A single quote never needs escaping in JSON, so dropping the backslash
     # cannot change the meaning of a valid envelope.
     for candidate in (text, text.replace("\\'", "'")):
-        for index, char in enumerate(candidate):
-            if char != "{":
+        found: List[dict] = []
+        index = 0
+        while index < len(candidate):
+            if candidate[index] != "{":
+                index += 1
                 continue
             try:
-                value, _end = decoder.raw_decode(candidate[index:])
+                value, end = decoder.raw_decode(candidate[index:])
             except json.JSONDecodeError:
+                index += 1
                 continue
             if isinstance(value, dict):
+                found.append(value)
+            # Skip past the object: its nested braces are not new candidates.
+            index += max(end, 1)
+        if found:
+            return found
+    return []
+
+
+def _json_object(text: str) -> Optional[dict]:
+    """The envelope to act on: the LAST object that carries SQL, else the first.
+
+    A repair prompt says "produce a DIFFERENT query"; the model sometimes
+    answers with the rejected object first and the corrected one after it.
+    Taking the first object re-submitted the rejected SQL three times in a
+    row and the turn failed with the fix sitting unread in the same message
+    (Opik trace 01a074f1-6a3a-7daf-b25f-e1d440a006b0, 2026-09-06). A
+    compliant response has exactly one object, for which this is identical.
+    """
+    objects = _json_objects(text)
+    if not objects:
+        return None
+    for value in reversed(objects):
+        for key in ("sql", "fixed_sql"):
+            if isinstance(value.get(key), str) and value[key].strip():
                 return value
-    return None
+    return objects[0]
 
 
 def _fenced_body(text: str) -> Optional[str]:

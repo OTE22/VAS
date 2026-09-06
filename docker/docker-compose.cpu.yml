@@ -292,18 +292,34 @@ services:
       # Per-call ceiling sized for the 7B on CPU (a planner-sized prompt
       # measures >120s here). See SQL_AGENT_TOTAL_TIMEOUT above.
       OLLAMA_TIMEOUT: "300"
-      # Development-only per-turn tracing of the SQL agent into a SELF-HOSTED
-      # Opik (one trace per turn: every node, every prompt and answer, every
-      # tool proposal, timings). Off by default; enable in docker/.env:
+      # Development-only per-turn tracing of the SQL agent into Opik (one
+      # trace per turn: every node, every prompt and answer, every tool
+      # proposal, timings). Off by default; enable in docker/.env:
       #   SQL_AGENT_OPIK_ENABLED=true
-      # and run Opik on the workstation (git clone comet-ml/opik; .\opik.ps1
-      # or ./opik.sh; UI at http://localhost:5173). Claude Code reads the
-      # traces back through .mcp.json (opik-mcp). Production REFUSES this
-      # flag at boot (config guard, exit 78) and its image does not even
-      # carry the SDK — do not copy these lines to a prod file.
+      # and EITHER run Opik on the workstation (git clone comet-ml/opik;
+      # .\opik.ps1 or ./opik.sh; UI at http://localhost:5173 — the default
+      # URL below) OR use the hosted service, development only, like NIM
+      # above, by adding to docker/.env:
+      #   OPIK_URL_OVERRIDE=https://www.comet.com/opik/api/
+      #   OPIK_API_KEY=...        OPIK_WORKSPACE=...   (from comet.com settings)
+      # Hosted means full prompts, answers, SQL and RESULT ROWS leave the box:
+      # the development database must be synthetic first. Claude Code reads
+      # the traces back through .mcp.json (scripts/opik_mcp.py reads this
+      # same docker/.env). Production REFUSES the flag at boot (config guard,
+      # exit 78) and its image does not carry the SDK — do not copy these
+      # lines to a prod file.
       SQL_AGENT_OPIK_ENABLED: ${SQL_AGENT_OPIK_ENABLED:-false}
       OPIK_URL_OVERRIDE: ${OPIK_URL_OVERRIDE:-http://host.docker.internal:5173/api/}
       OPIK_PROJECT_NAME: ${OPIK_PROJECT_NAME:-face-detector-sql-agent}
+      OPIK_API_KEY: ${OPIK_API_KEY:-}
+      OPIK_WORKSPACE: ${OPIK_WORKSPACE:-default}
+      # The opik SDK reports its own errors to a hard-coded Sentry DSN and
+      # posts usage analytics to Comet unless told otherwise. Sentry is
+      # decided the moment the package is imported, so it has to be said
+      # here, in the environment; sql_agent/tracing.py repeats both in the
+      # SDK's session config. Not tunable: there is no reason to turn them on.
+      OPIK_SENTRY_ENABLE: "false"
+      OPIK_ANALYTICS_ENABLE: "false"
       # Development-only hosted LLM for the SQL agent (NVIDIA NIM, free tier
       # at build.nvidia.com). Off by default; enable by setting BOTH in
       # docker/.env:

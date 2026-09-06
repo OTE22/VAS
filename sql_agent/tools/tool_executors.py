@@ -95,10 +95,17 @@ def _list_cameras(db) -> dict:
     """
     rows = _rows(db, "SELECT id, pipeline_id, location_name, is_active "
                      "FROM pipelines ORDER BY pipeline_id LIMIT 25")
+    # `is_active` is an INTEGER column (0/1), and the output contract is
+    # strict about `active: bool`. Passed through raw, pydantic rejected the
+    # whole envelope and EVERY list_cameras call came back INVALID_RESULT —
+    # the planner then asked the user to "provide a list of cameras" (Opik
+    # trace 01a074f0-0cdf-7c64-a6d3-15b7cb4e17b5, 2026-09-06). Coerce here,
+    # where the column's shape is known, not in the contract.
     cameras = [{"id": str(r.get("id")),
                 "camera": r.get("pipeline_id"),
                 "location": r.get("location_name"),
-                "active": r.get("is_active")}
+                "active": (None if r.get("is_active") is None
+                           else bool(r.get("is_active")))}
                for r in rows]
     return {"cameras": cameras, "count": len(cameras),
             "note": "refer to a camera by its `camera` value; never invent one"}

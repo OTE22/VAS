@@ -67,6 +67,11 @@ ENVIRONMENT_READERS_ALLOWED = {
     # against what settings resolved — reporting on the environment is its
     # whole job; every application value it checks still comes from settings.
     os.path.join("scripts", "regression_isolation_check.py"),
+    # Launcher for the Opik MCP server (Claude Code tooling, not the application):
+    # copies its own environment into the child so `uvx` is found, and decides
+    # the OPIK_* variables from docker/.env. Never imports settings: it runs on
+    # the workstation, outside the container, where config.py may not even load.
+    os.path.join("scripts", "opik_mcp.py"),
     # Runs inside the GDAL / Planetiler PREPARATION containers, which mount the
     # repo but not the application: no pydantic, no config module, so importing
     # settings there is not merely undesirable, it raises. The one value it

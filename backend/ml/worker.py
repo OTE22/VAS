@@ -183,7 +183,7 @@ async def _enqueue_scheduled_drift_if_due() -> None:
     if not settings.ML_DRIFT_MONITORING_ENABLED:
         return
 
-    interval = _seconds("ML_DRIFT_CHECK_INTERVAL_HOURS", 24, 1) * 3600
+    interval = max(1, float(settings.ML_DRIFT_CHECK_INTERVAL_HOURS)) * 3600
     cutoff = datetime.utcnow() - timedelta(seconds=interval)
     async with db_manager.get_session() as db:
         from backend.ml.monitoring_contract import production_inference_ready

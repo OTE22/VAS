@@ -493,7 +493,6 @@ class SQLIntelligenceAgent:
         except Exception as e:
             logger.warning("[SQL_AGENT] dialogue-state commit skipped: %s", e)
 
-    @controlled()
     def _graph_config(self, entrypoint: str):
         """LangGraph run config for one turn: the development tracer, or None.
 
@@ -514,6 +513,7 @@ class SQLIntelligenceAgent:
             logger.warning("[SQL_AGENT] tracer config skipped: %s", exc)
             return None
 
+    @controlled()
     def query(self, user_input: str, learn: bool = True, cancel_event=None):
         """
         Process a user query and return a human-friendly response.

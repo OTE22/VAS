@@ -68,7 +68,7 @@ ORDER BY d.timestamp DESC LIMIT 10""",
             # lagging cache (KSA showed 17 against 25 real detections).
             "sql": """SELECT COALESCE(p.location_name, p.pipeline_id) AS camera_name, p.pipeline_id, p.created_at,
        (SELECT COUNT(*) FROM detections d WHERE d.pipeline_id = p.pipeline_id) AS total_detections
-FROM pipelines p WHERE p.is_active = true ORDER BY total_detections DESC""",
+FROM pipelines p WHERE p.is_active = 1 ORDER BY total_detections DESC""",
             "purpose": "List all currently active cameras with their real detection counts"
         },
         {
@@ -275,7 +275,7 @@ ORDER BY first_seen ASC""",
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
 LEFT JOIN faces f ON d.id = f.detection_id
-WHERE p.is_active = true
+WHERE p.is_active = 1
 GROUP BY p.pipeline_id, p.location_name
 ORDER BY total_detections DESC""",
             "purpose": "Analyze and compare detection rates across all cameras"
@@ -483,7 +483,7 @@ ORDER BY last_detection DESC""",
     COUNT(d.id) as total_detections_today
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id AND DATE(d.timestamp) = CURRENT_DATE
-WHERE p.is_active = true
+WHERE p.is_active = 1
 GROUP BY p.pipeline_id, p.location_name
 HAVING MAX(d.timestamp) < NOW() - INTERVAL '30 minutes' OR MAX(d.timestamp) IS NULL
 ORDER BY time_since_detection DESC NULLS FIRST""",
@@ -649,7 +649,7 @@ ORDER BY hour_of_day""",
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id
 LEFT JOIN faces f ON d.id = f.detection_id
-WHERE p.is_active = true
+WHERE p.is_active = 1
 GROUP BY p.pipeline_id, p.location_name
 ORDER BY total_detections DESC""",
             "purpose": "Calculate average detection statistics per camera"
@@ -686,7 +686,7 @@ ORDER BY d.timestamp ASC""",
     MAX(d.timestamp) as last_detection_ever
 FROM pipelines p
 LEFT JOIN detections d ON p.pipeline_id = d.pipeline_id AND DATE(d.timestamp) = CURRENT_DATE
-WHERE p.is_active = true
+WHERE p.is_active = 1
 GROUP BY p.pipeline_id, p.location_name, p.is_active
 HAVING COUNT(d.id) = 0
 ORDER BY p.pipeline_id""",
@@ -802,7 +802,7 @@ JOIN pipelines p ON d.pipeline_id = p.pipeline_id
 WHERE DATE(d.timestamp) = CURRENT_DATE
     AND f.name IS NOT NULL
 GROUP BY f.name
-HAVING COUNT(DISTINCT p.pipeline_id) = (SELECT COUNT(*) FROM pipelines WHERE is_active = true)
+HAVING COUNT(DISTINCT p.pipeline_id) = (SELECT COUNT(*) FROM pipelines WHERE is_active = 1)
 ORDER BY cameras_visited DESC""",
             "purpose": "Find people who visited every active camera today"
         },

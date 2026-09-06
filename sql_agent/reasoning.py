@@ -122,9 +122,37 @@ _CORRECTABLE_SIGNS = (
     # pick an overload, which an explicit cast resolves.
     "is not unique", "could not choose", "no function matches",
     "undefinedcolumn", "undefinedfunction", "undefinedtable",
+    # "each UNION query must have the same number of columns" — a shape
+    # mistake in the query, and the model fixes it given the text. Fell
+    # through to PERMANENT and the user got a bare apology for "how many
+    # identities are known and how many unknown" (Opik trace
+    # 01a074f0-19fd-7f39-8a86-6e32d1a66633, 2026-09-06).
+    "must have the same number of columns",
+    # The hard battery of 2026-09-06: a CTE named like the table it reads
+    # ("missing FROM-clause entry for table d"), a percentile over COUNT(*)
+    # ("aggregate function calls cannot be nested"), an aggregate in WHERE,
+    # a window function in WHERE. Each is a shape mistake a rewrite fixes;
+    # each fell through to PERMANENT and the user got a bare apology.
+    "missing from-clause entry",
+    "cannot be nested",
+    "aggregate functions are not allowed",
+    "window functions are not allowed",
+    "must return only one column",
 )
 
 _FORBIDDEN_SIGNS = ("security:", "forbidden", "read-only", "not allowed")
+
+#: Postgres syntax complaints that happen to contain a forbidden sign. They
+#: are not refusals: "aggregate functions are not allowed in WHERE" is the
+#: model misplacing an aggregate, and it was answered with "That operation is
+#: not permitted — I can only read data" (Opik trace
+#: 01a0750e-8251-7b85-b812-1e41ffec6a50, 2026-09-06). A genuine refusal never
+#: reads like this; the guard's own messages carry their own codes.
+_FORBIDDEN_FALSE_POSITIVES = (
+    "aggregate functions are not allowed",
+    "window functions are not allowed",
+    "set-returning functions are not allowed",
+)
 
 _SANITIZED_DETAIL_CHARS = 200
 
@@ -445,7 +473,9 @@ def build_observation(state: dict) -> Dict[str, Any]:
                 observation["error_type"] = ErrorType.SQL_OUT_OF_SCOPE
             else:
                 observation["error_type"] = ErrorType.SQL_FORBIDDEN
-        elif any(sign in str(error_text).lower() for sign in _FORBIDDEN_SIGNS):
+        elif (any(sign in str(error_text).lower() for sign in _FORBIDDEN_SIGNS)
+              and not any(fp in str(error_text).lower()
+                          for fp in _FORBIDDEN_FALSE_POSITIVES)):
             observation["error_type"] = ErrorType.SQL_FORBIDDEN
         else:
             observation["error_type"] = classify_execution_error(error_text)

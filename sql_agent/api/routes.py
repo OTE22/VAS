@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from collections import OrderedDict
 from datetime import datetime
 from typing import Optional, Dict
@@ -352,7 +353,7 @@ def _register_request(request_id: str, user_id, cancel_event: threading.Event) -
         # running one go, with a log line.
         evicted = None
         for key, entry in _ACTIVE_REQUESTS.items():
-            if entry.get("status") != "running":
+            if entry.get("status") not in ("running", "cancelling"):
                 evicted = key
                 break
         if evicted is not None:
@@ -366,7 +367,7 @@ def _register_request(request_id: str, user_id, cancel_event: threading.Event) -
         "cancel_event": cancel_event,
         "user_id": user_id,
         "status": "running",
-        "started_at": asyncio.get_event_loop().time(),
+        "started_at": time.monotonic(),
     }
     return True
 
@@ -380,6 +381,8 @@ def _finish_request(request_id: str, status: str):
 def _sse_event(payload: dict, request_id: str, seq: int) -> str:
     """Every server event repeats request_id + sequence (client correlation)."""
     payload = {**payload, "request_id": request_id, "sequence": seq}
+    if payload.get("type") == "complete":
+        payload["provenance_url"] = f"/api/sql-agent/requests/{request_id}/trace"
     return f"data: {json.dumps(payload)}\n\n"
 
 
@@ -1396,6 +1399,8 @@ async def sql_agent_query(
             "success": not result_dict.get("turn_failed"),
             "response": response,
             "session_id": session_id,
+            "request_id": rest_request_id,
+            "provenance_url": f"/api/sql-agent/requests/{rest_request_id}/trace",
             "timestamp": datetime.utcnow().isoformat()
         }
         if artifact_block:
@@ -2146,6 +2151,8 @@ async def sql_agent_websocket(websocket: WebSocket):
             def ws_evt(payload: dict) -> dict:
                 nonlocal seq
                 seq += 1
+                if payload.get("type") == "complete":
+                    payload = {**payload, "provenance_url": f"/api/sql-agent/requests/{request_id}/trace"}
                 return {**payload, "request_id": request_id, "sequence": seq}
 
             if query_error:
@@ -2402,6 +2409,39 @@ async def sql_agent_websocket(websocket: WebSocket):
             await websocket.close()
         except:
             pass
+
+
+@router.get("/requests/{request_id}/trace")
+async def get_sql_agent_trace(
+    request_id: str,
+    response: Response,
+    current_user: User = Depends(require_chatbot_access()) if AUTH_AVAILABLE else None,
+):
+    """Owner-only operational evidence. No prompts, raw rows or private reasoning."""
+    if not AUTH_AVAILABLE or not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    response.headers["Cache-Control"] = "no-store"
+    entry = _ACTIVE_REQUESTS.get(request_id)
+    if entry and entry.get("user_id") == current_user.id:
+        run = getattr(entry.get("cancel_event"), "agent_run", None)
+        if run:
+            summary = run.summary()
+            summary["status"] = entry["status"]
+            return {"success": True, "run": summary}
+    # Same owner condition on archived history: neither an admin role nor an
+    # attacker-supplied run id widens access to another user's conversation.
+    from sqlalchemy import select
+    from db_models import UserQueryHistory
+    async with db_manager.get_session() as db:
+        row = (await db.execute(select(UserQueryHistory).where(
+            UserQueryHistory.user_id == current_user.id,
+            UserQueryHistory.query_metadata["agent_run"]["run_id"].astext == request_id
+        ).order_by(UserQueryHistory.id.desc()).limit(1))).scalar_one_or_none()
+        if row:
+            return {"success": True, "history_id": row.id, "run": row.query_metadata["agent_run"]}
+    raise HTTPException(status_code=404, detail="Run not found")
 
 
 @router.post("/requests/{request_id}/cancel")

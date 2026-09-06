@@ -18,6 +18,7 @@ and in the development image alike.
 """
 
 import os
+import re
 import sys
 import types
 from types import SimpleNamespace
@@ -65,35 +66,34 @@ class ExplodingTracer:
         raise RuntimeError("no server")
 
 
+SESSION = {}   # what the fake SDK was told through update_session_config
+
+
 @pytest.fixture(autouse=True)
 def _clean_state():
-    """Fresh once-only logging, fresh recorder, and the SDK env restored."""
+    """Fresh once-only logging and fresh recorders per test."""
     tracing._logged_reasons.clear()
     FakeTracer.instances.clear()
-    saved = {k: os.environ.get(k) for k in list(os.environ) if k.startswith("OPIK_")}
-    saved_keys = set(saved)
+    SESSION.clear()
     yield
-    for k in [k for k in os.environ if k.startswith("OPIK_")]:
-        if k not in saved_keys:
-            del os.environ[k]
-    for k, v in saved.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
 
 
 @pytest.fixture
 def fake_sdk(monkeypatch):
-    """Install a stand-in `opik` package exposing OpikTracer."""
+    """Install a stand-in `opik` package exposing OpikTracer and the
+    session-config hook the real SDK offers."""
     def install(tracer_cls=FakeTracer):
         opik = types.ModuleType("opik")
+        config = types.ModuleType("opik.config")
+        config.update_session_config = lambda key, value: SESSION.__setitem__(key, value)
         integrations = types.ModuleType("opik.integrations")
         langchain = types.ModuleType("opik.integrations.langchain")
         langchain.OpikTracer = tracer_cls
+        opik.config = config
         opik.integrations = integrations
         integrations.langchain = langchain
         monkeypatch.setitem(sys.modules, "opik", opik)
+        monkeypatch.setitem(sys.modules, "opik.config", config)
         monkeypatch.setitem(sys.modules, "opik.integrations", integrations)
         monkeypatch.setitem(sys.modules, "opik.integrations.langchain", langchain)
         return langchain
@@ -125,31 +125,51 @@ def test_production_never_traces_even_when_enabled_and_installed(fake_sdk):
     assert FakeTracer.instances == [], "no SDK object may be built in production"
 
 
-@pytest.mark.parametrize("url", [
+CLOUD_URLS = [
     "https://www.comet.com/opik/api/",
     "https://comet.com/opik/api",
     "http://eu.comet.com/opik/api/",
     "https://WWW.COMET.COM/opik/api/",
-])
-def test_the_hosted_service_is_refused_everywhere(fake_sdk, url):
-    fake_sdk()
-    cfg = agent_cfg(opik_enabled=True, opik_url=url)
-    assert tracing.tracing_status(cfg) == tracing.CLOUD_REFUSED
-    assert tracing.build_tracer(cfg) is None
-    assert FakeTracer.instances == []
-
-
-@pytest.mark.parametrize("url", [
+]
+LOCAL_URLS = [
     LOCAL_URL,
     "http://localhost:5173/api/",
     "http://127.0.0.1:5173/api",
     "https://opik.lab.internal/api/",
     "http://comet.com.lab.internal/api/",   # a suffix, not the hosted domain
-])
-def test_self_hosted_urls_are_accepted(fake_sdk, url):
+]
+
+
+@pytest.mark.parametrize("url", CLOUD_URLS + LOCAL_URLS)
+def test_production_refuses_every_destination(fake_sdk, url):
     fake_sdk()
-    assert tracing.tracing_status(agent_cfg(opik_enabled=True, opik_url=url)) \
-        == tracing.READY
+    cfg = agent_cfg(opik_enabled=True, is_production=True, opik_url=url)
+    assert tracing.tracing_status(cfg) == tracing.PRODUCTION
+    assert tracing.build_tracer(cfg) is None
+    assert FakeTracer.instances == []
+
+
+@pytest.mark.parametrize("url", CLOUD_URLS)
+def test_the_hosted_service_is_accepted_in_development_and_says_so(fake_sdk, url, caplog):
+    """Same footing as the NVIDIA development provider — but the log must
+    make the hosted case unmistakable, once."""
+    fake_sdk()
+    cfg = agent_cfg(opik_enabled=True, opik_url=url, opik_api_key="k", opik_workspace="w")
+    assert tracing.is_cloud_url(url)
+    with caplog.at_level("WARNING"):
+        assert tracing.build_tracer(cfg) is not None
+        tracing.build_tracer(cfg)
+    assert caplog.text.count("traces LEAVE this machine") == 1
+    assert SESSION["api_key"] == "k" and SESSION["workspace"] == "w"
+
+
+@pytest.mark.parametrize("url", LOCAL_URLS)
+def test_self_hosted_urls_are_accepted_quietly(fake_sdk, url, caplog):
+    fake_sdk()
+    assert not tracing.is_cloud_url(url)
+    with caplog.at_level("INFO"):
+        assert tracing.build_tracer(agent_cfg(opik_enabled=True, opik_url=url)) is not None
+    assert "LEAVE" not in caplog.text
 
 
 def test_missing_sdk_degrades_to_no_tracing(no_sdk):
@@ -174,21 +194,35 @@ def test_tracer_is_built_from_the_agent_settings(fake_sdk):
 
 
 def test_the_sdk_is_configured_from_settings_with_its_outbound_channels_closed(fake_sdk):
-    """The SDK reads OPIK_* from the environment; we write it there, and we
-    switch off the two channels it opens on its own (Sentry, analytics)."""
+    """The application settings are the SDK's only authority (its session
+    layer outranks its env and ~/.opik.config), and the two channels it opens
+    on its own — Sentry error reports, Comet usage analytics — are closed."""
     fake_sdk()
-    os.environ["OPIK_URL_OVERRIDE"] = "https://www.comet.com/opik/api/"  # stale
-    os.environ["OPIK_API_KEY"] = "stale-key"
     cfg = agent_cfg(opik_enabled=True, opik_url="http://localhost:5173/api/",
                     opik_workspace="default", opik_project_name="p")
     assert tracing.build_tracer(cfg) is not None
-    assert os.environ["OPIK_URL_OVERRIDE"] == "http://localhost:5173/api/"
-    assert os.environ["OPIK_WORKSPACE"] == "default"
-    assert os.environ["OPIK_PROJECT_NAME"] == "p"
-    assert "OPIK_API_KEY" not in os.environ, "an empty key clears a stale one"
-    assert os.environ["OPIK_SENTRY_ENABLE"] == "false"
-    assert os.environ["OPIK_ANALYTICS_ENABLE"] == "false"
-    assert os.environ["OPIK_ANALYTICS_URL"] == ""
+    assert SESSION == {
+        "url_override": "http://localhost:5173/api/",
+        "workspace": "default",
+        "project_name": "p",
+        "api_key": None,           # the open-source instance authenticates nobody
+        "sentry_enable": False,
+        "analytics_enable": False,
+        "analytics_url": "",
+        "track_disable": False,
+    }
+
+
+def test_sentry_is_also_closed_where_the_sdk_decides_it_at_import():
+    """The SDK arms Sentry when `opik` is imported, before any session config
+    can speak, so the development compose must say it in the environment."""
+    compose = open(os.path.join(REPO, "docker", "docker-compose.cpu.yml"),
+                   encoding="utf-8").read()
+    api = compose.split("  face_recognition:", 1)[1].split("\n  ml_worker:", 1)[0]
+    assert re.search(r'OPIK_SENTRY_ENABLE:\s*"false"', api), \
+        "face_recognition must set OPIK_SENTRY_ENABLE=false"
+    assert re.search(r'OPIK_ANALYTICS_ENABLE:\s*"false"', api), \
+        "face_recognition must set OPIK_ANALYTICS_ENABLE=false"
 
 
 def test_a_configured_key_reaches_the_sdk_but_not_the_log(fake_sdk, caplog):
@@ -196,8 +230,76 @@ def test_a_configured_key_reaches_the_sdk_but_not_the_log(fake_sdk, caplog):
     cfg = agent_cfg(opik_enabled=True, opik_api_key="opik-secret-123")
     with caplog.at_level("DEBUG"):
         assert tracing.build_tracer(cfg) is not None
-    assert os.environ["OPIK_API_KEY"] == "opik-secret-123"
+    assert SESSION["api_key"] == "opik-secret-123"
     assert "opik-secret-123" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The MCP launcher reads the same docker/.env and aims opik-mcp accordingly
+# ---------------------------------------------------------------------------
+
+def _launcher():
+    import importlib.util
+    path = os.path.join(REPO, "scripts", "opik_mcp.py")
+    spec = importlib.util.spec_from_file_location("opik_mcp_launcher", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_launcher_defaults_to_the_workstation_instance_on_the_oss_api_path():
+    env = _launcher().mcp_environment({})
+    assert env["COMET_URL_OVERRIDE"] == "http://localhost:5173"
+    assert env["OPIK_URL"] == "http://localhost:5173/api", \
+        "open-source Opik serves /api, not the hosted /opik/api"
+    assert "OPIK_API_KEY" not in env and "OPIK_WORKSPACE" not in env
+    assert env["OPIK_MCP_ANALYTICS_ENABLED"] == "false"
+    assert env["OPIK_DEFAULT_PROJECT_NAME"] == "face-detector-sql-agent"
+
+
+def test_launcher_turns_the_container_alias_into_localhost():
+    env = _launcher().mcp_environment(
+        {"OPIK_URL_OVERRIDE": "http://host.docker.internal:5173/api/"})
+    assert env["OPIK_URL"] == "http://localhost:5173/api"
+
+
+def test_launcher_aims_at_the_hosted_service_with_the_operator_credentials():
+    env = _launcher().mcp_environment({
+        "OPIK_URL_OVERRIDE": "https://www.comet.com/opik/api/",
+        "OPIK_API_KEY": "opik-key-1",
+        "OPIK_WORKSPACE": "my-team",
+        "OPIK_PROJECT_NAME": "proj",
+    })
+    assert env["COMET_URL_OVERRIDE"] == "https://www.comet.com"
+    assert env["OPIK_URL"] == "https://www.comet.com/opik/api"
+    assert env["OPIK_API_KEY"] == "opik-key-1"
+    assert env["OPIK_WORKSPACE"] == "my-team"
+    assert env["OPIK_DEFAULT_PROJECT_NAME"] == "proj"
+
+
+def test_launcher_reads_dotenv_like_compose_does(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text('\ufeff# comment\nOPIK_API_KEY="quoted"\nOPIK_WORKSPACE=ws \n\nBAD LINE\n',
+                 encoding="utf-8")
+    values = _launcher().read_dotenv(str(p))
+    assert values == {"OPIK_API_KEY": "quoted", "OPIK_WORKSPACE": "ws"}
+    assert _launcher().read_dotenv(str(tmp_path / "missing")) == {}
+
+
+def test_the_mcp_config_has_no_credentials_and_uses_the_launcher():
+    import json
+    cfg = json.load(open(os.path.join(REPO, ".mcp.json"), encoding="utf-8"))
+    server = cfg["mcpServers"]["opik-mcp"]
+    assert server["args"] == ["scripts/opik_mcp.py"]
+    assert "env" not in server, "credentials belong in docker/.env, not the repository"
+
+
+def test_the_tracing_module_never_touches_the_process_environment():
+    """The single-source rule (tests/test_config_single_source.py) — spelled
+    out here too because the obvious way to configure this SDK is exactly
+    the way that rule forbids."""
+    source = open(os.path.join(REPO, "sql_agent", "tracing.py"), encoding="utf-8").read()
+    assert "os.environ" not in source and "getenv" not in source
 
 
 def test_a_failing_sdk_never_fails_the_turn(fake_sdk, caplog):

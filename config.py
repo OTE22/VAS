@@ -1378,6 +1378,10 @@ class Settings(BaseSettings):
     )
     MLFLOW_TRACKING_URI: str = Field(default="", description="Empty uses a durable SQL-backed MLflow store under ML_ARTIFACT_DIR; alternatively an administrator-managed HTTPS tracking service. Credentials belong in service environment, never this field.")
     MLFLOW_EXPERIMENT_NAME: str = Field(default="ml-platform", description="MLflow experiment for governed training runs")
+    MLFLOW_HTTP_REQUEST_TIMEOUT: int = Field(default=10, ge=1, le=120,
+        description="MLflow SDK HTTP timeout in seconds; process restart required")
+    MLFLOW_HTTP_REQUEST_MAX_RETRIES: int = Field(default=1, ge=0, le=3,
+        description="MLflow SDK HTTP retries; process restart required")
     ML_TRAIN_MAX_THREADS: int = Field(default=2, ge=1, le=32)
     ML_OPTUNA_MAX_TRIALS: int = Field(default=30, ge=1, le=200)
     ML_OPTUNA_TIMEOUT_SECONDS: int = Field(default=600, ge=10, le=7200)
@@ -1567,27 +1571,33 @@ class Settings(BaseSettings):
     #      the admin settings API and applied at a later boot.
     # A trace contains the user's words, the names of people under
     # surveillance, the SQL and its rows: the very content the audit rules
-    # keep out of logs. The hosted service (comet.com) is refused everywhere;
-    # only a self-hosted Opik is accepted, and the `opik` package itself is a
-    # development extra (requirements-dev.txt) that production images never
-    # carry.
+    # keep out of logs. The hosted service (comet.com) is accepted in
+    # development only, like the NIM provider above — and it receives more
+    # than NIM does (result rows included), so the development database must
+    # be synthetic. The `opik` package itself is a development extra
+    # (requirements-dev.txt) that production images never carry.
     SQL_AGENT_OPIK_ENABLED: bool = Field(
         default=False,
         description="Attach an Opik tracer to every SQL-agent turn. "
                     "Development only — refused in production.")
     OPIK_URL_OVERRIDE: str = Field(
         default="http://host.docker.internal:5173/api/",
-        description="API URL of a SELF-HOSTED Opik. The container reaches the "
-                    "workstation's instance through host.docker.internal. "
-                    "comet.com is refused.")
+        description="Opik API URL. Default: a self-hosted instance on the "
+                    "workstation, reached from the container as "
+                    "host.docker.internal. The hosted service, "
+                    "https://www.comet.com/opik/api/, is accepted in "
+                    "development only (needs OPIK_API_KEY and OPIK_WORKSPACE).")
     OPIK_API_KEY: str = Field(
         default="",
-        description="Only for an authenticated self-hosted Opik; the "
-                    "open-source instance needs none. Never logged; redacted "
-                    "wherever a setting is rendered.")
+        description="Account key for the hosted service (or an authenticated "
+                    "self-hosted instance); the open-source instance needs "
+                    "none. Never logged; redacted wherever a setting is "
+                    "rendered.")
     OPIK_WORKSPACE: str = Field(
         default="default",
-        description="Open-source Opik has exactly one workspace, 'default'.")
+        description="Workspace name; the hosted service shows it in its "
+                    "settings page. Open-source Opik has exactly one, "
+                    "'default'.")
     OPIK_PROJECT_NAME: str = Field(
         default="face-detector-sql-agent",
         description="Opik project the agent's traces are filed under.")
@@ -1703,6 +1713,12 @@ class Settings(BaseSettings):
 
 # Create global settings instance
 settings = Settings()
+
+# MLflow exposes these SDK transport controls only through its environment.
+# Export the validated central configuration ONCE, before any SDK import; do
+# not mutate process configuration in request handlers or background jobs.
+os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] = str(settings.MLFLOW_HTTP_REQUEST_TIMEOUT)
+os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = str(settings.MLFLOW_HTTP_REQUEST_MAX_RETRIES)
 
 
 # Helper function to print configuration (for debugging)

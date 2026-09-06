@@ -23,8 +23,6 @@ def client():
     uri = tracking_uri()
     if uri.startswith("sqlite:"):
         (Path(settings.ML_ARTIFACT_DIR) / "tracking").mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "10")
-    os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "1")
     from mlflow import MlflowClient
     return MlflowClient(tracking_uri=uri, registry_uri=uri)
 

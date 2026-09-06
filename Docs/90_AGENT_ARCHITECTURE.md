@@ -708,6 +708,290 @@ rendered document beyond the invariant check inside the node itself. If you
 ask why a document turn shows no reasoning trace, that is why, and it is a
 gap rather than a decision.
 
+## Tracing a turn with Opik (development only)
+
+The logs above say *what kind* of thing happened and the Prometheus counters
+say *how often*. Neither can answer the question that actually comes up when
+an answer is wrong: **what exactly did node X send to the model on that turn,
+what came back, and where did it first go off the rails?** That is what a
+trace is for. With tracing on, every agent turn becomes one Opik trace: a
+span per graph node (`ingest_query` → `plan_action` → … → `story_response`),
+a span per model call inside it carrying the full prompt and the full answer,
+the tool proposals with their real arguments, the SQL, the observation, and
+the time each step took. The graph topology is drawn next to it. Turns of one
+conversation are grouped by thread (the conversation session id), so a
+context bug shows up as "turn 3 was fine, turn 4 lost the camera".
+
+Implementation: `sql_agent/tracing.py` builds an `OpikTracer` (the LangChain
+callback handler from the `opik` SDK) per turn and the four graph call sites
+in `sql_agent/agent.py` pass it as the LangGraph run `config`. The wrapped
+model in `llm/gateway.py` is a real `Runnable`, so the callbacks propagate
+through it to the Ollama/NIM calls without any change there. Tracing off
+means `config=None`, which is byte-for-byte the pre-tracing call.
+
+### The rule: development only, self-hosted only
+
+A trace **is** the content the audit rules keep out of log files: the user's
+own words, the names of the people under surveillance that `resolve_person`
+looked up, the generated SQL and its result rows. Shipping that to a tracing
+store outside the application's retention and audit is the same class of
+leak as the hosted LLM provider, and gets the same three fail-closed layers
+as `LLM_DEV_PROVIDER`:
+
+1. `sql_agent/tracing.py` attaches nothing when `settings.is_production`,
+   whatever the flag says, and logs why once.
+2. The config guard fails a production boot (exit 78,
+   `SQL_AGENT_TRACING_IN_PRODUCTION`) when `SQL_AGENT_OPIK_ENABLED` is on —
+   no acknowledgement escape. A stray `OPIK_API_KEY` in production is a
+   warning.
+3. `SQL_AGENT_OPIK_ENABLED`, `OPIK_URL_OVERRIDE` and `OPIK_API_KEY` are
+   `SECURITY_CRITICAL`, so they cannot be persisted through the admin
+   settings API and applied at a later boot; the key is in `SECRET_SETTINGS`.
+
+Two further points that have no equivalent in the LLM case:
+
+- **The hosted service (comet.com) is accepted in development only**, on the
+  same footing as the NVIDIA development provider: production refuses the
+  flag outright, so a cloud URL can never be reached there. What leaves the
+  machine is more than with the LLM provider — the full prompts and answers,
+  the SQL **and the result rows** — so the development database must hold
+  synthetic data before the switch goes on. The start-up log says
+  `traces LEAVE this machine` once so the hosted case is never mistaken for
+  the self-hosted one.
+- **The SDK is a development extra** (`requirements-dev.txt`, installed only
+  with `INSTALL_DEV=true`). Production images do not carry it, so they could
+  not honour the flag even if the guard let them. Beyond size (it pulls in
+  litellm, openai, boto3 stubs, tiktoken, tree-sitter), the `opik` package
+  reports its own errors to a hard-coded Sentry DSN and posts usage analytics
+  to Comet by default. Both are closed twice: the development compose sets
+  `OPIK_SENTRY_ENABLE=false` and `OPIK_ANALYTICS_ENABLE=false` in the
+  container environment (Sentry is armed the moment the package is imported,
+  so only the environment can say it in time), and `sql_agent/tracing.py`
+  writes the same, plus the URL, workspace, project and key, into the SDK's
+  *session* configuration — the layer that outranks the SDK's own environment
+  and `~/.opik.config` — every time it builds a tracer. The application
+  settings are the only authority; nothing in application code reads or
+  writes the process environment (the single-source rule in
+  `tests/test_config_single_source.py`).
+
+`tests/test_sql_agent_opik_tracing.py` holds all of the above and runs with a
+fake SDK, so it passes in the production image (no `opik`) and the
+development image alike.
+
+### Switching it on
+
+1. **Choose where traces go.** Both are configured in `docker/.env`, the
+   file that feeds the API container and, through `scripts/opik_mcp.py`,
+   the MCP server as well.
+
+   **Hosted (no server, no disk):** create a free account at
+   <https://www.comet.com>, copy the API key and workspace name from its
+   settings page, and add:
+
+   ```
+   OPIK_URL_OVERRIDE=https://www.comet.com/opik/api/
+   OPIK_API_KEY=<from comet.com — never paste it into a chat>
+   OPIK_WORKSPACE=<from comet.com>
+   ```
+
+   Development only, and only over a synthetic database: every prompt,
+   answer, SQL statement and result row of every turn goes to Comet's
+   servers.
+
+   **Self-hosted (nothing leaves the machine):** run Opik on the
+   workstation once. It is a Docker Compose stack of its own — ClickHouse,
+   MySQL, Redis, MinIO, ZooKeeper, backend, frontend — and not part of this
+   project's compose files on purpose: it is a developer tool, not a service
+   of the system.
+
+   ```powershell
+   git clone https://github.com/comet-ml/opik.git
+   cd opik
+   powershell -ExecutionPolicy ByPass -c ".\opik.ps1"     # Linux/macOS: ./opik.sh
+   ```
+
+   The UI is at <http://localhost:5173>; the REST API the SDK and the MCP
+   server use is `http://localhost:5173/api`. The default
+   `OPIK_URL_OVERRIDE` (`http://host.docker.internal:5173/api/`) already
+   points there, so nothing else is needed in `docker/.env`. Budget several
+   gigabytes of images; on a Docker Desktop workstation the virtual disk
+   never shrinks after a pull, so decide deliberately before the first one.
+
+   What the first bring-up on this workstation taught (2026-09-06; the
+   stack lives in `C:\Users\Raven\opik`, a sparse clone holding only
+   `deployment/docker-compose`):
+
+   - Run Compose with the base file named explicitly. Without `-f`, Compose
+     also loads `docker-compose.override.yaml` from that directory, which
+     publishes Opik's MySQL, Redis, ClickHouse and MinIO on host ports —
+     and its Redis collides with this project's on 6379. The base file
+     publishes only the UI on 5173.
+   - The application images carry `build:` sections pointing at source that
+     the sparse clone does not have. `pull` first, then `up --no-build`; a
+     bare `up` would try to compile the Java backend.
+   - Registry pulls timed out repeatedly on this link (`TLS handshake
+     timeout`); `docker pull` one image at a time with retries got through.
+   - Opik's backend reports usage to Comet unless `OPIK_USAGE_REPORT_ENABLED`
+     is `false` in the environment Compose interpolates.
+
+   ```powershell
+   cd C:\Users\Raven\opik\deployment\docker-compose
+   $env:OPIK_USAGE_REPORT_ENABLED = "false"
+   docker compose -f docker-compose.yaml --profile opik pull
+   docker compose -f docker-compose.yaml --profile opik up -d --no-build
+   # stop:  docker compose -f docker-compose.yaml --profile opik down
+   ```
+
+   Ten containers, about 5 GB of images. The UI answers at
+   <http://localhost:5173>; `GET /api/v1/private/projects` returning 200 is
+   the readiness check.
+
+2. **Enable the tracer** in `docker/.env` and recreate the API container:
+
+   ```
+   SQL_AGENT_OPIK_ENABLED=true
+   ```
+
+   ```powershell
+   docker compose -f docker/docker-compose.cpu.yml up -d face_recognition
+   ```
+
+   The `opik` package must be in the image: build it with `INSTALL_DEV=true`
+   (the development compose already does), or for a one-off trial
+   `docker exec face_recognition_api pip install --user opik==2.2.52` and
+   `docker restart face_recognition_api` — that install lives in the
+   container's writable layer and is gone at the next recreate.
+
+   After the API container is recreated, **restart nginx too**
+   (`docker restart face_recognition_nginx`): it resolved the API's address
+   at its own start and answers `502 Bad Gateway` until it looks again.
+
+   The container reaches the workstation's Opik through
+   `host.docker.internal` (`extra_hosts: host-gateway` in the dev compose;
+   it was not resolvable by default). The default `OPIK_URL_OVERRIDE` is
+   already `http://host.docker.internal:5173/api/`; `OPIK_PROJECT_NAME`
+   defaults to `face-detector-sql-agent`.
+
+   On start the log says which it is:
+
+   ```
+   [SQL_AGENT] Opik tracing ENABLED -> http://host.docker.internal:5173/api/ project='face-detector-sql-agent' (development only; traces hold user text and names)
+   ```
+
+   or, for the hosted service, a warning ending in `traces LEAVE this
+   machine`; or `refused` (production) or `not installed` (image built
+   without `INSTALL_DEV=true`). A tracer that cannot reach the server never
+   fails a turn: the SDK batches in the background and logs its own
+   connection errors.
+
+3. **Ask questions in the chat** and open the project in the Opik UI. Each
+   turn is a trace; expand it to walk the nodes.
+
+   Verified end to end on 2026-09-06 against the self-hosted stack: one
+   turn ("How many cameras are there?") produced one trace named
+   `LangGraph`, thread `user_1_main`, tags `sql_agent`/`query`, with 28
+   spans — every graph node (`ingest_query`, `plan_action`, `generate_sql`,
+   `validate_and_fix_sql`, `execute_sql`, `observe_and_replan`,
+   `story_response`, `learn_from_query`, …), the routing edges, and inside
+   the nodes the prompt template → model call → output parser chain, each
+   model call as an `llm` span with the full prompt and answer. A second
+   turn in the same conversation joined the same thread.
+
+### What the first session with the traces found (2026-09-06)
+
+Eight questions, eight traces, read node by node. Kept here because each
+one is a pattern to recognise the next time a trace looks like it.
+
+- **A look-up tool failing on every call, silently.** "How many cameras are
+  there?" was answered with *"Could you please provide a list of
+  cameras?"*. The trace's `tool_trace` showed `list_cameras -> LOOKUP_FAILED`
+  and the observation the model saw was `INVALID_RESULT`. Cause:
+  `pipelines.is_active` is an INTEGER column and the strict output contract
+  demanded a `bool`, so pydantic rejected the whole envelope. The executor
+  now coerces the column; `tests/test_trace_found_regressions.py` pins it.
+  Nothing in the logs distinguished this from a model that simply chose to
+  ask — only the trace did.
+- **A repair loop that never used the repair.** The prompt-injection probe
+  ended after 50 s with a bare apology. The trace showed three identical
+  `generate_sql` outputs: each correction response *echoed the rejected
+  envelope first and put the corrected one after it*, and the parser took
+  the first JSON object. `prepare_sql_from_llm_response` now prefers the last
+  object that carries SQL. The `failed_action_fingerprints` in that trace
+  were three copies of `query_database::{}` — the fingerprint carries the
+  arguments, not the SQL, so identical resubmissions are not detected. Open.
+- **A database error nobody was allowed to fix.** "How many identities are
+  known and how many unknown?" produced a UNION with mismatched arms;
+  Postgres said exactly why; the error was not in the correctable list, so
+  the turn went straight to an apology with no rewrite. The sign is now in
+  the list.
+- **The report-shape instruction rewriting the question.** Whenever the
+  reading says `shape = "report"`, SQL generation is told *"Return EVERY
+  matching row, one per detection… do not aggregate"*. The planner labels
+  most data questions as reports, including aggregates: "which 5 cameras
+  recorded the most detections", "how many identities", "detections per
+  day". Each came back as a raw row dump, and the narrator then *counted
+  rows from a 100-row preview* — the "overall" top-5 showed 14 for a camera
+  that the "last month" answer credited with 20. Not fixed here: the
+  instruction exists for a real reason (a tracking report was once answered
+  with a `LIMIT 1`), and the right shape vocabulary is a design decision.
+- **A reference misread as a name.** "who was seen most often on that top
+  camera?" was answered with `resolve_person(name="who was seen most
+  often")` → not found → *"please provide the name of the person"*. The
+  reading treated a question as a person; Python let the look-up through
+  because the argument was a string. Open.
+- **Where the time goes.** `story_response` was 23 s of a 32 s turn: up to
+  100 rows plus the full text of earlier reports in the narrator prompt.
+  One `retrieve_examples` took 14 s (others 0.4–1 s). Both are visible only
+  as span durations.
+
+### Reading traces from Claude Code (Opik MCP)
+
+`.mcp.json` at the repository root registers the Opik MCP server so Claude
+Code can read the traces back and reason about them — "which turns in the
+last hour failed validation, and what did `generate_sql` produce on them?" —
+instead of a person copying trace ids by hand:
+
+```json
+{
+  "mcpServers": {
+    "opik-mcp": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["scripts/opik_mcp.py"]
+    }
+  }
+}
+```
+
+`scripts/opik_mcp.py` reads `docker/.env` and launches `uvx opik-mcp` aimed
+at the same place the container posts to — hosted with the key and
+workspace, or the workstation instance with `host.docker.internal` turned
+back into `localhost`. The key therefore lives in one gitignored file and
+never in the repository's MCP config. The launcher prints one line to stderr
+saying where it is reading from.
+
+Points that are not obvious from the upstream README, all encoded in the
+launcher:
+
+- `opik-mcp` is a Python package run through `uvx` (needs Python 3.13 on the
+  workstation; `uv` fetches it on demand). The old npm `opik-mcp` is the
+  previous generation.
+- Without `OPIK_URL`, the server derives the REST base as
+  `COMET_URL_OVERRIDE + "/opik/api"` — the hosted layout. The open-source
+  stack serves it at `/api`, so `OPIK_URL` must be set explicitly there.
+- No `OPIK_API_KEY` and no `OPIK_WORKSPACE` for the open-source stack: it
+  does not authenticate and has exactly one workspace, `default`.
+- The MCP server posts start-up analytics to `stats.comet.com` unless
+  `OPIK_MCP_ANALYTICS_ENABLED=false` (observed on first launch). Kept off.
+- The server exposes `read`, `list`, `write`, `schema` and `read_skill`.
+  `list` over `trace` with a project filter and `read` of one trace are the
+  two that matter for debugging; `write` can add scores and comments to a
+  trace, which is how a reviewed turn gets marked good or bad for later
+  comparison.
+
+Restart Claude Code after adding `.mcp.json`; it prompts once to trust the
+project's servers.
+
 ---
 
 ## Choosing the action: the prompt is the lever

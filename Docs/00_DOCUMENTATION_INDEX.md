@@ -210,7 +210,7 @@ verification, settings — is documented **once**, in 46.
 - **[79_BACKGROUND_TASKS.md](79_BACKGROUND_TASKS.md)** — background job lifecycle, overlap protection and retention safety
 - **[80_ALEMBIC_IN_DOCKER.md](80_ALEMBIC_IN_DOCKER.md)** — running Alembic by hand inside the container
 - **[81_SQL_AGENT_QUERY_HISTORY.md](81_SQL_AGENT_QUERY_HISTORY.md)** — SQL agent query history, sessions and memory
-- **[90_AGENT_ARCHITECTURE.md](90_AGENT_ARCHITECTURE.md)** — how the agent decides what to do: planner vs dispatcher, artifacts and their lineage, the ownership boundary
+- **[90_AGENT_ARCHITECTURE.md](90_AGENT_ARCHITECTURE.md)** — how the agent decides what to do: planner vs dispatcher, artifacts and their lineage, the ownership boundary; watching it work, including per-turn Opik tracing (development only) and the Opik MCP server
 - **[82_RECOGNITION_LOGGING_WALKTHROUGH.md](82_RECOGNITION_LOGGING_WALKTHROUGH.md)** — logging walkthrough
 - **[71_IMAGE_INGESTION_WORKFLOW.md](71_IMAGE_INGESTION_WORKFLOW.md)** — the unified storage layout
 

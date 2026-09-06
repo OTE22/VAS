@@ -42,6 +42,7 @@ from sql_agent.reasoning import ErrorType
     "syntax error at or near \"FROM\"",
     "invalid input syntax for type integer",
     "column reference \"id\" is ambiguous",
+    "each UNION query must have the same number of columns",
 ])
 def test_a_query_the_database_refuses_can_be_rewritten(error):
     """THE fix. These are mistakes in the QUERY, and a rewrite can fix them."""

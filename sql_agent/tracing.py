@@ -19,12 +19,17 @@ POLICY — this is a DEVELOPMENT tool, never a production one:
     not ship it; this module imports it lazily and degrades to "no tracing"
     when it is absent. Beyond size (it drags in litellm and openai), the SDK
     reports errors to a hard-coded Sentry DSN and sends usage analytics to
-    Comet by default — both are switched off here before the SDK loads, and
-    neither belongs on a box documented as fully offline.
-  * Cloud Opik (comet.com) is refused even in development. Development runs
-    against synthetic data, but the habit of pointing traces at a hosted
-    endpoint is exactly what must not survive into production; a self-hosted
-    Opik on the workstation costs nothing and keeps the rule simple.
+    Comet by default. Sentry is decided when the package is imported, so the
+    development compose file switches it off in the container environment
+    (OPIK_SENTRY_ENABLE / OPIK_ANALYTICS_ENABLE); this module additionally
+    closes both in the SDK's session configuration, which the application
+    settings own outright — no ``~/.opik.config`` on the box is consulted.
+  * The hosted Opik (comet.com) is accepted in DEVELOPMENT ONLY, on the same
+    footing as the NVIDIA development LLM provider — and it receives more
+    than that provider does (result rows included), so the development
+    database must be synthetic before it is switched on. The log says so,
+    once, at start. Production never reaches this branch: the production
+    refusal above comes first.
 
 Every function here is best-effort: tracing must never fail, slow or change
 a turn. Any error in building the tracer is logged once and the turn runs
@@ -34,19 +39,18 @@ untraced.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional, Sequence
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
-# Hosted Opik. Refused unconditionally — see the module docstring.
+# Hosted Opik. Development only — see the module docstring.
 CLOUD_HOSTS = ("comet.com", "www.comet.com")
+CLOUD_URL = "https://www.comet.com/opik/api/"
 
 # Reason codes reported by ``tracing_status`` and logged once at agent start.
 DISABLED = "disabled"          # SQL_AGENT_OPIK_ENABLED is off (the default)
 PRODUCTION = "production"      # never in production, whatever the flag says
-CLOUD_REFUSED = "cloud_refused"  # OPIK_URL_OVERRIDE points at comet.com
 SDK_MISSING = "sdk_missing"    # opik is not installed (production image)
 READY = "ready"
 
@@ -69,8 +73,6 @@ def tracing_status(cfg: Any) -> str:
         return DISABLED
     if bool(getattr(cfg, "is_production", True)):
         return PRODUCTION
-    if is_cloud_url(getattr(cfg, "opik_url", "")):
-        return CLOUD_REFUSED
     try:
         import opik  # noqa: F401  (dev-only dependency)
     except Exception:  # ImportError, or a broken partial install
@@ -82,47 +84,62 @@ def _log_once(reason: str, cfg: Any) -> None:
     if reason in _logged_reasons:
         return
     _logged_reasons.add(reason)
-    if reason == READY:
+    url = getattr(cfg, "opik_url", "")
+    if reason == READY and is_cloud_url(url):
+        logger.warning("[SQL_AGENT] Opik tracing ENABLED -> HOSTED %s project=%r "
+                       "workspace=%r: traces LEAVE this machine (prompts, answers, "
+                       "SQL, result rows). Development only; the database must be "
+                       "synthetic.", url, getattr(cfg, "opik_project_name", ""),
+                       getattr(cfg, "opik_workspace", ""))
+    elif reason == READY:
         logger.info("[SQL_AGENT] Opik tracing ENABLED -> %s project=%r "
                     "(development only; traces hold user text and names)",
-                    getattr(cfg, "opik_url", ""), getattr(cfg, "opik_project_name", ""))
+                    url, getattr(cfg, "opik_project_name", ""))
     elif reason == DISABLED:
         logger.debug("[SQL_AGENT] Opik tracing off (SQL_AGENT_OPIK_ENABLED unset)")
     elif reason == PRODUCTION:
         logger.warning("[SQL_AGENT] Opik tracing requested but this is production — "
                        "refused. Traces would carry user questions and surveillance "
                        "subjects' names to a store outside the audit rules.")
-    elif reason == CLOUD_REFUSED:
-        logger.warning("[SQL_AGENT] Opik tracing refused: OPIK_URL_OVERRIDE=%r is the "
-                       "hosted service. Run a self-hosted Opik and point at it.",
-                       getattr(cfg, "opik_url", ""))
     elif reason == SDK_MISSING:
         logger.warning("[SQL_AGENT] Opik tracing requested but the `opik` package is "
                        "not installed. It is a development extra: build the image "
                        "with INSTALL_DEV=true (requirements-dev.txt).")
 
 
-def _export_sdk_environment(cfg: Any) -> None:
-    """Hand our settings to the SDK, which configures itself from OPIK_* env.
+def sdk_session_settings(cfg: Any) -> Dict[str, Any]:
+    """What the SDK is told, derived from the application settings only.
 
-    Done explicitly rather than trusting whatever ~/.opik.config or a stray
-    variable says: the application's settings are the single authority, and
-    the two outbound channels the SDK opens on its own (Sentry error reports,
-    Comet usage analytics) are closed here every time, not left to a default.
+    Pure, so the policy is testable without the SDK. ``api_key`` is None for
+    the open-source instance (it does not authenticate) and the account key
+    for the hosted service; the two outbound channels the SDK opens on its
+    own are closed every time.
     """
-    env = os.environ
-    env["OPIK_URL_OVERRIDE"] = str(cfg.opik_url)
-    env["OPIK_WORKSPACE"] = str(cfg.opik_workspace or "default")
-    env["OPIK_PROJECT_NAME"] = str(cfg.opik_project_name)
-    api_key = str(getattr(cfg, "opik_api_key", "") or "").strip()
-    if api_key:
-        env["OPIK_API_KEY"] = api_key
-    else:
-        env.pop("OPIK_API_KEY", None)
-    env["OPIK_SENTRY_ENABLE"] = "false"
-    env["OPIK_ANALYTICS_ENABLE"] = "false"
-    env["OPIK_ANALYTICS_URL"] = ""
-    env["OPIK_TRACK_DISABLE"] = "false"
+    api_key = str(getattr(cfg, "opik_api_key", "") or "").strip() or None
+    return {
+        "url_override": str(cfg.opik_url),
+        "workspace": str(getattr(cfg, "opik_workspace", "") or "default"),
+        "project_name": str(cfg.opik_project_name),
+        "api_key": api_key,
+        "sentry_enable": False,
+        "analytics_enable": False,
+        "analytics_url": "",
+        "track_disable": False,
+    }
+
+
+def _configure_sdk(cfg: Any) -> None:
+    """Hand the application settings to the SDK's session configuration.
+
+    The session layer outranks the SDK's own environment and ``~/.opik.config``
+    sources, so the application settings are the single authority for where
+    traces go. (Sentry is decided at import time from the environment, which
+    is why the development compose also sets OPIK_SENTRY_ENABLE=false; this
+    call makes every later configuration read agree.)
+    """
+    from opik import config as opik_config
+    for key, value in sdk_session_settings(cfg).items():
+        opik_config.update_session_config(key, value)
 
 
 def build_tracer(cfg: Any, *, thread_id: Optional[str] = None,
@@ -140,7 +157,7 @@ def build_tracer(cfg: Any, *, thread_id: Optional[str] = None,
     if reason != READY:
         return None
     try:
-        _export_sdk_environment(cfg)
+        _configure_sdk(cfg)
         from opik.integrations.langchain import OpikTracer
         metadata: Dict[str, Any] = {"component": "sql_agent"}
         if user_id is not None:
