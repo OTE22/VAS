@@ -4,29 +4,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>Surveillance Intelligence Agent</title>
+    <title>Surveillance AI · Conversations</title>
     <meta name="description"
         content="AI-powered surveillance assistant for tracking people and analyzing detection patterns">
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/vendor/fonts/inter.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3" />
-    <link rel="stylesheet" href="/frontend/css/tracking.css?v=conv-2">
+    <link rel="stylesheet" href="/frontend/css/tracking.css?v=chat-ui-4">
 </head>
 
-<body>
+<body class="tracking-page">
     <!-- Navbar Component (loaded dynamically) -->
     <div id="navbar-placeholder"></div>
 
     <!-- Main Container -->
-    <main class="military-main-container">
+    <main class="military-main-container" aria-label="Surveillance AI workspace">
         <!-- Sidebar for Query History -->
-        <aside class="history-sidebar" id="historySidebar">
+        <aside class="history-sidebar" id="historySidebar" aria-label="Conversations" aria-hidden="true" inert>
+            <div class="sidebar-brand"><i class="fas fa-comment-dots" aria-hidden="true"></i><span>Surveillance AI</span></div>
             <div class="sidebar-header">
-                <button class="new-chat-btn" id="newChatBtn" title="New Chat">
-                    <i class="fas fa-plus"></i>
+                <button class="new-chat-btn" id="newChatBtn" type="button" title="New chat">
+                    <i class="fas fa-pen-to-square" aria-hidden="true"></i>
                     <span>New chat</span>
                 </button>
-                <button class="sidebar-close-btn" id="sidebarCloseBtn" title="Close Sidebar">
+                <button class="sidebar-close-btn" id="sidebarCloseBtn" type="button" title="Close sidebar" aria-label="Close sidebar">
                     <i class="fas fa-xmark"></i>
                 </button>
             </div>
@@ -44,45 +45,40 @@
                     <!-- History items grouped by day will be inserted here -->
                 </div>
             </div>
+            <div class="sidebar-footer"><i class="fas fa-shield-halved" aria-hidden="true"></i><span>Your workspace conversations</span></div>
         </aside>
 
-        <!-- Sidebar Toggle Button -->
-        <button class="sidebar-toggle-btn" id="sidebarToggleBtn" title="Show History">
-            <i class="fas fa-bars"></i>
-        </button>
+        <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="Close conversations" tabindex="-1" hidden></button>
 
         <!-- Chat Container -->
         <div class="intelligence-chat-container">
-            <div class="chat-grid-overlay"></div>
-            <div class="chat-scan-line"></div>
+            <header class="chat-toolbar">
+                <button class="sidebar-toggle-btn" id="sidebarToggleBtn" type="button" title="Open sidebar" aria-label="Open sidebar">
+                    <i class="fas fa-bars" aria-hidden="true"></i>
+                </button>
+                <div class="chat-toolbar-title">Surveillance AI <span>People &amp; detection insights</span></div>
+                <button class="chat-new-btn" id="newChatTopBtn" type="button" title="New chat" aria-label="New chat"><i class="fas fa-pen-to-square" aria-hidden="true"></i></button>
+            </header>
 
             <div class="chat-inner">
                 <!-- Chat Messages Area -->
-                <div class="chat-messages" id="chatMessages">
+                <div class="chat-messages" id="chatMessages" role="region" aria-label="Conversation messages" tabindex="0">
                     <div class="welcome-message" id="welcomeMessage">
-                        <div class="welcome-icon">
-                            <i class="fas fa-robot"></i>
-                        </div>
                         <div class="welcome-text">
-                            <h3>How can I help you today?</h3>
-                            <p>I'm your AI-powered surveillance assistant. I can help you track people, analyze
-                                detection patterns, and answer questions about surveillance data.</p>
-                            <p class="security-note"><i class="fas fa-shield-halved"></i> Your conversations are
-                                automatically saved</p>
+                            <h1>What would you like to find?</h1>
+                            <p>Ask about people, cameras, and detection patterns in your workspace.</p>
                             <div class="example-queries">
                                 <p class="example-title"><i class="fas fa-sparkles"></i> Try these prompts</p>
                                 <!-- Click behavior via delegation in tracking.js — no inline handlers -->
                                 <ul>
-                                    <li>Track Joey</li>
-                                    <li>Show me all detections from today
-                                    </li>
+                                    <li><button type="button">Help me find a person</button></li>
+                                    <li><button type="button">Show me all detections from today</button></li>
                                     <!-- Filled from /api/pipelines with a camera this user can
                                          see; stays hidden when there is none. A hard-coded name
                                          here outlived its camera by months. -->
-                                    <li data-example="camera" hidden>Who was detected at camera
-                                        <span class="example-camera-name"></span>?</li>
-                                    <li>What are the most active pipelines?
-                                    </li>
+                                    <li data-example="camera" hidden><button type="button">Who was detected at camera
+                                        <span class="example-camera-name"></span>?</button></li>
+                                    <li><button type="button">What are the most active pipelines?</button></li>
                                 </ul>
                             </div>
                         </div>
@@ -95,14 +91,14 @@
                         <!-- ONE authoritative handler is attached in tracking.js.
                              Inline fallbacks are removed: they double-fired and
                              could START a query while the button was in Stop mode. -->
-                        <textarea id="chatInput" class="military-chat-input" placeholder="Message Surveillance AI..."
-                            autocomplete="off" rows="1"></textarea>
-                        <button id="sendBtn" class="military-send-btn" type="button" title="Send message">
+                        <textarea id="chatInput" class="military-chat-input" placeholder="Ask Surveillance AI"
+                            aria-label="Message Surveillance AI" aria-describedby="composerHint" autocomplete="off" rows="1"></textarea>
+                        <button id="sendBtn" class="military-send-btn" type="button" title="Send message" aria-label="Send message">
                             <i class="fas fa-arrow-up"></i>
                         </button>
                     </div>
                     <div class="input-footer">
-                        <span class="connection-status" id="connectionStatus">
+                        <span class="connection-status" id="connectionStatus" role="status" aria-live="polite">
                             <div class="status-indicator active"></div>
                             <span id="statusText">Ready</span>
                         </span>
@@ -111,6 +107,7 @@
                             <span>Help</span>
                         </button>
                     </div>
+                    <p class="composer-hint" id="composerHint">AI can make mistakes. Verify important results. <span>Shift + Enter for a new line.</span></p>
                 </div>
             </div>
         </div>
@@ -133,8 +130,8 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/tracking.js?v=chatgpt-3"></script>
-    <script src="/frontend/js/conversations.js?v=conv-2"></script>
+    <script src="/frontend/js/tracking.js?v=chat-ui-4"></script>
+    <script src="/frontend/js/conversations.js?v=chat-ui-4"></script>
 </body>
 
 </html>

@@ -411,3 +411,24 @@ inside the container. Before go-live also: `scripts/verify_offline_bundle.sh`,
 `tests/test_degradation_modes.py`, the acceptance battery of
 `95_AGENT_PRODUCTION_ACCEPTANCE.md` on the production stack, and a run with
 the gateway physically disconnected.
+
+## Production readiness proof (2026-09-06)
+
+What was executed, not reasoned about, before declaring the production path ready:
+
+| Gate | Command | Result |
+|---|---|---|
+| deploy script logic | `./deploy.sh --self-test` | 64 passed |
+| shell syntax | `bash -n deploy.sh scripts/deploy/*.sh scripts/*.sh` | clean |
+| production compose | `docker compose --env-file docker/env.production.example -f docker/docker-compose.prod.yml -f docker/docker-compose.prod.gpu.yml config` with the secret variables stubbed, default and `vllm,mcp-sql,milvus` profiles | valid |
+| nginx | `nginx -t` on `nginx.prod.conf` with the internal certificates (`--add-host face_recognition:127.0.0.1 --add-host martin:127.0.0.1`) | ok |
+| config guard, production environment | `python -m backend.security.config_guard` inside a throwaway API container carrying the rendered `face_recognition` environment, Docker-style 0400 secrets, the weights and the embedding cache | exit 0 |
+| config guard, copied development environment | same, plus `LLM_DEV_PROVIDER=nim`, `SQL_AGENT_OPIK_ENABLED=true`, `LLM_PROVIDER=nvidia_cloud` | exit 78 with five named violations |
+| tests | offline policy, config guard, provider selection, bundle, MCP catalogue, degradation, orchestrator, intent, runtime editability | 222 passed |
+
+Two defects surfaced only because the guard was run against the real rendered environment:
+
+1. The guard derived its model-file probe from the storage (directory-writability) probe, so a correct production boot reported `DETECTION_MODEL`, `RECOGNITION_MODEL` and `EMBEDDING_MODEL_PATH` as missing and exited 78. `default_artifact_probe` (a file probe) is now wired explicitly in `enforce()` and `main()`; `tests/test_offline_policy.py` pins it.
+2. `docker-compose.prod.yml` did not forward the deployment keys from `docker/.env`, so `env.production.example` documented lines that never reached the container (and named Ollama models that do not exist). The API service now forwards them with their offline defaults; the dev-only keys are deliberately not forwarded (section 5.4 of `Docs/97`).
+
+Still to run on the production host itself: the GPU image build (`Dockerfile.gpu` with numpy 2 and onnxruntime-gpu 1.20.2 has not been built here), `./deploy.sh validate`, and the SQL-agent acceptance battery against the Ollama models.

@@ -365,7 +365,7 @@
         renderBranchBar(container);
         (messagesResult.payload.messages || []).forEach(m => renderMessage(container, m));
         if (ui().scrollToBottom) ui().scrollToBottom(true);
-        if (window.innerWidth <= 768 && ui().toggleSidebar) ui().toggleSidebar();
+        if (window.innerWidth <= 968 && document.getElementById('historySidebar')?.classList.contains('open') && ui().toggleSidebar) ui().toggleSidebar();
     }
 
     function renderBranchBar(container) {
@@ -400,7 +400,7 @@
 
     function renderMessage(container, message) {
         const wrap = document.createElement('div');
-        wrap.className = `message ${message.role === 'user' ? 'user-message' : 'assistant-message'}`;
+        wrap.className = `message chat-message ${message.role === 'user' ? 'user-message user' : 'assistant-message assistant'}`;
         const inner = document.createElement('div');
         inner.className = 'message-inner';
 

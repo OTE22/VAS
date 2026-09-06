@@ -571,6 +571,7 @@
             icon.className = 'fas fa-arrow-up';
             btn.title = 'Send message';
         }
+        btn.setAttribute('aria-label', btn.title);
         btn.appendChild(icon);
     }
 
@@ -1293,11 +1294,16 @@
         const isOpening = !sidebar.classList.contains('open');
         sidebar.classList.toggle('open');
         sidebar.setAttribute('aria-hidden', isOpening ? 'false' : 'true');
+        sidebar.inert = !isOpening;
+        const backdrop = document.getElementById('sidebarBackdrop');
+        if (backdrop) backdrop.hidden = !isOpening;
         try { localStorage.setItem('tracking_sidebar_open', String(isOpening)); } catch (e) { }
         if (toggleBtn) {
             toggleBtn.style.display = isOpening ? 'none' : 'flex';
             toggleBtn.setAttribute('aria-expanded', String(isOpening));
         }
+        if (!isOpening && sidebar.contains(document.activeElement)) toggleBtn?.focus();
+        if (isOpening && window.innerWidth <= 968) document.getElementById('sidebarCloseBtn')?.focus();
     }
 
     function startNewChat() {
@@ -1316,7 +1322,7 @@
         currentSessionId = null;
         loadedHistoryQueryId = null;
         historyItemNodes.forEach(n => n.classList.remove('active'));
-        if (window.innerWidth <= 768) toggleSidebar();
+        if (window.innerWidth <= 968 && document.getElementById('historySidebar')?.classList.contains('open')) toggleSidebar();
     }
 
     // ------------------------------------------------------------------
@@ -1341,6 +1347,7 @@
         const input = document.getElementById('chatInput');
         if (input) {
             input.value = (text || '').replace(/^["']|["']$/g, '').trim();
+            input.dispatchEvent(new Event('input', { bubbles: true }));
             input.focus();
         }
     }
@@ -1366,7 +1373,7 @@
         // keydown (keypress is deprecated); Enter sends via the SAME handler,
         // Shift+Enter inserts a newline
         chatInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
                 handleSendOrStop();
             }
@@ -1395,13 +1402,26 @@
             closeBtn.dataset.listenerAttached = 'true';
             closeBtn.addEventListener('click', toggleSidebar);
         }
+        document.getElementById('sidebarBackdrop')?.addEventListener('click', () => {
+            if (sidebar?.classList.contains('open')) toggleSidebar();
+        });
+        sidebar?.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && !e.defaultPrevented && sidebar.classList.contains('open')) {
+                e.preventDefault();
+                toggleSidebar();
+            }
+        });
+        document.getElementById('newChatTopBtn')?.addEventListener('click', () => {
+            startNewChat();
+            document.getElementById('chatInput')?.focus();
+        });
         if (newChatBtn && newChatBtn.dataset.listenerAttached !== 'true') {
             newChatBtn.dataset.listenerAttached = 'true';
             newChatBtn.addEventListener('click', startNewChat);
         }
         let savedState = null;
         try { savedState = localStorage.getItem('tracking_sidebar_open'); } catch (e) { }
-        const shouldOpen = savedState !== null ? savedState === 'true' : window.innerWidth > 968;
+        const shouldOpen = window.innerWidth > 968 && savedState !== 'false';
         if (shouldOpen && sidebar && !sidebar.classList.contains('open')) toggleSidebar();
     }
 

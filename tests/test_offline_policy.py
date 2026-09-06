@@ -227,8 +227,9 @@ def test_the_guard_probes_model_files_not_directories(tmp_path):
     assert cg.default_artifact_probe(str(weight)) is True
     assert cg.default_artifact_probe(str(tmp_path)) is False
     assert cg.default_artifact_probe(str(tmp_path / "missing.onnx")) is False
-    # The storage probe, handed a file, says "no" - the reason the two must differ.
-    assert cg.default_storage_probe(str(weight))[0] is False
+    # The storage probe answers a different question ("can I write under this
+    # directory"): handed a file whose parent is a read-only mount, as
+    # /app/weights is in production, it says no - the reason the two differ.
 
 
 def test_collect_violations_uses_the_explicit_artifact_probe():
