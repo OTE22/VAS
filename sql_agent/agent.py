@@ -112,6 +112,18 @@ class SQLIntelligenceAgent:
             except Exception as exc:  # pragma: no cover - cosmetic only
                 logger.debug("[SQL_AGENT] graph definition unavailable: %s", exc)
         self.kb = SQLKnowledgeBase(config)
+        # Which orchestrator runs data turns: the built-in LangGraph loop, or
+        # the NeMo Agent Toolkit adapter over the MCP tools (AGENT_ORCHESTRATOR).
+        # Reported here once; a requested toolkit that is not installed falls
+        # back with the reason in the log, never silently.
+        try:
+            from .orchestration import select_orchestrator
+            self.orchestrator = select_orchestrator(config)
+            logger.info("[SQL_AGENT] orchestrator=%s (%s)", self.orchestrator.name,
+                        self.orchestrator.reason)
+        except Exception as e:
+            logger.warning("[SQL_AGENT] orchestrator selection failed (%s); using langgraph", e)
+            self.orchestrator = None
         # The caller's recent documents, refreshed by the API layer before
         # each turn. Ids, titles and languages only — never content, and never
         # another user's, because the query that fills it is owner-scoped.
@@ -527,6 +539,8 @@ class SQLIntelligenceAgent:
         """
         logger.info("[SQL_AGENT] Processing query (chars=%d)",
                     len(user_input) if isinstance(user_input, str) else 0)
+        if getattr(self, "orchestrator", None) is not None and self.orchestrator.name == "nemo":
+            return self._query_via_nemo(user_input)
         
         # The current turn is committed as a user/assistant pair only after the
         # graph succeeds. A timeout or cancellation therefore cannot leave an
@@ -883,7 +897,50 @@ class SQLIntelligenceAgent:
             # Always yield completion to close stream properly
             yield {"type": "complete", "message": "Stream ended with error", "step": "done", "success": False}
 
+    def _query_via_nemo(self, user_input: str):
+        """One data turn through the NeMo Agent Toolkit adapter over the MCP
+        tools. Same commit path as the graph: memory, working context, turn
+        facts. The adapter only ever reaches the database through
+        ``database.execute_readonly`` (guard + scope + read-only role)."""
+        from .mcp import MCPToolset, ToolContext
+        from .orchestration import NemoAgentAdapter
+        from .llm import get_gateway
+        from .llm.base import TaskType
+        scope = getattr(self.db.sql_policy, "pipeline_scope", None)
+        toolset = MCPToolset(db=self.db, kb=self.kb, config=getattr(self, "config", None),
+                             providers=sorted(get_gateway().providers))
+        llm = get_gateway().build_for(TaskType.CHAT) if hasattr(get_gateway(), "build_for") else None
+        adapter = NemoAgentAdapter(toolset, llm)
+        ctx = ToolContext(user_id=None, role=None, request_id="nemo",
+                          pipeline_scope=None if scope is None else frozenset(scope))
+        try:
+            outcome = adapter.run(user_input, ctx)
+        except Exception as e:
+            logger.error("[SQL_AGENT] NeMo adapter failed: %s", type(e).__name__, exc_info=True)
+            return ("I could not complete that through the data agent. Please try again.",
+                    {"turn_failed": True, "orchestrator": "nemo"})
+        response = outcome.get("response") or ""
+        state = {"final_response": response, "orchestrator": "nemo",
+                 "observations": [{"tool": t, "status": "ok"} for t in outcome.get("tools_called", [])],
+                 "planned_action": {"action": "query_database" if outcome.get("executed_queries") else "chat",
+                                    "source": "nemo"},
+                 "interpretation": {"wants": "data" if outcome.get("executed_queries") else "chat"}}
+        self.conversation_memory.add_user_message(user_input)
+        self.conversation_memory.add_ai_message(response)
+        self._record_working_context(user_input, state)
+        return response, state
+
     def _record_working_context(self, user_input: str, state: dict) -> None:
+        # The audit line the API layer writes for this turn (intent, tools,
+        # tables, SQL, authorization, rows, status) comes from the final
+        # state; every transport commits through here, so this is the one
+        # place to take it. Machine facts only - never rows, never words.
+        try:
+            from . import intent as _intent
+            self.last_turn_facts = _intent.turn_facts(state or {})
+        except Exception as e:
+            logger.debug("[SQL_AGENT] turn facts unavailable: %s", e)
+            self.last_turn_facts = {}
         """Persist what this turn produced, so the NEXT turn can say "it".
 
         Written through to the session file immediately (the file, not this

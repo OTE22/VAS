@@ -939,18 +939,15 @@ ORDER BY total_detections DESC""",
         self.config = config
 
         # Initialize ChromaDB client with persistence
-        self.client = chromadb.PersistentClient(
-            path=config.chroma_persist_dir,
-            settings=Settings(anonymized_telemetry=False)
-        )
-
-        # Get or create collection
-        self.collection = self.client.get_or_create_collection(
-            name=config.chroma_collection_name,
-            metadata={"description": "SQL query examples for face detection system",
-                      "index_version": "sql-examples-v2",
-                      "embedding_model": "chroma-default-all-MiniLM-L6-v2"}
-        )
+        # Chroma by default (unchanged), Milvus when VECTOR_STORE=milvus;
+        # both embed locally. See sql_agent/vector_store.py.
+        from . import vector_store as _vector_store
+        self.collection = _vector_store.open_collection(
+            config,
+            collection_metadata={"description": "SQL query examples for face detection system",
+                                 "index_version": "sql-examples-v2",
+                                 "embedding_model": "chroma-default-all-MiniLM-L6-v2"})
+        self.client = None
 
         # Auto-detect changes and re-initialize if needed
         self._auto_initialize_seed_examples()

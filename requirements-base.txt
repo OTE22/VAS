@@ -43,8 +43,16 @@
 # effective version depended on installation order — a running container once
 # had headless 4.9.0.80 pinned with contrib 4.11.0.86 shadowing it.
 # ---------------------------------------------------------------------------
-opencv-python-headless==4.9.0.80
-numpy==1.26.4
+# numpy 2 (2026-09-06): the NeMo Agent Toolkit (requirements-agent.txt) needs
+# numpy~=2.3, and nothing else in the image pins numpy<2 by its own metadata.
+# The one binary constraint was opencv-python-headless 4.9 (built against
+# numpy 1; 'numpy.core.multiarray failed to import' on 2.x); 4.10 ships
+# numpy-2 wheels. Verified in a probe container from the dev image: SCRFD
+# detector and ArcFace recognizer run on the ONNX weights, FAISS/scikit/
+# scipy/skimage/hdbscan/onnxruntime 1.23 import, and the toolkit installs
+# with 'No broken requirements found'. Rebuild the image after changing.
+opencv-python-headless==4.10.0.84
+numpy>=2.3,<3
 scikit-image
 scipy                      # backend/ml/drift_service.py; was only ever
                            # transitive via scikit-learn, which is fragile
@@ -164,3 +172,7 @@ requests
 # structural check before that gate existed. It used to arrive only
 # transitively, which is the exact breakage this file's header warns about.
 Pillow>=10.0.0
+
+# Model Context Protocol SDK: serves the SQL agent tool catalogue
+# (sql_agent/mcp/server.py) and lets local agent hosts call it. Internal only.
+mcp>=2.1

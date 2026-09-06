@@ -10,7 +10,64 @@ let settingsData = null;
 let auditLogData = null;
 let saveInFlight = false;
 
+// Presentation only: never define defaults, permissions, or validation here.
+// Unknown/new keys always remain available in Advanced.
+const BASIC_SETTING_LABELS = new Map([
+    ['SIMILARITY_THRESHOLD', 'Known face match threshold'],
+    ['UNKNOWN_SIMILARITY_THRESHOLD', 'Unknown face match threshold'],
+    ['SAVE_IMAGES', 'Save detection images'],
+    ['SAVE_UNKNOWN_FACES', 'Save unknown faces'],
+    ['DATA_RETENTION_DAYS', 'Detection data retention'],
+    ['SNAPSHOT_RETENTION_DAYS', 'Snapshot retention'],
+    ['SEARCH_HISTORY_RETENTION_DAYS', 'Search history retention'],
+    ['TASK_HISTORY_RETENTION_DAYS', 'Task history retention'],
+]);
+const settingsView = { mode: 'basic', category: 'all', search: '' };
+
+function settingsInView() {
+    const all = settingsData ? settingsData.all_settings : [];
+    return settingsView.mode === 'advanced' ? all : all.filter(setting =>
+        BASIC_SETTING_LABELS.has(setting.key) && !setting.is_sensitive && !setting.is_readonly);
+}
+
+function settingLabel(setting) {
+    return BASIC_SETTING_LABELS.get(setting.key) || String(setting.key).replace(/_/g, ' ').toLowerCase();
+}
+
+function updateSettingsView() {
+    document.querySelectorAll('#settings-view-controls [data-view]').forEach(btn => {
+        const active = btn.dataset.view === settingsView.mode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', String(active));
+    });
+    document.getElementById('settings-heading').textContent = settingsView.mode === 'basic' ? 'Basic settings' : 'Advanced settings';
+    document.getElementById('settings-view-help').textContent = settingsView.mode === 'basic'
+        ? 'Common recognition, image storage, and retention controls. Technical and sensitive settings remain in Advanced.'
+        : 'All available settings, including Basic. Read-only controls and existing permissions still apply.';
+    renderCategoryFilters();
+    renderSettings();
+}
+
+function clearSettingsFilters() {
+    settingsView.category = 'all';
+    settingsView.search = '';
+    document.getElementById('settings-search').value = '';
+    updateSettingsView();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
+    document.getElementById('settings-view-controls').addEventListener('click', e => {
+        const button = e.target.closest('[data-view]');
+        if (!button) return;
+        settingsView.mode = button.dataset.view;
+        settingsView.category = 'all';
+        updateSettingsView();
+    });
+    document.getElementById('settings-search').addEventListener('input', e => {
+        settingsView.search = e.target.value;
+        renderSettings();
+    });
+    document.getElementById('settings-reset-filters').addEventListener('click', clearSettingsFilters);
     await loadAllData();
 
     const settingForm = document.getElementById('setting-form');
@@ -29,6 +86,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const container = document.getElementById('settings-container');
     if (container) {
         container.addEventListener('click', (e) => {
+            if (e.target.closest('[data-show-advanced]')) {
+                settingsView.mode = 'advanced';
+                settingsView.category = 'all';
+                updateSettingsView();
+                document.querySelector('[data-view="advanced"]').focus();
+                return;
+            }
             const editBtn = e.target.closest('.setting-btn.edit');
             if (editBtn) {
                 const card = editBtn.closest('.setting-card');
@@ -102,7 +166,7 @@ function escapeHtml(text) {
     if (text === null || text === undefined) return '';
     const div = document.createElement('div');
     div.textContent = String(text);
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function displayValue(v) {
@@ -141,14 +205,16 @@ async function loadSettings() {
     const container = document.getElementById('settings-container');
     if (!container) return;
 
+    settingsData = null;
+    document.getElementById('settings-result-count').textContent = 'Loading settings…';
     container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> Loading settings...</div>';
     attachRefreshButtonListener();
 
     try {
         settingsData = await apiFetch('/api/settings');
-        renderCategoryFilters();
-        renderSettings();
+        updateSettingsView();
     } catch (error) {
+        document.getElementById('settings-result-count').textContent = 'Settings unavailable';
         container.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> Error loading settings: ${escapeHtml(error.message)}</div>`;
         console.error('Error loading settings:', error);
         attachRefreshButtonListener();
@@ -159,23 +225,22 @@ function renderCategoryFilters() {
     const container = document.getElementById('category-filters');
     if (!container || !settingsData) return;
 
-    container.innerHTML = `
-        <button class="category-filter-btn active" data-category="all">
-            <i class="fas fa-th"></i> All Settings
+    const categories = [...new Set(settingsInView().map(setting => setting.category))];
+    if (!categories.includes(settingsView.category)) settingsView.category = 'all';
+    container.innerHTML = ['all', ...categories.filter(cat => cat !== 'all')].map(cat => `
+        <button type="button" class="category-filter-btn${cat === settingsView.category ? ' active' : ''}" data-category="${escapeHtml(cat)}" aria-pressed="${cat === settingsView.category}">
+            ${cat === 'all' ? 'All categories' : escapeHtml(String(cat).replace(/_/g, ' '))}
         </button>
-        ${settingsData.categories.map(cat => `
-            <button class="category-filter-btn" data-category="${escapeHtml(cat)}">
-                <i class="fas fa-tag"></i> ${escapeHtml(cat.charAt(0).toUpperCase() + cat.slice(1))}
-            </button>
-        `).join('')}
-    `;
+    `).join('');
 }
 
 function filterByCategory(category) {
-    document.querySelectorAll('.category-filter-btn').forEach(btn => {
+    settingsView.category = category;
+    document.querySelectorAll('#category-filters .category-filter-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.category === category);
+        btn.setAttribute('aria-pressed', String(btn.dataset.category === category));
     });
-    renderSettings(category);
+    renderSettings();
 }
 
 // ---------------------------------------------------------------------------
@@ -201,30 +266,43 @@ function applyModeBadge(setting) {
 function sourceBadge(setting) {
     if (setting.source === 'database') {
         const warn = setting.overridden
-            ? ` title="Admin value differs from environment (env=${escapeHtml(displayValue(setting.env_value))}); the admin value wins"`
-            : ' title="Value set by an admin (stored in database)"';
-        return `<span class="setting-badge"${warn} style="background:#00b0ff20;color:#00b0ff;border:1px solid #00b0ff40;"><i class="fas fa-database"></i> db${setting.overridden ? ' ⚠' : ''}</span>`;
+            ? ' title="Saved value differs from environment. This does not confirm it has been applied."'
+            : ' title="Saved configuration is classified as a database override."';
+        return `<span class="setting-badge"${warn} style="background:#00b0ff20;color:#00b0ff;border:1px solid #00b0ff40;"><i class="fas fa-database"></i> Saved source: database${setting.overridden ? ' ⚠' : ''}</span>`;
     }
     if (setting.source === 'environment') {
-        return `<span class="setting-badge" title="Value comes from the environment (.env / docker-compose)" style="background:#a29bfe20;color:#a29bfe;border:1px solid #a29bfe40;"><i class="fas fa-server"></i> env</span>`;
+        return `<span class="setting-badge" title="Saved configuration matches the environment (.env / docker-compose)" style="background:#a29bfe20;color:#a29bfe;border:1px solid #a29bfe40;"><i class="fas fa-server"></i> Saved source: environment</span>`;
     }
-    return `<span class="setting-badge" title="Built-in default value" style="background:#63636320;color:#999;border:1px solid #63636340;">default</span>`;
+    return `<span class="setting-badge" title="Saved configuration is classified as the code default, not a measurement of runtime application." style="background:#63636320;color:#bbb;border:1px solid #63636340;">Saved source: ${setting.source === 'default' ? 'code default' : 'unknown'}</span>`;
 }
 
-function renderSettings(category = 'all') {
+function inUseValue(setting) {
+    if (setting.is_sensitive) return '***HIDDEN***';
+    // Never substitute a saved value or code default for missing runtime data.
+    if (setting.effective_value === undefined) return 'Not reported by API';
+    return displayValue(setting.effective_value);
+}
+
+function renderSettings() {
     const container = document.getElementById('settings-container');
     if (!container || !settingsData) return;
 
-    let settingsToShow = category === 'all'
-        ? settingsData.all_settings
-        : (settingsData.settings_by_category[category] || []);
+    const inView = settingsInView();
+    const query = settingsView.search.trim().toLowerCase();
+    // Search metadata only, never values (including masked credentials).
+    const settingsToShow = inView.filter(setting =>
+        (settingsView.category === 'all' || setting.category === settingsView.category) &&
+        [settingLabel(setting), setting.key, setting.description, setting.category]
+            .some(value => String(value || '').toLowerCase().includes(query)));
+    document.getElementById('settings-result-count').textContent = `${settingsToShow.length} of ${inView.length} settings`;
 
     if (settingsToShow.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
                 <i class="fas fa-inbox"></i>
                 <h3>No Settings Found</h3>
-                <p>No settings match the selected category.</p>
+                <p>No settings match this view and its filters. Clear filters above${settingsView.mode === 'basic' ? ' or search Advanced for technical settings' : ''}.</p>
+                ${settingsView.mode === 'basic' ? '<button type="button" class="settings-view-btn" data-show-advanced>Search Advanced settings</button>' : ''}
             </div>
         `;
         return;
@@ -235,37 +313,45 @@ function renderSettings(category = 'all') {
             <span class="setting-unit-badge" style="background:#4ecdc420;color:#4ecdc4;border:1px solid #4ecdc440;">${escapeHtml(setting.unit)}</span>` : '';
 
         const stored = setting.is_sensitive ? '***HIDDEN***' : displayValue(setting.stored_value);
-        const effective = setting.is_sensitive ? '***HIDDEN***' : displayValue(setting.effective_value);
-        const diverged = !setting.is_sensitive && String(stored) !== String(effective);
+        const effective = inUseValue(setting);
+        const diverged = !setting.is_sensitive && setting.effective_value !== undefined &&
+            setting.stored_value !== undefined && String(stored) !== String(effective);
 
         return `
         <div class="setting-card ${setting.is_readonly ? 'readonly' : ''}" data-key="${escapeHtml(setting.key)}">
             <div class="setting-card-header">
-                <div class="setting-key" title="${escapeHtml(setting.description)}">${escapeHtml(setting.key)}</div>
+                <h3 class="setting-title">${escapeHtml(settingLabel(setting))}</h3>
+                <div class="setting-key">${escapeHtml(setting.key)}</div>
                 <div class="setting-badges">
                     ${setting.is_sensitive ? '<span class="setting-badge sensitive" title="Sensitive value (hidden)"><i class="fas fa-lock"></i></span>' : ''}
                     ${setting.is_readonly ? '<span class="setting-badge readonly" title="Read-only"><i class="fas fa-ban"></i></span>' : ''}
                     <span class="setting-badge category">${escapeHtml(setting.category)}</span>
                     ${applyModeBadge(setting)}
-                    ${sourceBadge(setting)}
                     ${unitBadge}
                 </div>
             </div>
+            <details class="setting-reference">
+                <summary>About this setting</summary>
+                <p class="setting-description">${escapeHtml(setting.description || 'No description provided.')}</p>
+                <p class="settings-help">Reference text may mention defaults. The In use value below is reported by the running API.</p>
+                ${sourceBadge(setting)}
+            </details>
+            <div class="setting-in-use-label">In use <small>(reported by running API)</small></div>
             <div class="setting-value-container">
                 <div class="setting-value ${setting.is_sensitive ? 'hidden' : ''}">
-                    ${escapeHtml(effective)}${setting.unit && !setting.is_sensitive ? ` <small style="color:#4ecdc4;font-weight:500;">${escapeHtml(setting.unit)}</small>` : ''}
-                    ${diverged ? `<div style="font-size:0.7rem;color:#ffc107;margin-top:0.2rem;" title="Stored value differs from what the running process uses — apply action or restart pending">stored: ${escapeHtml(stored)} <i class="fas fa-hourglass-half"></i></div>` : ''}
+                    <span class="setting-in-use-value">${escapeHtml(effective)}</span>${setting.unit && !setting.is_sensitive && setting.effective_value !== undefined ? ` <small style="color:#4ecdc4;font-weight:500;">${escapeHtml(setting.unit)}</small>` : ''}
                 </div>
                 <span class="setting-value-type">${escapeHtml(setting.value_type)}</span>
             </div>
+            ${diverged ? `<p class="setting-saved-difference">Saved value (not in use): <span>${escapeHtml(stored)}</span>. See the apply requirements above.</p>` : ''}
             <div class="setting-actions">
                 ${setting.can_edit ? `
-                    <button class="setting-btn edit" type="button" title="Edit ${escapeHtml(setting.key)}">
-                        <i class="fas fa-edit"></i>
+                    <button class="setting-btn edit" type="button" title="Edit ${escapeHtml(setting.key)}" aria-label="Edit ${escapeHtml(setting.key)}">
+                        <i class="fas fa-edit" aria-hidden="true"></i> Edit
                     </button>
                 ` : `
-                    <button class="setting-btn" disabled title="Readonly: ${escapeHtml(setting.key)}">
-                        <i class="fas fa-lock"></i>
+                    <button class="setting-btn" type="button" disabled title="Readonly: ${escapeHtml(setting.key)}">
+                        <i class="fas fa-lock" aria-hidden="true"></i> Read only
                     </button>
                 `}
             </div>
@@ -358,9 +444,7 @@ function buildValueControl(setting) {
     // value, or a stored row predates a code change, those two differ, and
     // pre-filling `stored_value` showed the admin a number the system was not
     // using and offered to "keep" it.
-    const currentRaw = setting.effective_value !== undefined && setting.effective_value !== null
-        ? setting.effective_value
-        : setting.stored_value;
+    const currentRaw = setting.effective_value;
     const current = setting.is_sensitive ? '' : currentRaw;
 
     if (Array.isArray(setting.allowed_values) && setting.allowed_values.length > 0) {
@@ -401,6 +485,14 @@ function buildValueControl(setting) {
     }
 
     control.id = 'setting-new-value';
+    // A select otherwise silently picks its first option when runtime data is missing.
+    if (control.tagName === 'SELECT' && (current === null || current === undefined || current === '')) {
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Choose a new value';
+        placeholder.selected = true;
+        control.prepend(placeholder);
+    }
     control.className = 'security-input';
     control.required = true;
     container.appendChild(control);
@@ -418,9 +510,7 @@ function editSetting(key) {
 
     const oldField = document.getElementById('setting-old-value');
     if (oldField) {
-        const stored = setting.is_sensitive ? '***HIDDEN***' : displayValue(setting.stored_value);
-        const effective = setting.is_sensitive ? '***HIDDEN***' : displayValue(setting.effective_value);
-        oldField.value = stored === effective ? stored : `stored: ${stored} | effective: ${effective}`;
+        oldField.value = inUseValue(setting);
     }
 
     buildValueControl(setting);

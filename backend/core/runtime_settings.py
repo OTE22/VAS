@@ -337,6 +337,29 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
         description="Days of backups kept by the backup service (scripts/backup/backup.sh)"),
     "BACKUP_INTERVAL_SECONDS": SettingMeta("integer", "sec", 3600, 2592000, None, "container_recreate",
         description="Seconds between automatic backup runs (scripts/backup/backup-loop.sh)"),
+    # ---- Deployment mode & data agent (Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md) ----
+    # Read at boot by the config guard and the model registry; a change is a
+    # new container environment, so container_recreate is the honest mode.
+    # The policy keys themselves (OFFLINE_MODE, ALLOW_*, endpoints) are
+    # SECURITY_CRITICAL and read-only here; these are the operator's choices.
+    "LLM_MODEL": SettingMeta("string", None, None, None, None, "container_recreate", allow_empty=True,
+        description="Model id served by the local OpenAI-compatible server (LLM_PROVIDER=vllm|nim_local)"),
+    "LLM_SQL_MODEL": SettingMeta("string", None, None, None, None, "container_recreate", allow_empty=True,
+        description="SQL specialist served there; empty = LLM_MODEL"),
+    "OLLAMA_INTERPRETER_MODEL": SettingMeta("string", None, None, None, None, "container_recreate", allow_empty=True,
+        description="Ollama model that READS each turn (intent, people, camera); empty = OLLAMA_MODEL"),
+    "VECTOR_STORE": SettingMeta("string", None, None, None, ["chroma", "milvus"], "container_recreate",
+        description="Knowledge-base vector store: embedded Chroma (default) or the Milvus profile"),
+    "AGENT_ORCHESTRATOR": SettingMeta("string", None, None, None, ["langgraph", "nemo"], "container_recreate",
+        description="Data-turn orchestrator: the built-in LangGraph loop or the NeMo Agent Toolkit adapter"),
+    "EMBEDDING_MODEL_PATH": SettingMeta("string", None, None, None, None, "container_recreate",
+        description="Local embedding model file the offline checklist requires"),
+    "STT_MODEL_PATH": SettingMeta("string", None, None, None, None, "container_recreate", allow_empty=True,
+        description="Local speech-to-text model file (checked when STT_PROVIDER is not none)"),
+    "OFFLINE_BUNDLE_MANIFEST": SettingMeta("string", None, None, None, None, "container_recreate", allow_empty=True,
+        description="Path of the verified offline bundle manifest; must exist when set"),
+    "SQL_AGENT_LEARN_FROM_QUERIES": SettingMeta("boolean", None, None, None, None, "api_restart",
+        description="Add answered turns to the knowledge base (keep off: only verified seeds belong there)"),
 }
 
 # Categories whose non-curated keys can never be live (bind/env/connection level)

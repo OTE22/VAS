@@ -105,6 +105,15 @@ DERIVED_PATHS = {
 # live settings object, so without this an admin token could flip ENVIRONMENT
 # to "development" and neutralize every check in this module.
 SECURITY_CRITICAL_KEYS = frozenset({
+    # Offline policy and inference endpoints (2026-09-06): a writable
+    # OFFLINE_MODE or LLM_BASE_URL would let an admin token point a
+    # production box at the internet from inside the running process.
+    "OFFLINE_MODE", "OFFLINE_ALLOWED_HOSTS",
+    "ALLOW_EXTERNAL_APIS", "ALLOW_MODEL_DOWNLOADS", "ALLOW_EXTERNAL_TELEMETRY",
+    "LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY", "LLM_API_KEY_FILE",
+    "EMBEDDING_PROVIDER", "EMBEDDING_BASE_URL",
+    "MCP_SQL_URL", "MILVUS_URI", "STT_PROVIDER", "STT_BASE_URL",
+    "OTEL_EXPORTER_ENDPOINT",
     "ENVIRONMENT", "DEBUG", "WORKERS", "USE_GPU",
     "ALLOW_MULTI_WORKER", "ALLOW_CPU_FALLBACK",
     "JWT_SECRET_KEY", "JWT_SECRET_KEY_FILE", "JWT_ALGORITHM",
@@ -1000,6 +1009,20 @@ def collect_violations(
             "Consider 1440 (24h) or less.",
             severity="warn",
         ))
+
+    # ---- Offline policy ---------------------------------------------------
+    # Production must ENFORCE offline operation, not prefer it. The rules are
+    # pure (backend/security/offline_policy.py) and read only cfg/env/probe
+    # arguments; a fatal finding aborts the boot like any other violation.
+    try:
+        from backend.security import offline_policy as _offline
+        for finding in _offline.collect_offline_violations(
+                cfg, production=production, env=env,
+                artifact_probe=(lambda path: storage_probe(path)[0]) if storage_probe else None):
+            add(ConfigViolation(finding.code, finding.key, finding.message,
+                                finding.fix, severity=finding.severity))
+    except ImportError:
+        pass
 
     return out
 

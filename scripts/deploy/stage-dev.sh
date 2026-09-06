@@ -15,6 +15,7 @@
 #   D2  the two model weights present and matching the manifest
 #   D3  the compose file renders
 #   D4  whether the optional NVIDIA NIM dev LLM is on, and how to turn it on
+#   D4b the self-hosted Opik tracer, started only when enabled (dev only)
 #   D5  start the stack
 #   D6  wait until it actually answers, then print where to log in
 #
@@ -87,6 +88,38 @@ cmd_dev_up() {
         stage_pass "local Ollama (default)"
     fi
 
+    # ---- D4b Opik tracing (DEVELOPMENT ONLY) ------------------------------
+    # The tracer records prompts, SQL and rows: a development convenience the
+    # production path never starts (deploy.sh stage 06b refuses it).
+    stage_begin "D4b Opik tracing (dev only)"
+    explain "WHAT" "Starts the self-hosted Opik stack when tracing is enabled."
+    explain "READS" "docker/.env (SQL_AGENT_OPIK_ENABLED), \$OPIK_HOME/docker-compose.yaml"
+    explain_cont "(OPIK_HOME defaults to \$HOME/opik: a checkout of comet-ml/opik)"
+    explain "NEVER" "runs in production; never enables tracing by itself."
+    local opik_enabled opik_home
+    opik_enabled="$(read_env_kv SQL_AGENT_OPIK_ENABLED 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    opik_home="${OPIK_HOME:-$HOME/opik}"
+    case "$opik_enabled" in
+        1|true|yes|on)
+            if [ -f "$opik_home/docker-compose.yaml" ]; then
+                # Always name the file: Opik's checkout ships a second compose
+                # file whose Redis port collides with the dev stack's.
+                if run docker compose -f "$opik_home/docker-compose.yaml" up -d; then
+                    stage_pass "Opik starting from $opik_home (UI: http://localhost:5173); traces go to project $(read_env_kv OPIK_PROJECT_NAME 2>/dev/null || echo face-detector-sql-agent)"
+                else
+                    stage_warn "SQL_AGENT_OPIK_ENABLED=true but the Opik stack at $opik_home did not start - the API runs untraced"
+                fi
+            else
+                stage_warn "SQL_AGENT_OPIK_ENABLED=true but no Opik checkout at $opik_home (set OPIK_HOME or git clone https://github.com/comet-ml/opik) - the API runs untraced"
+            fi ;;
+        *)
+            info "tracing off. To trace every SQL-agent turn in development add to docker/.env:"
+            info "    SQL_AGENT_OPIK_ENABLED=true"
+            info "    OPIK_URL_OVERRIDE=http://host.docker.internal:5173/api/"
+            info "and keep a self-hosted Opik checkout at \$HOME/opik (or set OPIK_HOME)."
+            stage_pass "Opik not requested" ;;
+    esac
+
     # ---- D5 start ----------------------------------------------------------
     stage_begin "D5 start"
     explain "WHAT" "Starts the whole dev stack in dependency order."
@@ -155,6 +188,11 @@ print('OK' if d.get('healthy') else ','.join(bad) or 'unknown')
 cmd_dev_stop() {
     info "stopping the development stack (containers only - every volume and its data survives)"
     dev_compose_mutate stop || die "stop failed"
+    local opik_home="${OPIK_HOME:-$HOME/opik}"
+    if [ -f "$opik_home/docker-compose.yaml" ] && docker compose -f "$opik_home/docker-compose.yaml" ps -q 2>/dev/null | grep -q .; then
+        info "stopping the development Opik stack at $opik_home"
+        run docker compose -f "$opik_home/docker-compose.yaml" stop || warn "Opik stop failed"
+    fi
     ok "stopped. Start again with: ./deploy.sh dev"
 }
 

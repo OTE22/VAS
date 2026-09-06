@@ -316,6 +316,20 @@ def parse_setting_value(value: str, value_type: str) -> Any:
         return value
 
 
+
+def _field_description(key: str) -> str:
+    """The description written on the config.py Field, else a generic line.
+    New settings get a real explanation on the page without a second copy."""
+    try:
+        from config import Settings
+        field = Settings.model_fields.get(key)
+        if field is not None and field.description:
+            return str(field.description)
+    except Exception:
+        pass
+    return f"{key} configuration setting"
+
+
 def format_setting_value(value: Any, value_type: str) -> str:
     """Format setting value to string for storage"""
     if value is None:
@@ -334,15 +348,83 @@ async def sync_settings_from_config(db: AsyncSession):
     # Get all config attributes
     config_dict = {}
     categories = {
-        "server": ["HOST", "PORT", "WORKERS", "USE_GPU", "ENVIRONMENT", "DEBUG", "LOG_DIR", "LOG_LEVEL", "LOGS_LIFE_TIME_HOURS", "BACKGROUND_TASK_NOTIFICATIONS_ENABLED", "BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS"],
-        "security": ["JWT_SECRET_KEY", "JWT_ALGORITHM", "ACCESS_TOKEN_EXPIRE_MINUTES"],
+        "server": ["HOST", "PORT", "WORKERS", "USE_GPU", "ENVIRONMENT", "DEBUG", "LOG_DIR", "LOG_LEVEL", "LOGS_LIFE_TIME_HOURS", "BACKGROUND_TASK_NOTIFICATIONS_ENABLED", "BACKGROUND_TASK_NOTIFICATION_LEAD_TIME_SECONDS",
+                     "APP_NAME",
+                     "VERSION",
+                     "GIT_COMMIT",
+                     "HOSTNAME",
+                     "ALLOW_MULTI_WORKER",
+                     "ALLOW_CPU_FALLBACK",
+                     "MIGRATIONS_MODE",
+                     "MIGRATIONS_EXPECTED_HEAD",
+                     "MIGRATION_DB_WAIT_SECONDS",
+                     "MIGRATION_DB_RETRY_INTERVAL_SECONDS",
+                     "MLFLOW_HTTP_REQUEST_TIMEOUT",
+                     "MLFLOW_HTTP_REQUEST_MAX_RETRIES",
+                     "LOG_FILE_NAME",
+                     "LOG_MAX_BYTES",
+                     "LOG_BACKUP_COUNT",
+                     "LOG_FILE_LEVEL",
+                     "LOG_API_DEFAULT_PAGE_SIZE",
+                     "LOG_API_MAX_PAGE_SIZE",
+                     "LOG_API_MAX_SCAN_FILES",
+                     "LOG_API_MAX_SCAN_BYTES",
+                     "LOG_API_TIMEOUT_SECONDS"
+                     ],
+        "security": ["JWT_SECRET_KEY", "JWT_ALGORITHM", "ACCESS_TOKEN_EXPIRE_MINUTES",
+                     "AUTH_COOKIE_SECURE",
+                     "AUTH_COOKIE_SAMESITE",
+                     "AUTH_COOKIE_HOST_PREFIX",
+                     "AUTH_ALLOWED_ORIGINS",
+                     "AUTH_TRUST_PROXY_HEADERS",
+                     "AUTH_SAME_HOST_ORIGIN_TRUSTED",
+                     "AUTH_RATE_LIMIT_ENABLED",
+                     "AUTH_RATE_LIMIT_ACCOUNT_MAX",
+                     "AUTH_RATE_LIMIT_ACCOUNT_WINDOW",
+                     "AUTH_RATE_LIMIT_IP_MAX",
+                     "AUTH_RATE_LIMIT_IP_WINDOW",
+                     "AUTH_RATE_LIMIT_GLOBAL_MAX",
+                     "AUTH_RATE_LIMIT_GLOBAL_WINDOW",
+                     "JWT_ISSUER",
+                     "JWT_AUDIENCE",
+                     "JWT_SECRET_KEY_FILE",
+                     "CORS_ORIGINS",
+                     "ENABLE_API_DOCS",
+                     "TLS_CERT_PATH",
+                     "BOOTSTRAP_ADMIN_ENABLED",
+                     "BOOTSTRAP_ADMIN_USERNAME",
+                     "BOOTSTRAP_ADMIN_EMAIL",
+                     "BOOTSTRAP_ADMIN_PASSWORD",
+                     "BOOTSTRAP_ADMIN_PASSWORD_FILE",
+                     "BOOTSTRAP_ADMIN_REQUIRE_ROTATION",
+                     "WEBHOOK_AUTH_MODE",
+                     "WEBHOOK_AUTH_HEADER",
+                     "WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS",
+                     "WEBHOOK_AUTH_INSECURE_ACK",
+                     "WEBHOOK_API_KEYS",
+                     "WEBHOOK_API_KEYS_FILE",
+                     "WEBHOOK_AUTH_TOKEN",
+                     "WEBHOOK_AUTH_TOKEN_FILE"
+                     ],
         "database": ["DATABASE_URL", "DB_HOST", "DB_PORT", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", 
-                    "DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_RECYCLE", "DB_POOL_PRE_PING"],
+                    "DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_RECYCLE", "DB_POOL_PRE_PING",
+                     "DB_POOL_TIMEOUT",
+                     "DB_CONNECT_TIMEOUT",
+                     "DB_COMMAND_TIMEOUT",
+                     "DB_STATEMENT_TIMEOUT_MS",
+                     "DB_IDLE_TX_TIMEOUT_MS",
+                     "LOCAL_DB_HOST",
+                     "POSTGRES_PASSWORD_FILE",
+                     "DATABASE_URL_FILE"
+                     ],
         # REDIS_POOL_SIZE, CACHE_LOCAL_SIZE, CACHE_VERSION and CACHE_WARNING_*
         # are deliberately absent: nothing in the codebase reads them, so
         # rendering them here offered editable knobs wired to nothing.
         # REDIS_MAX_CONNECTIONS is the pool size that is actually used.
-        "cache": ["REDIS_URL", "REDIS_MAX_CONNECTIONS", "CACHE_TTL"],
+        "cache": ["REDIS_URL", "REDIS_MAX_CONNECTIONS", "CACHE_TTL",
+                     "CACHE_TTL_UNKNOWN",
+                     "REDIS_URL_FILE"
+                     ],
         # FACES_DIR is absent deliberately: it is derived from STORAGE_DIR
         # (config.Settings) and has no setter, so listing it here would show an
         # editable field whose edits can never take effect.
@@ -353,12 +435,21 @@ async def sync_settings_from_config(db: AsyncSession):
         "processing": ["MAX_QUEUE_SIZE", "QUEUE_WORKERS", "MAX_CONCURRENT_REQUESTS",
                       "PIPELINE_BATCH_SIZE",
                       "INFERENCE_WORKERS", "MAX_CONCURRENT_INFERENCE", "MAX_CONCURRENT_INFERENCE_PER_PIPELINE",
-                      "WEBHOOK_MAX_BODY_MB", "WEBHOOK_DEDUP_TTL_SECONDS"],
+                      "WEBHOOK_MAX_BODY_MB", "WEBHOOK_DEDUP_TTL_SECONDS",
+                     "BATCH_SIZE",
+                     "FACE_TRACKING_CLEANUP_INTERVAL",
+                     "FACE_QUALITY_SCORER",
+                     "DASHBOARD_CLEANUP_INTERVAL_SECONDS"
+                     ],
         # The *_DIR companions of these flags are derived from STORAGE_DIR and
         # are therefore not listed — only the on/off switches are settings.
         "storage": ["STORAGE_DIR", "SAVE_IMAGES", "MAX_STORAGE_GB", "MAX_PHOTOS_PER_PERSON",
                    "SAVE_UNKNOWN_FACES", "MAX_FILE_SIZE", "SAVE_WEBHOOK_IMAGES",
-                   "SAVE_CROPPED_IMAGES"],
+                   "SAVE_CROPPED_IMAGES",
+                     "BACKUP_DIR",
+                     "ALLOWED_IMAGE_EXTENSIONS",
+                     "ML_ARTIFACT_DIR"
+                     ],
         "tracking": ["FACE_TRACKING_ENABLED", "FACE_TRACKING_WINDOW_SECONDS", "FACE_TRACKING_MAX_ENTRIES",
                      "FACE_TRACKING_SIMILARITY_THRESHOLD", "SKIP_UNKNOWN_FACES", "SHOW_UNKNOWN_FACES_ON_DASHBOARD",
                      "FACE_TRACKING_MAX_MEMORY_MB",
@@ -386,7 +477,13 @@ async def sync_settings_from_config(db: AsyncSession):
                     "KNOWN_INDEX_TYPE",
                     "PIPELINE_AWARE_CLUSTERING_ENABLED", "PIPELINE_SIMILARITY_WEIGHT",
                     "EMBEDDING_SIMILARITY_WEIGHT", "CROSS_PIPELINE_SIMILARITY_THRESHOLD", "SIMILARITY_MODEL_PATH",
-                    "SIMILARITY_MODEL_MIN_SAMPLES", "SIMILARITY_MODEL_AUTO_TRAIN"],
+                    "SIMILARITY_MODEL_MIN_SAMPLES", "SIMILARITY_MODEL_AUTO_TRAIN",
+                     "IDENTITY_QUALITY_THRESHOLD_KNOWN",
+                     "IDENTITY_QUALITY_THRESHOLD_UNKNOWN",
+                     "MERGE_WARNING_MIN_SIMILARITY",
+                     "VECTOR_INDEX_FALLBACK",
+                     "ACTIVITY_CORRELATION_ENABLED"
+                     ],
         # BATCH_WRITE_MAX_WAIT is absent: batch_writer.py reads only
         # BATCH_WRITE_INTERVAL and BATCH_WRITE_SIZE.
         #
@@ -400,11 +497,45 @@ async def sync_settings_from_config(db: AsyncSession):
                      "TASK_HISTORY_RETENTION_DAYS",
                      "BACKUP_RETENTION_DAYS", "BACKUP_INTERVAL_SECONDS",
                      "BATCH_WRITE_SIZE", "BATCH_WRITE_INTERVAL"],
-        "ollama": ["OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_SQL_MODEL", "OLLAMA_TEMPERATURE", "OLLAMA_TIMEOUT"],
+        "ollama": ["OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_SQL_MODEL", "OLLAMA_INTERPRETER_MODEL",
+                   "OLLAMA_TEMPERATURE", "OLLAMA_TIMEOUT"],
+        # Deployment mode & the data agent's providers. The policy keys are
+        # SECURITY_CRITICAL (read-only): they are shown so an operator can see
+        # what the box enforces, and changed only through the container
+        # environment (Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md).
+        "deployment": ["ENVIRONMENT", "OFFLINE_MODE", "OFFLINE_ALLOWED_HOSTS",
+                       "ALLOW_EXTERNAL_APIS", "ALLOW_MODEL_DOWNLOADS", "ALLOW_EXTERNAL_TELEMETRY",
+                       "LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_SQL_MODEL",
+                       "EMBEDDING_PROVIDER", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL_PATH",
+                       "VECTOR_STORE", "MILVUS_URI", "MCP_SQL_URL", "AGENT_ORCHESTRATOR",
+                       "STT_PROVIDER", "STT_BASE_URL", "STT_MODEL_PATH",
+                       "OTEL_EXPORTER_ENDPOINT", "OFFLINE_BUNDLE_MANIFEST",
+                       "SQL_AGENT_OPIK_ENABLED", "SQL_AGENT_LEARN_FROM_QUERIES",
+                     "LLM_API_KEY",
+                     "LLM_API_KEY_FILE"
+                     ],
         "sql_agent": ["CHROMADB_PATH", "CHROMA_COLLECTION_NAME", "RAG_TOP_K", "RAG_SIMILARITY_THRESHOLD",
                      "SQL_AGENT_MAX_CONCURRENT", "SQL_AGENT_TOTAL_TIMEOUT",
                      "SQL_AGENT_MAX_REASONING_STEPS", "SQL_AGENT_MAX_REPLANS",
-                     "SQL_AGENT_MAX_EXECUTION_RETRIES"],
+                     "SQL_AGENT_MAX_EXECUTION_RETRIES",
+                     "SQL_AGENT_MAX_QUERY_CHARS",
+                     "SQL_AGENT_MAX_ACTIONS_PER_TURN",
+                     "SQL_AGENT_TRACE_CONTEXT",
+                     "SQL_AGENT_DB_USER",
+                     "SQL_AGENT_DB_PASSWORD",
+                     "SQL_AGENT_DB_PASSWORD_FILE",
+                     "LLM_DEV_PROVIDER",
+                     "NVIDIA_NIM_BASE_URL",
+                     "NVIDIA_NIM_API_KEY",
+                     "NVIDIA_NIM_MODEL",
+                     "NVIDIA_NIM_SQL_MODEL",
+                     "NVIDIA_NIM_INTERPRETER_MODEL",
+                     "NVIDIA_NIM_TIMEOUT",
+                     "OPIK_URL_OVERRIDE",
+                     "OPIK_API_KEY",
+                     "OPIK_WORKSPACE",
+                     "OPIK_PROJECT_NAME"
+                     ],
         "advanced_search": [
             "SEARCH_MIN_QUALITY_THRESHOLD", "SEARCH_QUALITY_WARNING_THRESHOLD",
             "CONFIDENCE_VERY_HIGH_MIN", "CONFIDENCE_HIGH_MIN", "CONFIDENCE_MEDIUM_MIN", "CONFIDENCE_LOW_MIN",
@@ -443,7 +574,10 @@ async def sync_settings_from_config(db: AsyncSession):
             "MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME", "ML_TRAIN_MAX_THREADS",
             "ML_OPTUNA_MAX_TRIALS", "ML_OPTUNA_TIMEOUT_SECONDS", "ML_SHAP_MAX_ROWS", "ML_SHAP_BACKGROUND_ROWS",
             "ML_DRIFT_MONITORING_ENABLED",
-        ],
+                     "ML_WORKER_ID",
+                     "ML_JOB_MAINTENANCE_SECONDS"
+                     ],
+        "map": ["MAP_DATA_DIR", "MAP_MAX_COORDINATES", "MAP_INSTALL_DISK_RESERVE_GB", "MAP_MARTIN_INTERNAL_URL", "MAP_AVAILABILITY_REFRESH_SECONDS", "MAP_BOUNDS_SOUTH", "MAP_BOUNDS_WEST", "MAP_BOUNDS_NORTH", "MAP_BOUNDS_EAST"],
     }
 
     # Reconcile against the runtime registry.
@@ -507,6 +641,30 @@ async def sync_settings_from_config(db: AsyncSession):
                 
                 # Get custom description for specific settings
                 custom_descriptions = {
+                    "OFFLINE_MODE": "Empty = follow ENVIRONMENT (production is offline). true forces the offline policy; false in production refuses the boot (exit 78). Read-only: change it in the container environment.",
+                    "OFFLINE_ALLOWED_HOSTS": "Comma-separated hosts inside the air gap that are not private addresses or service names. Read-only.",
+                    "ALLOW_EXTERNAL_APIS": "Development only: hosted inference may be used. Must be false in production. Read-only.",
+                    "ALLOW_MODEL_DOWNLOADS": "Development only: model files may be fetched. Must be false in production. Read-only.",
+                    "ALLOW_EXTERNAL_TELEMETRY": "Development only: a hosted tracer may be used. Must be false in production. Read-only.",
+                    "LLM_PROVIDER": "ollama (default) | vllm | nim_local (local OpenAI-compatible servers) | nvidia_cloud (development only, refused offline). Read-only.",
+                    "LLM_BASE_URL": "Base URL of the vLLM / local NIM server, e.g. http://vllm:8000/v1. Must be internal in production. Read-only.",
+                    "LLM_MODEL": "Model id served at LLM_BASE_URL for chat and reading. Takes effect after the container is recreated.",
+                    "LLM_SQL_MODEL": "SQL specialist served at LLM_BASE_URL; empty = LLM_MODEL.",
+                    "EMBEDDING_PROVIDER": "local = the bundled ONNX MiniLM (no network). Remote embedding APIs are refused offline. Read-only.",
+                    "EMBEDDING_BASE_URL": "A local embedding service endpoint, if any. Read-only.",
+                    "EMBEDDING_MODEL_PATH": "Where the local embedding model must exist; the production checklist fails when it is missing.",
+                    "VECTOR_STORE": "chroma (embedded, default) or milvus (the milvus compose profile).",
+                    "MILVUS_URI": "Milvus endpoint when VECTOR_STORE=milvus, e.g. http://milvus:19530. Read-only.",
+                    "MCP_SQL_URL": "Empty = the MCP tool catalogue runs in-process. Set to http://mcp-sql:9901/mcp only with the mcp-sql profile. Read-only.",
+                    "AGENT_ORCHESTRATOR": "langgraph (built-in ReAct loop) or nemo (NeMo Agent Toolkit over the MCP tools; falls back when the toolkit is absent).",
+                    "STT_PROVIDER": "none | local | whisper | faster_whisper | riva | external (development only). Read-only.",
+                    "STT_BASE_URL": "Speech-to-text service endpoint, if any. Read-only.",
+                    "STT_MODEL_PATH": "Local speech-to-text model file, checked at boot when STT is on.",
+                    "OTEL_EXPORTER_ENDPOINT": "OTLP collector for traces; must be internal in production. Read-only.",
+                    "OFFLINE_BUNDLE_MANIFEST": "Path of the verified offline bundle manifest (checksums); must exist when set.",
+                    "SQL_AGENT_OPIK_ENABLED": "Development-only Opik tracing of every SQL-agent turn (prompts, SQL, rows, MCP tool spans). Production refuses it at boot.",
+                    "SQL_AGENT_LEARN_FROM_QUERIES": "Add answered turns to the knowledge base. Keep off: only verified seeds belong there.",
+                    "OLLAMA_INTERPRETER_MODEL": "Ollama model that reads each turn (intent, people, camera); empty = OLLAMA_MODEL.",
                     "MAX_EMBEDDINGS_PER_IDENTITY": "How many CAMERA-OBSERVED face vectors to keep per person; the lowest-quality ones beyond this are pruned by the daily identity-retention job. Photos added through Add Person are never pruned — their vectors are kept for as long as the photo is in the gallery. Default: 10",
                     "MAX_PHOTOS_PER_PERSON": "CAMERA CAPTURES ONLY. How many face crops a camera pipeline keeps on disk per known person, per pipeline. Unknown faces are exempt and are always saved. This does NOT limit photos added through Add Person — an uploaded gallery is capped at 1000 images per person and is not configurable. Default: 1",
                     "ENROLL_STRONG_MATCH_MIN": "Similarity (0-1) at or above which an uploaded photo is treated as an already-enrolled person, and adding it to that person is the recommended action. Must not be below ENROLL_CANDIDATE_MIN — startup refuses an inverted pair. Default: 0.75",
@@ -579,7 +737,7 @@ async def sync_settings_from_config(db: AsyncSession):
                         value=value_str,
                         value_type=get_value_type(key, value),
                         category=category,
-                        description=custom_descriptions.get(key, f"{key} configuration setting"),
+                        description=custom_descriptions.get(key, _field_description(key)),
                         is_sensitive=key in sensitive_keys,
                         is_readonly=key in readonly_keys
                     )

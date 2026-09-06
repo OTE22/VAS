@@ -36,6 +36,17 @@
 #     battery — stages 01-14. The dev conveniences above are REFUSED here by
 #     the fail-closed preflight (exit 78), not merely turned off.
 #
+# OFFLINE POLICY (production) AND OPIK (development only)
+# --------------------------------------------------------
+#   Production is air-gapped. Stage 06b writes ENVIRONMENT=production,
+#   OFFLINE_MODE=true, ALLOW_*=false and the HF offline switches into
+#   docker/.env when they are missing, and REFUSES the deployment when the
+#   file enables the Opik tracer, the hosted NIM provider, an ALLOW_* flag
+#   or OFFLINE_MODE=false. The Opik container is never started by the
+#   production path; `./deploy.sh dev` starts it (stage D4b) only when
+#   SQL_AGENT_OPIK_ENABLED=true and a self-hosted Opik checkout exists at
+#   OPIK_HOME (default: $HOME/opik). See Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md.
+#
 # Running both on one host does not work: each wants ports 80/443.
 #
 # WHAT THIS IS
@@ -544,6 +555,73 @@ stage_env_config() {
 }
 
 # ---------------------------------------------------------------------------
+# Stage 06b — offline policy (PRODUCTION is air-gapped; fail closed here, before
+# the image boots and the config guard refuses it with exit 78).
+#
+# WRITES (install/start only, never in validate/--dry-run): the mode keys a
+# production docker/.env must carry when they are absent. It never changes a
+# value the operator set; it refuses instead.
+# NEVER: starts, pulls or configures an Opik container. Tracing is a
+# development convenience (`./deploy.sh dev`, stage D4b).
+# ---------------------------------------------------------------------------
+stage_offline_policy() {
+    stage_begin "06b offline policy"
+    explain "WHAT" "Makes docker/.env say what production must say: offline, no hosted"
+    explain_cont "LLM, no tracer, no downloads. Refuses a development .env copied here."
+    explain "READS" "docker/.env"
+    explain "WRITES" "the missing mode keys under the managed section (install/start only)."
+    explain "NEVER" "starts an Opik container, sets a cloud endpoint, or overrides a"
+    explain_cont "value you set - it stops and tells you which line to change."
+    local env_val problems=""
+    env_val="$(read_env_kv SQL_AGENT_OPIK_ENABLED 2>/dev/null)"
+    case "$(printf '%s' "$env_val" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) problems="$problems SQL_AGENT_OPIK_ENABLED=$env_val" ;;
+    esac
+    env_val="$(read_env_kv LLM_DEV_PROVIDER 2>/dev/null)"
+    [ -n "$env_val" ] && problems="$problems LLM_DEV_PROVIDER=$env_val"
+    env_val="$(read_env_kv LLM_PROVIDER 2>/dev/null)"
+    case "$(printf '%s' "$env_val" | tr '[:upper:]' '[:lower:]')" in
+        nvidia_cloud|openai|anthropic|gemini|cohere) problems="$problems LLM_PROVIDER=$env_val" ;;
+    esac
+    env_val="$(read_env_kv OFFLINE_MODE 2>/dev/null)"
+    case "$(printf '%s' "$env_val" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off) problems="$problems OFFLINE_MODE=$env_val" ;;
+    esac
+    local key
+    for key in ALLOW_EXTERNAL_APIS ALLOW_MODEL_DOWNLOADS ALLOW_EXTERNAL_TELEMETRY; do
+        env_val="$(read_env_kv "$key" 2>/dev/null)"
+        case "$(printf '%s' "$env_val" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) problems="$problems $key=$env_val" ;;
+        esac
+    done
+    for key in LLM_BASE_URL EMBEDDING_BASE_URL MCP_SQL_URL MILVUS_URI STT_BASE_URL OTEL_EXPORTER_ENDPOINT OPIK_URL_OVERRIDE; do
+        env_val="$(read_env_kv "$key" 2>/dev/null)"
+        case "$env_val" in
+            *integrate.api.nvidia.com*|*api.openai.com*|*api.anthropic.com*|*huggingface.co*|*googleapis.com*|*cohere.*|*comet.com*)
+                problems="$problems $key=$env_val" ;;
+        esac
+    done
+    if [ -n "$problems" ]; then
+        stage_fail "docker/.env carries development-only or external settings:$problems - remove them (production is air-gapped; the config guard would refuse the boot with exit 78 anyway)"
+    fi
+    # Missing keys get their production value; present keys are left alone.
+    local wrote=""
+    for key in "ENVIRONMENT=production" "OFFLINE_MODE=true" "ALLOW_EXTERNAL_APIS=false" \
+               "ALLOW_MODEL_DOWNLOADS=false" "ALLOW_EXTERNAL_TELEMETRY=false" \
+               "SQL_AGENT_OPIK_ENABLED=false" "HF_HUB_OFFLINE=1" "TRANSFORMERS_OFFLINE=1"; do
+        if [ -z "$(read_env_kv "${key%%=*}" 2>/dev/null)" ]; then
+            upsert_env_kv "${key%%=*}" "${key#*=}"
+            wrote="$wrote ${key%%=*}"
+        fi
+    done
+    if [ -n "$wrote" ]; then
+        stage_pass "offline policy asserted; wrote:$wrote"
+    else
+        stage_pass "docker/.env already states the offline policy"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Stage 09 — compose validation (the gate the runbook prescribes)
 # ---------------------------------------------------------------------------
 stage_compose_validate() {
@@ -646,6 +724,7 @@ cmd_install() {
     stage_secrets
     stage_tls
     stage_env_config
+    stage_offline_policy
     stage_gpu_detect
     stage_model_check
     stage_compose_validate
@@ -662,6 +741,7 @@ cmd_validate() {
     stage_secrets
     stage_tls
     stage_env_config
+    stage_offline_policy
     stage_gpu_detect
     stage_model_check
     stage_compose_validate
@@ -670,6 +750,7 @@ cmd_validate() {
 cmd_start() {
     require_root start
     stage_preflight
+    stage_offline_policy
     stage_gpu_detect
     stage_model_check
     stage_compose_validate

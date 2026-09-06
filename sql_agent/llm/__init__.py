@@ -55,6 +55,15 @@ def get_gateway():
         # provider exists here (it registers nothing in production). Keying
         # the adapter off the registry keeps the two impossible to disagree:
         # no spec, no adapter; spec present, adapter present.
+        if any(spec.provider == "openai_compat" for spec in registry.all()):
+            from .openai_compat_provider import OpenAICompatProvider
+            providers["openai_compat"] = OpenAICompatProvider(
+                base_url=config.llm_base_url,
+                api_key=getattr(config, "llm_api_key", ""),
+                default_temperature=config.ollama_temperature,
+            )
+            logger.info("[LLM] local OpenAI-compatible provider (%s) at %s",
+                        config.llm_provider, config.llm_base_url)
         if any(spec.provider == "nim" for spec in registry.all()):
             from .nim_provider import NIMProvider
 

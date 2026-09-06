@@ -181,8 +181,35 @@ def build_default_registry(cfg) -> ModelRegistry:
     # SQL work prefers the specialist and falls back to the general model;
     # with NIM enabled the hosted models come first and Ollama remains the
     # local fallback.
+    # A local OpenAI-compatible server (vLLM or a local NIM container) is a
+    # first-class LOCAL provider: allowed in production, RESTRICTED data,
+    # preferred over Ollama when configured. Selected by LLM_PROVIDER +
+    # LLM_BASE_URL + LLM_MODEL; the offline policy verifies the URL is internal.
+    local_provider = str(getattr(cfg, "llm_provider", "ollama") or "ollama").strip().lower()
+    local_enabled = (local_provider in ("vllm", "nim_local", "openai_compat")
+                     and bool(str(getattr(cfg, "llm_base_url", "") or "").strip())
+                     and bool(str(getattr(cfg, "llm_model", "") or "").strip()))
+    local_general = local_sql = None
+    if local_enabled:
+        local_general = str(cfg.llm_model).strip()
+        local_sql = str(getattr(cfg, "llm_sql_model", "") or "").strip() or local_general
+        for model_id, label in ((local_general, "general"), (local_sql, "SQL specialist")):
+            if registry.get(model_id) is None:
+                registry.register(ModelSpec(
+                    provider="openai_compat",
+                    model_id=model_id,
+                    display_name=f"{model_id} ({local_provider}, {label})",
+                    capabilities=frozenset({Capability.STREAMING, Capability.JSON_MODE,
+                                            Capability.TOOL_CALLING}),
+                    context_tokens=32768,
+                    max_sensitivity=DataSensitivity.RESTRICTED,  # runs on the host
+                    timeout_seconds=float(cfg.ollama_timeout),
+                ))
     sql_order = [sql_id, general_id]
     chat_order = [general_id]
+    if local_enabled:
+        sql_order = [local_sql, local_general] + sql_order
+        chat_order = [local_general] + chat_order
     if nim_enabled:
         sql_order = [nim_sql, nim_general] + sql_order
         chat_order = [nim_general] + chat_order
@@ -218,6 +245,8 @@ def build_default_registry(cfg) -> ModelRegistry:
         ))
     if reader_local:
         reader_order = [reader_local] + reader_order
+    if local_enabled:
+        reader_order = [local_general] + reader_order
     if nim_enabled:
         reader_nim = str(getattr(cfg, "nim_interpreter_model", "") or "").strip()
         if reader_nim and registry.get(reader_nim) is None:

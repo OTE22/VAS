@@ -189,3 +189,22 @@ def graph_config(tracer: Optional[Any]) -> Optional[Dict[str, Any]]:
 def turn_config(cfg: Any, **tracer_kwargs: Any) -> Optional[Dict[str, Any]]:
     """``graph_config(build_tracer(...))`` in one call, for the agent."""
     return graph_config(build_tracer(cfg, **tracer_kwargs))
+
+
+def tool_tracker(cfg: Any, tool_name: str):
+    """A decorator that records one MCP tool call as an Opik span named
+    ``mcp:<tool>`` under the current turn trace, or None when tracing is
+    not active (production, disabled, SDK missing). Development only, like
+    every other tracer here; the span carries the call arguments and the
+    envelope, which is what a person debugging a turn needs to see."""
+    if tracing_status(cfg) != READY:
+        return None
+    try:
+        _configure_sdk(cfg)
+        import opik
+        return opik.track(name=f"mcp:{tool_name}", type="tool",
+                          capture_input=True, capture_output=True,
+                          project_name=str(cfg.opik_project_name))
+    except Exception as exc:
+        logger.debug("[SQL_AGENT] MCP tool span not attached: %s", exc)
+        return None

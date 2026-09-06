@@ -600,3 +600,58 @@ body.settings-page {
     }
 }
 
+/* Settings browser: scoped to this page; existing modal styles stay intact. */
+body.settings-page .settings-intro { margin: 1.5rem 0; }
+body.settings-page .settings-intro h1 { font-size: 1.75rem; color: #fff; margin: 0 0 0.5rem; }
+body.settings-page .settings-intro p,
+body.settings-page .settings-help,
+body.settings-page .settings-disclosure p { color: #b8c9c4; font-size: 0.9rem; line-height: 1.6; }
+body.settings-page .settings-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1.25rem; margin-bottom: 1.25rem; }
+body.settings-page .settings-view-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+body.settings-page .settings-view-btn,
+body.settings-page .settings-text-btn { border: 1px solid #527367; border-radius: 6px; padding: 0.65rem 1rem; background: #101d19; color: #dce8e3; font: inherit; cursor: pointer; min-height: 44px; }
+body.settings-page .settings-view-btn.active { border-color: #00ff96; color: #00ff96; background: #123626; }
+body.settings-page .settings-text-btn { background: transparent; font-size: 0.85rem; }
+body.settings-page .settings-search-label { display: flex; flex-direction: column; gap: 0.4rem; flex: 1 1 280px; color: #dce8e3; font-size: 0.875rem; }
+body.settings-page #settings-search { width: 100%; min-width: 0; min-height: 44px; padding: 0.65rem 0.85rem; border: 1px solid #527367; border-radius: 6px; color: #fff; background: #0d1713; font: inherit; }
+body.settings-page #settings-search::placeholder { color: #a4b8ae; }
+body.settings-page :is(button, input, summary):focus-visible { outline: 2px solid #00ff96; outline-offset: 3px; }
+body.settings-page .filter-section { display: flex; gap: 1rem; align-items: flex-start; }
+body.settings-page .category-filters { flex-direction: row; max-height: none; overflow: visible; }
+body.settings-page .category-filter-btn { width: auto; min-height: 44px; padding: 0.5rem 0.75rem; text-transform: none; letter-spacing: normal; }
+body.settings-page .settings-results-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+body.settings-page .settings-results-header h2 { margin: 0; color: #e8f0ec; font-size: 1.15rem; }
+body.settings-page #settings-result-count { color: #b8c9c4; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+body.settings-page .settings-container { grid-template-columns: repeat(auto-fill, minmax(min(100%, 310px), 1fr)); gap: 1rem; max-height: none; min-height: 0; overflow: visible; padding: 0.75rem 0; }
+body.settings-page .setting-card { min-width: 0; min-height: 0; max-height: none; padding: 1rem; border-color: #315346; }
+body.settings-page .setting-card-header { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+body.settings-page .setting-title { color: #eef5f1; font-size: 1rem; line-height: 1.4; margin: 0; overflow-wrap: anywhere; }
+body.settings-page .setting-title::first-letter { text-transform: uppercase; }
+body.settings-page .setting-key { color: #9eb9ad; font: 0.75rem/1.5 monospace; white-space: normal; overflow-wrap: anywhere; letter-spacing: normal; }
+body.settings-page .setting-badges { gap: 0.35rem; }
+body.settings-page .setting-badge,
+body.settings-page .setting-unit-badge { font-size: 0.7rem; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+body.settings-page .setting-description { color: #b8c9c4; font-size: 0.875rem; line-height: 1.55; margin: 0.5rem 0 0.75rem; overflow-wrap: anywhere; }
+body.settings-page .setting-reference { margin: 0.5rem 0 1rem; }
+body.settings-page .setting-reference summary { color: #b8c9c4; cursor: pointer; font-size: 0.875rem; }
+body.settings-page .setting-in-use-label { margin-top: auto; margin-bottom: 0.4rem; color: #eef5f1; font-size: 0.9rem; font-weight: 600; }
+body.settings-page .setting-in-use-label small { color: #b8c9c4; font-weight: 400; }
+body.settings-page .setting-saved-difference { margin: 0.5rem 0 0; color: #ffc107; font-size: 0.8rem; line-height: 1.5; overflow-wrap: anywhere; }
+body.settings-page .setting-value-container { flex-direction: row; align-items: flex-start; }
+body.settings-page .setting-value { display: block; font-size: 1rem; line-height: 1.5; max-height: none; white-space: normal; overflow-wrap: anywhere; }
+body.settings-page .setting-actions { margin-top: 0.75rem; flex-direction: row; justify-content: flex-end; }
+body.settings-page .setting-btn { width: auto; height: auto; min-height: 44px; padding: 0.5rem 0.85rem; gap: 0.5rem; font-size: 0.85rem; }
+body.settings-page .settings-container > :is(.loading, .empty-state, .error) { grid-column: 1 / -1; }
+body.settings-page .settings-disclosure { margin: 1rem 0; padding: 1rem; border: 1px solid #315346; border-radius: 6px; background: rgba(0, 0, 0, 0.35); }
+body.settings-page .settings-disclosure summary { color: #dce8e3; cursor: pointer; padding: 0.25rem 0; font-weight: 600; }
+body.settings-page .audit-section .table-container { max-height: 400px; }
+body.settings-page :is(.setting-card, .category-filter-btn, .refresh-btn-red),
+body.settings-page :is(.setting-card, .category-filter-btn, .refresh-btn-red):hover { transition: none; transform: none; box-shadow: none; }
+body.settings-page :is(.setting-card, .category-filter-btn)::before { display: none; }
+@media (max-width: 600px) {
+    body.settings-page .intelligence-content.settings-page { padding: 0.5rem 1rem; }
+    body.settings-page .filter-section { flex-direction: column; }
+    body.settings-page .settings-toolbar { align-items: stretch; }
+    body.settings-page .settings-search-label { flex-basis: 100%; }
+}
+

@@ -1,0 +1,14 @@
+# NVIDIA NeMo Agent Toolkit for the optional `AGENT_ORCHESTRATOR=nemo` path,
+# plus the MCP SDK it talks to. Optional: the application image does not
+# include it by default; install it into the image with
+#     pip install -r requirements-agent.txt
+# (or add the line to the Dockerfile) when the NeMo orchestrator is wanted.
+#
+# nvidia-nat-core requires numpy~=2.3. requirements-base.txt moved the image
+# to numpy 2 with OpenCV 4.10 on 2026-09-06 precisely so this installs
+# cleanly next to the face-recognition stack (verified: detector, recognizer
+# and FAISS run on numpy 2.4 with the toolkit installed, `pip check` clean).
+# Production imports these wheels from the offline bundle (kind "wheel");
+# nothing is downloaded at runtime.
+nvidia-nat[langchain]>=1.8,<2
+mcp>=2.1

@@ -211,6 +211,9 @@ verification, settings — is documented **once**, in 46.
 - **[80_ALEMBIC_IN_DOCKER.md](80_ALEMBIC_IN_DOCKER.md)** — running Alembic by hand inside the container
 - **[81_SQL_AGENT_QUERY_HISTORY.md](81_SQL_AGENT_QUERY_HISTORY.md)** — SQL agent query history, sessions and memory
 - **[90_AGENT_ARCHITECTURE.md](90_AGENT_ARCHITECTURE.md)** — how the agent decides what to do: planner vs dispatcher, artifacts and their lineage, the ownership boundary; watching it work, including per-turn Opik tracing (development only) and the Opik MCP server
+- **[96_LOCAL_DATA_AGENT_ARCHITECTURE.md](96_LOCAL_DATA_AGENT_ARCHITECTURE.md)** — the local enterprise data agent: development (online) vs production (air-gapped) modes, the offline policy and startup checklist, MCP tool catalogue, Vanna-style retrieval, local LLM/embedding/vector-store providers, offline bundle, compose profiles, network isolation, monitoring, troubleshooting, production validation checklist
+- **[97_DATA_AGENT_CONFIGURATION_GUIDE.md](97_DATA_AGENT_CONFIGURATION_GUIDE.md)** — how to configure the data agent in development (online, cloud optional, Opik) and production (air-gapped, fail-closed): every setting explained, what the boot guard checks, step-by-step setup for both modes, bundle import, profiles, worked scenarios, verification commands
+- **[98_SETTINGS_CONSUMERS.md](98_SETTINGS_CONSUMERS.md)** — every setting on the admin settings page with its value in use, when a change applies, and exactly which Python modules, compose files, env templates and scripts consume it (regenerate with scripts/settings_consumers.py)
 - **[82_RECOGNITION_LOGGING_WALKTHROUGH.md](82_RECOGNITION_LOGGING_WALKTHROUGH.md)** — logging walkthrough
 - **[71_IMAGE_INGESTION_WORKFLOW.md](71_IMAGE_INGESTION_WORKFLOW.md)** — the unified storage layout
 

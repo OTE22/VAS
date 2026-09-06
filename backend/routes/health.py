@@ -8,7 +8,7 @@ import os
 import sys
 import logging
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -80,11 +80,17 @@ async def readiness_check():
         stats = await processing_queue.get_stats()
         return stats["processing"] < settings.MAX_CONCURRENT_REQUESTS * 2
 
+    async def _check_offline_policy():
+        # Production must never become ready while it would call out or is
+        # missing a local artifact (backend/security/offline_policy.py).
+        summary = _offline_policy_summary()
+        return summary["healthy"]
     results = dict(await asyncio.gather(
         _bounded("database", db_manager.health_check, required=True),
         _bounded("models", _check_models, required=True),
         _bounded("cache", _check_cache, required=False),
         _bounded("queue", _check_queue, required=False),
+        _bounded("offline_policy", _check_offline_policy, required=bool(settings.is_production)),
     ))
 
     required_ok = all(v["healthy"] for v in results.values() if v["required"])
@@ -243,11 +249,81 @@ async def health_check():
         }
 
 
+def _offline_policy_summary() -> dict:
+    """Fatal offline-policy findings, counted. Pure configuration - no I/O -
+    so it is safe inside the 2-second readiness bound. Reads no environment:
+    the library switches are the boot guard's business."""
+    try:
+        from backend.security import offline_policy as _op
+        findings = _op.collect_offline_violations(settings, production=bool(settings.is_production))
+        fatal = [f for f in findings if f.severity == "fatal"]
+        return {"healthy": not fatal, "enforced": _op.offline_mode(settings, bool(settings.is_production)),
+                "fatal": len(fatal), "warnings": len(findings) - len(fatal),
+                "codes": sorted({f.code for f in fatal})}
+    except Exception as e:
+        return {"healthy": False, "error": str(e)[:120]}
+
+
+def _require_admin_dependency():
+    from backend.auth.auth_service import require_admin
+    return require_admin()
+
+
+@router.get("/api/health/offline-policy")
+@router.get("/health/offline-policy")
+async def offline_policy_report(current_user: dict = Depends(_require_admin_dependency())):
+    """The production startup checklist, [PASS]/[FAIL] per item, for
+    administrators only (it names endpoints and artifact paths).
+
+    Served at /api/health/offline-policy for machine clients (auth failures
+    are JSON there) and at /health/offline-policy for browsers (auth failures
+    redirect like every other page)."""
+    import asyncio
+    from backend.security import offline_policy as _op
+
+    async def _probe_http(url: str):
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(url)
+                return r.status_code < 500, f"HTTP {r.status_code}"
+        except Exception as e:
+            return False, type(e).__name__
+
+    async def _probe_db():
+        try:
+            return bool(await asyncio.wait_for(db_manager.health_check(), timeout=2.0)), ""
+        except Exception as e:
+            return False, type(e).__name__
+
+    reach = {"PostgreSQL": await _probe_db()}
+    llm_url = (settings.LLM_BASE_URL or "").strip() if str(getattr(settings, "LLM_PROVIDER", "ollama")).lower() != "ollama" \
+        else (settings.OLLAMA_BASE_URL or "").strip()
+    if llm_url:
+        reach["local LLM"] = await _probe_http(llm_url.rstrip("/") + ("/models" if llm_url.rstrip("/").endswith("/v1") else "/api/tags"))
+    for label, url in (("MCP", getattr(settings, "MCP_SQL_URL", "")),
+                       ("Milvus", getattr(settings, "MILVUS_URI", "")),
+                       ("STT", getattr(settings, "STT_BASE_URL", "")),
+                       ("embedding service", getattr(settings, "EMBEDDING_BASE_URL", ""))):
+        if str(url or "").strip():
+            reach[label] = await _probe_http(str(url).strip())
+    checks = _op.startup_checklist(settings, production=bool(settings.is_production),
+                                   reachability=reach)
+    return {
+        "environment": settings.ENVIRONMENT,
+        "offline_mode": _op.offline_mode(settings, bool(settings.is_production)),
+        "healthy": all(c.passed for c in checks),
+        "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in checks],
+        "report": _op.format_checklist(checks),
+    }
+
+
 @router.get("/health/detailed")
 async def detailed_health_check():
     """Detailed health check for all components"""
     try:
         checks = {}
+        checks["offline_policy"] = _offline_policy_summary()
 
         # Background-service supervision: full per-service dump (status,
         # last_success, last_error, consecutive_failures, restarts) — the

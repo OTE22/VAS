@@ -89,6 +89,18 @@ class Config:
     nim_interpreter_model: str = field(
         default_factory=lambda: getattr(settings, "NVIDIA_NIM_INTERPRETER_MODEL", ""))
     nim_timeout: int = field(default_factory=lambda: settings.NVIDIA_NIM_TIMEOUT)
+    # Deployment mode: local OpenAI-compatible server (vLLM / local NIM),
+    # vector store and embedding provider. See Docs/96_LOCAL_DATA_AGENT_ARCHITECTURE.md.
+    llm_provider: str = field(default_factory=lambda: getattr(settings, "LLM_PROVIDER", "ollama"))
+    llm_base_url: str = field(default_factory=lambda: getattr(settings, "LLM_BASE_URL", ""))
+    llm_model: str = field(default_factory=lambda: getattr(settings, "LLM_MODEL", ""))
+    llm_sql_model: str = field(default_factory=lambda: getattr(settings, "LLM_SQL_MODEL", ""))
+    llm_api_key: str = field(default_factory=lambda: getattr(settings, "LLM_API_KEY", ""))
+    vector_store: str = field(default_factory=lambda: getattr(settings, "VECTOR_STORE", "chroma"))
+    milvus_uri: str = field(default_factory=lambda: getattr(settings, "MILVUS_URI", ""))
+    embedding_provider: str = field(default_factory=lambda: getattr(settings, "EMBEDDING_PROVIDER", "local"))
+    agent_orchestrator: str = field(default_factory=lambda: getattr(settings, "AGENT_ORCHESTRATOR", "langgraph"))
+    mcp_sql_url: str = field(default_factory=lambda: getattr(settings, "MCP_SQL_URL", ""))
     is_production: bool = field(default_factory=lambda: settings.is_production)
 
     # Development-only per-turn tracing (Opik). sql_agent/tracing.py refuses

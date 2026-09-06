@@ -116,6 +116,9 @@ class AgentState(TypedDict):
     planner_candidates: Optional[Dict]
     # Durable working memory, read from the session file at request time.
     working_context: Optional[Dict]
+    # Caller facts for the MCP tool context (set by the API layer when known).
+    user_role: Optional[str]
+    request_id: Optional[str]
     # The caller's recent artifacts (id/type/title/language only — never
     # content), pre-fetched in the route so graph nodes stay synchronous.
     artifact_index: Optional[List[Dict]]

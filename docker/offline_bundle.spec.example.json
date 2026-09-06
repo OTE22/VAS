@@ -1,0 +1,21 @@
+{
+  "_comment": "Example spec for scripts/offline_bundle.py prepare. Paths are on the PREPARING (online) machine; dest is where production expects the file. Images are saved with `docker save`.",
+  "items": [
+    {"kind": "embedding", "src": "/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx",
+     "dest": "/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx"},
+    {"kind": "llm", "src": "/var/lib/docker/volumes/docker_ollama_models/_data/models",
+     "dest": "/var/lib/docker/volumes/docker_ollama_models/_data/models"},
+    {"kind": "other", "src": "./weights", "dest": "/app/weights"},
+    {"kind": "wheel", "src": "./wheels", "dest": ""},
+    {"kind": "frontend", "src": "./frontend/vendor", "dest": "/app/frontend/vendor"},
+    {"kind": "cert", "src": "./certs", "dest": "/app/certs"},
+    {"kind": "config", "src": "./docker/env.production.example", "dest": "/opt/face_detector/env.production.example"},
+    {"kind": "image", "name": "face_detector-face_recognition:latest"},
+    {"kind": "image", "name": "pgvector/pgvector:pg15"},
+    {"kind": "image", "name": "redis:7-alpine"},
+    {"kind": "image", "name": "ollama/ollama:latest"},
+    {"kind": "image", "name": "nginx:alpine"},
+    {"kind": "image", "name": "prom/prometheus:latest"},
+    {"kind": "image", "name": "grafana/grafana:latest"}
+  ]
+}

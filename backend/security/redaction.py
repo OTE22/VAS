@@ -10,6 +10,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 # Settings whose values must never be rendered, anywhere, for any reason.
 SECRET_SETTINGS = frozenset({
+    # SQL-agent read-only role, local LLM bearer, webhook token (2026-09-06)
+    "SQL_AGENT_DB_PASSWORD", "SQL_AGENT_DB_PASSWORD_FILE",
+    "LLM_API_KEY", "LLM_API_KEY_FILE",
+    "WEBHOOK_AUTH_TOKEN", "WEBHOOK_AUTH_TOKEN_FILE",
     "JWT_SECRET_KEY",
     "JWT_SECRET_KEY_FILE",
     "POSTGRES_PASSWORD",

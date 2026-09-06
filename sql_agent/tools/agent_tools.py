@@ -245,6 +245,7 @@ class SQLAgentTools:
         # that actually executed SQL - the scoped user saw every camera.
         self.db = db if db is not None else DatabaseManager(config)
         self.kb = SQLKnowledgeBase(config)  # Knowledge Base for RAG
+        self._catalogue = None   # the MCP tool catalogue, built on first use
         self.conversation_memory = conversation_memory  # Conversation memory for context
 
     def _validate_sql_policy(self, sql: str) -> dict:
@@ -2423,11 +2424,10 @@ class SQLAgentTools:
             # the question that produced them, and retrieved examples are
             # interpolated into the SQL-generation system prompt. Unscoped,
             # one user's questions became another user's prompt content.
-            examples = self.kb.search_similar(
-                query=state["normalized_input"],
-                top_k=config.rag_top_k,
-                user_id=state.get("user_id"),
-            )
+            import time as _time
+            _rag_started = _time.monotonic()
+            examples = self._retrieve_through_catalogue(
+                state, state["normalized_input"], config.rag_top_k)
             # The verified seeds are written with PERSON_NAME / OTHER_PERSON /
             # CAMERA_NAME placeholders, and a placeholder embeds far from a
             # real name: "which camera saw JOEY, and how many minutes ..."
@@ -2439,16 +2439,14 @@ class SQLAgentTools:
             # similarity, so literal-name examples still count.
             placeholder_query = self._placeholder_query(state)
             if placeholder_query and placeholder_query != state["normalized_input"]:
-                extra = self.kb.search_similar(
-                    query=placeholder_query,
-                    top_k=config.rag_top_k,
-                    user_id=state.get("user_id"),
-                )
+                extra = self._retrieve_through_catalogue(
+                    state, placeholder_query, config.rag_top_k)
                 examples = self._merge_examples(examples, extra, config.rag_top_k)
                 logger.info("[STEP_3.5] placeholder retrieval merged "
                             "(top_similarities=%s)",
                             [ex.get("similarity") for ex in examples[:3]])
             state["retrieved_examples"] = examples
+            observability.observe_stage_latency("vanna_retrieval", _time.monotonic() - _rag_started, "ok")
             state["rag_context"] = self.kb.format_examples_for_prompt(examples)
 
             if examples:
@@ -2468,6 +2466,63 @@ class SQLAgentTools:
             logger.error(f"❌ Error: {state['error']}")
 
         return state
+
+    @property
+    def catalogue(self):
+        """The MCP tool catalogue bound to this agent's database manager and
+        knowledge base. Retrieval and execution in the graph go through it,
+        so every turn - LangGraph or NeMo - uses one audited, timed,
+        contract-checked tool surface (see sql_agent/mcp/tools.py)."""
+        if self._catalogue is None:
+            from ..mcp.tools import MCPToolset
+            self._catalogue = MCPToolset(db=self.db, kb=self.kb, config=globals().get("config"))
+        return self._catalogue
+
+    @staticmethod
+    def _tool_context(state):
+        from ..mcp.tools import ToolContext
+        return ToolContext(user_id=state.get("user_id"), role=state.get("user_role"),
+                           request_id=str(state.get("request_id") or state.get("query_history_id") or "-"),
+                           pipeline_scope=None)      # the manager's policy already carries the scope
+
+    def _retrieve_through_catalogue(self, state, query: str, top_k: int) -> list:
+        """vanna.retrieve_sql_examples, as the list the graph expects."""
+        out = self.catalogue.call("vanna.retrieve_sql_examples",
+                                  {"question": str(query)[:1000], "top_k": max(1, min(20, int(top_k or 5)))},
+                                  self._tool_context(state))
+        if out.get("status") != "ok":
+            logger.warning("[STEP_3.5] retrieval through the catalogue failed: %s", out.get("error_code"))
+            return []
+        examples = []
+        for ex in out["data"].get("examples", []):
+            entry = dict(ex)
+            entry.setdefault("document_id", ex.get("question"))
+            examples.append(entry)
+        return examples
+
+    def _execute_through_catalogue(self, state) -> dict:
+        """database.execute_readonly, as the query_result the graph expects.
+
+        The catalogue re-runs the AST verdict with the manager's policy (the
+        caller's camera scope included) and refuses before the database sees
+        anything; DatabaseManager.execute_query then guards and scopes again.
+        """
+        max_rows = int(getattr(getattr(self.db, "sql_policy", None), "max_rows", 500) or 500)
+        out = self.catalogue.call("database.execute_readonly",
+                                  {"sql": state["generated_sql"], "max_rows": max(1, min(5000, max_rows))},
+                                  self._tool_context(state))
+        if out.get("status") == "ok":
+            data = out["data"]
+            return {"success": True, "rows": data.get("rows", []), "row_count": data.get("row_count", 0),
+                    "columns": data.get("columns", []), "truncated": bool(data.get("truncated"))}
+        detail = out.get("detail") or {}
+        error = str(detail.get("error") or out.get("error") or out.get("error_code") or "execution failed")
+        if out.get("error_code") == "PERMISSION_DENIED" and not error.startswith("Security:"):
+            error = "Security: " + error
+        failed = {"success": False, "error": error, "rows": [], "row_count": 0}
+        if detail.get("error_code"):
+            failed["error_code"] = detail["error_code"]
+        return failed
 
     _NAME_POOL_TTL_SECONDS = 60
     #: A verified seed at or above this similarity to the question is
@@ -2744,6 +2799,8 @@ If no query is possible:
 
         self._trace_envelope("generate_sql", prompt)
         chain = prompt | self.sql_llm | StrOutputParser()
+        import time as _time
+        _gen_started = _time.monotonic()
 
         try:
             logger.info("[STEP_4] 🤖 Calling LLM for SQL generation...")
@@ -2757,6 +2814,8 @@ If no query is possible:
             # Use the prepare_sql_from_llm_response tool to parse and clean the response
             logger.info("🔧 Using prepare_sql_from_llm_response tool...")
             prepared = prepare_sql_from_llm_response.invoke(result)
+            observability.observe_stage_latency("sql_generation", _time.monotonic() - _gen_started,
+                                                "ok" if prepared.get("success") else "error")
 
             if prepared["success"]:
                 # Generation produces an UNTRUSTED candidate. It neither
@@ -2854,6 +2913,8 @@ If no query is possible:
             # complexity, then returns SQL with the enforced LIMIT.
             policy_result = self._validate_sql_policy(generated_sql)
             state["sql_validation_code"] = policy_result.get("code")
+            if not policy_result.get("is_safe", policy_result.get("allowed", True)):
+                observability.observe_sql_validation_failure(policy_result.get("code") or "POLICY_REJECTED")
             if not policy_result["is_safe"]:
                 state["sql_validation_status"] = "INVALID"
                 state["sql_validation_error"] = policy_result["reason"]
@@ -3030,7 +3091,21 @@ Provide the corrected SQL:""")
                     len(state.get("generated_sql") or ""))
 
         try:
-            result = self.db.execute_query(state["generated_sql"])
+            import time as _time
+            _db_started = _time.monotonic()
+            result = self._execute_through_catalogue(state)
+            try:
+                _err = str((result or {}).get("error") or "").lower()
+                _outcome = ("ok" if (result or {}).get("success")
+                            else "timeout" if "statement timeout" in _err or "canceling statement" in _err
+                            else "error")
+                observability.observe_stage_latency("db_query", _time.monotonic() - _db_started, _outcome)
+                if _outcome == "timeout":
+                    observability.observe_db_timeout()
+                if (result or {}).get("success"):
+                    observability.observe_rows_returned(int((result or {}).get("row_count") or 0))
+            except Exception:
+                pass
             state["query_result"] = result
             if result.get("success"):
                 row_count = result.get('row_count', 0)

@@ -32,6 +32,15 @@ from .registry import ModelRegistry
 logger = logging.getLogger(__name__)
 
 
+def _observe_llm(spec, seconds: float, outcome: str) -> None:
+    """llm_latency / llm_errors, per model, best-effort."""
+    try:
+        from .. import observability
+        observability.observe_stage_latency("llm", seconds, outcome, spec.model_id)
+    except Exception:
+        pass
+
+
 class CircuitBreaker:
     """Stops hammering a provider that is already failing.
 
@@ -256,12 +265,15 @@ class LLMGateway:
                 run.reserve("model")
             if deadline is not None and time.monotonic() >= deadline:
                 raise ProviderUnavailable("MODEL_DEADLINE_EXCEEDED")
+            attempt_started = time.monotonic()
             try:
                 result = fn()
+                _observe_llm(spec, time.monotonic() - attempt_started, "ok")
             except RunStopped:
                 raise
             except Exception as e:
                 last_error = e
+                _observe_llm(spec, time.monotonic() - attempt_started, "error")
                 self.breaker.record_failure(key)
                 elapsed = time.monotonic() - started
                 if attempt < spec.max_retries:

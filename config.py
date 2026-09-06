@@ -1577,6 +1577,85 @@ class Settings(BaseSettings):
         description="Per-attempt timeout in seconds for NIM calls")
 
     # =====================================================
+    # Deployment mode & offline policy (backend/security/offline_policy.py)
+    # =====================================================
+    # Development may use the internet; production ENFORCES offline operation.
+    # OFFLINE_MODE unset means "offline when ENVIRONMENT is production". In
+    # production, every endpoint below must resolve to an internal host, the
+    # ALLOW_* flags must be off, and the artifacts must exist locally -
+    # otherwise the config guard aborts the boot (exit 78) and /health/ready
+    # never turns green. See Docs/96_LOCAL_DATA_AGENT_ARCHITECTURE.md.
+    OFFLINE_MODE: str = Field(
+        default="",
+        description="'' = follow ENVIRONMENT (production -> offline). "
+                    "true/false to force. Production refuses false.")
+    OFFLINE_ALLOWED_HOSTS: str = Field(
+        default="",
+        description="Comma-separated hosts inside the air-gapped network that "
+                    "are not private addresses or service names (rare).")
+    ALLOW_EXTERNAL_APIS: bool = Field(
+        default=False, description="Development only: hosted inference may be used.")
+    ALLOW_MODEL_DOWNLOADS: bool = Field(
+        default=False, description="Development only: model files may be fetched.")
+    ALLOW_EXTERNAL_TELEMETRY: bool = Field(
+        default=False, description="Development only: a hosted tracer may be used.")
+    # Inference provider selection. 'ollama' keeps today's behaviour. 'vllm'
+    # and 'nim_local' are OpenAI-compatible local servers described by
+    # LLM_BASE_URL / LLM_MODEL. 'nvidia_cloud' is the hosted development
+    # provider (equivalent to LLM_DEV_PROVIDER=nim) and is refused offline.
+    LLM_PROVIDER: str = Field(
+        default="ollama",
+        description="ollama | vllm | nim_local | nvidia_cloud")
+    LLM_BASE_URL: str = Field(
+        default="",
+        description="OpenAI-compatible base URL for vllm / nim_local, e.g. "
+                    "http://vllm:8000/v1")
+    LLM_MODEL: str = Field(
+        default="",
+        description="Model id served at LLM_BASE_URL (vllm / nim_local)")
+    LLM_SQL_MODEL: str = Field(
+        default="",
+        description="Optional SQL specialist at LLM_BASE_URL; empty = LLM_MODEL")
+    LLM_API_KEY: str = Field(
+        default="",
+        description="Optional bearer for a local NIM/vLLM server (never logged). "
+                    "Prefer LLM_API_KEY_FILE.")
+    LLM_API_KEY_FILE: str = Field(default="", description="Docker secret holding LLM_API_KEY")
+    EMBEDDING_PROVIDER: str = Field(
+        default="local",
+        description="local (bundled ONNX MiniLM through Chroma) | a local "
+                    "service name; remote embedding APIs are refused offline")
+    EMBEDDING_BASE_URL: str = Field(
+        default="", description="Base URL of a local embedding service, if any")
+    EMBEDDING_MODEL_PATH: str = Field(
+        default="/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/model.onnx",
+        description="Where the local embedding model must exist offline")
+    VECTOR_STORE: str = Field(
+        default="chroma", description="chroma (default, embedded) | milvus")
+    MILVUS_URI: str = Field(
+        default="", description="Milvus endpoint when VECTOR_STORE=milvus, e.g. http://milvus:19530")
+    MCP_SQL_URL: str = Field(
+        default="",
+        description="Internal MCP endpoint for the SQL tool server; empty = "
+                    "in-process tools")
+    AGENT_ORCHESTRATOR: str = Field(
+        default="langgraph",
+        description="langgraph (built-in ReAct loop) | nemo (NeMo Agent Toolkit "
+                    "adapter over the MCP tools; falls back when not installed)")
+    STT_PROVIDER: str = Field(
+        default="none",
+        description="none | local | whisper | faster_whisper | riva | external (dev only)")
+    STT_BASE_URL: str = Field(default="", description="Endpoint of the STT service, if any")
+    STT_MODEL_PATH: str = Field(default="", description="Local STT model path (offline check)")
+    OTEL_EXPORTER_ENDPOINT: str = Field(
+        default="",
+        description="OTLP collector for traces/metrics; must be internal offline")
+    OFFLINE_BUNDLE_MANIFEST: str = Field(
+        default="",
+        description="Path of the verified offline bundle manifest (checksums); "
+                    "when set it must exist")
+
+    # =====================================================
     # Development-only LLM tracing (Opik) for the SQL Agent
     # =====================================================
     # Records one trace per agent turn — every node, every model call with
@@ -1670,6 +1749,7 @@ class Settings(BaseSettings):
             ("JWT_SECRET_KEY", "JWT_SECRET_KEY_FILE"),
             ("POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE"),
             ("DATABASE_URL", "DATABASE_URL_FILE"),
+            ("LLM_API_KEY", "LLM_API_KEY_FILE"),
             ("REDIS_URL", "REDIS_URL_FILE"),
             ("BOOTSTRAP_ADMIN_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD_FILE"),
             ("WEBHOOK_API_KEYS", "WEBHOOK_API_KEYS_FILE"),

@@ -1386,6 +1386,7 @@ async def sql_agent_query(
                 await finalize_turn(
                     agent_instance,
                     user_id=current_user.id,
+                    role=getattr(current_user, "role", None),
                     query=query,
                     response=response,
                     session_id=session_id,
@@ -2351,6 +2352,7 @@ async def sql_agent_websocket(websocket: WebSocket):
                     await finalize_turn(
                         agent_instance,
                         user_id=current_user.id,
+                        role=getattr(current_user, "role", None),
                         query=query,
                         response=accumulated_response or None,
                         session_id=ws_session_id,
@@ -2784,7 +2786,8 @@ async def complete_turn_document(agent_instance, current_user, response_text,
 
 async def finalize_turn(agent_instance, *, user_id, query, response, session_id,
                         success, processing_time_ms, metadata,
-                        conversation_id=None, request_label="turn") -> None:
+                        conversation_id=None, request_label="turn",
+                        role=None) -> None:
     """Persist the turn and let working memory point at it — every transport.
 
     History is written through the disconnect shield (the client often hangs
@@ -2793,6 +2796,29 @@ async def finalize_turn(agent_instance, *, user_id, query, response, session_id,
     "show me all of those" has a durable reference.
     """
     metadata = dict(metadata or {})
+    # The turn's audit record. The durable part (history metadata) carries
+    # the SQL and its validated form; the LOG line carries hashes, never SQL
+    # or the question - the repository's privacy rule for logs. Machine
+    # facts only: intent, tools, tables, authorization, rows, model, status.
+    facts = dict(getattr(agent_instance, "last_turn_facts", None) or {})
+    try:
+        from .. import intent as _intent
+        from .. import observability as _obs
+        if facts:
+            metadata.setdefault("intent", facts.get("intent"))
+            metadata.setdefault("tools", facts.get("tools"))
+            metadata.setdefault("tables", facts.get("tables"))
+            metadata.setdefault("validated_sql", facts.get("validated_sql"))
+            metadata.setdefault("authorization", facts.get("authorization"))
+            metadata.setdefault("model", facts.get("model"))
+            metadata.setdefault("status", facts.get("status"))
+            if facts.get("generated_sql") and not metadata.get("sql"):
+                metadata["sql"] = facts["generated_sql"]
+        metadata.setdefault("question_hash", _intent.question_hash(query))
+        if facts.get("intent"):
+            _obs.observe_intent(facts["intent"])
+    except Exception as e:
+        logger.debug("[AUDIT] turn facts not attached: %s", e)
     entry = _ACTIVE_REQUESTS.get(request_label)
     if entry and entry.get("user_id") == user_id:
         run = getattr(entry.get("cancel_event"), "agent_run", None)
@@ -2817,6 +2843,32 @@ async def finalize_turn(agent_instance, *, user_id, query, response, session_id,
     # no logs, not even the loop-lag watchdog (it could not run either).
     await run_in_threadpool(_remember_result_row_id, agent_instance,
                             saved_history_id)
+    try:
+        from backend.auth.auth_security import audit as _audit_event
+        from .. import intent as _intent
+        _audit_event(
+            "sql_agent_turn",
+            result="success" if success else "failure",
+            request_id=str(request_label or "-"),
+            user_id=user_id,
+            duration_ms=int(processing_time_ms or 0),
+            reference_id=str(saved_history_id) if saved_history_id else None,
+            role=str(role) if role else None,
+            question_hash=metadata.get("question_hash"),
+            intent=facts.get("intent"),
+            tools=",".join(facts.get("tools") or []) or None,
+            tables=",".join(facts.get("tables") or []) or None,
+            generated_sql_hash=(_intent.question_hash(facts.get("generated_sql") or "")
+                                if facts.get("generated_sql") else None),
+            validated_sql_hash=(_intent.question_hash(facts.get("validated_sql") or "")
+                                if facts.get("validated_sql") else None),
+            authorization=facts.get("authorization"),
+            row_count=facts.get("row_count"),
+            model=facts.get("model") or None,
+            status=facts.get("status"),
+        )
+    except Exception as e:
+        logger.debug("[AUDIT] sql_agent_turn not recorded: %s", e)
 
 
 async def _durable_memory_section(current_user, session_id) -> str:

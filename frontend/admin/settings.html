@@ -24,7 +24,7 @@
     <!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
-    <link rel="stylesheet" href="/frontend/css/settings.css">
+    <link rel="stylesheet" href="/frontend/css/settings.css?v=settings-7">
     <link rel="stylesheet" href="/frontend/css/footer.css">
 </head>
 <body data-page-class="settings-page" data-page-class-scope="containers">
@@ -39,10 +39,23 @@
         <div class="intelligence-scan-line"></div>
         
         <div class="intelligence-content">
-            <!-- Category Filter -->
-            <section class="filter-section" aria-labelledby="filter-heading">
+            <header class="settings-intro">
+                <h1>System settings</h1>
+                <p>Start with everyday controls. Advanced includes every setting available to your account.</p>
+                <p class="settings-help">In use shows the current value reported by the running API, not a code default. Saved values that differ are shown separately. Refresh to check again after applying changes or restarting.</p>
+            </header>
+            <section class="settings-toolbar" aria-label="Find settings">
+                <div id="settings-view-controls" class="settings-view-controls" role="group" aria-label="Settings view">
+                    <button type="button" class="settings-view-btn active" data-view="basic" aria-pressed="true">Basic</button>
+                    <button type="button" class="settings-view-btn" data-view="advanced" aria-pressed="false">Advanced · All settings</button>
+                </div>
+                <label class="settings-search-label" for="settings-search">Search settings
+                    <input id="settings-search" type="search" placeholder="Search by name, key, or description" autocomplete="off" aria-controls="settings-container">
+                </label>
+            </section>
+            <section class="filter-section" aria-label="Filter by category">
                 <div class="category-filters" id="category-filters">
-                    <button class="category-filter-btn active" data-category="all">
+                    <button type="button" class="category-filter-btn active" data-category="all" aria-pressed="true">
                         <i class="fas fa-th"></i> All Settings
                     </button>
                 </div>
@@ -55,7 +68,12 @@
 
             <!-- Settings List -->
             <section class="settings-section" aria-labelledby="settings-heading">
-                <details><summary>ML capability registry</summary><p>Integration availability, storage, defaults and limits are managed here. Per-run tuning and SHAP stay optional. Model management and promotion require administrator access.</p><div id="ml-capability-health" role="status" aria-live="polite" style="overflow-x:auto">Loading capabilities?</div></details>
+                <div class="settings-results-header">
+                    <h2 id="settings-heading">Basic settings</h2>
+                    <span id="settings-result-count" role="status" aria-live="polite"></span>
+                    <button id="settings-reset-filters" class="settings-text-btn" type="button">Clear filters</button>
+                </div>
+                <p id="settings-view-help" class="settings-help">Common recognition, image storage, and retention controls. Technical and sensitive settings remain in Advanced.</p>
                 <div class="settings-container" id="settings-container">
                     <div class="loading">
                         <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
@@ -64,8 +82,15 @@
                 </div>
             </section>
 
+            <details class="settings-disclosure">
+                <summary>ML capability registry</summary>
+                <p>Integration availability, storage, defaults and limits are managed here. Per-run tuning and SHAP stay optional. Model management and promotion require administrator access.</p>
+                <div id="ml-capability-health" role="status" aria-live="polite" style="overflow-x:auto">Loading capabilities…</div>
+            </details>
             <!-- Retention Tools -->
-            <section class="retention-tools-section" aria-label="Retention tools" style="margin: 1rem 0; padding: 0.9rem 1rem; border: 1px solid rgba(0,255,150,0.25); border-radius: 8px; background: rgba(0,255,150,0.04);">
+            <details class="settings-disclosure retention-tools-section">
+                <summary>Retention tools</summary>
+                <p>Inspect retention or preview expired data before running cleanup. Run now permanently deletes expired data after confirmation.</p>
                 <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
                     <span style="color:#00ff96; font-weight:700; font-size:0.9rem;">
                         <i class="fas fa-broom"></i> RETENTION TOOLS
@@ -81,10 +106,11 @@
                     </button>
                 </div>
                 <pre id="retention-output" style="display:none; margin-top:0.75rem; max-height: 320px; overflow:auto; background: rgba(0,0,0,0.4); color:#cde; padding:0.75rem; border-radius:6px; font-size:0.75rem;"></pre>
-            </section>
+            </details>
 
             <!-- Audit Log Section -->
-            <section class="audit-section" aria-labelledby="audit-heading">
+            <details class="settings-disclosure audit-section">
+                <summary id="audit-heading">Recent settings changes</summary>
                 <div class="table-container">
                     <table class="intelligence-data-table" role="table" aria-label="Settings audit log">
                         <thead>
@@ -107,7 +133,7 @@
                         </tbody>
                     </table>
                 </div>
-            </section>
+            </details>
         </div>
     </main>
 
@@ -138,7 +164,7 @@
                     <input type="hidden" id="setting-type" name="setting_type">
 
                     <div class="security-form-section">
-                        <label class="security-label">
+                        <label class="security-label" for="setting-key-display">
                             <span class="label-text">Setting Key</span>
                             <span class="label-required">*</span>
                         </label>
@@ -148,8 +174,8 @@
                     </div>
 
                     <div class="security-form-section">
-                        <label class="security-label">
-                            <span class="label-text">Current Value</span>
+                        <label class="security-label" for="setting-old-value">
+                            <span class="label-text">In use (reported by running API)</span>
                         </label>
                         <div class="security-input-wrapper">
                             <input type="text" id="setting-old-value" class="security-input" readonly>
@@ -157,7 +183,7 @@
                     </div>
 
                     <div class="security-form-section">
-                        <label class="security-label">
+                        <label class="security-label" for="setting-new-value">
                             <span class="label-text">New Value</span>
                             <span class="label-required">*</span>
                         </label>
@@ -171,7 +197,7 @@
                     </div>
 
                     <div class="security-form-section">
-                        <label class="security-label">
+                        <label class="security-label" for="change-reason">
                             <span class="label-text">Change Reason</span>
                             <span class="label-optional">(Optional)</span>
                         </label>
@@ -197,7 +223,7 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-settings.js?v=settings-5"></script>
+    <script src="/frontend/js/admin-settings.js?v=settings-7"></script>
     <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>
