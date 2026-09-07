@@ -297,14 +297,14 @@ async def offline_policy_report(current_user: dict = Depends(_require_admin_depe
             return False, type(e).__name__
 
     reach = {"PostgreSQL": await _probe_db()}
-    llm_url = (settings.LLM_BASE_URL or "").strip() if str(getattr(settings, "LLM_PROVIDER", "ollama")).lower() != "ollama" \
+    llm_url = (settings.LLM_BASE_URL or "").strip() if str(settings.LLM_PROVIDER).lower() != "ollama" \
         else (settings.OLLAMA_BASE_URL or "").strip()
     if llm_url:
         reach["local LLM"] = await _probe_http(llm_url.rstrip("/") + ("/models" if llm_url.rstrip("/").endswith("/v1") else "/api/tags"))
-    for label, url in (("MCP", getattr(settings, "MCP_SQL_URL", "")),
-                       ("Milvus", getattr(settings, "MILVUS_URI", "")),
-                       ("STT", getattr(settings, "STT_BASE_URL", "")),
-                       ("embedding service", getattr(settings, "EMBEDDING_BASE_URL", ""))):
+    for label, url in (("MCP", settings.MCP_SQL_URL),
+                       ("Milvus", settings.MILVUS_URI),
+                       ("STT", settings.STT_BASE_URL),
+                       ("embedding service", settings.EMBEDDING_BASE_URL)):
         if str(url or "").strip():
             reach[label] = await _probe_http(str(url).strip())
     checks = _op.startup_checklist(settings, production=bool(settings.is_production),

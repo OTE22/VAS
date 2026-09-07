@@ -291,6 +291,11 @@ services:
       # chowns it to appuser, and refuses to start if it is not writable.
       HF_HOME: /home/appuser/.cache/huggingface
       # Offline policy: the model libraries must never try the hub.
+      # MLflow reads its HTTP transport controls from the environment only; config.py
+      # declares the same names so the Settings page shows them. Inert while
+      # MLFLOW_TRACKING_URI is empty (local SQL-backed store, no HTTP).
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "10"
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "1"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       # tqdm progress bars ("Loading weights", "Batches") are terminal UI;
@@ -421,6 +426,11 @@ services:
       LOG_DIR: /var/log/face-recognition
       HF_HOME: /home/appuser/.cache/huggingface
       # Offline policy: the model libraries must never try the hub.
+      # MLflow reads its HTTP transport controls from the environment only; config.py
+      # declares the same names so the Settings page shows them. Inert while
+      # MLFLOW_TRACKING_URI is empty (local SQL-backed store, no HTTP).
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "10"
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "1"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HUB_DISABLE_PROGRESS_BARS: "1"

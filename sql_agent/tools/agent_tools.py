@@ -5046,7 +5046,7 @@ say "we have no records" — say that you have not looked it up, or ask."""),
                         "detection counter")
             state["should_learn"] = False
 
-        if not getattr(settings, "SQL_AGENT_LEARN_FROM_QUERIES", False):
+        if not settings.SQL_AGENT_LEARN_FROM_QUERIES:
             # Executing is not being right. Learned examples outrank the
             # schema and the seeds for the same question, so a wrong answer
             # learned once is served back until purged. Off until learning

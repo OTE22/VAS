@@ -44,15 +44,17 @@ WORKDIR /app
 COPY requirements-base.txt requirements-cpu.txt requirements-dev.txt requirements-ml.txt ./
 # BuildKit cache mount: downloaded wheels persist across builds and across a
 # KILLED build, so an interrupted build does not start from zero.
-# PIP_NO_CACHE_DIR is set globally above, so it is re-enabled for this RUN
+# PIP_NO_CACHE_DIR is set globally above. pip disables the cache for ANY value of
+# that variable, even 0/false (pip cmdoptions._handle_no_cache_dir keeps the
+# legacy behaviour on purpose), so it must be UNSET for the cached RUNs
 # only; the cache lives outside the image, so image content is unchanged.
 #
 # This layer used to pull ~4.5 GB because torch resolved to the CUDA wheel.
 # requirements-cpu.txt now points torch at the CPU index, so the NVIDIA wheel
 # set is gone from this image entirely — see the comment in that file.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    PIP_NO_CACHE_DIR=0 pip install --upgrade pip && \
-    PIP_NO_CACHE_DIR=0 pip install -r requirements-cpu.txt
+    env -u PIP_NO_CACHE_DIR pip install --upgrade pip && \
+    env -u PIP_NO_CACHE_DIR pip install -r requirements-cpu.txt
 
 # Test dependencies — development / CI image only.
 #
@@ -64,7 +66,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ARG INSTALL_DEV=false
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$INSTALL_DEV" = "true" ]; then \
-        PIP_NO_CACHE_DIR=0 pip install -r requirements-dev.txt; \
+        env -u PIP_NO_CACHE_DIR pip install -r requirements-dev.txt; \
     fi
 
 # =====================================================

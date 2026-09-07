@@ -1816,11 +1816,12 @@ class Settings(BaseSettings):
 # Create global settings instance
 settings = Settings()
 
-# MLflow exposes these SDK transport controls only through its environment.
-# Export the validated central configuration ONCE, before any SDK import; do
-# not mutate process configuration in request handlers or background jobs.
-os.environ["MLFLOW_HTTP_REQUEST_TIMEOUT"] = str(settings.MLFLOW_HTTP_REQUEST_TIMEOUT)
-os.environ["MLFLOW_HTTP_REQUEST_MAX_RETRIES"] = str(settings.MLFLOW_HTTP_REQUEST_MAX_RETRIES)
+# MLflow reads MLFLOW_HTTP_REQUEST_TIMEOUT / MLFLOW_HTTP_REQUEST_MAX_RETRIES
+# only from the process environment. They are therefore set on the containers
+# in docker/docker-compose.prod.yml (face_recognition, ml_worker), where both
+# the SDK and this Settings object read the same value. config.py never writes
+# os.environ: a write here lands after Settings() is built and can only
+# mislead a later reader (tests/test_config_single_source.py).
 
 
 # Helper function to print configuration (for debugging)

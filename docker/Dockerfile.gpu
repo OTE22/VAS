@@ -110,9 +110,16 @@ WORKDIR /app
 COPY requirements-base.txt requirements-gpu.txt requirements-dev.txt requirements-ml.txt ./
 # BuildKit cache mount — same rationale as Dockerfile.cpu: wheel downloads
 # survive cache busts and killed builds; image content is unchanged.
+# blinker: the CUDA/Ubuntu base ships python3-blinker 1.4 as a distutils
+# package in /usr/lib/python3/dist-packages, which pip cannot uninstall
+# ("uninstall-distutils-installed-package"). mlflow -> Flask needs >= 1.9.
+# --ignore-installed puts the new one in /usr/local, earlier on sys.path, and
+# the requirements install then sees it as satisfied. python:3.11-slim (the
+# CPU image) has no system blinker, which is why Dockerfile.cpu never hit this.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    PIP_NO_CACHE_DIR=0 pip install --upgrade pip && \
-    PIP_NO_CACHE_DIR=0 pip install -r requirements-gpu.txt
+    env -u PIP_NO_CACHE_DIR pip install --upgrade pip && \
+    env -u PIP_NO_CACHE_DIR pip install --ignore-installed "blinker>=1.9" && \
+    env -u PIP_NO_CACHE_DIR pip install -r requirements-gpu.txt
 
 # ---------------------------------------------------------------------------
 # Force the CUDA ONNX Runtime to be the one on disk.
@@ -149,7 +156,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     if pip show onnxruntime >/dev/null 2>&1; then \
         echo "Removing the CPU onnxruntime that chromadb pulled in"; \
         pip uninstall -y onnxruntime; \
-        PIP_NO_CACHE_DIR=0 pip install --no-deps --force-reinstall "$ORT_GPU"; \
+        env -u PIP_NO_CACHE_DIR pip install --no-deps --force-reinstall "$ORT_GPU"; \
     fi && \
     python -c "from importlib.metadata import distributions; \
 names = {d.metadata['Name'].lower() for d in distributions()}; \
@@ -164,7 +171,7 @@ assert 'onnxruntime' not in names, \
 ARG INSTALL_DEV=false
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$INSTALL_DEV" = "true" ]; then \
-        PIP_NO_CACHE_DIR=0 pip install -r requirements-dev.txt; \
+        env -u PIP_NO_CACHE_DIR pip install -r requirements-dev.txt; \
     fi
 
 # =====================================================

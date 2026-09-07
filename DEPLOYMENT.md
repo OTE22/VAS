@@ -1035,3 +1035,42 @@ Deeper trees: [`Docs/73_TROUBLESHOOTING.md`](Docs/73_TROUBLESHOOTING.md).
 
 `weights/`, `map-data/` and the Ollama models are re-downloadable — but keep a
 copy if this site must stay offline.
+
+## 10. Offline policy (production is air-gapped)
+
+Production **enforces** offline operation; development may use the internet.
+The switch is a block of plain settings in `docker/.env` (no secrets), copied
+from `docker/env.production.example`:
+
+```
+ENVIRONMENT=production          OFFLINE_MODE=true
+LLM_PROVIDER=ollama             OLLAMA_MODEL=qwen2.5:7b
+OLLAMA_SQL_MODEL=hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
+LLM_DEV_PROVIDER=               NVIDIA_NIM_API_KEY=          (empty: no hosted NIM)
+EMBEDDING_PROVIDER=local        EMBEDDING_MODEL_PATH=/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/model.onnx
+VECTOR_STORE=chroma  MCP_SQL_URL=  MILVUS_URI=  STT_PROVIDER=none  OTEL_EXPORTER_ENDPOINT=
+ALLOW_EXTERNAL_APIS=false  ALLOW_MODEL_DOWNLOADS=false  ALLOW_EXTERNAL_TELEMETRY=false
+SQL_AGENT_OPIK_ENABLED=false    HF_HUB_OFFLINE=1  TRANSFORMERS_OFFLINE=1
+```
+
+What enforces it:
+
+- **`deploy.sh` stage 06b** refuses to deploy when `docker/.env` carries a
+  development value (`OFFLINE_MODE=false`, any `ALLOW_*=true`, `LLM_DEV_PROVIDER`
+  set, a hosted `LLM_PROVIDER`, the Opik tracer, or any endpoint pointing at a
+  known cloud host), and writes the missing mode keys when the file has none.
+- **The config guard** (`backend/security/offline_policy.py`) refuses the boot
+  (exit 78, `/health/ready` never green) if any endpoint is not internal or a
+  required local artifact is missing (the ONNX embedding model is baked into
+  the image; detection/recognition weights are verified by stage 08).
+- **`/health/offline-policy`** (admin) shows the `[PASS]`/`[FAIL]` checklist
+  the guard evaluated.
+
+The `vllm`, `mcp-sql` and `milvus` services in the compose file are
+**profile-gated** and never start unless you ask for that profile; the
+default production stack is Ollama + embedded Chroma, all on the box.
+
+Development stays separate: `./deploy.sh dev` and `docker/docker-compose.cpu.yml`
+may set `ALLOW_*=true` and `LLM_DEV_PROVIDER=nim` (NVIDIA NIM for testing the
+SQL agent); none of that is accepted by the production path.
+
