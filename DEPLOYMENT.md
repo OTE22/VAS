@@ -1486,3 +1486,160 @@ The one-shot `migrate` job mounts only its six secret files (§13.2); it has no 
 - Prove a data volume is writable by the app: `docker exec -u 1000:1000 face_detector_prod-face_recognition-1 sh -c 'touch /app/storage/.probe && rm /app/storage/.probe'` must succeed silently.
 - Sizes: `sudo docker system df -v | grep face_detector_prod_`.
 
+## 15. The SQL bot (chat agent): how it runs, and its variables
+
+The "SQL bot" is the chat assistant on the Tracking pages. It turns a question
+into a **read-only** SQL query against this deployment's own PostgreSQL,
+executes it as a dedicated SELECT-only role, and writes the answer as text, a
+table, a chart or a PDF/Word export. In production every part of it is local:
+two Ollama models on the GPU, an embedded Chroma knowledge base, the internal
+database. Nothing leaves the box; the offline policy (§10) refuses to boot
+otherwise. Live check today: `/api/sql-agent/health` → `operational`
+(model ready, database ready, history ready).
+
+### 15.1 How a question is answered
+
+```
+browser ──HTTPS──▶ nginx ──▶ API  POST /api/sql-agent/query  (or /query/stream, or WS /ws/sql-agent)
+                                  │  login required + the CHATBOT_USE capability (admin grants/withdraws it per user)
+                                  ▼
+   ingest_query ─▶ detect_malicious_intent ─▶ plan_action (interpreter reads the turn: what, shape, format)
+        │                                          │
+        ▼                                          ▼
+   chat_response (small talk / help)      check_schema ─▶ retrieve_examples  ◀── Chroma knowledge base
+   with OLLAMA_MODEL                                          │                   (~1 070 verified question→SQL seeds,
+                                                              ▼                    MiniLM embeddings, RAG_TOP_K=5)
+                                                      generate_sql  ◀── OLLAMA_SQL_MODEL (Arctic-Text2SQL)
+                                                              │
+                                                              ▼
+                                                      validate_and_fix_sql  ── sqlglot AST guard (§15.2)
+                                                              │
+                                                              ▼
+                                                      execute_sql  ── role fr_readonly · default_transaction_read_only=on
+                                                              │        · statement_timeout ≤ 30 s · 500-row cap
+                                                              ▼
+                                                      observe_and_replan (≤ SQL_AGENT_MAX_REPLANS) ─▶ story_response
+                                                                                                    with OLLAMA_MODEL
+                                                              ▼
+                                                      render_artifact / translate_artifact (table, chart, PDF, Word)
+```
+
+The graph lives in `sql_agent/graph.py`; the nodes are in `sql_agent/tools/agent_tools.py`.
+Every question runs under the budgets in §15.3: the run stops with a clear
+message when it exceeds them instead of looping.
+
+### 15.2 What makes it safe
+
+| Layer | Rule | Where |
+|---|---|---|
+| Who may ask | a logged-in user holding the `CHATBOT_USE` capability; revoked instantly when an admin withdraws it (`require_chatbot_access`) | `backend/auth/auth_service.py` |
+| What SQL is allowed | `SELECT` only; table allow-list; ≤ 10 joins; subquery depth ≤ 5; `LIMIT` enforced (max 500 rows); functions policy; no `EXPLAIN` for users | `sql_agent/security/sql_guard.py` (sqlglot AST, not regex) |
+| Whose data | the caller's camera scope is injected into every scoped table; administrators are unrestricted; an EMPTY scope fails closed (refuse, never widen) | `sql_guard.py` camera scope |
+| Which role executes | `SQL_AGENT_DB_USER=fr_readonly`, password from a secret file; the connection is opened with `default_transaction_read_only=on` and a `statement_timeout` derived from the remaining run budget | `sql_agent/database.py`, `db/roles.sql` |
+| Boot-time guard | refuses a shared or superuser role for the bot, any external LLM/embedding/MCP/vector/STT endpoint, the hosted NIM provider, the Opik tracer | `backend/security/config_guard.py`, `offline_policy.py` |
+| Prompt injection | `detect_malicious_intent` node before any planning; the model never sees credentials; generated SQL is validated regardless of what the model wrote | `agent_tools.py` |
+| Audit | every request has an id; `GET /api/sql-agent/requests/{id}/trace` shows the steps; SQL-agent audit rows are kept `AUDIT_LOG_RETENTION_DAYS` | `sql_agent/api/routes.py` |
+
+### 15.3 Variables the bot uses, with production values
+
+**Models and inference**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `LLM_PROVIDER` | `ollama` | config.py default | no | ollama \| vllm \| nim_local \| nvidia_cloud |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | compose | no | — |
+| `OLLAMA_MODEL` | `qwen2.5:7b` | compose | no | chat, tool selection and turn reading (interpreter) — qwen2.5:7b answered 6/6 native tool calls |
+| `OLLAMA_SQL_MODEL` | `hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M` | compose | no | the SQL specialist used only by the generate/modify-SQL nodes |
+| `OLLAMA_INTERPRETER_MODEL` | (empty) | config.py default | no | empty = OLLAMA_MODEL; a larger reader may be set if short follow-ups get misread |
+| `OLLAMA_TEMPERATURE` | `0.1` | config.py default | no | low = deterministic SQL |
+| `OLLAMA_TIMEOUT` | `120` | config.py default | no | seconds per model call |
+| `LLM_BASE_URL` | (empty) | config.py default | no | OpenAI-compatible base URL for vllm / nim_local, e.g. http://vllm:8000/v1 |
+| `LLM_MODEL` | (empty) | config.py default | no | Model id served at LLM_BASE_URL (vllm / nim_local) |
+| `LLM_SQL_MODEL` | (empty) | config.py default | no | Optional SQL specialist at LLM_BASE_URL; empty = LLM_MODEL |
+| `LLM_API_KEY_FILE` | (empty) | config.py default | no | Docker secret holding LLM_API_KEY |
+
+**Database access (generated SQL)**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `SQL_AGENT_DB_USER` | `fr_readonly` | compose | no | MUST be a dedicated SELECT-only role, different from POSTGRES_USER; the config guard refuses a shared or superuser role (rule SQL_AGENT_DB_ROLE_SHARED) |
+| `SQL_AGENT_DB_PASSWORD` | `/run/secrets/…` via `SQL_AGENT_DB_PASSWORD_FILE` | compose → secret file | no | comes from the secret file; never in the environment |
+| `SQL_AGENT_MAX_EXECUTION_RETRIES` | `1` | config.py default | yes, after API restart | Retries of the SAME SQL after a TRANSIENT database error (dropped connection, pool timeout). Infrastructure, |
+
+**Knowledge base and retrieval**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `EMBEDDING_PROVIDER` | `local` | config.py default | no | local (bundled ONNX MiniLM through Chroma) \| a local service name; remote embedding APIs are refused offline |
+| `EMBEDDING_MODEL_PATH` | `/home/appuser/.cache/chroma/onnx_models/` | config.py default | no | the ONNX MiniLM in the 'chromadb_cache' volume; verified at boot |
+| `EMBEDDING_BASE_URL` | (empty) | config.py default | no | Base URL of a local embedding service, if any |
+| `VECTOR_STORE` | `chroma` | config.py default | no | chroma (default, embedded) \| milvus |
+| `MILVUS_URI` | (empty) | config.py default | no | Milvus endpoint when VECTOR_STORE=milvus, e.g. http://milvus:19530 |
+| `CHROMADB_PATH` | `/app/database/chromadb` | compose | no | the Chroma knowledge base; inside the 'face_database_data' volume |
+| `CHROMA_COLLECTION_NAME` | `sql_knowledge_base` | config.py default | no | — |
+| `RAG_TOP_K` | `5` | config.py default | no | — |
+| `RAG_SIMILARITY_THRESHOLD` | `0.3` | config.py default | no | — |
+| `SQL_AGENT_LEARN_FROM_QUERIES` | `False` | config.py default | no | false: verified answers are NOT written back into the knowledge base automatically |
+
+**Run limits (fail-closed budgets per question)**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `SQL_AGENT_MAX_MODEL_CALLS` | `24` | config.py default | yes, after API restart | Total model attempts per agent run, including retries and fallback |
+| `SQL_AGENT_MAX_TOOL_CALLS` | `12` | config.py default | yes, after API restart | Maximum selected tools per agent run |
+| `SQL_AGENT_MAX_RUN_TOKENS` | `65536` | config.py default | yes, after API restart | Reported token budget; checked before each subsequent model/tool call |
+| `SQL_AGENT_TOTAL_TIMEOUT` | `300` | config.py default | yes, after API restart | wall-clock budget for one question; the SQL statement_timeout is derived from what remains (≤ 30 s) |
+| `SQL_AGENT_MAX_REASONING_STEPS` | `8` | config.py default | yes, after API restart | Total reasoning steps per turn (tool look-ups + re-plans). The upper bound on how long one turn may think. |
+| `SQL_AGENT_MAX_ACTIONS_PER_TURN` | `3` | config.py default | no | — |
+| `SQL_AGENT_MAX_REPLANS` | `1` | config.py default | yes, after API restart | Corrective re-plans after a failed action. Each needs a reason from the Observation; there is no blind retry. |
+| `SQL_AGENT_MAX_CONCURRENT` | `2` | config.py default | yes, after API restart | questions the API answers at once; further ones wait |
+| `SQL_AGENT_MAX_QUERY_CHARS` | `8000` | config.py default | no | Maximum natural-language SQL-agent query length across REST, SSE and WebSocket transports. |
+| `SQL_AGENT_TRACE_CONTEXT` | `False` | config.py default | no | — |
+
+**Memory and history**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `SQL_AGENT_MEMORY_RETENTION_DAYS` | `30` | config.py default | yes, after API restart | explicit user memories and idle conversation context expire after this |
+| `SEARCH_HISTORY_RETENTION_DAYS` | `90` | config.py default | yes, next job run | Days to retain search history records. Default: 90 |
+| `AUDIT_LOG_RETENTION_DAYS` | `180` | config.py default | yes, next job run | Days to retain audit-log records (chatbot, identity, settings). Default: 180 |
+
+**Orchestration and optional services**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `AGENT_ORCHESTRATOR` | `langgraph` | config.py default | no | langgraph = the built-in ReAct graph (below) |
+| `MCP_SQL_URL` | (empty) | config.py default | no | empty = tools run in-process; the 'mcp-sql' profile serves them over HTTP on port 9901 |
+| `STT_PROVIDER` | `none` | config.py default | no | none \| local \| whisper \| faster_whisper \| riva \| external (dev only) |
+| `STT_BASE_URL` | (empty) | config.py default | no | Endpoint of the STT service, if any |
+| `STT_MODEL_PATH` | (empty) | config.py default | no | Local STT model path (offline check) |
+
+**Development only — refused in production**
+
+| Variable | Production value | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `LLM_DEV_PROVIDER` | (empty) | config.py default | no | 'nim' routes to NVIDIA's hosted API for development; stage 06b and the guard refuse it here |
+| `NVIDIA_NIM_API_KEY` | (empty) | config.py default | no | API key from build.nvidia.com (free tier). Never logged; redacted everywhere a setting is rendered. |
+| `NVIDIA_NIM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | config.py default | no | OpenAI-compatible base URL of the NIM endpoint |
+| `NVIDIA_NIM_MODEL` | `meta/llama-3.2-11b-vision-instruct` | config.py default | no | NIM model for chat/intent tasks |
+| `NVIDIA_NIM_SQL_MODEL` | `openai/gpt-oss-120b` | config.py default | no | — |
+| `NVIDIA_NIM_INTERPRETER_MODEL` | (empty) | config.py default | no | — |
+| `NVIDIA_NIM_TIMEOUT` | `60` | config.py default | no | Per-attempt timeout in seconds for NIM calls |
+| `SQL_AGENT_OPIK_ENABLED` | `False` | config.py default | no | per-turn tracing to a self-hosted Opik, development only |
+| `OPIK_URL_OVERRIDE` | `http://host.docker.internal:5173/api/` | config.py default | no | Opik API URL. Default: a self-hosted instance on the workstation, reached from the container as host.docker. |
+| `OPIK_API_KEY` | (empty) | config.py default | no | Account key for the hosted service (or an authenticated self-hosted instance); the open-source instance needs |
+| `OPIK_WORKSPACE` | `default` | config.py default | no | Workspace name; the hosted service shows it in its settings page. Open-source Opik has exactly one, 'default |
+| `OPIK_PROJECT_NAME` | `face-detector-sql-agent` | config.py default | no | Opik project the agent's traces are filed under. |
+
+Runtime changes are made on the Settings page (or `PUT /api/settings/<KEY>`, §13.0); the ten run-limit and memory keys apply after an API restart. `OLLAMA_MODEL` and `OLLAMA_SQL_MODEL` are compose values: change them in `docker/docker-compose.prod.yml` **and** make sure the model is present (`docker exec face_detector_prod-ollama-1 ollama list`) — stage 13 of `deploy.sh` checks that.
+
+### 15.4 Operating it
+
+- **Models on disk** (`ollama_models` volume, 10 GB): `qwen2.5:7b` (chat/tools/reading), `hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M` (SQL), `qwen2.5:1.5b` (kept, unused). Ollama holds a GPU reservation on the same RTX 5090 as face recognition; `OLLAMA_KEEP_ALIVE` (ollama container) decides how long a model stays loaded after the last question — the first question after idle pays the load time.
+- **Health:** `GET /api/sql-agent/health` (any chatbot user) · `/health/offline-policy` shows "local LLM reachable" (admin) · `docker exec face_detector_prod-ollama-1 ollama ps` shows what is loaded on the GPU right now.
+- **Knowledge base:** Chroma at `/app/database/chromadb` (volume `face_database_data`, backed up daily as `artifacts.tar.gz`); the seed catalogue is in `sql_agent/seed_catalog*.py` and is re-applied on boot, so the volume can be recreated.
+- **History, sessions, memories:** in PostgreSQL (`user_query_history`, sessions, explicit memories); users manage theirs through `/api/sql-agent/history`, `/sessions`, `/memory`; memories expire after `SQL_AGENT_MEMORY_RETENTION_DAYS`.
+- **Exports:** `POST /api/sql-agent/export/pdf|word` produce artifacts fetched by `GET /api/sql-agent/artifacts/{id}`.
+- **Alternatives, all local:** `LLM_PROVIDER=vllm` with the `vllm` compose profile (`LLM_BASE_URL=http://vllm:8000/v1`, `LLM_MODEL`); `VECTOR_STORE=milvus` with the `milvus` profile; the `mcp-sql` profile to serve the tools over MCP. None of them is started by the default production stack.
+- **Development only:** NVIDIA NIM (`LLM_DEV_PROVIDER=nim`, `NVIDIA_NIM_*`) and Opik tracing exist to test query quality on the workstation; the production deploy path refuses both.
+
