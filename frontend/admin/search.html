@@ -25,9 +25,9 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=search-2">
+    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=search-3">
 </head>
-<body>
+<body class="search-workspace">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -35,8 +35,7 @@
     <div id="navbar-placeholder"></div>
 
     <main class="intelligence-main-container" id="main-content" role="main">
-        <div class="intelligence-grid-overlay"></div>
-        <div class="intelligence-scan-line"></div>
+
         
         <div class="intelligence-content">
             <header class="page-header">
@@ -46,8 +45,9 @@
                         <div class="header-icon-glow"></div>
                     </div>
                     <div class="header-text">
-                        <h1 class="page-title">Advanced Search Intelligence</h1>
-                        <p class="page-description">Multi-face detection • Watchlist checking • Intelligence analytics</p>
+                        <span class="workspace-eyebrow">Identity intelligence / Search workspace</span>
+                        <h1 class="page-title">Advanced search</h1>
+                        <p class="page-description">Find matching identities, review detections, and investigate with context.</p>
                     </div>
                 </div>
                 <div class="header-actions">
@@ -56,7 +56,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-history" aria-hidden="true"></i>
                             </div>
-                            <span class="btn-title">SEARCH HISTORY</span>
+                            <span class="btn-title">Search history</span>
                         </div>
                     </a>
                     <a href="/admin/intelligence" class="intelligence-admin-btn" title="Intelligence Analysis">
@@ -64,7 +64,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-brain" aria-hidden="true"></i>
                             </div>
-                            <span class="btn-title">INTELLIGENCE</span>
+                            <span class="btn-title">Intelligence</span>
                         </div>
                     </a>
                     <a href="/admin/watchlists" class="intelligence-admin-btn" title="Manage Watchlists">
@@ -72,7 +72,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-list-alt" aria-hidden="true"></i>
                             </div>
-                            <span class="btn-title">WATCHLISTS</span>
+                            <span class="btn-title">Watchlists</span>
                         </div>
                     </a>
                     <a href="/admin/live-alerts" class="intelligence-admin-btn" title="Live Alerts">
@@ -80,7 +80,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-bell" aria-hidden="true"></i>
                             </div>
-                            <span class="btn-title">LIVE ALERTS</span>
+                            <span class="btn-title">Live alerts</span>
                         </div>
                     </a>
                 </div>
@@ -89,9 +89,10 @@
             <div class="search-container">
                 <!-- Left Panel: Search Controls -->
                 <div class="search-panel">
+                    <div class="panel-intro"><span class="workspace-eyebrow">New search</span><h2>Build your search</h2><p>Add a reference image and define your search scope.</p></div>
                     <!-- Image Upload -->
                     <div class="search-section">
-                        <h3><i class="fas fa-image"></i> Upload Image</h3>
+                        <h3><span class="section-step">01</span> Reference image</h3>
                         <!-- A <button>, not a <div>: the file inputs are
                              display:none, so with a div this — the page's only
                              way in — could not be reached by keyboard at all. -->
@@ -99,7 +100,7 @@
                                 aria-describedby="upload-area-hint">
                             <i class="fas fa-cloud-upload-alt" aria-hidden="true"></i>
                             <p>Drag &amp; drop image here</p>
-                            <small id="upload-area-hint">or click to browse</small>
+                            <small id="upload-area-hint">Choose an image to get started</small>
                         </button>
                         <input type="file" id="image-input" accept=".jpg,.jpeg,.png,.webp,image/*" style="display: none;">
                         <div class="image-preview" id="image-preview">
@@ -113,7 +114,7 @@
                         <div class="toggle-container" style="margin-top: 0.75rem;">
                             <span><i class="fas fa-layer-group"></i> Batch Mode</span>
                             <label class="toggle-switch">
-                                <input type="checkbox" id="batch-mode-toggle">
+                                <input type="checkbox" id="batch-mode-toggle" aria-label="Batch mode">
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
@@ -125,10 +126,10 @@
 
                     <!-- Search Options -->
                     <div class="search-section">
-                        <h3><i class="fas fa-sliders-h"></i> Search Options</h3>
+                        <h3><span class="section-step">02</span> Search preferences</h3>
                         
                         <div class="form-group">
-                            <label>Search Scope</label>
+                            <label for="search-scope">Search Scope</label>
                             <select class="form-control" id="search-scope">
                                 <option value="both">All Identities (Known + Unknown)</option>
                                 <option value="known">Known Identities Only</option>
@@ -137,7 +138,7 @@
                         </div>
 
                         <div class="form-group">
-                            <label>Max Results Per Face</label>
+                            <label for="top-k">Max Results Per Face</label>
                             <!-- No `selected` attribute: the default comes from
                                  SEARCH_DEFAULT_TOP_K via /api/search/config, and
                                  options above SEARCH_MAX_TOP_K are removed on load.
@@ -154,15 +155,15 @@
                         <div class="toggle-container">
                             <span><i class="fas fa-shield-alt"></i> Check Watchlists</span>
                             <label class="toggle-switch">
-                                <input type="checkbox" id="check-watchlist" checked>
+                                <input type="checkbox" id="check-watchlist" aria-label="Check watchlists" checked>
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
                     </div>
 
                     <!-- Filters -->
-                    <div class="search-section" data-batch-unsupported>
-                        <h3><i class="fas fa-filter"></i> Filters</h3>
+                    <details class="search-section advanced-section" data-batch-unsupported>
+                        <summary><span><i class="fas fa-filter" aria-hidden="true"></i> Date &amp; location</span><i class="fas fa-chevron-down" aria-hidden="true"></i></summary>
                         <p class="batch-unsupported-note" role="note" hidden>
                             <i class="fas fa-circle-info" aria-hidden="true"></i>
                             Not applied in batch mode — batch search accepts scope, matches
@@ -170,12 +171,12 @@
                         </p>
 
                         <div class="form-group">
-                            <label>Date From</label>
+                            <label for="date-from">Date From</label>
                             <input type="date" class="form-control" id="date-from">
                         </div>
 
                         <div class="form-group">
-                            <label>Date To</label>
+                            <label for="date-to">Date To</label>
                             <input type="date" class="form-control" id="date-to">
                         </div>
 
@@ -188,19 +189,12 @@
                                 <option value="">All Cameras</option>
                             </select>
                         </div>
-                    </div>
+                    </details>
 
                     <!-- Negative Search (Exclude) -->
-                    <div class="search-section exclude-section" data-batch-unsupported>
-                        <div class="section-header-enhanced">
-                            <div class="section-icon">
-                                <i class="fas fa-ban"></i>
-                            </div>
-                            <div class="section-title-group">
-                                <h3>Exclude from Results</h3>
-                                <p class="section-subtitle">Filter out specific identities or watchlists</p>
-                            </div>
-                        </div>
+                    <details class="search-section exclude-section advanced-section" data-batch-unsupported>
+                        <summary><span><i class="fas fa-user-slash" aria-hidden="true"></i> Exclusions</span><i class="fas fa-chevron-down" aria-hidden="true"></i></summary>
+                        <p class="section-subtitle">Remove specific identities or watchlists from your results.</p>
                         <p class="batch-unsupported-note" role="note" hidden>
                             <i class="fas fa-circle-info" aria-hidden="true"></i>
                             Exclusions are not applied in batch mode.
@@ -208,7 +202,7 @@
 
                         <!-- Exclude Identities -->
                         <div class="exclude-group">
-                            <label class="exclude-label">
+                            <label class="exclude-label" for="exclude-identities-search">
                                 <i class="fas fa-user-slash"></i>
                                 <span>Exclude Identities</span>
                                 <span class="exclude-count" id="exclude-identities-count">0</span>
@@ -236,7 +230,7 @@
 
                         <!-- Exclude Watchlists -->
                         <div class="exclude-group">
-                            <label class="exclude-label">
+                            <label class="exclude-label" for="exclude-watchlists-search">
                                 <i class="fas fa-list-alt"></i>
                                 <span>Exclude Watchlists</span>
                                 <span class="exclude-count" id="exclude-watchlists-count">0</span>
@@ -265,8 +259,9 @@
                         <!-- Hidden selects for form submission -->
                         <select class="form-control" id="exclude-identities" multiple style="display: none;"></select>
                         <select class="form-control" id="exclude-watchlists" multiple style="display: none;"></select>
-                    </div>
+                    </details>
 
+                    <div class="search-action-bar">
                     <!-- Search Button -->
                     <button class="search-btn" id="search-btn" disabled>
                         <i class="fas fa-search"></i>
@@ -282,12 +277,13 @@
                             <i class="fas fa-trash"></i> Clear
                         </button>
                     </div>
+                    </div>
                 </div>
 
                 <!-- Right Panel: Results -->
                 <div class="results-panel" id="results-panel">
                     <div class="results-header">
-                        <h2><i class="fas fa-poll-h"></i> Search Results</h2>
+                        <div><span class="workspace-eyebrow">Review &amp; investigate</span><h2>Search results</h2></div>
                         <div class="results-actions">
                             <button class="results-action-btn" id="export-btn" title="Export Results" style="display: none;">
                                 <i class="fas fa-download"></i> Export
@@ -312,9 +308,15 @@
                     <div class="results-content" id="results-content">
                         <!-- Empty State -->
                         <div class="empty-state" id="empty-state">
-                            <i class="fas fa-search"></i>
-                            <h3>Upload an image to search</h3>
-                            <p>The system will detect all faces and find matching identities</p>
+                            <div class="search-illustration" aria-hidden="true"><i class="fas fa-user"></i><span class="illustration-search"><i class="fas fa-search"></i></span></div>
+                            <span class="workspace-eyebrow">Start with a reference</span>
+                            <h3>Your next discovery starts here</h3>
+                            <p>Upload an image to detect faces and explore matching identities across your selected sources.</p>
+                            <ol class="search-guide">
+                                <li><span>1</span><div><strong>Add an image</strong><p>Use a clear, well-lit reference.</p></div></li>
+                                <li><span>2</span><div><strong>Set your scope</strong><p>Choose identities and optional filters.</p></div></li>
+                                <li><span>3</span><div><strong>Review matches</strong><p>Explore results, alerts, and summaries.</p></div></li>
+                            </ol>
                         </div>
 
                         <!-- Matches Tab -->
@@ -328,7 +330,7 @@
                     </div>
 
                     <!-- Searching Overlay -->
-                    <div class="searching-overlay" id="searching-overlay" style="display: none;">
+                    <div class="searching-overlay" id="searching-overlay" role="status" aria-live="polite" style="display: none;">
                         <div class="searching-spinner"></div>
                         <div class="searching-text">Analyzing faces...</div>
                     </div>

@@ -8,6 +8,33 @@ Written to be read start to finish once. For exact commands see
 authority) and [`Docs/93_PRODUCTION_RUNBOOK.md`](Docs/93_PRODUCTION_RUNBOOK.md)
 (the orientation map).
 
+**Last updated: 2026-09-07** — sections 10–16 added (offline policy, rebuild
+cache, the `migrate` preflight, the generated variable inventory, volumes, the
+SQL bot, faces and enrolment); §2 counts corrected; §6b added.
+
+### Contents
+
+- [1. What was done](#1-what-was-done)
+- [2. Variables — where every value comes from](#2-variables--where-every-value-comes-from)
+- [3. Certificates — how HTTPS works here](#3-certificates--how-https-works-here)
+- [4. IP addresses — who assigns them](#4-ip-addresses--who-assigns-them)
+- [4a. Giving the server a static IP](#4a-giving-the-server-a-static-ip)
+- [5. DNS — how names are resolved](#5-dns--how-names-are-resolved)
+- [5a. File ownership — who owns what, and why](#5a-file-ownership--who-owns-what-and-why)
+- [6. Logging in the first time](#6-logging-in-the-first-time)
+- [6a. The chatbot, the GPU, and why it was slow](#6a-the-chatbot-the-gpu-and-why-it-was-slow)
+- [7. Everyday commands](#7-everyday-commands)
+- [7a. Seeing Docker in a GUI](#7a-seeing-docker-in-a-gui)
+- [8. If something breaks](#8-if-something-breaks)
+- [9. Back up these, in this order](#9-back-up-these-in-this-order)
+- [10. Offline policy (production is air-gapped)](#10-offline-policy-production-is-air-gapped)
+- [11. Rebuild time: the pip wheel cache](#11-rebuild-time-the-pip-wheel-cache)
+- [12. The `migrate` job and the config preflight](#12-the-migrate-job-and-the-config-preflight)
+- [13. Production variable inventory (generated 2026-09-07)](#13-production-variable-inventory-generated-2026-09-07)
+- [14. Volumes and mounts — what every container can read and write (verified 2026-09-07)](#14-volumes-and-mounts--what-every-container-can-read-and-write-verified-2026-09-07)
+- [15. The SQL bot (chat agent): how it runs, and its variables](#15-the-sql-bot-chat-agent-how-it-runs-and-its-variables)
+- [16. Faces: how a person is stored, matched and added](#16-faces-how-a-person-is-stored-matched-and-added)
+
 ---
 
 ## 1. What was done
@@ -58,6 +85,19 @@ Work completed:
   files; `docker inspect` now exposes no credential on any service.
 
 ---
+
+### Added on 2026-09-07 (after the code pull)
+
+- Production **offline mode** made explicit and enforced (§10): the policy block in
+  `docker/.env`, stage 06b of `deploy.sh`, the config guard, `/health/offline-policy`.
+- The image rebuild fixed at its roots (§11): pip's cache was never used
+  (`PIP_NO_CACHE_DIR` semantics) and BuildKit was discarding the cache after 48 h;
+  the CUDA base's `blinker` conflict with `mlflow` resolved in `Dockerfile.gpu`.
+- A six-minute outage understood and closed (§12): the `migrate` job no longer runs
+  the inference-artifact preflight it cannot satisfy; how to roll back safely.
+- Three generated references (§13–§14) and two explanations (§15–§16) so the whole
+  configuration surface, every mount and both AI subsystems are documented from the
+  running system rather than from memory.
 
 ## 2. Variables — where every value comes from
 
@@ -1530,6 +1570,25 @@ database. Nothing leaves the box; the offline policy (§10) refuses to boot
 otherwise. Live check today: `/api/sql-agent/health` → `operational`
 (model ready, database ready, history ready).
 
+### 15.0 The four models, at a glance
+
+| Role in the bot | Model | Runs where | Size | Setting |
+|---|---|---|---|---|
+| Reasoning, chat, tool selection, reading each turn (interpreter), writing the answer | `qwen2.5:7b` — Qwen2.5 7B Instruct, 4-bit | Ollama container, GPU | 4.7 GB | `OLLAMA_MODEL` (`OLLAMA_INTERPRETER_MODEL` empty = same model) |
+| SQL generation (`generate_sql`, `modify_sql` nodes) | `hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M` — Snowflake Arctic-Text2SQL-R1 7B, GGUF 4-bit | Ollama container, GPU | 4.7 GB | `OLLAMA_SQL_MODEL` |
+| Embeddings for the knowledge base (similar verified question→SQL examples in Chroma) | `all-MiniLM-L6-v2` as ONNX — Chroma's default embedding function, 384 dimensions | API container, CPU (onnxruntime); file in the `chromadb_cache` volume | 90 MB | `EMBEDDING_PROVIDER=local`, `EMBEDDING_MODEL_PATH` |
+| Embeddings for query-history similarity ("questions like this one you asked before") | `sentence-transformers/all-MiniLM-L6-v2` — same model, PyTorch format, loaded offline-only | API container, CPU (torch CPU); cached in `hf_cache_data` | 90 MB | `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1` |
+
+Also on disk but unused: `qwen2.5:1.5b` (986 MB). `qwen2.5:7b` was chosen over
+it because it passed 6 of 6 native tool-call tests against 3 of 6. The two
+embedding entries are one model in two formats; neither uses the GPU, and
+embedding a sentence takes milliseconds. The two LLMs share the GPU with face
+recognition through Ollama's device reservation (face recognition itself uses
+SCRFD and ArcFace, unrelated to the bot). Presence is enforced: the config
+guard verifies the MiniLM ONNX file at boot and `deploy.sh` stage 13 verifies
+both Ollama models against `ollama list`, so a host cannot start with one
+missing.
+
 ### 15.1 How a question is answered
 
 ```
@@ -1675,4 +1734,146 @@ Runtime changes are made on the Settings page (or `PUT /api/settings/<KEY>`, §1
 - **Exports:** `POST /api/sql-agent/export/pdf|word` produce artifacts fetched by `GET /api/sql-agent/artifacts/{id}`.
 - **Alternatives, all local:** `LLM_PROVIDER=vllm` with the `vllm` compose profile (`LLM_BASE_URL=http://vllm:8000/v1`, `LLM_MODEL`); `VECTOR_STORE=milvus` with the `milvus` profile; the `mcp-sql` profile to serve the tools over MCP. None of them is started by the default production stack.
 - **Development only:** NVIDIA NIM (`LLM_DEV_PROVIDER=nim`, `NVIDIA_NIM_*`) and Opik tracing exist to test query quality on the workstation; the production deploy path refuses both.
+
+## 16. Faces: how a person is stored, matched and added
+
+### 16.1 One person, many face vectors
+
+A person is an **identity**; each face view of that person is one row in
+`identity_embeddings`: a 512-dimensional ArcFace vector (`RECOGNITION_MODEL`
+`w600k_r50.onnx`, faces found by the SCRFD detector `det_10g.onnx`), plus where
+it came from — `pipeline_id`/`detection_id` for a camera sighting, `image_id`
+for an uploaded photo — a quality score and the embedding-model version. There
+is no fixed number of vectors per person and no averaging: **matching compares a
+new face against every stored vector of every active known person** (pgvector
+HNSW index, cosine distance) and the identity of the single best vector wins if
+it clears `SIMILARITY_THRESHOLD` (0.4). A person with five views is therefore
+recognised if *any* view is close enough, which is what several views buy you:
+different angles, lighting, glasses, age.
+
+Uploaded photos are kept in `identity_images` (one row per photo, at most
+1 000 per person, the same file never twice thanks to a checksum index, exactly
+one marked *primary* for display: `PUT /api/identities/{id}/images/{image_id}/primary`).
+
+### 16.2 How vectors get added to a person
+
+| Path | What happens | Guards |
+|---|---|---|
+| **Add Person (upload)** — the "Enrol a new face" modal, `POST /api/upload-person` | the photo is decoded, exactly one face must be found (two faces → refused), an embedding is computed and compared with the best score per existing person (pool of 25 nearest vectors) | ≥ `ENROLL_STRONG_MATCH_MIN` (0.75): "this is an existing person — add the photo to them" is recommended · between `ENROLL_CANDIDATE_MIN` (0.40) and 0.75: the admin is shown up to `ENROLL_MAX_CANDIDATES` (5) candidates and must choose · below 0.40: enrolled directly as a new person. The choice is committed with `POST /api/enrollment/confirm` (`add_to_existing` / `create_new` / `cancel`); an unconfirmed upload is parked and can be cancelled (`POST /api/enrollment/cancel`) |
+| **More photos for an existing person** — `POST /api/identities/{id}/images` | same decoding/embedding, added to that person | checksum duplicate check, 1 000-photo cap, one face per photo |
+| **Camera sighting of an unknown face** | if no known person clears 0.4 the sighting creates an **unknown identity** with that vector (`faiss_index_type=unknown`); later sightings of the same face attach to it | unknown identities are clustered nightly into merge suggestions and expire: snapshots after `SNAPSHOT_RETENTION_DAYS` (90), vectors after `EMBEDDING_RETENTION_MONTHS` (12), marked inactive after `INACTIVE_THRESHOLD_DAYS` (180) unseen |
+| **Promote** — `POST /api/admin/unknown/{identity_id}/promote` | an unknown identity becomes a known person, keeping every vector it collected | — |
+| **Merge** — `POST /api/admin/identities/merge` (preview first with `…/merge-preview`; nightly suggestions are approved via `…/merge-suggestions/{id}/approve`, and a merge can be undone with `…/merges/{merge_id}/unmerge`) | two identities become one; all vectors move to the survivor | the merge checker compares up to 8 newest vectors per side by *median* similarity, so one lucky pair cannot justify a merge; vectors from different embedding-model versions are never compared |
+| **Auto-enrichment from cameras** (`IDENTITY_AUTO_ENRICH_ENABLED`) | a confidently recognised live face is appended to the known person so the person "learns" new views | **off in production (default).** When on: similarity ≥ 0.75, quality ≥ 0.5, skipped if ≥ 0.95 similar to a stored view, hard cap `MAX_EMBEDDINGS_PER_IDENTITY` (10). Off because one wrong attribution would become a permanent, self-reinforcing vector |
+
+### 16.3 Housekeeping (identity retention, daily)
+
+- Camera-derived vectors are capped at **10 per person** (highest quality kept, then newest); vectors from uploaded photos are **never pruned** — they live as long as the photo is in the gallery.
+- A camera vector whose detection was never persisted (a crash mid-write) is removed after a grace period; an unknown identity left with no evidence goes with it.
+- `SIMILARITY_THRESHOLD` (0.4) is the same bar the enrolment review uses as its floor, on purpose: anything recognition would confuse, enrolment must ask about, otherwise a duplicate person is created silently and recognition reports either name at random.
+
+### 16.4 The settings involved, with production values
+
+| Setting | Production | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `DETECTION_MODEL` / `RECOGNITION_MODEL` | `det_10g.onnx` / `w600k_r50.onnx` under `/app/weights` | compose (bind mount, verified by stage 08) | no | SCRFD face detector; ArcFace recogniser producing the 512-d vector |
+| `VECTOR_BACKEND` | `pgvector` | compose | no | vectors live in PostgreSQL and are searched there (FAISS is a disposable in-memory index rebuilt from the table) |
+| `PGVECTOR_INDEX_TYPE` / `PGVECTOR_HNSW_M` / `PGVECTOR_HNSW_EF_CONSTRUCTION` | `hnsw` / 32 / 128 | compose | index rebuild | approximate-nearest-neighbour index parameters |
+| `SIMILARITY_THRESHOLD` | 0.4 | compose | no | minimum cosine similarity for a match (measured: same person across photos ≈ 0.43, unrelated faces < 0.05) |
+| `CONFIDENCE_THRESHOLD` | 0.5 | compose | no | minimum detector confidence for a face to be considered at all |
+| `IDENTITY_INGEST_TOP_K` | 5 | default | no | how many nearest vectors are fetched per live face before the threshold filters |
+| `ENROLL_CANDIDATE_MIN` / `ENROLL_STRONG_MATCH_MIN` | 0.40 / 0.75 | default | no | the review band for Add Person (must not be inverted; startup refuses that) |
+| `ENROLL_CANDIDATE_POOL` / `ENROLL_MAX_CANDIDATES` | 25 / 5 | default | no | vectors fetched, then collapsed to one row per person; candidates shown |
+| `IDENTITY_AUTO_ENRICH_ENABLED` | false | default | no | camera views added to known people automatically (see 16.2) |
+| `IDENTITY_ENRICH_MIN_SIMILARITY` / `IDENTITY_ENRICH_MIN_QUALITY` / `IDENTITY_NEAR_DUPLICATE_MIN` | 0.75 / 0.5 / 0.95 | default | yes / yes / no | enrichment guards (only matter when enrichment is on) |
+| `MAX_EMBEDDINGS_PER_IDENTITY` | 10 | default | yes, next job run | cap on camera-derived vectors per person |
+| `SNAPSHOT_RETENTION_DAYS` / `EMBEDDING_RETENTION_MONTHS` / `INACTIVE_THRESHOLD_DAYS` | 90 / 12 / 180 | default | yes / no / yes | unknown-identity housekeeping (§9 of the home page's retention panel shows the first two) |
+| `IDENTITY_CLEANUP_INTERVAL_HOURS` / `CLUSTER_INTERVAL_HOURS` / `CLUSTER_STARTUP_DELAY_HOURS` | 24 / 24 / 7 | default | yes / no / yes | cadence of identity retention and of the nightly clustering into merge suggestions |
+| `FACE_TRACKING_WINDOW_SECONDS` | 30 | compose | no | in-memory suppression of the same face re-detected within 30 s (0 would write every frame) |
+| `SAVE_CROPPED_IMAGES` | false | compose | yes, immediate | keep a crop of every detected face on disk |
+
+### 16.5 Merge, merge suggestions ("auto-merge") and promote
+
+**Nothing merges automatically.** The only code that merges identities is
+`merge_identities` / `merge_multiple_identities`, and their only callers are
+three administrator endpoints: the pair merge, the multi-merge and *approve
+suggestion*. What the system does automatically is **propose**.
+
+**How suggestions are produced (the nightly clustering job, §9 of Docs/95)**
+
+1. Runs 7 h after boot (shortened to the next 24 h slot when it already ran
+   recently) and then every `CLUSTER_INTERVAL_HOURS` (24). It looks only at
+   **unknown** identities seen in the last `CLUSTER_ACTIVE_WINDOW_DAYS` (90) and
+   needs at least `CLUSTER_MIN_SIZE` (2) of them.
+2. Hybrid matching: same-camera candidates come from co-appearance/time patterns
+   and are confirmed by a vector check ≥ `UNKNOWN_SIMILARITY_THRESHOLD` (0.35);
+   cross-camera candidates are found vector-first and must clear the stricter
+   `CROSS_PIPELINE_SIMILARITY_THRESHOLD` (0.50), because two people seen only on
+   different cameras have no co-appearance evidence for or against. DBSCAN
+   (`CLUSTER_EPS` 0.35, `CLUSTER_MIN_SAMPLES` 2) groups them.
+3. Each candidate group gets a **confidence**: the trained similarity model from
+   the ML-Ops page when one is active (`PIPELINE_AWARE_CLUSTERING_ENABLED`,
+   allowed to sit `CLUSTER_TRAINED_MODEL_MARGIN` 0.05 below the threshold),
+   otherwise a heuristic (0.8 × face similarity + 0.06; pattern evidence capped
+   at 0.75).
+4. The result is a `MergeSuggestion` row with status **pending**. It waits for a
+   person. Statuses: `pending` → `approved` / `rejected`, or `invalidated` when
+   one of its identities was merged or deleted in the meantime. Suggestions can
+   also be regenerated on demand (`POST /api/admin/merge-suggestions/generate-pipeline-aware`).
+
+**The gate every merge passes** (`backend/core/merge_compatibility.py`) — pair
+merge, multi-merge, preview, suggestion approval alike, by construction:
+
+- only stored, validated vectors count (finite, unit-norm), and only vectors
+  sharing an `embedding_model_version` are compared — never across model
+  spaces; up to the 8 newest vectors per identity;
+- for each pair of identities the score is the **median** of all cross
+  similarities, never the maximum, so one mis-attributed frame cannot vouch for
+  merging two strangers; for a group the score is the **minimum** of the pair
+  medians, so one unrelated member drags the whole group down;
+- `compatible` when that score ≥ `MERGE_WARNING_MIN_SIMILARITY` (0.40);
+  otherwise `high_risk`, which the API refuses unless the caller sends
+  `confirm_merge_risk: true`; `unavailable` when nothing is comparable.
+
+**Merging** (`POST /api/admin/identities/merge` with `from_identity_id`,
+`to_identity_id`, `decision`; `…/merge-multiple` for several; preview first with
+`…/merge-preview`, which shows the target, the sources, the per-camera
+distribution, the type outcome and which snapshot will represent the result).
+Allowed for administrators, or for users whose camera scope covers every
+identity involved. In one transaction the loser's appearances, vectors, faces,
+watch-list memberships and live-search alerts move to the winner; if the winner
+is a known person the moved vectors are relabelled into the known search space;
+the loser stays in the database as `MERGED` and inactive so history and audit
+keep pointing at something real. Everything moved is written to the merge's
+**provenance**, which is what makes **unmerge**
+(`POST /api/admin/identities/merges/{merge_id}/unmerge`) exact: it puts back
+exactly the rows listed there and restores the loser's previous status. Every
+unmerge refusal (for example the merge record no longer existing) happens in a
+verification phase before any write, so a refusal never leaves a half-undone
+merge.
+
+**Approving a suggestion** (`POST /api/admin/merge-suggestions/{id}/approve`,
+optional `confirm_merge_risk`) runs the same gate and the same merge; rejecting
+(`…/reject`) records the decision so the pair is not proposed again in that form.
+
+**Promote** (`POST /api/admin/unknown/{identity_id}/promote` with
+`display_name` (required), optional `person_code` (must be unique; refused if
+taken) and `decision: create_new`) turns an **unknown** identity into a **new
+known person**: its type becomes known, its status `PROMOTED` (treated as active
+and known by matching), and every vector it collected is relabelled into the
+known search space, so the person is recognised from the next sighting on. If
+the unknown face is really someone already enrolled, do not promote: use
+`GET /api/admin/unknown/{identity_id}/match-candidates` (read-only ranking of
+known people against that face) and **merge the unknown into that person**, which
+keeps one identity. Administrators can promote any unknown identity; other users
+only those from cameras in their scope.
+
+Related settings not listed in 16.4: `UNKNOWN_SIMILARITY_THRESHOLD` 0.35,
+`CROSS_PIPELINE_SIMILARITY_THRESHOLD` 0.50 (Settings page, immediate),
+`MERGE_WARNING_MIN_SIMILARITY` 0.40, `CLUSTER_EPS` 0.35, `CLUSTER_MIN_SAMPLES` 2,
+`CLUSTER_MIN_SIZE` 2, `CLUSTER_ACTIVE_WINDOW_DAYS` 90 (next job run),
+`PIPELINE_AWARE_CLUSTERING_ENABLED` true (immediate), `CLUSTER_TRAINED_MODEL_MARGIN`
+0.05 (immediate) — all `config.py` defaults in production.
+
+Code: `backend/core/identity_service.py` (matching, unknown identities, enrichment, merge), `backend/core/enrollment_service.py` (Add Person), `backend/routes/upload.py` and `backend/routes/enrollment_review.py` (the endpoints), `backend/core/identity_index_pgvector.py` (the search), `backend/core/identity_retention.py` and `identity_clustering.py` (housekeeping), `backend/core/merge_compatibility.py` (merge checks).
 
