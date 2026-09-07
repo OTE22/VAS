@@ -8,6 +8,19 @@
 
 set -eu
 
+# The backup role's password comes from a mounted Docker secret, exported here
+# INSIDE the process. Compose used to set PGPASSWORD in `environment:`, which
+# made it readable via `docker inspect` on the backup container. libpq's own
+# PGPASSFILE is not usable instead: it refuses a pgpass file that is
+# group-readable, and every secret in this deployment is 0440 root:1000.
+if [ -r /run/secrets/backup_db_password ]; then
+    PGPASSWORD="$(cat /run/secrets/backup_db_password)"
+    export PGPASSWORD
+elif [ -z "${PGPASSWORD:-}" ]; then
+    echo "[backup-loop] no credential: mount secret backup_db_password" >&2
+    exit 78
+fi
+
 INTERVAL="${BACKUP_INTERVAL_SECONDS:-86400}"
 
 echo "[backup-loop] starting; interval=${INTERVAL}s retention=${BACKUP_RETENTION_DAYS:-14}d"

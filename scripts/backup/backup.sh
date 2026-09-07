@@ -14,6 +14,16 @@
 
 set -eu
 
+# Resolve the backup role's password HERE, at the point of use, not only in
+# backup-loop.sh. deploy.sh's backup stage runs this script through
+# `compose exec -T backup sh /scripts/backup.sh`, a fresh shell that does not
+# inherit the loop's exported PGPASSWORD - so the scheduled backups succeeded
+# while every on-demand one failed with "fe_sendauth: no password supplied".
+if [ -z "${PGPASSWORD:-}" ] && [ -r /run/secrets/backup_db_password ]; then
+    PGPASSWORD="$(cat /run/secrets/backup_db_password)"
+    export PGPASSWORD
+fi
+
 DEST="${1:-/backups}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${DEST}/${STAMP}"

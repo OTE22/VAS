@@ -5,6 +5,7 @@ Routes for system management (cleanup, circuit breaker, face tracker).
 """
 
 import os
+import asyncio
 import sys
 import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -32,6 +33,49 @@ router = APIRouter(
     tags=["System Management"],
     dependencies=[Depends(require_role(["admin"]))],
 )
+
+
+# One in-flight manual run per job. The scheduled loops guard only their own
+# task, so without this an admin double-click would run two clustering passes
+# concurrently over the same identities.
+_manual_run_locks = {"identity_clustering": asyncio.Lock(), "identity_retention": asyncio.Lock()}
+
+
+async def _run_manually(name: str, cycle):
+    lock = _manual_run_locks[name]
+    async with lock:
+        await cycle()
+
+
+def _schedule_manual_run(background_tasks: BackgroundTasks, name: str, cycle, label: str):
+    if _manual_run_locks[name].locked():
+        raise HTTPException(status_code=409, detail=f"A manual {label} run is already in progress")
+    background_tasks.add_task(_run_manually, name, cycle)
+    return {"status": "scheduled", "task_type": name,
+            "message": f"{label} started in background; follow it on /admin/background-tasks"}
+
+
+@router.post("/api/clustering/run", status_code=202)
+async def clustering_run_now(background_tasks: BackgroundTasks):
+    """Run identity clustering now instead of waiting for its startup delay.
+
+    Clustering waits 7 hours after every boot; on a day with several deploys it
+    never runs at all. This is the operator's way to compensate. Same cycle the
+    scheduler runs, so it records the same task-history row and notifications.
+    """
+    from backend.core.identity_clustering import clustering_service
+    if not clustering_service or not getattr(clustering_service, "_enabled", True):
+        raise HTTPException(status_code=409, detail="Identity clustering is disabled")
+    return _schedule_manual_run(background_tasks, "identity_clustering",
+                                clustering_service._run_cycle, "identity clustering")
+
+
+@router.post("/api/identity-retention/run", status_code=202)
+async def identity_retention_run_now(background_tasks: BackgroundTasks):
+    """Run the identity retention cleanup now (same cycle the daily timer runs)."""
+    from backend.core.identity_retention import identity_retention_manager
+    return _schedule_manual_run(background_tasks, "identity_retention",
+                                identity_retention_manager._run_cycle, "identity retention")
 
 
 @router.post("/api/cleanup/manual")

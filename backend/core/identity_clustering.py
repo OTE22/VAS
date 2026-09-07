@@ -147,8 +147,12 @@ class IdentityClusteringService:
             logger.warning("[CLUSTERING] Already running; ignoring duplicate start()")
             return
         logger.info("[CLUSTERING] Starting IdentityClusteringService...")
-        from backend.core.service_supervisor import supervised_loop
+        from backend.core.service_supervisor import supervised_loop, durable_initial_delay
         startup_delay_seconds = int(self.cluster_startup_delay_hours * 3600)
+        # Derived from the last completed run, so a restart cannot push the next
+        # run out by another full startup delay (see durable_initial_delay).
+        startup_delay_seconds = await durable_initial_delay(
+            "identity_clustering", startup_delay_seconds, self.cluster_interval_hours * 3600)
         self._clustering_task = asyncio.create_task(
             supervised_loop(
                 "identity_clustering",

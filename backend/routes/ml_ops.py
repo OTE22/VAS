@@ -553,6 +553,10 @@ async def ml_overview(
                 "Human review remains required.",
             ],
         }
+        # Worker liveness. The heartbeat row already existed in the database
+        # (10 s cadence, 60 s lease) but nothing in the UI showed it, so a dead
+        # worker would be noticed only when drift checks silently stopped.
+        payload["worker"] = await _ml_worker_liveness(db)
         resp = JSONResponse(content=jsonable(payload))
         resp.headers["Cache-Control"] = "no-store"
         return resp
@@ -560,6 +564,30 @@ async def ml_overview(
         raise
     except Exception as e:
         raise _safe_500("ml overview", e)
+
+
+async def _ml_worker_liveness(db: AsyncSession) -> Dict[str, Any]:
+    """Every ML worker's heartbeat, judged against the lease it must renew."""
+    from db_models import MLWorkerHeartbeat
+    from config import settings as _cfg
+    lease = float(_cfg.ML_JOB_LEASE_SECONDS)   # config.py owns the default
+    try:
+        rows = (await db.execute(select(MLWorkerHeartbeat))).scalars().all()
+    except Exception as e:
+        return {"available": False, "error": type(e).__name__, "workers": []}
+    now = datetime.utcnow()
+    workers = []
+    for r in rows:
+        beat = getattr(r, "heartbeat_at", None)
+        age = (now - beat.replace(tzinfo=None)).total_seconds() if beat else None
+        workers.append({
+            "worker_id": r.worker_id, "hostname": getattr(r, "hostname", None),
+            "status": getattr(r, "status", None), "current_job_id": getattr(r, "current_job_id", None),
+            "heartbeat_at": beat, "heartbeat_age_seconds": None if age is None else round(age, 1),
+            "alive": age is not None and age < lease,
+        })
+    return {"available": True, "lease_seconds": lease,
+            "alive_count": sum(1 for w in workers if w["alive"]), "workers": workers}
 
 
 def jsonable(obj):

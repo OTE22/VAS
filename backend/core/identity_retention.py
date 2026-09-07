@@ -90,13 +90,15 @@ class IdentityRetentionManager:
         if self._cleanup_task and not self._cleanup_task.done():
             logger.warning("Identity retention manager already running; ignoring duplicate start()")
             return
-        from backend.core.service_supervisor import supervised_loop
+        from backend.core.service_supervisor import supervised_loop, durable_initial_delay
+        initial_delay = await durable_initial_delay(
+            "identity_retention", 3600, self.cleanup_interval_hours * 3600)
         self._cleanup_task = asyncio.create_task(
             supervised_loop(
                 "identity_retention",
                 (self.cleanup_interval_hours * 3600) - 60,
                 self._run_cycle,
-                initial_delay=3600,
+                initial_delay=initial_delay,
                 error_backoff_base=3600,
             ),
             name="identity_retention",

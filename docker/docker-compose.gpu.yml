@@ -56,8 +56,9 @@ services:
       MAX_QUEUE_SIZE: 10000
       QUEUE_WORKERS: 50
       MAX_CONCURRENT_REQUESTS: 500
+      # GPU_BATCH_SIZE removed: superseded by PIPELINE_BATCH_SIZE, which is
+      # the one processing_queue.py actually reads.
       BATCH_SIZE: 20
-      GPU_BATCH_SIZE: 32
       PIPELINE_BATCH_SIZE: 5
     deploy:
       resources:

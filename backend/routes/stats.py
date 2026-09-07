@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Statistics"])
 
 
+def _retention_policy() -> dict:
+    """Read-only view of every retention window that prunes the database or
+    its files, rendered on the home page. Read from `settings` at call time:
+    the Settings page applies next_job_run changes there in place, so these
+    are the values the cleanup jobs will actually use, never a cached copy."""
+    return {
+        "data_days": int(settings.DATA_RETENTION_DAYS),
+        "task_history_days": int(settings.TASK_HISTORY_RETENTION_DAYS),
+        "search_history_days": int(settings.SEARCH_HISTORY_RETENTION_DAYS),
+        "audit_log_days": int(settings.AUDIT_LOG_RETENTION_DAYS),
+        "identity_snapshot_days": int(settings.SNAPSHOT_RETENTION_DAYS),
+        "identity_embedding_months": int(settings.EMBEDDING_RETENTION_MONTHS),
+        "logs_hours": int(settings.LOGS_LIFE_TIME_HOURS),
+        "backup_days": int(settings.BACKUP_RETENTION_DAYS),
+        "cleanup_interval_hours": int(settings.CLEANUP_INTERVAL_HOURS),
+        "identity_cleanup_interval_hours": int(settings.IDENTITY_CLEANUP_INTERVAL_HOURS),
+        "backup_interval_hours": round(int(settings.BACKUP_INTERVAL_SECONDS) / 3600, 1),
+    }
+
+
 @router.get("/api/stats")
 async def get_stats(
     db: AsyncSession = Depends(get_db),
@@ -229,6 +249,7 @@ async def get_stats(
             "cache": cache_stats,
             "tracker": tracker_stats,
             "retention_days": settings.DATA_RETENTION_DAYS,
+            "retention": _retention_policy(),
         }
 
     except Exception as e:

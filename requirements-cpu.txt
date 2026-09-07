@@ -29,8 +29,12 @@ xgboost==3.2.0; platform_system != "Linux"
 #
 # Face detection and recognition do NOT use torch. They run on ONNX Runtime.
 # ---------------------------------------------------------------------------
+# Pinned for the same reason as requirements-gpu.txt: --extra-index-url ADDS
+# an index rather than preferring it, so an unpinned torch can resolve to the
+# PyPI CUDA build and drag in several GB of nvidia_* wheels. The `+cpu` local
+# version exists only on the pytorch index, which forces the CPU wheel.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch
+torch==2.13.0+cpu
 
 # ---------------------------------------------------------------------------
 # Inference and vector search — the CPU builds.

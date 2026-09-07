@@ -138,6 +138,42 @@ def _set_gauges(name: str, up: Optional[bool] = None,
         pass
 
 
+async def durable_initial_delay(task_type: str, default_seconds: float,
+                                interval_seconds: float, *, floor_seconds: float = 60.0) -> float:
+    """The first-run delay for a periodic job, derived from its LAST COMPLETED run.
+
+    `initial_delay` was a fixed number restarted from zero on every boot, so a
+    job with a 7-hour startup delay never ran on a day with several deploys:
+    each restart re-armed the full delay (identity clustering's last run fell a
+    day behind for exactly this reason). The durable ML drift job never had the
+    problem because it asks the database "when did I last complete?" - this
+    gives the in-process loops the same answer.
+
+    Returns min(default, max(floor, next_due - now)) when a completed run exists,
+    so a boot never delays a job past its original schedule but also never runs
+    it sooner than `floor_seconds` after boot (the reason the delay exists is
+    to stay off a fresh boot's load). With no history, or on any error, it
+    returns `default_seconds` unchanged - identical to the old behaviour.
+    """
+    try:
+        from datetime import datetime
+        from backend.core.task_history import task_history_manager
+        rows = await task_history_manager.get_task_history(
+            task_type=task_type, status="completed", limit=1)
+        stamp = (rows[0].get("completed_at") or rows[0].get("started_at")) if rows else None
+        if not stamp:
+            return default_seconds
+        if isinstance(stamp, str):
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if stamp.tzinfo is not None:
+            stamp = stamp.replace(tzinfo=None)
+        remaining = (stamp - datetime.utcnow()).total_seconds() + interval_seconds
+        return float(min(default_seconds, max(floor_seconds, remaining)))
+    except Exception as e:  # never let scheduling logic stop a service from starting
+        logger.debug("[SUPERVISOR] durable_initial_delay(%s) fell back to default: %s", task_type, e)
+        return default_seconds
+
+
 async def supervised_loop(
     name: str,
     interval,  # float, or a zero-arg callable re-read each cycle (live-tunable cadences)

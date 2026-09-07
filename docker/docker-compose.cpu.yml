@@ -189,8 +189,12 @@ services:
       DB_POOL_RECYCLE: 3600
       DB_POOL_PRE_PING: "true"
       REDIS_URL: redis://redis:6379/0
+      # REDIS_MAX_CONNECTIONS is the pool size the client actually uses.
+      # REDIS_POOL_SIZE was removed: it is declared in config.py but NOTHING
+      # reads it, so setting it here presented a tuning knob wired to nothing -
+      # backend/routes/settings.py already hides it from the admin UI for that
+      # reason, and Docs/63_REDIS_CACHING_GUIDE.md says so outright.
       REDIS_MAX_CONNECTIONS: 50
-      REDIS_POOL_SIZE: 25
       CACHE_TTL: 3600
       CACHE_LOCAL_SIZE: 20000
       DETECTION_MODEL: /app/weights/det_10g.onnx
@@ -203,14 +207,19 @@ services:
       PGVECTOR_HNSW_EF_CONSTRUCTION: "128"
       MAX_QUEUE_SIZE: 2000
       QUEUE_WORKERS: 15
+      # CPU_BATCH_SIZE removed: nothing reads it. The pipeline reads
+      # PIPELINE_BATCH_SIZE (processing_queue.py). BATCH_SIZE is kept only
+      # because config.py's diagnostic dump prints it.
       BATCH_SIZE: 10
-      CPU_BATCH_SIZE: 10
       MAX_CONCURRENT_REQUESTS: 150
-      DATA_RETENTION_DAYS: 30
+      DATA_RETENTION_DAYS: 365
+      TASK_HISTORY_RETENTION_DAYS: 365
       CLEANUP_INTERVAL_HOURS: 24
       BATCH_WRITE_SIZE: 25
+      # BATCH_WRITE_MAX_WAIT removed: batch_writer.py reads only
+      # BATCH_WRITE_INTERVAL and BATCH_WRITE_SIZE.
       BATCH_WRITE_INTERVAL: "2.0"
-      BATCH_WRITE_MAX_WAIT: "5.0"
+      FACE_TRACKING_WINDOW_SECONDS: "30"   # see docker-compose.prod.yml
       FACE_TRACKING_MAX_ENTRIES: 2000
       FACE_TRACKING_MAX_MEMORY_MB: 1000
       FACE_TRACKING_CLEANUP_INTERVAL: 300

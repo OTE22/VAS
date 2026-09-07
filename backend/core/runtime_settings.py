@@ -698,6 +698,15 @@ async def hydrate_from_db(db) -> int:
             continue  # seeded mirror of env/default — nothing to apply
         try:
             value = typed_parse(row.key, row.value, row.category)
+            # A stored value that already equals what the process resolved is a
+            # seeded mirror, not an admin override - nothing to apply or defer.
+            # describe_source cannot tell: since the DB/redis credentials moved
+            # to secret FILES there is no env var to compare against, so their
+            # mirror rows classified as "database" and every boot warned that
+            # DATABASE_URL, JWT_SECRET_KEY, POSTGRES_PASSWORD and REDIS_URL
+            # "need the container recreated" when nothing differed at all.
+            if value == effective_value(row.key):
+                continue
             if apply_to_runtime(row.key, value, row.category, at_boot=True):
                 applied += 1
             else:

@@ -13,7 +13,7 @@
       so the layout survives a future re-ordering of these two links.
     -->
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
-    <link rel="stylesheet" href="/frontend/css/home.css?v=home-4">
+    <link rel="stylesheet" href="/frontend/css/home.css?v=home-5">
 </head>
 <body class="hp" data-state="loading" data-freshness="never">
     <!-- Navbar Component (loaded dynamically by navbar-loader.js) -->
@@ -359,6 +359,71 @@
             </section>
 
             <!-- ============================================================
+                 DATA RETENTION — read-only. Every window that prunes the
+                 database or its files, exactly as the cleanup jobs will apply
+                 it. Values come from /api/stats (`retention`); nothing here is
+                 editable and nothing is hard-coded in the page.
+                 ============================================================ -->
+            <section class="hp-panel hp-panel--block" id="retention-panel" data-state="loading">
+                <div class="hp-panel__head">
+                    <h2 class="hp-panel__title">Data retention</h2>
+                    <p class="hp-panel__subtitle">How long each kind of record is kept before a cleanup job deletes it &middot; read-only</p>
+                </div>
+                <div class="hp-retention">
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-database" aria-hidden="true"></i>Detections &amp; events</p>
+                        <p class="hp-retention__value"><span id="rt-data">&mdash;</span> <span class="hp-retention__unit" id="rt-data-unit"></span></p>
+                        <p class="hp-retention__note" id="rt-data-note">Detections, events and their image files</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-list-check" aria-hidden="true"></i>Task history</p>
+                        <p class="hp-retention__value"><span id="rt-tasks">&mdash;</span> <span class="hp-retention__unit" id="rt-tasks-unit"></span></p>
+                        <p class="hp-retention__note">Background-job runs shown on the task page</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-magnifying-glass" aria-hidden="true"></i>Search history</p>
+                        <p class="hp-retention__value"><span id="rt-search">&mdash;</span> <span class="hp-retention__unit" id="rt-search-unit"></span></p>
+                        <p class="hp-retention__note">Each user&rsquo;s past searches</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-clipboard-list" aria-hidden="true"></i>Audit log</p>
+                        <p class="hp-retention__value"><span id="rt-audit">&mdash;</span> <span class="hp-retention__unit" id="rt-audit-unit"></span></p>
+                        <p class="hp-retention__note">Chatbot, identity and settings audit records</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-image" aria-hidden="true"></i>Identity snapshots</p>
+                        <p class="hp-retention__value"><span id="rt-snapshots">&mdash;</span> <span class="hp-retention__unit" id="rt-snapshots-unit"></span></p>
+                        <p class="hp-retention__note" id="rt-snapshots-note">Face snapshots of unknown identities</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-fingerprint" aria-hidden="true"></i>Identity embeddings</p>
+                        <p class="hp-retention__value"><span id="rt-embeddings">&mdash;</span> <span class="hp-retention__unit" id="rt-embeddings-unit"></span></p>
+                        <p class="hp-retention__note" id="rt-embeddings-note">Face vectors of identities not seen since</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-file-lines" aria-hidden="true"></i>Application logs</p>
+                        <p class="hp-retention__value"><span id="rt-logs">&mdash;</span> <span class="hp-retention__unit" id="rt-logs-unit"></span></p>
+                        <p class="hp-retention__note">Log files on the server</p>
+                    </article>
+
+                    <article class="hp-retention__item">
+                        <p class="hp-retention__label"><i class="fas fa-box-archive" aria-hidden="true"></i>Database backups</p>
+                        <p class="hp-retention__value"><span id="rt-backups">&mdash;</span> <span class="hp-retention__unit" id="rt-backups-unit"></span></p>
+                        <p class="hp-retention__note" id="rt-backups-note">Database dumps on the backup volume</p>
+                    </article>
+
+                </div>
+                <p class="hp-retention__foot"><i class="fas fa-lock" aria-hidden="true"></i>Shown as the cleanup jobs will apply them. Administrators change them on the Settings page.</p>
+            </section>
+
+            <!-- ============================================================
                  QUICK ACTIONS — never gated on /api/stats
                  ============================================================ -->
             <nav class="hp-section" aria-label="Quick actions">
@@ -471,6 +536,6 @@
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <!-- <script src="/frontend/js/upload-modal.js?v=upload-3"></script> -->
-    <script src="/frontend/js/home.js?v=home-4"></script>
+    <script src="/frontend/js/home.js?v=home-5"></script>
 </body>
 </html>

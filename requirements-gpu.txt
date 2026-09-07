@@ -83,6 +83,12 @@ faiss-gpu
 # query-history search was permanently dead on GPU deployments — while
 # docker/Dockerfile.gpu provisioned a HuggingFace cache for it.
 # ---------------------------------------------------------------------------
+# The pin is load-bearing, not cosmetic. `--extra-index-url` ADDS an index; it
+# does not prefer it. pip resolves the highest version across PyPI *and* the
+# CPU index, so an unpinned `torch` silently resolved to the PyPI CUDA build
+# and started pulling nvidia_cublas_cu12 (581 MB) and friends - several GB,
+# exactly what the note above says not to do. The `+cpu` local version only
+# exists on the pytorch index, so naming it forces the CPU wheel.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch
+torch==2.13.0+cpu
 sentence-transformers

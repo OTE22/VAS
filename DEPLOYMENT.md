@@ -50,6 +50,12 @@ Work completed:
   user except 19 credential files that are deliberately root-owned.
 - **Docker reachable without sudo** (§7a) — a systemd drop-in keeps the socket
   accessible to the operator across every restart, so GUI tools connect.
+- **The GPU is now actually used for the LLMs** (§6a) — ollama had been running
+  every model on CPU. A chatbot question went from **94s to 2–8s**.
+- **Python fixed to a final release** (§6a) — the GPU image was building on
+  3.11.0rc1, which silently broke semantic search over query history.
+- **Database credentials moved out of the environment** (§2) — seven new secret
+  files; `docker inspect` now exposes no credential on any service.
 
 ---
 
@@ -89,16 +95,39 @@ because a variable set but referenced nowhere is how a rename hides.
 
 ### Secrets are passed as file *paths*, never values
 
-Three credentials are too sensitive for an environment variable:
+**Every** credential a container needs arrives as a mounted file, never as an
+environment value — ten of them:
 
 ```
-secrets/jwt_secret                → JWT_SECRET_KEY_FILE=/run/secrets/jwt_secret
-secrets/bootstrap_admin_password  → BOOTSTRAP_ADMIN_PASSWORD_FILE=...
-secrets/webhook_api_keys          → WEBHOOK_API_KEYS_FILE=...
+secrets/jwt_secret                  → JWT_SECRET_KEY_FILE
+secrets/bootstrap_admin_password    → BOOTSTRAP_ADMIN_PASSWORD_FILE
+secrets/webhook_api_keys            → WEBHOOK_API_KEYS_FILE
+secrets/database_url_app            → DATABASE_URL_FILE        (api, ml_worker)
+secrets/database_url_migrator       → DATABASE_URL_FILE        (migrate)
+secrets/postgres_password_app       → POSTGRES_PASSWORD_FILE   (api, ml_worker)
+secrets/postgres_password_migrator  → POSTGRES_PASSWORD_FILE   (migrate)
+secrets/redis_url                   → REDIS_URL_FILE
+secrets/sql_agent_db_password       → SQL_AGENT_DB_PASSWORD_FILE
+secrets/backup_db_password          → read by backup-loop.sh AND backup.sh (deploy.sh backup), exported in-process
 ```
 
-The app receives a **filename** and opens it itself. That is why no credential
-appears in `docker inspect`, a crash dump, or a log line.
+The app receives a **filename** and opens it itself (`config.py` resolves every
+`*_FILE` in `Settings.__init__`, and the file wins over any inline value). That
+is why `docker inspect` on any service shows **no credential value** — verified
+across all eleven containers. The one exception is the postgres image's own
+first-boot `POSTGRES_PASSWORD`, which the image itself requires in its
+environment.
+
+The database credentials used to be inline (`DATABASE_URL` with the password
+embedded, `POSTGRES_PASSWORD`, `PGPASSWORD` on the backup service) and were
+therefore visible to anyone who could run `docker inspect` — and in every
+support bundle or pasted terminal that output lands in. The `_FILE` variants
+already existed in `config.py`; compose simply never used them.
+
+The DB files are **derived from `docker/.env`** by `generate-secrets.sh`, which
+stays the source the postgres init and `db/roles.sql` read. Two copies of one
+password, deliberately: `.env` is never mounted, and the files are never in
+`environment:`.
 
 Files are `0440 root:1000` — readable by the service, writable by nobody. The
 `secrets/` directory is `0750 root:1000`, so you can read one without sudo:
@@ -731,6 +760,131 @@ throttle (8 failed attempts per account, 30 per IP, over 15 minutes).
 
 ---
 
+## 6a. The chatbot, the GPU, and why it was slow
+
+### What runs where
+
+Two different GPU workloads share the one RTX 5090:
+
+| Workload | Runs on | Used for |
+|---|---|---|
+| SCRFD + ArcFace | ONNX Runtime + CUDA | face detection and recognition |
+| ollama (3 models) | llama.cpp + CUDA | the chatbot and SQL generation |
+
+Three models stay resident (`OLLAMA_KEEP_ALIVE=-1`), about 15 GB of the card's
+32 GB:
+
+```
+qwen2.5:7b                      the chat / tool-selecting model  (OLLAMA_MODEL)
+Arctic-Text2SQL-R1-7B           SQL generation                   (OLLAMA_SQL_MODEL)
+qwen2.5:1.5b                    the previous chat model, still cached
+```
+
+### The defect that made it slow
+
+A chatbot question took **94 seconds**. The models were not the problem —
+`ollama ps` was:
+
+```
+NAME                    PROCESSOR
+Arctic-Text2SQL-R1-7B   100% CPU     <- on a host with an idle RTX 5090
+qwen2.5:7b              100% CPU
+qwen2.5:1.5b            100% CPU
+```
+
+Root cause was in `scripts/deploy/stage-gpu.sh`:
+
+```bash
+if [ -n "$ollama_uuid" ]; then      # only ever true on a 2-GPU host
+```
+
+On a single-GPU host that variable is empty, so the generated overlay printed
+
+```
+#   ollama           -> (shares the face_recognition GPU)
+```
+
+in its header **and emitted no device reservation for ollama at all**. Compose
+needs a `deploy.resources.reservations.devices` entry before the NVIDIA runtime
+will inject the GPU; `NVIDIA_VISIBLE_DEVICES=all` on the service does nothing on
+its own. The file documented sharing and configured none.
+
+ollama now always gets a reservation — its own card on a 2-GPU host, the *same*
+UUID as face_recognition on a 1-GPU host.
+
+### The difference it made
+
+| | on CPU | on GPU |
+|---|---|---|
+| Arctic SQL 7B, warm | 24.1s | **1.0s** |
+| qwen2.5:7b, warm | 3.0s | **0.1s** |
+| **a full chatbot question** | **94s** | **2–8s** |
+
+Verify it yourself at any time — `PROCESSOR` must say GPU, not CPU:
+
+```bash
+sudo docker exec face_detector_prod-ollama-1 ollama ps
+nvidia-smi --query-gpu=memory.used,memory.free --format=csv
+```
+
+### Why the chat model is qwen2.5:7b and not 1.5b
+
+Measured on this host with the real 11-tool payload:
+
+| | native tool calls | wrong tool |
+|---|---|---|
+| qwen2.5:1.5b | 3 of 6 (2 unparseable) | 1 |
+| qwen2.5:7b | **6 of 6** | 0 |
+
+The 1.5B advertises function calling but often returns prose the fallback
+parser has to rescue, and once chose `list_my_documents` for "list the people
+seen at the north gate". The 7B answers both correctly and honestly — *"No
+person named 'Joey' is enrolled"* rather than inventing one.
+
+Once ollama is on the GPU the 7B costs nothing in warm latency (0.1s for both).
+End to end it is a little slower — **7–8s vs 2–3s** — because it generates more
+tokens. That is the trade: correct in 8s over wrong in 3s. To revert, set
+`OLLAMA_MODEL: qwen2.5:1.5b` in `docker/docker-compose.prod.yml` and recreate.
+
+### Python must be a FINAL 3.11, never an RC
+
+`docker/Dockerfile.gpu` installs Python from the **deadsnakes** PPA, not from
+Ubuntu. This is deliberate: jammy's `python3.11` package is
+`3.11.0~rc1-1~22.04.1`, a release *candidate*. It lacks
+`sys.get_int_max_str_digits`, which torch's `_dynamo` polyfill needs at import,
+and the failure surfaced three layers away:
+
+```
+sentence_transformers -> "Could not import PreTrainedModel"
+transformers          -> AttributeError
+torch/_dynamo         -> sys.get_int_max_str_digits      <- the real cause
+```
+
+Every chatbot question then logged *"no embedding produced — semantic query
+search degraded"* while everything else looked healthy. The CPU image never had
+this: it builds `FROM python:3.11-slim`.
+
+The Dockerfile now asserts at build time, so an RC cannot return silently:
+
+```dockerfile
+RUN ... && python3.11 -c "import sys; assert hasattr(sys, 'get_int_max_str_digits')"
+```
+
+### torch is pinned to the CPU build on purpose
+
+Both requirements files pin `torch==2.13.0+cpu`. torch exists only because
+`sentence-transformers` needs it, for one 384-dim embedding that runs on CPU in
+milliseconds. The CUDA build would add several GB and contend for the same card
+SCRFD and ArcFace need.
+
+The pin is load-bearing: `--extra-index-url` **adds** an index, it does not
+prefer one. pip resolves the highest version across PyPI *and* the CPU index, so
+an unpinned `torch` silently resolved to the PyPI CUDA build and began pulling
+`nvidia_cublas_cu12` (581 MB) and friends. The `+cpu` local version exists only
+on the pytorch index, so naming it forces the CPU wheel.
+
+---
+
 ## 7. Everyday commands
 
 ```bash
@@ -858,6 +1012,9 @@ Rancher Desktop has the same problem, for the same reason.
 | Docker GUI: "permission denied" on the socket | your session predates the `docker` group (§7a) |
 | `docker ps` empty while the site serves | CLI pointed at Docker Desktop's engine — `docker context use default` |
 | `deploy.sh paths` reports DRIFT | someone changed an owner without updating `paths.sh` (§5a) |
+| chatbot takes ~90s to answer | ollama is on CPU — `ollama ps` must say GPU (§6a) |
+| "semantic query search degraded" in the log | Python is an RC, not a final 3.11 (§6a) |
+| image build pulls GB of `nvidia_*` wheels | `torch` lost its `+cpu` pin (§6a) |
 
 Start with `sudo ./deploy.sh doctor`. It is read-only, orders findings by
 dependency, and prints the command that fixes each one. **Read the first

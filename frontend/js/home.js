@@ -61,12 +61,13 @@ const KPI_CARDS = [
     ['kpi-tracker', 'kpi-tracker-value', 'kpi-tracker-note']
 ];
 
-const DATA_PANELS = ['pipelines-section', 'queue-panel', 'storage-panel', 'tracker-panel'];
+const DATA_PANELS = ['pipelines-section', 'queue-panel', 'storage-panel', 'tracker-panel', 'retention-panel'];
 
 const DATA_FIELDS = [
     'pl-active', 'pl-detections',
     'q-size', 'q-max', 'q-processing', 'q-received', 'q-processed', 'q-skipped',
     'st-used', 'st-max', 'st-files', 'st-used-gb', 'st-retention',
+    'rt-data', 'rt-tasks', 'rt-search', 'rt-audit', 'rt-snapshots', 'rt-embeddings', 'rt-logs', 'rt-backups',
     'tk-pipelines', 'tk-faces', 'tk-added', 'tk-skipped', 'tk-duplicates',
     'tk-window', 'tk-notify', 'tk-memory'
 ];
@@ -595,6 +596,56 @@ function renderStorage(stats) {
     return status;
 }
 
+// Read-only retention panel. One row per window that prunes the database or
+// its files: [value element id, /api/stats path, unit]. The unit is rendered
+// next to the figure, so a tile reads "365 days" / "12 months" / "48 hours".
+const RETENTION_TILES = [
+    ['rt-data',       'retention.data_days',                'day'],
+    ['rt-tasks',      'retention.task_history_days',        'day'],
+    ['rt-search',     'retention.search_history_days',      'day'],
+    ['rt-audit',      'retention.audit_log_days',           'day'],
+    ['rt-snapshots',  'retention.identity_snapshot_days',   'day'],
+    ['rt-embeddings', 'retention.identity_embedding_months', 'month'],
+    ['rt-logs',       'retention.logs_hours',               'hour'],
+    ['rt-backups',    'retention.backup_days',              'day']
+];
+
+function renderRetention(stats) {
+    let reported = 0;
+    RETENTION_TILES.forEach(function (tile) {
+        const value = safeNumber(stats, tile[1]);
+        if (value === null) {
+            setText(tile[0], EM_DASH);
+            setText(tile[0] + '-unit', '');
+            return;
+        }
+        reported += 1;
+        setText(tile[0], formatInt(value));
+        setText(tile[0] + '-unit', value === 1 ? tile[2] : tile[2] + 's');
+    });
+
+    // The cadence lines say WHEN a window is enforced, which is the question
+    // that follows "how long" — a 365-day window checked daily deletes a
+    // record within a day of it ageing out, not on the day itself.
+    const every = safeNumber(stats, 'retention.cleanup_interval_hours');
+    setText('rt-data-note', every === null
+        ? 'Detections, events and their image files'
+        : 'Detections, events and their image files · cleanup runs every ' + plural(every, 'hour'));
+    const identityEvery = safeNumber(stats, 'retention.identity_cleanup_interval_hours');
+    setText('rt-snapshots-note', identityEvery === null
+        ? 'Face snapshots of unknown identities'
+        : 'Face snapshots of unknown identities · cleanup runs every ' + plural(identityEvery, 'hour'));
+    setText('rt-embeddings-note', identityEvery === null
+        ? 'Face vectors of identities not seen since'
+        : 'Face vectors of identities not seen since · cleanup runs every ' + plural(identityEvery, 'hour'));
+    const backupEvery = safeNumber(stats, 'retention.backup_interval_hours');
+    setText('rt-backups-note', backupEvery === null
+        ? 'Database dumps on the backup volume'
+        : 'Database dumps on the backup volume · a new backup every ' + plural(backupEvery, 'hour'));
+
+    setState('retention-panel', reported === 0 ? 'unavailable' : 'ready');
+}
+
 function renderPipelineFigures(stats) {
     const active = safeNumber(stats, 'pipelines.active');
     setText('pl-active', formatInt(active));
@@ -677,6 +728,7 @@ function renderAll(stats) {
     ];
 
     renderPipelineFigures(stats);
+    renderRetention(stats);
     renderHeadlineKpis(stats);
     renderHealthSummary(statuses);
     renderOverall(stats, statuses);

@@ -81,6 +81,16 @@ DEPLOY_FILES=(
   "secrets/jwt_secret               0440  root:1000  read by face_recognition + migrate"
   "secrets/bootstrap_admin_password 0440  root:1000  read by face_recognition"
   "secrets/webhook_api_keys         0440  root:1000  read by face_recognition + migrate"
+  # Database / cache credentials as files, so none of them sits in a container's
+  # `environment:` where `docker inspect` would print it. Derived from docker/.env
+  # by generate-secrets.sh; same mode as every other secret.
+  "secrets/database_url_app         0440  root:1000  fr_app URL: face_recognition + ml_worker"
+  "secrets/database_url_migrator    0440  root:1000  fr_migrator URL: migrate"
+  "secrets/postgres_password_app    0440  root:1000  fr_app password: face_recognition + ml_worker"
+  "secrets/postgres_password_migrator 0440 root:1000 fr_migrator password: migrate"
+  "secrets/redis_url                0440  root:1000  read by face_recognition + migrate"
+  "secrets/sql_agent_db_password    0440  root:1000  fr_readonly: face_recognition + migrate"
+  "secrets/backup_db_password       0440  root:1000  fr_backup: exported by backup-loop.sh"
   "docker/redis/users.acl           0640  999:1000   read by redis (uid 999 in redis:7-alpine)"
   # Written by stage-gpu.sh running as root, so without an entry here it stayed
   # root-owned and was the only file in the repo the host user could not edit.

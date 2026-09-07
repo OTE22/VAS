@@ -132,6 +132,39 @@ EOF
     WROTE_COMPOSE_ENV=1
 fi
 
+# ---------------------------------------------------------------------------
+# Credential FILES for the containers, derived from docker/.env
+#
+# Compose used to embed these in `environment:` (DATABASE_URL with the password
+# inline, POSTGRES_PASSWORD, REDIS_URL, SQL_AGENT_DB_PASSWORD, PGPASSWORD), so
+# every one of them was readable via `docker inspect`. config.py already
+# resolves *_FILE variants for all of them; compose now mounts these instead.
+#
+# Read back from docker/.env rather than from this run's variables: on an
+# EXISTING deployment the variables above are fresh random values that do not
+# match the live database, while docker/.env is what the roles were created
+# with. Deriving from the file is correct on a fresh install and a re-run alike.
+# write_secret never overwrites, so re-running cannot re-key a live deployment.
+# ---------------------------------------------------------------------------
+echo
+echo "Generating credential files from ${COMPOSE_ENV}..."
+env_value() { grep "^$1=" "$COMPOSE_ENV" | head -1 | cut -d= -f2-; }
+_app="$(env_value FR_APP_PASSWORD)"; _mig="$(env_value FR_MIGRATOR_PASSWORD)"
+_ro="$(env_value FR_READONLY_PASSWORD)"; _bk="$(env_value FR_BACKUP_PASSWORD)"
+_rp="$(env_value REDIS_PASSWORD)"
+if [ -z "$_app" ] || [ -z "$_mig" ] || [ -z "$_ro" ] || [ -z "$_bk" ] || [ -z "$_rp" ]; then
+    echo "  ! ${COMPOSE_ENV} is missing a password; credential files not written" >&2
+else
+    write_secret database_url_app       "postgresql+asyncpg://fr_app:${_app}@postgres:5432/face_recognition"
+    write_secret database_url_migrator  "postgresql+asyncpg://fr_migrator:${_mig}@postgres:5432/face_recognition"
+    write_secret postgres_password_app       "$_app"
+    write_secret postgres_password_migrator  "$_mig"
+    write_secret redis_url              "redis://fr_app:${_rp}@redis:6379/0"
+    write_secret sql_agent_db_password  "$_ro"
+    write_secret backup_db_password     "$_bk"
+fi
+unset _app _mig _ro _bk _rp
+
 cat <<EOF
 
 ------------------------------------------------------------------------

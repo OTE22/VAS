@@ -36,11 +36,33 @@ ENV PYTHONUNBUFFERED=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-# Install Python 3.11
+# Install Python 3.11 — from deadsnakes, NOT from jammy.
+#
+# Ubuntu 22.04 never shipped a final CPython 3.11: `apt-cache policy python3.11`
+# on this base returns 3.11.0~rc1-1~22.04.1, a RELEASE CANDIDATE. That RC is
+# missing sys.get_int_max_str_digits (added in 3.11.0 final), which torch's
+# _dynamo polyfill references at import time. The result was a three-layer
+# masked failure in production:
+#
+#     sentence_transformers -> "Could not import PreTrainedModel"
+#     transformers          -> AttributeError
+#     torch/_dynamo         -> sys.get_int_max_str_digits   <- the real cause
+#
+# Every SQL-agent query then logged "no embedding produced - semantic query
+# search degraded" while the rest of the app looked healthy. The CPU image
+# never had this: it builds FROM python:3.11-slim and gets 3.11.16.
+#
+# deadsnakes provides 3.11.15 for jammy, which brings this image in line.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-dev \
-    python3-pip \
+        software-properties-common gnupg \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3.11-dev \
+        python3.11-distutils \
+        python3-pip \
+    && python3.11 -c "import sys; assert hasattr(sys, 'get_int_max_str_digits'), \
+        f'got Python {sys.version.split()[0]} - not a final 3.11 release'" \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python and pip

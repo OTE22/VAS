@@ -66,18 +66,29 @@ services:
               device_ids: ["${api_uuid}"]
               capabilities: [gpu]
 EOF
-    if [ -n "$ollama_uuid" ]; then
-        cat <<EOF
+    # ollama ALWAYS gets a reservation. On a 2-GPU host it gets its own card;
+    # on a 1-GPU host it reserves THE SAME uuid as face_recognition, which is
+    # what "shares the GPU" has to mean in compose terms.
+    #
+    # This block used to be skipped entirely when $ollama_uuid was empty (the
+    # single-GPU case). The header still printed
+    # "ollama -> (shares the face_recognition GPU)", so the file DOCUMENTED
+    # sharing while configuring none: without a device reservation the nvidia
+    # runtime injects nothing, and `NVIDIA_VISIBLE_DEVICES=all` on the service
+    # is inert. Ollama then silently ran every model on CPU - `ollama ps`
+    # showed "100% CPU" - which made a SQL-agent question take ~94s on a host
+    # with an idle RTX 5090.
+    local ollama_device="${ollama_uuid:-$api_uuid}"
+    cat <<EOF
   ollama:
     deploy:
       resources:
         reservations:
           devices: !override
             - driver: nvidia
-              device_ids: ["${ollama_uuid}"]
+              device_ids: ["${ollama_device}"]
               capabilities: [gpu]
 EOF
-    fi
 }
 
 # uuid_for_index: resolve an nvidia-smi index to its stable UUID.
@@ -191,11 +202,22 @@ stage_gpu_detect() {
     if [ "$DRY_RUN" != "1" ] && [ "${VALIDATE_ONLY:-0}" != "1" ]; then
         printf '%s' "$rendered" | grep -q "$api_uuid" || \
             stage_fail "the merged configuration does not carry the intended device id for face_recognition"
+        # Both face_recognition AND ollama always carry exactly one reservation
+        # now: render_gpu_overlay emits an ollama block on a 1-GPU host too,
+        # pointing at the same card. So the merged config must hold exactly TWO
+        # device_ids entries regardless of GPU count. "Appended instead of
+        # overriding" - the failure this guards - would show as three or more.
+        # This used to expect 1 unless a second GPU existed, which was correct
+        # only while ollama had no reservation at all (and silently ran on CPU).
         local device_lines
         device_lines="$(printf '%s' "$rendered" | grep -c 'device_ids' || true)"
-        local expected=1; [ -n "$ollama_uuid" ] && expected=2
+        local expected=2
         [ "$device_lines" = "$expected" ] || \
             stage_fail "merged configuration has $device_lines device_ids entries, expected $expected (compose merge appended instead of overriding)"
+        # And ollama's reservation must actually be there: the regression this
+        # catches is ollama losing its GPU and falling back to CPU without error.
+        printf '%s' "$rendered" | awk '/^  ollama:/{f=1} f&&/device_ids/{found=1} f&&/^  [a-z_]+:/&&!/^  ollama:/{exit} END{exit !found}' || \
+            stage_fail "the merged configuration carries no device reservation for ollama (it would run on CPU)"
     fi
 
     # One CUDA session per process. The single-flight guards and model caches

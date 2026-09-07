@@ -1090,3 +1090,77 @@ body.hp[data-freshness="stale"] .hp-defs dd { opacity: .72; }
   .hp-kpi-grid { grid-template-columns: 1fr; }
   .hp-health-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------------------
+   Data retention — read-only policy tiles. Same surface, radius and type
+   scale as .hp-defs / .hp-kpi so the panel reads as part of the page, with
+   the figure one step larger than a definition value because the number IS
+   the content here.
+   --------------------------------------------------------------------------- */
+.hp-retention {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr));
+  gap: var(--hp-space-3);
+}
+
+.hp-retention__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hp-space-1);
+  min-width: 0;
+  padding: var(--hp-space-4);
+  border-radius: var(--hp-radius-md);
+  background: var(--hp-surface);
+  border: 1px solid var(--hp-border);
+  box-shadow: inset 3px 0 0 var(--hp-primary);
+}
+
+.hp-retention__label {
+  font-size: var(--hp-fs-label);
+  font-weight: var(--hp-fw-semibold);
+  letter-spacing: var(--hp-ls-label);
+  text-transform: uppercase;
+  color: var(--hp-text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--hp-space-2);
+}
+
+.hp-retention__label i { color: var(--hp-primary); font-size: .8em; }
+
+.hp-retention__value {
+  font-size: var(--hp-fs-figure);
+  font-weight: var(--hp-fw-heavy);
+  line-height: var(--hp-lh-tight);
+  letter-spacing: var(--hp-ls-tight);
+  color: var(--hp-text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.hp-retention__unit {
+  font-size: var(--hp-fs-sm);
+  font-weight: var(--hp-fw-medium);
+  letter-spacing: 0;
+  color: var(--hp-text-muted);
+}
+
+.hp-retention__note {
+  font-size: var(--hp-fs-label);
+  color: var(--hp-text-muted);
+  line-height: var(--hp-lh-snug);
+  overflow-wrap: anywhere;
+}
+
+.hp-retention__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--hp-space-2);
+  font-size: var(--hp-fs-label);
+  color: var(--hp-text-muted);
+}
+
+.hp-retention__foot i { color: var(--hp-text-faint); font-size: .9em; }
+
+.hp-panel[data-state="loading"] .hp-retention__value,
+.hp-panel[data-state="unavailable"] .hp-retention__value { color: var(--hp-text-faint); }
