@@ -760,6 +760,39 @@ a change on first login, and the file stops working once you set a real one.
 There is **no account lockout** and no self-service reset — only a sliding
 throttle (8 failed attempts per account, 30 per IP, over 15 minutes).
 
+### 6b. Accounts survive rebuilds — what the bootstrap password does and does not do
+
+The bootstrap password is used **once in the life of a database**: at the first
+boot with an empty `users` table the API creates `admin` from
+`secrets/bootstrap_admin_password` and sets `must_change_password`, so the first
+login is redirected to `/change-password`. Changing it there clears the flag and
+stamps `password_changed_at`. From then on:
+
+- **A rebuild, `deploy.sh upgrade`, restart or rollback never resets a password
+  or re-arms the forced change.** Accounts live in the `postgres_data` volume,
+  which every deploy path preserves (§14); the image only carries code. After a
+  rebuild you log in with whatever password the account had before it.
+- **To change your own password:** log in and open `/change-password`
+  (`POST /api/auth/change-password`). Do this whenever a password has been
+  written down, pasted into a chat or shared.
+- **To reset another user's password as an administrator:** the Users page
+  (`POST /api/users/{id}/reset-password`). An administrator cannot delete or
+  demote the last administrator.
+- **To see the state of an account** (read-only, from the host):
+
+  ```bash
+  sudo docker exec -e PGPASSWORD="$(sudo grep '^FR_READONLY_PASSWORD=' docker/.env | cut -d= -f2-)" \
+    face_detector_prod-postgres-1 psql -h 127.0.0.1 -U fr_readonly -d face_recognition \
+    -c "select username, role, is_active, must_change_password, password_changed_at, last_login from users"
+  ```
+
+- **The bootstrap flow happens again only on a fresh database.** A new
+  production install starts empty and therefore forces the change on the first
+  login automatically (`BOOTSTRAP_ADMIN_REQUIRE_ROTATION=true` on the API). To
+  rehearse it on an existing host you would have to destroy the database
+  (`sudo ./deploy.sh uninstall --purge-data`, then install again) — there is no
+  switch that re-arms the bootstrap on a populated database, by design.
+
 ---
 
 ## 6a. The chatbot, the GPU, and why it was slow
