@@ -510,7 +510,9 @@ class SQLAgentTools:
             # translation); another query is refused as a repeat.
             queried_ok = any(o.get("tool") == "query_database" for o in done_ok)
             if (committed["signature"] in done
-                    or (committed.get("tool") == "query_database" and queried_ok)):
+                    or (committed.get("tool") in ("query_database",
+                                                  "modify_previous_query")
+                        and queried_ok)):
                 # "Is the whole request done?" said no, and the model then
                 # committed the SAME action again: one question ran an
                 # identical 165-row query three times until the 300 s run
@@ -573,6 +575,41 @@ class SQLAgentTools:
                 return None
         arguments = call.get("arguments") or {}
         action = planned.get("action")
+        spoken_text = str(state.get("normalized_input") or "")
+        if name == "generate_document" and action == "clarify":
+            # "I want JOEY's tracking report as a PDF in Arabic" with no
+            # result yet was met with "I don't have anything to put in a
+            # document" (Opik 01a07860-f7c9). The message names a subject
+            # the data knows: the query runs first, is narrated, and the
+            # file is rendered from that narrative in the same turn.
+            from . import interpreter as _interp
+            known = [str((e or {}).get("display_name") or "")
+                     for e in (state.get("identity_index") or [])]
+            try:
+                known += [c.get("location") or c.get("camera") or ""
+                          for c in self._all_cameras()]
+            except Exception:
+                pass
+            if _interp._mentions_any(spoken_text, [k for k in known if k]):
+                state["document_after_query"] = {
+                    "format": arguments.get("format") or "pdf",
+                    "language": arguments.get("language")}
+                planned = {"action": "query_database", "confidence": 0.9,
+                           "source": "tool_loop"}
+                action = "query_database"
+                name = "query_database"
+                arguments = {"question": spoken_text,
+                             "response_shape": "report"}
+                logger.info("[REACT] document requested before any result; "
+                            "querying first, the file follows")
+        elif name == "query_database" and not state.get("document_after_query"):
+            from . import interpreter as _interp
+            wanted = _interp.requested_file_format(spoken_text)
+            if wanted:
+                # The message names a file format the loop did not carry:
+                # the query is the first step, the file the second.
+                state["document_after_query"] = {
+                    "format": wanted, "language": arguments.get("language")}
         is_chat = name == "answer_directly"
         contextual_chat = is_chat and bool(arguments.get("uses_context"))
         state["turn_kind"] = "chat" if is_chat or action == "clarify" else "data"
@@ -627,6 +664,39 @@ class SQLAgentTools:
                                if name == "ask_clarifying_question" else ""),
         ).as_dict()
 
+        if (name == "query_database" and arguments.get("uses_context")
+                and _has_a_previous_turn(state, candidates)):
+            # A follow-up is the USER'S words plus what they refer to. The
+            # model's paraphrase replaced "which of those cameras saw him the
+            # most?" with the previous turn's tracking task, and "only on
+            # 2026-08-18" pinned the camera the previous ANSWER named instead
+            # of re-ranking the day (Opik 01a0785a-d39e, 01a0785d-1e56).
+            # Python composes the reference from state; the reading's
+            # paraphrase is kept only as a hint.
+            previous = (candidates.get("last_result") or {})
+            prev_q = " ".join(str(previous.get("question") or "").split())[:300]
+            spoken = " ".join(str(state.get("normalized_input") or "").split())
+            refs = [n for n in people if n]
+            if not refs and prev_q:
+                # Nobody was resolved this turn ("at which cameras?" names
+                # no one): the subject is whoever the previous question named,
+                # read from the stored names, so an Arabic follow-up keeps
+                # IRON MAN in front of the generator (Opik 01a07891-f749).
+                try:
+                    refs = list(self._names_in_text(prev_q, state))
+                except Exception:
+                    refs = []
+            if spoken and prev_q and spoken.casefold() != prev_q.casefold():
+                # Short, subject first; the previous SQL also reaches the
+                # generator through its conversation-context block.
+                if refs:
+                    composed = (f"{spoken} (about {', '.join(refs)}; "
+                                f"a follow-up to: \"{prev_q}\")")
+                else:
+                    composed = f"{spoken} (a follow-up to: \"{prev_q}\")"
+                question = composed
+                logger.info("[REACT] follow-up composed from the message and "
+                            "the previous question")
         if name == "query_database" and question:
             # A paraphrase that is a strict PREFIX of the user's own words is
             # the message cut short - the model's tool-call JSON broke at
@@ -646,6 +716,20 @@ class SQLAgentTools:
             key: value for key, value in planned.items()
             if key in planner.PlannedAction.__slots__
         })
+
+    def _names_a_stored_subject(self, state: AgentState) -> bool:
+        """Does the message itself name an enrolled person or a real camera?
+        A fact checked against the stored names, not a reading of intent."""
+        from . import interpreter as _interp
+        known = [str((e or {}).get("display_name") or "")
+                 for e in (state.get("identity_index") or [])]
+        try:
+            known += [c.get("location") or c.get("camera") or ""
+                      for c in self._all_cameras()]
+        except Exception:
+            pass
+        return _interp._mentions_any(str(state.get("normalized_input") or ""),
+                                    [k for k in known if k])
 
     def _suspend_for_unknown_name(self, state: AgentState, needle: str, reading):
         """The request names someone who is not enrolled: ask, with the
@@ -765,6 +849,21 @@ class SQLAgentTools:
                 confidence=0.95, source="interpreter",
                 language=reading.language, format=reading.format,
                 target="last_result")
+        elif (reading.wants == interpreter.DOCUMENT
+                and not planner.has_actionable_context(candidates or {})
+                and (reading.people or reading.camera
+                     or self._names_a_stored_subject(state))):
+            # Nothing to render yet, but the message names a subject the
+            # data knows: the query runs first, the file follows from its
+            # narration (the same two steps the loop path takes).
+            state["document_after_query"] = {"format": reading.format or "pdf",
+                                             "language": reading.language}
+            plan = planner.PlannedAction("query_database", confidence=0.95,
+                                         source="interpreter")
+            state["sql_generation_input"] = str(
+                state.get("normalized_input") or reading.question or "")[:500]
+            logger.info("[INTERPRET] document requested before any result; "
+                        "querying first, the file follows")
         elif reading.wants == interpreter.DOCUMENT:
             plan = planner.PlannedAction(
                 "generate_document", confidence=0.95, source="interpreter",
@@ -919,7 +1018,21 @@ class SQLAgentTools:
         if tool_call:
             planned = self._apply_model_tool_call(
                 state, tool_call, tool_trace, candidates)
+            answered_by_query = any(
+                o.get("tool") == "query_database" and o.get("status") == "ok"
+                for o in (state.get("observations") or []))
             if (planned is not None and tool_call.get("name") == "answer_directly"
+                    and getattr(planned, "action", None) == "chat"
+                    and answered_by_query):
+                # The rows this turn fetched ARE the answer. Handing the
+                # reading a second opinion here re-planned a narrowed query
+                # over a correct two-row comparison and answered from one
+                # row (Opik 01a07857-1b27, 2026-09-06). Narrate what exists.
+                state["repeat_refused"] = True
+                planned = None
+                logger.info("[REACT] answer_directly after a successful query; "
+                            "narrating the held result")
+            elif (planned is not None and tool_call.get("name") == "answer_directly"
                     and getattr(planned, "action", None) == "chat"):
                 # Two model paths; when the loop says "answer directly" the
                 # reading - which sees the situation and the closed lists -
@@ -1144,7 +1257,30 @@ class SQLAgentTools:
             state["actions_taken"] = taken
             ceiling = int(settings.SQL_AGENT_MAX_ACTIONS_PER_TURN)
 
-            if taken < ceiling:
+            # A re-execution that stands in for a refused repeat IS the answer:
+            # asking again whether the request is complete re-entered the loop,
+            # which refused again and re-executed again - three executions and
+            # three model calls per correct one-row answer (Opik 01a07841-9405).
+            already_refused = bool(state.get("repeat_refused")) or (
+                (state.get("planned_action") or {}).get("source") == "repeat_refused")
+            if (not state.get("document_after_query")
+                    and observation.get("action") == "query_database"
+                    and not observation.get("artifact_id")):
+                from . import interpreter as _interp
+                wanted = _interp.requested_file_format(
+                    state.get("normalized_input") or "")
+                if wanted:
+                    # The message names a file: narrate the rows first, then
+                    # render that narrative. Re-entering the loop rendered a
+                    # 'Query summary' stub because nothing had been written yet.
+                    state["document_after_query"] = {
+                        "format": wanted,
+                        "language": ((state.get("interpretation") or {}).get("language")
+                                     or state.get("response_language"))}
+            if state.get("document_after_query"):
+                logger.info("[REASONING] query narrated next, then the "
+                            "requested file is rendered from it")
+            elif taken < ceiling and not already_refused:
                 done_summary = (f"{observation.get('action')} "
                                 f"(rows={observation.get('row_count')}, "
                                 f"artifact={bool(observation.get('artifact_id'))})")
@@ -1635,8 +1771,28 @@ class SQLAgentTools:
                 "strings. You need not name all of them.")
 
     @staticmethod
+    def _rows_for_names(state, names, limit: int = 12):
+        """The result rows that carry one of `names` in any column, rendered
+        as 'name: column value, column value'. Python reads the rows; the
+        narration that dropped them is completed, not trusted."""
+        rows = ((state.get("query_result") or {}).get("rows") or [])[:limit]
+        out = []
+        for name in names:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if any(str(v).strip() == str(name).strip() for v in row.values()):
+                    rest = [f"{k} {v}" for k, v in row.items()
+                            if str(v).strip() != str(name).strip() and v not in (None, "")]
+                    out.append(f"{name}: " + ", ".join(rest) if rest else str(name))
+                    break
+            else:
+                out.append(str(name))
+        return out
+
+    @staticmethod
     def _names_as_stored_footer(missing, language: str) -> str:
-        listed = ", ".join(missing)
+        listed = "; ".join(missing) if any(":" in str(m) for m in missing) else ", ".join(missing)
         if (language or "en") == "ar":
             return f"\n\nالأسماء كما هي مسجلة في النظام: {listed}"
         return f"\n\nNames as stored in the system: {listed}"
@@ -1654,8 +1810,11 @@ class SQLAgentTools:
             return response_text
         logger.info("[STEP_6] narration dropped or translated %d identifier(s); "
                     "appending them as stored", len(missing))
+        rows = ((state.get("query_result") or {}).get("rows") or [])
+        direct = bool(rows) and cls._answer_shape(state, len(rows)) == "direct"
         footer = cls._names_as_stored_footer(
-            missing, state.get("response_language") or "en")
+            cls._rows_for_names(state, missing) if direct else list(missing),
+            state.get("response_language") or "en")
         if streaming_callback:
             streaming_callback({"type": "content", "content": footer,
                                 "step": "response"})
@@ -1959,7 +2118,12 @@ class SQLAgentTools:
     def _direct_prompt(self, state, rows, row_count: int):
         if self._answer_shape(state, row_count) != "direct":
             return None
-        preview = json.dumps(rows[:self._DIRECT_MAX_ROWS], indent=2,
+        # Every row that qualified for a direct read-out is handed over: the
+        # prompt demands each row appear, yet 7 per-camera averages arrived
+        # as 3 under a 'Rows (7 returned)' header and the narrator invented
+        # the pairing (Opik 01a07841-9405, 2026-09-06).
+        preview = json.dumps(rows[:max(self._DIRECT_MAX_ROWS,
+                                       self._SUMMARY_DIRECT_MAX_ROWS)], indent=2,
                              default=str)
         return ChatPromptTemplate.from_messages([
             SystemMessage(content=(
@@ -4353,6 +4517,16 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         path, not two.
         """
         plan = state.get("planned_action") or {}
+        pending = state.pop("document_after_query", None) or {}
+        if pending:
+            # The query was narrated a moment ago; that narrative is the
+            # document. The plan still describes the query, so the file's
+            # format and language come from the pending request.
+            state["planned_action"] = {**plan, "action": "generate_document",
+                                       "format": pending.get("format") or "pdf",
+                                       "language": pending.get("language"),
+                                       "target": "last_result"}
+            plan = state["planned_action"]
         fmt = plan.get("format") or "pdf"
         language = plan.get("language") or state.get("response_language") or "en"
         content = self._document_source_text(state)

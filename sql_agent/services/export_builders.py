@@ -107,7 +107,14 @@ def _shape_rtl(text: str) -> str:
     try:
         import arabic_reshaper
         from bidi.algorithm import get_display
-        return get_display(arabic_reshaper.reshape(_INLINE_TAG.sub("", text)))
+        # The shipped Cairo subset carries the base Arabic letters and their
+        # joined forms but not every ISOLATED presentation form (alef, teh,
+        # reh, feh, waw, yeh ...): a translated report showed boxes where
+        # those letters stood alone (2026-09-06). An isolated letter looks
+        # like its base code point, so the reshaper is told to emit that.
+        reshaper = arabic_reshaper.ArabicReshaper(
+            configuration={"use_unshaped_instead_of_isolated": True})
+        return get_display(reshaper.reshape(_INLINE_TAG.sub("", text)))
     except Exception:
         return text
 
@@ -154,11 +161,43 @@ def _markdown_block(line: str) -> tuple:
     return 0, _markdown_inline(raw)
 
 
+#: A markdown table row: cells between pipes. The separator row (|---|:-:|)
+#: is recognised by its cells being only dashes and colons.
+_MD_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_MD_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _table_rows(lines):
+    """The cell grid of consecutive markdown table lines, separator dropped.
+    Every row is padded to the widest one so reportlab gets a rectangle."""
+    rows = []
+    for line in lines:
+        if _MD_TABLE_SEP.match(line):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        rows.append([_markdown_inline(c) for c in cells])
+    width = max((len(r) for r in rows), default=0)
+    return [r + [""] * (width - len(r)) for r in rows]
+
+
+def _split_table_runs(lines):
+    """[(is_table, [lines])] - runs of table lines and runs of other lines,
+    in order, so a paragraph that mixes a heading and a table keeps both."""
+    runs = []
+    for line in lines:
+        is_table = bool(_MD_TABLE_ROW.match(line)) or bool(_MD_TABLE_SEP.match(line))
+        if runs and runs[-1][0] == is_table:
+            runs[-1][1].append(line)
+        else:
+            runs.append((is_table, [line]))
+    return runs
+
+
 def build_pdf_bytes(safe_title: str, safe_content: str, safe_date: str, analyst: str):
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter, A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import inch
         
@@ -247,6 +286,42 @@ def build_pdf_bytes(safe_title: str, safe_content: str, safe_date: str, analyst:
             if not para.strip():
                 continue
             raw = para.strip()
+            # A markdown table becomes a real table: rendered as prose its
+            # pipes and dashes reached the page verbatim (an Arabic tracking
+            # report, 2026-09-06). Text around it stays a paragraph.
+            runs = _split_table_runs(raw.split('\n'))
+            if any(is_table for is_table, _ in runs):
+                for is_table, run_lines in runs:
+                    if is_table:
+                        grid = _table_rows(run_lines)
+                        if not grid:
+                            continue
+                        rtl = bool(arabic_font and any(_ARABIC_CHAR.search(c) for r in grid for c in r))
+                        cell_style = rtl_body_style if rtl else body_style
+                        cells = [[Paragraph(_shape_rtl(c) if rtl and _ARABIC_CHAR.search(c) else c, cell_style)
+                                  for c in row] for row in grid]
+                        if rtl:
+                            cells = [list(reversed(row)) for row in cells]
+                        table = Table(cells, repeatRows=1, hAlign='LEFT')
+                        table.setStyle(TableStyle([
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#999999')),
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e8f5ee')),
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            ('FONTSIZE', (0, 0), (-1, -1), 9)]))
+                        story.append(table)
+                    else:
+                        text_lines = [_markdown_block(line) for line in run_lines if line.strip()]
+                        if not text_lines:
+                            continue
+                        lvl = text_lines[0][0]
+                        if arabic_font and any(_ARABIC_CHAR.search(l) for l in run_lines):
+                            story.append(Paragraph('<br/>'.join(_shape_rtl(b) for _l, b in text_lines),
+                                                   rtl_header_style if lvl else rtl_body_style))
+                        else:
+                            story.append(Paragraph('<br/>'.join(b for _l, b in text_lines),
+                                                   header_style if lvl else body_style))
+                    story.append(Spacer(1, 0.1*inch))
+                continue
             # Convert the MARKUP before anything else: the marker decides the
             # style, and the marker itself must not reach the page.
             blocks = [_markdown_block(line) for line in raw.split('\n')]

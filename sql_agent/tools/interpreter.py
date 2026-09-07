@@ -301,6 +301,11 @@ def validate(parsed: dict, *, names: List[str], cameras: List[str],
     language = language if language in ("ar", "en") else None
     fmt = str(parsed.get("format") or "").strip().lower()
     fmt = fmt if fmt in ("pdf", "word") else None
+    # A file format is a closed vocabulary, like a camera name: when the
+    # message names one and the reading left the slot empty, the slot is
+    # filled from the message ("Give me a PDF report of X" was read as
+    # plain data and answered as text, Opik 01a0785e-cc62).
+    fmt = fmt or requested_file_format(user_text)
 
     question = " ".join(str(parsed.get("question") or "").split())[:_MAX_QUESTION]
     ask = " ".join(str(parsed.get("question_for_user") or "").split())[:_MAX_QUESTION]
@@ -384,6 +389,23 @@ ASKS_QUESTION = ("Answer YES or NO and nothing else. Does the message ask "
                  "the assistant for anything - a question to answer, data to "
                  "look up, a change, a file, a check? Thanks, greetings, "
                  "acknowledgements and small talk are NO.")
+
+
+#: File formats the document builders produce, as the user names them. A
+#: closed vocabulary of artefact types - not a reading of intent.
+_FILE_FORMAT_TOKENS = (
+    ("pdf", "pdf"), ("docx", "word"), (".doc", "word"),
+    ("word file", "word"), ("word document", "word"), ("ملف وورد", "word"),
+)
+
+
+def requested_file_format(user_text: str):
+    """The downloadable file format the message names, or None."""
+    low = " ".join(str(user_text or "").split()).casefold()
+    for token, fmt in _FILE_FORMAT_TOKENS:
+        if token in low:
+            return fmt
+    return None
 
 
 def _mentions_any(user_text: str, names) -> bool:

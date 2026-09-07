@@ -231,6 +231,9 @@ class AgentState(TypedDict):
     # The tool loop committed an action identical to one that already
     # succeeded this turn; the turn answers from what it has.
     repeat_refused: Optional[bool]
+    # A file the turn asked for, produced AFTER its query is narrated
+    # ({format, language}); see agent_tools._apply_model_tool_call.
+    document_after_query: Optional[Dict]
     # generate_sql keeps the held canonical SQL instead of calling the model.
     reuse_generated_sql: Optional[bool]
     # What the LAST rejected attempt got wrong, fed back into generate_sql

@@ -45,8 +45,9 @@ Choose the final action by what the current request is ABOUT:
 - about the DATA, a new question          -> query_database
 - the SAME question with something changed -> modify_active_query
 - the result just produced, as a file      -> generate_document
-- a file that already exists, in another
-  language                                 -> translate_document
+  (no result yet? query_database first; the file is the next step)
+- the previous answer, or a file that
+  already exists, in another language      -> translate_document
 
 Use the conversation state and tool observations together. The CURRENT USER
 MESSAGE is authoritative. Earlier context helps resolve references but must
@@ -433,7 +434,7 @@ def _says_yes(text: str) -> bool:
 
 _ACTION_DESCRIPTIONS = {
     "generate_document": "turn the previous result into a downloadable file",
-    "translate_document": "restate an existing document in another language",
+    "translate_document": "restate the previous answer or an existing document in another language",
     "modify_active_query": "re-run the previous question with something changed",
     "query_database": "run a query against the surveillance data",
     "update_task_state": "change the active task",

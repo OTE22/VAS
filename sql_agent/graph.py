@@ -287,7 +287,14 @@ def create_sql_agent(conversation_memory=None, db=None) -> StateGraph:
         {name: name for name in _OBSERVATION_TARGETS}
     )
     workflow.add_edge("enrich_co_appearance", "story_response")
-    workflow.add_edge("story_response", "learn_from_query")  # Add learning step
+    # A turn that asked for a file AND had to query first renders the
+    # narrative it just wrote; every other turn goes on to learning.
+    def route_after_story(state: AgentState) -> str:
+        return "render_artifact" if state.get("document_after_query") else "learn_from_query"
+
+    workflow.add_conditional_edges(
+        "story_response", route_after_story,
+        {"render_artifact": "render_artifact", "learn_from_query": "learn_from_query"})
 
     # End nodes
     workflow.add_edge("learn_from_query", END)

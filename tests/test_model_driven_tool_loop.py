@@ -162,7 +162,10 @@ def test_validated_tool_decision_populates_downstream_context():
          "signature": ["query_database", "query-signature"]},
     ]
 
-    plan = tools._apply_model_tool_call(state, call, trace, {})
+    # uses_context is believed only when the session HAS context: a
+    # previous result is what the follow-up refers to.
+    plan = tools._apply_model_tool_call(
+        state, call, trace, {"last_result": {"question": "track joey", "row_count": 3}})
 
     assert plan.action == "query_database"
     assert state["planned_action"]["source"] == "tool_loop"
@@ -182,7 +185,8 @@ def test_conversational_recall_keeps_recent_context_without_querying():
     trace = [{"tool": "answer_directly", "committed": True,
               "signature": ["answer_directly", "recall-signature"]}]
 
-    plan = tools._apply_model_tool_call(state, call, trace, {})
+    plan = tools._apply_model_tool_call(
+        state, call, trace, {"last_result": {"question": "track joey", "row_count": 3}})
 
     assert plan.action == "chat"
     assert state["recall"] is True

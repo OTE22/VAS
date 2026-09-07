@@ -158,15 +158,18 @@ def tool_specs(include_actions: bool = True) -> List[dict]:
               required=["change"]),
         _spec("generate_document",
               "Turn an answer or report that already exists in this "
-              "conversation into a downloadable PDF or Word file. Do not use "
-              "when no result exists; ask what the user wants reported first.",
+              "conversation into a downloadable PDF or Word file. When no "
+              "result exists yet, call query_database for the subject the "
+              "message names first; the file is produced as the next step.",
               {"format": {"type": "string", "enum": ["pdf", "word"],
                           "description": "The requested downloadable file type"},
                "language": {"type": "string", "enum": ["en", "ar"],
                             "description": "Optional output language; omit to "
                                            "preserve the answer's language"}}),
         _spec("translate_document",
-              "Restate an EXISTING document in another language.",
+              "Restate the previous answer, or an existing document, in "
+              "another language. No document id is needed for the most "
+              "recent answer.",
               {"language": {"type": "string", "enum": ["en", "ar"]},
                "document_id": {"type": "string",
                                "description": "id from list_my_documents; "

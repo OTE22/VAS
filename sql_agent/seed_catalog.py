@@ -150,6 +150,103 @@ LIMIT 1""",
 # ---------------------------------------------------------------------------
 # 1b. The third battery (2026-09-06): shapes the model could not build unaided
 # ---------------------------------------------------------------------------
+# 1c. The fourth battery (2026-09-06): truths the model mis-built or mis-read
+# ---------------------------------------------------------------------------
+CATALOG += [
+E("On the day with the most detections, what percentage of that day's detections happened in its single busiest hour",
+f"""WITH busiest_day AS (
+    SELECT DATE(d.timestamp) AS detection_day, COUNT(*) AS day_total
+    FROM detections d
+    GROUP BY DATE(d.timestamp)
+    ORDER BY day_total DESC, detection_day
+    LIMIT 1),
+busiest_hour AS (
+    SELECT EXTRACT(HOUR FROM d.timestamp)::int AS hour_of_day, COUNT(*) AS hour_total
+    FROM detections d
+    WHERE DATE(d.timestamp) = (SELECT detection_day FROM busiest_day)
+    GROUP BY EXTRACT(HOUR FROM d.timestamp)
+    ORDER BY hour_total DESC, hour_of_day
+    LIMIT 1)
+SELECT bd.detection_day, bd.day_total, bh.hour_of_day, bh.hour_total,
+    ROUND(100.0 * bh.hour_total / bd.day_total, 1) AS percentage_in_busiest_hour
+FROM busiest_day bd, busiest_hour bh""",
+"The busiest day first (a DATE, compared with DATE), then that day's busiest hour, then the share; one row"),
+E("Which camera has the largest share of all unidentified faces, and what percentage of the unidentified faces is that",
+f"""SELECT {CAM} AS camera_name, COUNT(*) AS unidentified_faces,
+    ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS share_of_all_unidentified_percent
+{FDP}
+WHERE {UNID}
+{GROUP_CAM}
+ORDER BY unidentified_faces DESC, camera_name""",
+"Share of ALL unidentified faces per camera (denominator = every unidentified face, via SUM() OVER ()), largest first; ties share the top count. Not the share of unidentified faces WITHIN a camera"),
+E("Which cameras had detections on exactly one day, and which day was it for each",
+f"""SELECT {CAM} AS camera_name, MIN(DATE(d.timestamp)) AS the_only_day, COUNT(*) AS detections
+{DP}
+{GROUP_CAM}
+HAVING COUNT(DISTINCT DATE(d.timestamp)) = 1
+ORDER BY camera_name""",
+"Cameras whose detections all fall on ONE calendar day (HAVING COUNT(DISTINCT DATE) = 1), with that day; one row per camera"),
+E("Which day of the week has the highest average number of detections per day, counting only days that had detections",
+f"""WITH per_day AS (
+    SELECT DATE(d.timestamp) AS detection_day, COUNT(*) AS detections
+    FROM detections d
+    GROUP BY DATE(d.timestamp))
+SELECT TRIM(TO_CHAR(detection_day, 'Day')) AS weekday, COUNT(*) AS active_days,
+    SUM(detections) AS detections, ROUND(AVG(detections), 1) AS average_per_active_day
+FROM per_day
+GROUP BY TRIM(TO_CHAR(detection_day, 'Day')), EXTRACT(DOW FROM detection_day)
+ORDER BY average_per_active_day DESC, weekday""",
+"Average detections per ACTIVE day for each weekday (a day with no detections does not count), highest first; one row per weekday"),
+E("How many detections of identified people happened outside 08:00 to 18:00, and what percentage of all identified detections is that",
+f"""SELECT COUNT(*) AS identified_detections,
+    COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM d.timestamp) < 8 OR EXTRACT(HOUR FROM d.timestamp) >= 18) AS outside_hours,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM d.timestamp) < 8 OR EXTRACT(HOUR FROM d.timestamp) >= 18) / COUNT(*), 1) AS outside_hours_percent
+FROM faces f
+JOIN detections d ON f.detection_id = d.id
+WHERE {IDENT}""",
+"Identified detections outside 08:00-18:00 (hour < 8 or hour >= 18) and their share of all identified detections; one row"),
+E("What was the longest gap in hours between two consecutive detections of PERSON_NAME, and which cameras were those two detections at",
+f"""WITH ordered AS (
+    SELECT d.timestamp AS seen_at, {CAM} AS camera_name,
+        LAG(d.timestamp) OVER (ORDER BY d.timestamp) AS previous_seen_at,
+        LAG({CAM}) OVER (ORDER BY d.timestamp) AS previous_camera
+    {FDP}
+    WHERE {PERSON})
+SELECT previous_seen_at, seen_at, previous_camera, camera_name,
+    ROUND(EXTRACT(EPOCH FROM (seen_at - previous_seen_at)) / 3600, 2) AS gap_hours
+FROM ordered
+WHERE previous_seen_at IS NOT NULL
+ORDER BY gap_hours DESC
+LIMIT 1""",
+"Longest gap between one person's consecutive detections: LAG over ALL their detections in time order (never partitioned by detection), with the camera before and after; one row"),
+E("Compare the average recognition similarity of PERSON_NAME's faces with OTHER_PERSON's faces",
+f"""SELECT f.name, COUNT(*) AS faces,
+    ROUND(AVG(f.similarity)::numeric, 3) AS average_similarity,
+    ROUND(MIN(f.similarity)::numeric, 3) AS lowest_similarity,
+    ROUND(MAX(f.similarity)::numeric, 3) AS highest_similarity
+FROM faces f
+WHERE {PERSON} OR LOWER(f.name) LIKE LOWER('%OTHER_PERSON%')
+GROUP BY f.name
+ORDER BY average_similarity DESC""",
+"Two people's similarity statistics side by side: one row per person from ONE pass over faces (never a self-join of faces on detection_id)"),
+E("How many detections happened in the 24 hours after PERSON_NAME's first detection, and how many of those were at the same camera as that first detection",
+f"""WITH first_seen AS (
+    SELECT d.timestamp AS first_at, d.pipeline_id AS first_pipeline_id
+    FROM faces f
+    JOIN detections d ON f.detection_id = d.id
+    WHERE {PERSON}
+    ORDER BY d.timestamp
+    LIMIT 1)
+SELECT fs.first_at, (SELECT {CAM} FROM pipelines p WHERE p.pipeline_id = fs.first_pipeline_id) AS first_camera,
+    COUNT(*) AS detections_in_24h,
+    COUNT(*) FILTER (WHERE d.pipeline_id = fs.first_pipeline_id) AS at_the_same_camera
+FROM first_seen fs
+JOIN detections d ON d.timestamp > fs.first_at AND d.timestamp <= fs.first_at + INTERVAL '24 hours'
+GROUP BY fs.first_at, fs.first_pipeline_id""",
+"Window after a person's first detection: the first row carries BOTH its time and its pipeline_id, so the same-camera count compares against a real column; one row"),
+]
+
+# ---------------------------------------------------------------------------
 CATALOG += [
 E("Which pair of cameras is most often visited one after the other by the same identified person, and how many times",
 f"""WITH steps AS (

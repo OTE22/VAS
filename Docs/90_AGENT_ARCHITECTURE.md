@@ -1211,7 +1211,12 @@ The default now states the CHOICE, keyed on what the request is about:
 | the DATA, a new question | `query_database` |
 | the SAME question, something changed | `modify_active_query` |
 | the result just produced, as a file | `generate_document` |
-| a file that exists, in another language | `translate_document` |
+| the previous answer, or a file that exists, in another language | `translate_document` |
+
+A file asked for before any result exists ("I want JOEY's tracking report as a
+PDF in Arabic") is not a clarification: when the message names a stored person
+or camera, `query_database` runs first, its narration is written, and the file is
+rendered from that narration in the same turn (`document_after_query`, below).
 
 That distinction — the data, or the thing just produced — is the one the tool
 vocabulary is already built around, so it is a structural guide rather than a
@@ -1228,6 +1233,68 @@ They were mistaken for structural problems for some time; they were the
 prompt.
 
 ---
+
+## Fourth and fifth batteries (2026-09-06): what the traces changed
+
+Ten unseen analytical questions (fourth battery: 3.5/10 raw, 9/10 after the
+fixes and eight verified seeds in `seed_catalog.py` section 1c) and six
+conversations covering follow-ups, PDF generation and Arabic (fifth battery)
+were replayed as the test account and read in Opik. Every change below is a
+structural one; none adds a phrase list.
+
+- **A direct read-out hands over every row that qualified.** `_direct_prompt`
+  demanded "every row must appear" while slicing the preview to three rows;
+  seven per-camera averages arrived as three under a "Rows (7 returned)"
+  header and the narrator invented the pairing. The preview now carries up to
+  `_SUMMARY_DIRECT_MAX_ROWS`. When the narration still drops identifiers, the
+  footer that lists them "as stored" now carries their rows' figures
+  (`_rows_for_names`), so a shortened list reaches the user complete.
+- **"Answer directly" after a successful query is final.** The loop said
+  answer_directly over a correct two-row comparison; the reading's second
+  opinion ("this is a data question") re-planned a narrowed query and the
+  user got one row. With a successful `query_database` in this turn's
+  observations the second opinion is skipped and the held result is narrated
+  (`repeat_refused`). A same-turn `modify_previous_query` after a successful
+  query is refused the same way, and a refused repeat no longer re-asks
+  "is the whole request done?" (three executions per one-row answer before).
+- **A follow-up keeps the user's words.** The model's paraphrase of "which of
+  those cameras saw him the most?" was the previous turn's tracking task, and
+  "only on 2026-08-18" pinned the camera the previous ANSWER named. With
+  `uses_context` on a session that has a previous turn, Python composes the
+  SQL input from the message, the previous question and the resolved names
+  (`"<message> (about IRON MAN; a follow-up to: \"<previous question>\")"`).
+  When the follow-up resolved nobody ("at which cameras?"), the subject is
+  whichever stored person or camera the previous question named
+  (`_names_in_text`); an Arabic follow-up had otherwise lost IRON MAN and
+  fetched every detection. The model's paraphrase is not used as the question.
+- **A file before any result: query first, then render.** `generate_document`
+  with nothing to render, on a message naming a stored person or camera,
+  becomes `query_database` with `document_after_query = {format, language}`.
+  After the query is narrated, `route_after_story` sends the turn to
+  `render_artifact`, which takes the pending format/language and renders the
+  narrative just written. A query whose message names a file format the loop
+  did not carry (`interpreter.requested_file_format`, a closed vocabulary of
+  file types) gets the same pending file. The tool contract says so too:
+  "no result yet? call query_database first".
+- **Translation of the previous answer.** The loop's contract said
+  `translate_document` restates "an EXISTING document", so "ترجمه إلى العربية"
+  after a text report asked for a document id. The contract and the prompt
+  now name the previous answer as a source; the planner already targets
+  `last_result` when no artifact exists.
+- **Markdown tables render as tables.** The PDF builder passed table rows
+  through as prose, so an Arabic tracking report carried `| --- | --- |` on
+  the page. `_split_table_runs` / `_table_rows` turn a run of pipe-delimited
+  lines into a reportlab `Table` (header row, grid, RTL cell order for Arabic).
+- **Isolated Arabic letters render.** The shipped `assets/fonts/Cairo-PDF.ttf`
+  subset has the base letters and their joined forms but only 89 of the 141
+  presentation forms; the ISOLATED alef, teh, theh, reh, feh, waw and yeh are
+  missing, and a translated report drew boxes there (seen by rendering the
+  PDF page to an image, not by extracting its text). `_shape_rtl` now runs the
+  reshaper with `use_unshaped_instead_of_isolated`, so an isolated letter is
+  emitted as its base code point, which the font has.
+- **Verify a PDF by looking at it.** `pypdf` text extraction of shaped Arabic
+  drops letters and can miss Latin names; render page 1 with PyMuPDF
+  (`fitz`) and read the image. Names must appear in Latin letters.
 
 ## Historical implementation notes: retired phrase-router version
 
