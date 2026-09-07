@@ -201,6 +201,8 @@ verification, settings — is documented **once**, in 46.
 - **[93_PRODUCTION_RUNBOOK.md](93_PRODUCTION_RUNBOOK.md)** — orientation map: every artifact (secrets, certs, volumes, DB roles, JWT) in order of use
 - **[94_SETTINGS_PAGE_VERIFICATION.md](94_SETTINGS_PAGE_VERIFICATION.md)** — every setting exercised through the settings page's API, verified per apply mode, restored; 2026-09-04
 - **[95_BACKGROUND_JOBS_VERIFICATION.md](95_BACKGROUND_JOBS_VERIFICATION.md)** — every background job checked one by one (schedule, last/next run, admin control), read-only; 2026-09-04 §8 records the five fixes applied the same day (durable clustering delay, run-now endpoints, hydration false alarm, 30 s tracker window, ML worker liveness) with live evidence.
+- **[95_AGENT_PRODUCTION_ACCEPTANCE.md](95_AGENT_PRODUCTION_ACCEPTANCE.md)** — agent production assessment and acceptance: what the SQL/chat agent must prove before it is accepted in production.
+- **[mlops-guided-workflow.md](mlops-guided-workflow.md)** — guided ML Operations workflow: the step-by-step operator path through the ML-Ops page.
 - **[61_DEPLOYMENT_RUNBOOK.md](61_DEPLOYMENT_RUNBOOK.md)** — **the production authority**
 - **[60_BACKUP_AND_RESTORE.md](60_BACKUP_AND_RESTORE.md)** — backup, restore, disaster-recovery drill
 - **[63_REDIS_CACHING_GUIDE.md](63_REDIS_CACHING_GUIDE.md)** — Redis caching

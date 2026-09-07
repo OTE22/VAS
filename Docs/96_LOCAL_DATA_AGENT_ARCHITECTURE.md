@@ -83,7 +83,7 @@ the audit function and the query-history rows.
 |---|---|
 | Deployment-mode settings (`OFFLINE_MODE`, `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_SQL_MODEL`, `LLM_API_KEY[_FILE]`, `EMBEDDING_PROVIDER`, `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL_PATH`, `VECTOR_STORE`, `MILVUS_URI`, `MCP_SQL_URL`, `AGENT_ORCHESTRATOR`, `STT_PROVIDER`, `STT_BASE_URL`, `STT_MODEL_PATH`, `OTEL_EXPORTER_ENDPOINT`, `OFFLINE_BUNDLE_MANIFEST`, `OFFLINE_ALLOWED_HOSTS`, `ALLOW_EXTERNAL_APIS`, `ALLOW_MODEL_DOWNLOADS`, `ALLOW_EXTERNAL_TELEMETRY`) | `config.py`, `sql_agent/config.py` |
 | Offline policy: internal-host test, known public hosts, violation collection, startup checklist | `backend/security/offline_policy.py`, wired into `config_guard.collect_violations` |
-| Readiness + admin checklist | `backend/routes/health.py` (`/health/ready` component `offline_policy`; `/api/health/offline-policy` and `/health/offline-policy` admin-only), nginx locations |
+| Readiness + admin checklist | `backend/routes/health.py` (`/health/ready` component `offline_policy`; `/health/offline-policy` and `/health/offline-policy` admin-only), nginx locations |
 | Intent labels, question hash, table extraction, turn facts | `sql_agent/intent.py` |
 | Turn audit event + intent metric | `sql_agent/api/routes.py` (`finalize_turn`), `sql_agent/agent.py` (`last_turn_facts`) |
 | Latency and failure metrics | `sql_agent/observability.py`, wired in `llm/gateway.py`, `tools/agent_tools.py` |
@@ -403,7 +403,7 @@ questions, names, credentials, tokens or rows. Each MCP call writes
 [PASS] STT reachable            (when STT_BASE_URL is set)
 ```
 
-Read it with `GET /api/health/offline-policy` (JSON, machine clients) or
+Read it with `GET /health/offline-policy` (JSON, machine clients) or
 `GET /health/offline-policy` (browser) as an administrator, or run the
 guard directly: `python -c "from backend.security.config_guard import enforce; enforce()"`
 inside the container. Before go-live also: `scripts/verify_offline_bundle.sh`,

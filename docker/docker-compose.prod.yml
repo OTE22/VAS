@@ -159,6 +159,14 @@ services:
       SQL_AGENT_DB_PASSWORD_FILE: /run/secrets/sql_agent_db_password
       WEBHOOK_API_KEYS_FILE: /run/secrets/webhook_api_keys
       WORKERS: "1"
+      # One-shot maintenance command, not a serving process: the entrypoint's
+      # config preflight is bypassed here as its own comment prescribes for this
+      # case. Since 2026-09-06 that preflight also requires the inference artifacts
+      # (weights, embedding model) on disk, which this job neither mounts nor uses
+      # — it refused to run and blocked the whole app tier (exit 78, 2026-09-07).
+      # The migration tool keeps its own fail-closed checks (MIGRATIONS_EXPECTED_HEAD,
+      # revision mismatch); face_recognition and ml_worker still run the full guard.
+      CONFIG_PREFLIGHT: "0"
     secrets:
       - jwt_secret
       - webhook_api_keys

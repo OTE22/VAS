@@ -270,6 +270,16 @@ def test_compose_sets_no_unknown_application_setting():
         # stdout, which is the log stream here — one model load turns into
         # thousands of unreadable partial lines in the container log.
         "HF_HUB_DISABLE_PROGRESS_BARS",
+        # huggingface_hub / transformers read these straight from the environment.
+        # Pinned in every production container so no model library ever tries the
+        # hub (docker/env.production.example); not application settings.
+        "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE",
+        # etcd and minio images behind the `milvus` compose profile
+        "ETCD_AUTO_COMPACTION_MODE", "ETCD_AUTO_COMPACTION_RETENTION",
+        "ETCD_ENDPOINTS", "ETCD_QUOTA_BACKEND_BYTES",
+        "MINIO_ROOT_USER", "MINIO_ROOT_PASSWORD", "MINIO_ADDRESS",
+        # opik image (development stack only)
+        "OPIK_ANALYTICS_ENABLE", "OPIK_SENTRY_ENABLE",
     }
 
     declared = set(Settings.model_fields)

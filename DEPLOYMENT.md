@@ -65,13 +65,15 @@ There are **two** template files, and they are not interchangeable.
 
 | File | Who reads it | Contains |
 |---|---|---|
-| `docker/.env` | **Compose only** — never mounted into a container | 10 deployment values |
+| `docker/.env` | **Compose only** — never mounted into a container (the profile-gated `mcp-sql` is the one exception) | 36 deployment values: the 10 credentials/pins below plus the 26 offline-policy keys of §10 — full inventory in §13 |
 | `.env.example` | a template for the *application* settings | documents ~120 of the 325 settings in `config.py` |
 
 > Compose reads `.env` from the **`docker/` directory**, not the repo root.
 > A value put in a root `.env` is silently ignored by Compose.
 
-### The 10 values in `docker/.env`, and what each becomes
+### The 10 original values in `docker/.env`, and what each becomes
+
+(The 26 offline-policy keys added on 2026-09-07 are listed in §10; §13 is the complete, generated inventory of everything every container receives.)
 
 Every one is generated once by `scripts/setup/generate-secrets.sh` and **never
 overwritten** on a re-run.
@@ -1026,6 +1028,8 @@ Deeper trees: [`Docs/73_TROUBLESHOOTING.md`](Docs/73_TROUBLESHOOTING.md).
 
 ## 9. Back up these, in this order
 
+(§14 lists every volume with what it holds and which of them the backup job covers.)
+
 1. **`secrets/` and `docker/.env`** — not regenerable. A new `jwt_secret` logs
    everyone out; new DB passwords no longer match the roles inside postgres.
 2. **`certs/internal-ca.*`** — reissuing means re-trusting the CA on every client.
@@ -1073,4 +1077,412 @@ default production stack is Ollama + embedded Chroma, all on the box.
 Development stays separate: `./deploy.sh dev` and `docker/docker-compose.cpu.yml`
 may set `ALLOW_*=true` and `LLM_DEV_PROVIDER=nim` (NVIDIA NIM for testing the
 SQL agent); none of that is accepted by the production path.
+
+## 11. Rebuild time: the pip wheel cache
+
+A full image rebuild downloads about 2.4 GB of wheels (CUDA libraries for
+`faiss-gpu`/`xgboost`, `onnxruntime-gpu`, torch CPU, the ML stack). Two things
+decide whether the *next* rebuild takes 40 minutes or 3:
+
+1. **The Dockerfiles cache wheels in a BuildKit cache mount**
+   (`--mount=type=cache,target=/root/.cache/pip`). pip must not see
+   `PIP_NO_CACHE_DIR` on those steps: pip disables its cache for **any** value
+   of that variable, even `0` or `false` (deliberate legacy behaviour in
+   `pip/_internal/cli/cmdoptions.py`). The cached `RUN` lines therefore use
+   `env -u PIP_NO_CACHE_DIR pip install …`. Verify after a build with
+   `sudo docker buildx du --verbose` — the `exec.cachemount` record should be
+   about 1.3 GB, not 0 B.
+2. **BuildKit's default garbage collection deletes that cache after 48 h
+   unused.** `/etc/docker/daemon.json` on this host carries a builder GC policy
+   that keeps cache mounts by size instead of age (copy:
+   `docker/daemon.json.production.example`):
+
+   ```
+   rule 0  type=exec.cachemount   keep up to 60 GB, no age limit
+   rule 1  unused-for=720h        keep up to 60 GB
+   rule 2  everything             keep up to 120 GB
+   ```
+   Note the single `=` in `type=exec.cachemount`: dockerd splits daemon.json
+   filters at the first `=`, so `type==…` silently becomes a filter that
+   matches nothing. Applying the file needs `sudo systemctl restart docker`
+   (all containers restart; they come back on their own within ~20 s).
+
+The first rebuild after either fix still downloads everything once; every
+rebuild after that reuses the cache.
+
+## 12. The `migrate` job and the config preflight
+
+Since 2026-09-06 the entrypoint's config preflight also verifies that the
+inference artifacts (detection/recognition weights, the embedding model) exist
+inside every production container. The one-shot `migrate` job runs the CPU
+image with no weights mount and no embedding model — it never runs inference —
+so it refused to start (exit 78) and, because the app tier waits for it, took
+production down for six minutes on 2026-09-07. It now sets
+`CONFIG_PREFLIGHT: "0"`, the bypass the entrypoint documents for one-shot
+maintenance commands (`ml_worker` already used it). The migration tool keeps its
+own fail-closed checks (`MIGRATIONS_EXPECTED_HEAD`, revision mismatch), and
+`face_recognition` still runs the full guard; `/health/offline-policy` shows
+its checklist.
+
+Two lessons for the next failed upgrade:
+
+- **Check the database before believing "schema advanced".** `deploy.sh`
+  compares the *intended* heads, not `alembic_version`. If
+  `select version_num from alembic_version` still shows the old head, a
+  code-only rollback is safe.
+- **The `:rollback` tags are whatever was `:latest` when the rollback point was
+  taken.** After a build that failed part-way, one of them (here `migrate`)
+  can already hold the new code. The working rollback was: tag the genuine old
+  `face_recognition:rollback` image as `migrate:latest` (same code base; its
+  migration is a no-op), restore `MIGRATIONS_EXPECTED_HEAD` in `docker/.env`,
+  then `docker compose … up -d --no-build`.
+
+## 13. Production variable inventory (generated 2026-09-07)
+
+Everything below was produced from the *rendered* production configuration
+(`docker compose … config`) and the host file, not typed by hand. Three layers:
+
+1. **`docker/.env`** — read by Compose and by `deploy.sh`; never mounted into
+   the application containers.
+2. **Docker secrets** — files under `secrets/`, mounted at `/run/secrets/…`; the
+   containers receive only the *path* through a `*_FILE` variable.
+3. **Container environment** — the exact variables each production container
+   starts with. Anything not listed here comes from `config.py` defaults.
+
+### 13.0 How a value reaches the app, and how to change one
+
+**Resolution order inside a container** (highest wins):
+
+```
+1. environment: in docker-compose.prod.yml   (literal, or ${VAR} filled from docker/.env)
+2. a row saved by the Settings page          (application_settings table — only for the
+                                              187 settings registered in runtime_settings.py;
+                                              hydrated at boot, ignored if it equals the env value)
+3. the default in config.py
+```
+Secrets are the exception: the container gets only `NAME_FILE=/run/secrets/<file>`,
+and `config.py` reads the file into `NAME` through `backend/security/secrets.py`
+(`resolve_secret`). A secret value never appears in `docker inspect`.
+
+**To change a value**
+
+| You want to… | Do this | Takes effect |
+|---|---|---|
+| change a runtime-changeable setting (column "Runtime change" says yes) | Settings page as admin, or `PUT /api/settings/<KEY>` with header `X-Requested-With: XMLHttpRequest` and body `{"value": "<text>", "change_reason": "…"}` | per its apply mode: immediately / next request / next job run / after an API restart |
+| change anything set in the compose file | edit `docker/docker-compose.prod.yml`, then `sudo ./deploy.sh upgrade --yes` (full path with backup and health battery) — or, for an environment-only change, `cd docker && sudo docker compose -f docker-compose.prod.yml -f docker-compose.prod.gpu.yml -f gpu-allocation.generated.yml up -d <service>` | on container recreate |
+| change a `docker/.env` value that compose interpolates | edit `docker/.env` (root, mode 0600), then recreate the services that use it (column "Consumed by") | on container recreate |
+| rotate a credential | edit the value in `docker/.env`, delete the corresponding file(s) under `secrets/`, run `sudo ./deploy.sh upgrade --yes` — it regenerates the files, re-applies `db/roles.sql` so database roles follow, and recreates the containers | on container recreate |
+| see the effective value | `GET /api/settings` (admin; shows stored, env and effective value and the source) · `docker inspect <container> --format '{{range .Config.Env}}{{println .}}{{end}}'` · `/health/offline-policy` for the offline checklist | — |
+
+A Settings-page row that differs from the compose value **overrides it until the row is deleted** (the page shows it as overridden). A row equal to the compose value is a harmless mirror and is skipped at boot.
+
+### 13.1 `docker/.env` — every key, how to obtain it, where it goes
+
+Host file, mode 0600 root. Read by Docker Compose for `${…}` and by `deploy.sh` stage 06b. Never mounted into the application containers (the profile-gated `mcp-sql` is the only exception).
+
+| Key | Value | How to obtain / set it | Consumed by |
+|---|---|---|---|
+| `PUBLIC_ORIGIN` | `https://face-detector.internal` | the https:// name users type (must match the certificate); set with 'sudo ./deploy.sh --public-origin=https://<host>' — feeds 'CORS_ORIGINS'/'AUTH_ALLOWED_ORIGINS' | face_recognition, migrate |
+| `POSTGRES_SUPERUSER_PASSWORD` | `<secret>` | generated by 'scripts/setup/generate-secrets.sh' (openssl rand); used by the postgres image on FIRST boot only — changing it later does not change the role | postgres |
+| `FR_APP_PASSWORD` | `<secret>` | generated by generate-secrets.sh → 'secrets/postgres_password_app' + 'secrets/database_url_app'; rotate: edit here, delete those two files, 'sudo ./deploy.sh upgrade --yes' (re-applies db/roles.sql so the role follows) | generate-secrets.sh → secret file |
+| `FR_MIGRATOR_PASSWORD` | `<secret>` | as FR_APP_PASSWORD, for 'secrets/postgres_password_migrator' + 'secrets/database_url_migrator' | generate-secrets.sh → secret file |
+| `FR_READONLY_PASSWORD` | `<secret>` | as FR_APP_PASSWORD, for 'secrets/sql_agent_db_password' (the SQL agent's read-only role) | generate-secrets.sh → secret file |
+| `FR_BACKUP_PASSWORD` | `<secret>` | as FR_APP_PASSWORD, for 'secrets/backup_db_password' | generate-secrets.sh → secret file |
+| `REDIS_PASSWORD` | `<secret>` | generated by generate-secrets.sh → 'secrets/redis_url' and 'docker/redis/users.acl'; rotate: edit, delete both, re-run generate-secrets.sh, recreate redis + API | redis |
+| `REDIS_MONITOR_PASSWORD` | `<secret>` | generated by generate-secrets.sh; hashed into 'docker/redis/users.acl' only | generate-secrets.sh → secret file |
+| `GRAFANA_ADMIN_PASSWORD` | `<secret>` | generated by generate-secrets.sh; becomes 'GF_SECURITY_ADMIN_PASSWORD' (grafana admin login) | grafana |
+| `MIGRATIONS_EXPECTED_HEAD` | `fcc3d4e5f6a7` | pinned automatically by 'deploy.sh upgrade' to the checkout's alembic head; never edit by hand — the migrate job refuses a mismatch | face_recognition, migrate, ml_worker |
+| `ENVIRONMENT` | `production` | keep 'production'; the services set it themselves — this copy is what stage 06b checks | deploy.sh stage 06b (gate) |
+| `OFFLINE_MODE` | `true` | keep 'true' (or empty = follow ENVIRONMENT); 'false' is refused by stage 06b and the config guard | deploy.sh stage 06b (gate) |
+| `LLM_PROVIDER` | `ollama` | 'ollama' in production; 'vllm'/'nim_local' need the 'vllm' profile; hosted providers are refused | deploy.sh stage 06b (gate) |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | internal URL of the ollama service; the compose file also sets it literally on the API | deploy.sh stage 06b (gate) |
+| `OLLAMA_MODEL` | `qwen2.5:7b` | chat/tool model; must be present in 'ollama list' (stage 13 checks); pull on a connected host or import via the offline bundle | deploy.sh stage 06b (gate) |
+| `OLLAMA_SQL_MODEL` | `hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M` | SQL specialist model; same presence rule as OLLAMA_MODEL | deploy.sh stage 06b (gate) |
+| `LLM_DEV_PROVIDER` | (empty) | must stay EMPTY in production ('nim' is development only) | deploy.sh stage 06b (gate) |
+| `NVIDIA_NIM_API_KEY` | (empty) | must stay EMPTY in production | generate-secrets.sh → secret file |
+| `EMBEDDING_PROVIDER` | `local` | 'local' — the ONNX MiniLM baked into the GPU image | deploy.sh stage 06b (gate) |
+| `EMBEDDING_BASE_URL` | (empty) | empty unless a local embedding service is deployed | deploy.sh stage 06b (gate) |
+| `EMBEDDING_MODEL_PATH` | `/home/appuser/.cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx/model.onnx` | path inside the API container; the config guard verifies the file exists at boot | deploy.sh stage 06b (gate) |
+| `VECTOR_STORE` | `chroma` | 'chroma' (embedded); 'milvus' needs the 'milvus' profile and MILVUS_URI | deploy.sh stage 06b (gate) |
+| `MILVUS_URI` | (empty) | empty unless VECTOR_STORE=milvus | deploy.sh stage 06b (gate) |
+| `MCP_SQL_URL` | (empty) | empty = in-process SQL tools; set only with the 'mcp-sql' profile | deploy.sh stage 06b (gate) |
+| `AGENT_ORCHESTRATOR` | `langgraph` | 'langgraph' (built in); 'nemo' only if that toolkit is installed | deploy.sh stage 06b (gate) |
+| `STT_PROVIDER` | `none` | 'none' until a local speech model is bundled | deploy.sh stage 06b (gate) |
+| `STT_BASE_URL` | (empty) | empty unless STT_PROVIDER points at a local service | deploy.sh stage 06b (gate) |
+| `STT_MODEL_PATH` | (empty) | empty unless STT_PROVIDER=local; then the file must exist (guard) | deploy.sh stage 06b (gate) |
+| `OTEL_EXPORTER_ENDPOINT` | (empty) | empty (Prometheus/Grafana are the telemetry); an internal OTLP collector URL is allowed, a cloud one is refused | deploy.sh stage 06b (gate) |
+| `SQL_AGENT_OPIK_ENABLED` | `false` | must be 'false' in production (Opik tracer is development only) | deploy.sh stage 06b (gate) |
+| `ALLOW_EXTERNAL_APIS` | `false` | must be 'false' | deploy.sh stage 06b (gate) |
+| `ALLOW_MODEL_DOWNLOADS` | `false` | must be 'false' | deploy.sh stage 06b (gate) |
+| `ALLOW_EXTERNAL_TELEMETRY` | `false` | must be 'false' | deploy.sh stage 06b (gate) |
+| `OFFLINE_BUNDLE_MANIFEST` | (empty) | empty unless the offline bundle directory is also mounted in the API container | deploy.sh stage 06b (gate) |
+| `HF_HUB_OFFLINE` | `1` | keep '1' | deploy.sh stage 06b (gate) |
+| `TRANSFORMERS_OFFLINE` | `1` | keep '1' | deploy.sh stage 06b (gate) |
+
+### 13.2 Docker secrets — created by `scripts/setup/generate-secrets.sh`, files in `secrets/` (0440 root:1000)
+
+| Secret file | Derived from | Mounted by | App reads it as | Rotate |
+|---|---|---|---|---|
+| `backup_db_password` | FR_BACKUP_PASSWORD | backup | read directly by the service | change 'FR_BACKUP_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `bootstrap_admin_password` | random; first admin login, rotation forced on first login | face_recognition | `BOOTSTRAP_ADMIN_PASSWORD` | delete the file, re-run generate-secrets.sh, recreate the services |
+| `database_url_app` | FR_APP_PASSWORD | face_recognition, ml_worker | `DATABASE_URL` | change 'FR_APP_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `database_url_migrator` | FR_MIGRATOR_PASSWORD | migrate | `DATABASE_URL` | change 'FR_MIGRATOR_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `jwt_secret` | random (openssl rand) | face_recognition, migrate | `JWT_SECRET_KEY` | delete the file, re-run generate-secrets.sh, recreate the services |
+| `postgres_password_app` | FR_APP_PASSWORD | face_recognition, ml_worker | `POSTGRES_PASSWORD` | change 'FR_APP_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `postgres_password_migrator` | FR_MIGRATOR_PASSWORD | migrate | `POSTGRES_PASSWORD` | change 'FR_MIGRATOR_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `redis_url` | REDIS_PASSWORD | face_recognition, migrate | `REDIS_URL` | change 'REDIS_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `sql_agent_db_password` | FR_READONLY_PASSWORD | face_recognition, migrate | `SQL_AGENT_DB_PASSWORD` | change 'FR_READONLY_PASSWORD' in docker/.env, delete the file, 'deploy.sh upgrade' |
+| `webhook_api_keys` | random; the keys cameras present as Bearer tokens | face_recognition, migrate | `WEBHOOK_API_KEYS` | delete the file, re-run generate-secrets.sh, recreate the services |
+
+### 13.3 Every production container: variable, where it is set, who reads it, how to change it
+
+Values are what `docker compose config` renders. "compose line N" refers to `docker/docker-compose.prod.yml`. "Read by" lists the code that consumes the value (found by scanning for `settings.NAME`); for foreign images it names the program.
+
+
+#### `face_recognition` — built from `docker/Dockerfile.gpu` · 71 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `ALLOW_CPU_FALLBACK` | `false` | compose (overlay) | backend/core/gpu_runtime.py, backend/security/config_guard.py | no — compose/.env only | Permit silent CPU inference when USE_GPU is set but CUDA is unavailable. Set False on real GPU deployments |
+| `AUTH_ALLOWED_ORIGINS` | `https://face-detector.internal` | compose line 234 ← 'docker/.env' 'PUBLIC_ORIGIN' | backend/security/config_guard.py, backend/security/origins.py | no — compose/.env only | Comma-separated hosts allowed to submit credentials (the request Host is always allowed) |
+| `AUTH_COOKIE_HOST_PREFIX` | `true` | compose line 233 (literal) | backend/auth/auth_security.py | no — compose/.env only | Use the __Host- cookie prefix when Secure is enabled |
+| `AUTH_COOKIE_SAMESITE` | `strict` | compose line 232 (literal) | backend/auth/auth_security.py, backend/security/config_guard.py | no — compose/.env only | Auth cookie SameSite policy: lax, strict or none |
+| `AUTH_COOKIE_SECURE` | `true` | compose line 231 (literal) | backend/auth/auth_security.py, backend/security/config_guard.py | no — compose/.env only | Set True in production (HTTPS). Enables the Secure flag and the __Host- cookie prefix |
+| `AUTH_SAME_HOST_ORIGIN_TRUSTED` | `false` | compose line 235 (literal) | backend/security/config_guard.py, backend/security/origins.py | no — compose/.env only | Treat the request Host as a valid credential-submission origin. Set False in production once AUTH_ALLOWED_ORIG |
+| `BACKUP_RETENTION_DAYS` | `14` | compose line 288 ← 'docker/.env' 'BACKUP_RETENTION_DAYS' | backend/routes/stats.py, scripts/backup/backup-loop.sh, scripts/backup/backup.sh | stored by the Settings page, but only a container recreate applies it | Days of backups to keep (also consumed by scripts/backup/backup.sh) |
+| `BOOTSTRAP_ADMIN_PASSWORD_FILE` | `<secret>` | compose line 206 → secret file | config.py resolves it into 'BOOTSTRAP_ADMIN_PASSWORD' via backend/security/secrets.py:resolve_secret | no — compose/.env only | Path to a Docker secret holding the first-admin password |
+| `BOOTSTRAP_ADMIN_REQUIRE_ROTATION` | `true` | compose line 207 (literal) | backend/services/bootstrap_admin.py | no — compose/.env only | Force a password change on the bootstrapped account's first login |
+| `CACHE_TTL` | `3600` | compose line 228 (literal) | backend/core/cache_manager.py, backend/core/redis_cache.py, backend/routes/websocket.py | yes — Settings page, effective at once | Cache TTL for dashboard data in seconds (default: 3600 = 1 hour) |
+| `CHROMADB_PATH` | `/app/database/chromadb` | compose line 323 (literal) | sql_agent/config.py | no — compose/.env only | config.py default "./sql_agent/chromadb_data" |
+| `CONFIDENCE_THRESHOLD` | `0.5` | compose line 253 (literal) | backend/core/model_manager.py | yes — Settings page, stored; takes effect after the API restarts | config.py default 0.5 |
+| `CORS_ORIGINS` | `https://face-detector.internal` | compose line 236 ← 'docker/.env' 'PUBLIC_ORIGIN' | backend/security/config_guard.py, backend/security/origins.py | no — compose/.env only | config.py default "*" |
+| `DATABASE_URL_FILE` | `/run/secrets/database_url_app` | compose line 210 → secret file | config.py resolves it into 'DATABASE_URL' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `DATA_RETENTION_DAYS` | `365` | compose line 286 (literal) | backend/core/data_retention.py, backend/lifespan.py, backend/routes/stats.py | yes — Settings page, effective at the next job run | config.py default 30 |
+| `DB_HOST` | `postgres` | compose line 214 (literal) | scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py, sql_agent/config.py | no — compose/.env only | config.py default "postgres" |
+| `DB_MAX_OVERFLOW` | `60` | compose line 217 (literal) | db_connection.py | no — compose/.env only | config.py default 100 |
+| `DB_POOL_PRE_PING` | `true` | compose line 219 (literal) | db_connection.py | no — compose/.env only | config.py default True |
+| `DB_POOL_RECYCLE` | `3600` | compose line 218 (literal) | db_connection.py | no — compose/.env only | config.py default 3600 |
+| `DB_POOL_SIZE` | `30` | compose line 216 (literal) | backend/core/batch_search_service.py, backend/routes/admin_tutorial.py, db_connection.py | no — compose/.env only | config.py default 50 |
+| `DB_PORT` | `5432` | compose line 215 (literal) | sql_agent/config.py | no — compose/.env only | config.py default 5432 |
+| `DEBUG` | `false` | compose line 194 (literal) | backend/security/config_guard.py, db_connection.py | no — compose/.env only | config.py default False |
+| `DETECTION_MODEL` | `/app/weights/det_10g.onnx` | compose line 250 (literal) | backend/core/enrollment_service.py, backend/core/model_manager.py, backend/lifespan.py | no — compose/.env only | config.py default "/app/weights/det_10g.onnx" |
+| `ENABLE_API_DOCS` | `false` | compose line 237 (literal) | backend/main.py, backend/security/config_guard.py | no — compose/.env only | Serve /docs, /redoc and /openapi.json. Must be false in production |
+| `ENVIRONMENT` | `production` | compose line 193 (literal) | backend/core/runtime_fingerprint.py, backend/routes/health.py, backend/security/config_guard.py (+7 more) | no — compose/.env only | config.py default "production" |
+| `FACE_TRACKING_WINDOW_SECONDS` | `30` | compose line 276 (literal) | backend/config.py | no — compose/.env only | config.py default 0 |
+| `HF_HOME` | `/home/appuser/.cache/huggingface` | compose line 300 (literal) | docker-entrypoint.sh | no — image / entrypoint variable | not an application setting |
+| `HF_HUB_DISABLE_PROGRESS_BARS` | `1` | compose line 311 (literal) | huggingface_hub library | no — image / entrypoint variable | not an application setting |
+| `HF_HUB_OFFLINE` | `1` | compose line 307 (literal) | huggingface_hub library | no — image / entrypoint variable | not an application setting |
+| `HOST` | `0.0.0.0` | compose line 196 (literal) | gunicorn.conf.py, scripts/setup/start_production.sh | no — compose/.env only | config.py default "0.0.0.0" |
+| `INFERENCE_WORKERS` | `3` | compose line 270 (literal) | backend/services/image_processing.py | yes — Settings page, stored; takes effect after the API restarts | config.py default 3 |
+| `JWT_SECRET_KEY_FILE` | `<secret>` | compose line 205 → secret file | config.py resolves it into 'JWT_SECRET_KEY' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `LOG_DIR` | `/var/log/face-recognition` | compose line 295 (literal) | backend/core/log_cleanup.py, backend/routes/logs.py, scripts/map_data/build_all.sh (+2 more) | no — compose/.env only | config.py default "/var/log/face-recognition" |
+| `LOG_LEVEL` | `INFO` | compose line 294 (literal) | backend/ml/worker.py, gunicorn.conf.py, scripts/setup/start_production.sh (+1 more) | yes — Settings page, stored; takes effect after the API restarts | config.py default "INFO" |
+| `MAX_CONCURRENT_INFERENCE` | `3` | compose line 271 (literal) | backend/services/image_processing.py | yes — Settings page, stored; takes effect after the API restarts | config.py default 3 |
+| `MAX_QUEUE_SIZE` | `2000` | compose line 268 (literal) | backend/core/processing_queue.py, backend/routes/admin_tutorial.py | yes — Settings page, stored; takes effect after the API restarts | config.py default 10000 |
+| `MAX_STORAGE_GB` | `5000` | compose line 293 (literal) | backend/core/data_retention.py | yes — Settings page, effective at once | config.py default 500 |
+| `MIGRATIONS_EXPECTED_HEAD` | `fcc3d4e5f6a7` | compose line 248 ← 'docker/.env' 'MIGRATIONS_EXPECTED_HEAD' | backend/core/runtime_fingerprint.py, backend/utils/migrations.py | no — compose/.env only | Pin the expected Alembic head so a drifted schema cannot serve traffic |
+| `MIGRATIONS_MODE` | `verify` | compose line 247 (literal) | backend/core/runtime_fingerprint.py, backend/lifespan.py, backend/utils/migrations.py | no — compose/.env only | config.py default "run" |
+| `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | `1` | compose line 306 (literal) | mlflow SDK (HTTP transport) | no — compose/.env only | MLflow SDK HTTP retries; process restart required |
+| `MLFLOW_HTTP_REQUEST_TIMEOUT` | `10` | compose line 305 (literal) | mlflow SDK (HTTP transport) | no — compose/.env only | MLflow SDK HTTP timeout in seconds; process restart required |
+| `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility` | compose (overlay) | NVIDIA container runtime | no — image / entrypoint variable | not an application setting |
+| `NVIDIA_VISIBLE_DEVICES` | `all` | compose (overlay) | NVIDIA container runtime | no — image / entrypoint variable | not an application setting |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | compose line 312 (literal) | backend/routes/health.py, sql_agent/config.py | no — compose/.env only | config.py default "http://ollama:11434" |
+| `OLLAMA_MODEL` | `qwen2.5:7b` | compose line 321 (literal) | sql_agent/config.py | no — compose/.env only | config.py default "llama3.2:3b" |
+| `OLLAMA_SQL_MODEL` | `hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M` | compose line 322 (literal) | sql_agent/config.py | no — compose/.env only | config.py default: empty |
+| `PGVECTOR_HNSW_EF_CONSTRUCTION` | `128` | compose line 267 (literal) | backend/core/identity_index_pgvector.py, scripts/verify_pgvector_usage.py | yes — Settings page, stored; takes effect at the next index rebuild | HNSW efConstruction (build-time search width, 64-200, higher = better index quality) |
+| `PGVECTOR_HNSW_M` | `32` | compose line 266 (literal) | backend/core/identity_index_pgvector.py | yes — Settings page, stored; takes effect at the next index rebuild | HNSW M parameter (connections per node, 16-64) |
+| `PGVECTOR_INDEX_TYPE` | `hnsw` | compose line 260 (literal) | backend/core/identity_index_pgvector.py, scripts/verify_pgvector_usage.py | yes — Settings page, stored; takes effect at the next index rebuild | pgvector index type: 'hnsw' (fast, recommended) or 'ivfflat' (memory efficient) |
+| `PORT` | `8000` | compose line 197 (literal) | gunicorn.conf.py, scripts/setup/start_production.sh | no — compose/.env only | config.py default 8000 |
+| `POSTGRES_DB` | `face_recognition` | compose line 213 (literal) | scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py, sql_agent/config.py | no — compose/.env only | config.py default "face_recognition" |
+| `POSTGRES_PASSWORD_FILE` | `<secret>` | compose line 212 → secret file | config.py resolves it into 'POSTGRES_PASSWORD' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `POSTGRES_USER` | `fr_app` | compose line 211 (literal) | backend/security/config_guard.py, scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py (+1 more) | no — compose/.env only | config.py default "postgres" |
+| `PYTHONUNBUFFERED` | `1` | compose line 195 (literal) | the Python interpreter | no — image / entrypoint variable | not an application setting |
+| `QUEUE_WORKERS` | `15` | compose line 269 (literal) | backend/lifespan.py, scripts/setup/start_production.sh | yes — Settings page, stored; takes effect after the API restarts | config.py default 50 |
+| `RECOGNITION_MODEL` | `/app/weights/w600k_r50.onnx` | compose line 251 (literal) | backend/core/advanced_search.py, backend/core/enrollment_service.py, backend/core/identity_service.py (+2 more) | no — compose/.env only | config.py default "/app/weights/w600k_r50.onnx" |
+| `REDIS_MAX_CONNECTIONS` | `50` | compose line 227 (literal) | backend/core/cache_manager.py, backend/core/redis_cache.py | no — compose/.env only | config.py default 100 |
+| `REDIS_URL_FILE` | `/run/secrets/redis_url` | compose line 221 → secret file | config.py resolves it into 'REDIS_URL' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `SAVE_CROPPED_IMAGES` | `false` | compose line 278 (literal) | backend/services/image_processing.py | yes — Settings page, effective at once | Save cropped person images for debugging |
+| `SAVE_WEBHOOK_IMAGES` | `false` | compose line 277 (literal) | backend/routes/webhook.py, backend/security/config_guard.py, backend/services/queue_worker.py | yes — Settings page, effective at once | Save all images received via webhook for debugging |
+| `SIMILARITY_THRESHOLD` | `0.4` | compose line 252 (literal) | backend/core/advanced_search.py, backend/core/identity_index_pgvector.py, backend/core/identity_service.py (+3 more) | yes — Settings page, effective at once | config.py default 0.4 |
+| `SQL_AGENT_DB_PASSWORD_FILE` | `<secret>` | compose line 244 → secret file | config.py resolves it into 'SQL_AGENT_DB_PASSWORD' via backend/security/secrets.py:resolve_secret | no — compose/.env only | Path to a Docker secret holding the read-only role's password |
+| `SQL_AGENT_DB_USER` | `fr_readonly` | compose line 243 (literal) | backend/security/config_guard.py, sql_agent/config.py | no — compose/.env only | Read-only role used to execute generated SQL. Must differ from POSTGRES_USER |
+| `STORAGE_DIR` | `/app/storage` | compose line 258 (literal) | backend/config.py, backend/core/data_retention.py, backend/core/enrollment_service.py (+15 more) | no — compose/.env only | config.py default "/app/storage" |
+| `TASK_HISTORY_RETENTION_DAYS` | `365` | compose line 287 (literal) | backend/core/data_retention.py, backend/routes/stats.py | yes — Settings page, effective at the next job run | Days to retain background-task history records. Default: 30 |
+| `TRANSFORMERS_OFFLINE` | `1` | compose line 308 (literal) | transformers library | no — image / entrypoint variable | not an application setting |
+| `USE_GPU` | `true` | compose line 202 (literal) | backend/core/gpu_runtime.py, backend/core/operational_metrics.py, backend/core/runtime_fingerprint.py (+2 more) | no — compose/.env only | config.py default False |
+| `VECTOR_BACKEND` | `pgvector` | compose line 259 (literal) | backend/core/advanced_search.py, backend/core/enrollment_service.py, backend/core/identity_clustering.py (+12 more) | yes — Settings page, stored; takes effect after the API restarts | Vector search backend: 'pgvector' (RECOMMENDED for production) or 'faiss' (faster but requires sync logic) |
+| `WEBHOOK_API_KEYS_FILE` | `<secret>` | compose line 285 → secret file | config.py resolves it into 'WEBHOOK_API_KEYS' via backend/security/secrets.py:resolve_secret | no — compose/.env only | Path to a Docker secret holding WEBHOOK_API_KEYS |
+| `WEBHOOK_AUTH_MODE` | `enforce` | compose line 284 (literal) | backend/security/config_guard.py, backend/security/webhook_auth.py | no — compose/.env only | enforce \| log_only \| off. log_only exists purely to migrate a fleet of already-deployed cameras; production r |
+| `WORKERS` | `1` | compose line 201 (literal) | backend/core/runtime_fingerprint.py, backend/lifespan.py, backend/security/config_guard.py (+2 more) | stored by the Settings page, but only a container recreate applies it | config.py default 4 |
+
+#### `ml_worker` — built from `docker/Dockerfile.gpu` · 26 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `CONFIG_PREFLIGHT` | `0` | compose line 417 (literal) | docker-entrypoint.sh | no — image / entrypoint variable | not an application setting |
+| `DATABASE_URL_FILE` | `/run/secrets/database_url_app` | compose line 420 → secret file | config.py resolves it into 'DATABASE_URL' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `DB_HOST` | `postgres` | compose line 424 (literal) | scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py, sql_agent/config.py | no — compose/.env only | config.py default "postgres" |
+| `DB_MAX_OVERFLOW` | `5` | compose line 427 (literal) | db_connection.py | no — compose/.env only | config.py default 100 |
+| `DB_POOL_PRE_PING` | `true` | compose line 428 (literal) | db_connection.py | no — compose/.env only | config.py default True |
+| `DB_POOL_SIZE` | `5` | compose line 426 (literal) | backend/core/batch_search_service.py, backend/routes/admin_tutorial.py, db_connection.py | no — compose/.env only | config.py default 50 |
+| `DB_PORT` | `5432` | compose line 425 (literal) | sql_agent/config.py | no — compose/.env only | config.py default 5432 |
+| `ENVIRONMENT` | `production` | compose line 412 (literal) | backend/core/runtime_fingerprint.py, backend/routes/health.py, backend/security/config_guard.py (+7 more) | no — compose/.env only | config.py default "production" |
+| `HF_HOME` | `/home/appuser/.cache/huggingface` | compose line 435 (literal) | docker-entrypoint.sh | no — image / entrypoint variable | not an application setting |
+| `HF_HUB_DISABLE_PROGRESS_BARS` | `1` | compose line 444 (literal) | huggingface_hub library | no — image / entrypoint variable | not an application setting |
+| `HF_HUB_OFFLINE` | `1` | compose line 442 (literal) | huggingface_hub library | no — image / entrypoint variable | not an application setting |
+| `LOG_DIR` | `/var/log/face-recognition` | compose line 434 (literal) | backend/core/log_cleanup.py, backend/routes/logs.py, scripts/map_data/build_all.sh (+2 more) | no — compose/.env only | config.py default "/var/log/face-recognition" |
+| `LOG_LEVEL` | `INFO` | compose line 433 (literal) | backend/ml/worker.py, gunicorn.conf.py, scripts/setup/start_production.sh (+1 more) | yes — Settings page, stored; takes effect after the API restarts | config.py default "INFO" |
+| `MIGRATIONS_EXPECTED_HEAD` | `fcc3d4e5f6a7` | compose line 419 ← 'docker/.env' 'MIGRATIONS_EXPECTED_HEAD' | backend/core/runtime_fingerprint.py, backend/utils/migrations.py | no — compose/.env only | Pin the expected Alembic head so a drifted schema cannot serve traffic |
+| `MIGRATIONS_MODE` | `verify` | compose line 418 (literal) | backend/core/runtime_fingerprint.py, backend/lifespan.py, backend/utils/migrations.py | no — compose/.env only | config.py default "run" |
+| `MLFLOW_HTTP_REQUEST_MAX_RETRIES` | `1` | compose line 441 (literal) | mlflow SDK (HTTP transport) | no — compose/.env only | MLflow SDK HTTP retries; process restart required |
+| `MLFLOW_HTTP_REQUEST_TIMEOUT` | `10` | compose line 440 (literal) | mlflow SDK (HTTP transport) | no — compose/.env only | MLflow SDK HTTP timeout in seconds; process restart required |
+| `ML_ARTIFACT_DIR` | `/app/models/ml` | compose line 432 (literal) | backend/ml/capabilities.py, backend/ml/dataset_builder.py, backend/ml/mlflow_tracking.py (+4 more) | no — compose/.env only | Approved internal directory for ML artifacts; loads outside this prefix are refused. Default: models/ml |
+| `ML_WORKER_ID` | `ml-worker-production-primary` | compose line 431 (literal) | backend/ml/worker.py | no — compose/.env only | Stable identity for the ML worker, so a container replacement updates one heartbeat row instead of creating a |
+| `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility` | compose (overlay) | NVIDIA container runtime | no — image / entrypoint variable | not an application setting |
+| `NVIDIA_VISIBLE_DEVICES` | `all` | compose (overlay) | NVIDIA container runtime | no — image / entrypoint variable | not an application setting |
+| `POSTGRES_DB` | `face_recognition` | compose line 423 (literal) | scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py, sql_agent/config.py | no — compose/.env only | config.py default "face_recognition" |
+| `POSTGRES_PASSWORD_FILE` | `<secret>` | compose line 422 → secret file | config.py resolves it into 'POSTGRES_PASSWORD' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `POSTGRES_USER` | `fr_app` | compose line 421 (literal) | backend/security/config_guard.py, scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py (+1 more) | no — compose/.env only | config.py default "postgres" |
+| `PYTHONUNBUFFERED` | `1` | compose line 413 (literal) | the Python interpreter | no — image / entrypoint variable | not an application setting |
+| `TRANSFORMERS_OFFLINE` | `1` | compose line 443 (literal) | transformers library | no — image / entrypoint variable | not an application setting |
+
+#### `migrate` — built from `docker/Dockerfile.cpu` · 18 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `AUTH_ALLOWED_ORIGINS` | `https://face-detector.internal` | compose line 150 ← 'docker/.env' 'PUBLIC_ORIGIN' | backend/security/config_guard.py, backend/security/origins.py | no — compose/.env only | Comma-separated hosts allowed to submit credentials (the request Host is always allowed) |
+| `AUTH_COOKIE_SECURE` | `true` | compose line 152 (literal) | backend/auth/auth_security.py, backend/security/config_guard.py | no — compose/.env only | Set True in production (HTTPS). Enables the Secure flag and the __Host- cookie prefix |
+| `AUTH_SAME_HOST_ORIGIN_TRUSTED` | `false` | compose line 151 (literal) | backend/security/config_guard.py, backend/security/origins.py | no — compose/.env only | Treat the request Host as a valid credential-submission origin. Set False in production once AUTH_ALLOWED_ORIG |
+| `CONFIG_PREFLIGHT` | `0` | compose line 169 (literal) | docker-entrypoint.sh | no — image / entrypoint variable | not an application setting |
+| `CORS_ORIGINS` | `https://face-detector.internal` | compose line 149 ← 'docker/.env' 'PUBLIC_ORIGIN' | backend/security/config_guard.py, backend/security/origins.py | no — compose/.env only | config.py default "*" |
+| `DATABASE_URL_FILE` | `/run/secrets/database_url_migrator` | compose line 145 → secret file | config.py resolves it into 'DATABASE_URL' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `ENABLE_API_DOCS` | `false` | compose line 153 (literal) | backend/main.py, backend/security/config_guard.py | no — compose/.env only | Serve /docs, /redoc and /openapi.json. Must be false in production |
+| `ENVIRONMENT` | `production` | compose line 142 (literal) | backend/core/runtime_fingerprint.py, backend/routes/health.py, backend/security/config_guard.py (+7 more) | no — compose/.env only | config.py default "production" |
+| `JWT_SECRET_KEY_FILE` | `<secret>` | compose line 154 → secret file | config.py resolves it into 'JWT_SECRET_KEY' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `MIGRATIONS_EXPECTED_HEAD` | `fcc3d4e5f6a7` | compose line 144 ← 'docker/.env' 'MIGRATIONS_EXPECTED_HEAD' | backend/core/runtime_fingerprint.py, backend/utils/migrations.py | no — compose/.env only | Pin the expected Alembic head so a drifted schema cannot serve traffic |
+| `MIGRATIONS_MODE` | `run` | compose line 143 (literal) | backend/core/runtime_fingerprint.py, backend/lifespan.py, backend/utils/migrations.py | no — compose/.env only | config.py default "run" |
+| `POSTGRES_PASSWORD_FILE` | `<secret>` | compose line 147 → secret file | config.py resolves it into 'POSTGRES_PASSWORD' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `POSTGRES_USER` | `fr_migrator` | compose line 146 (literal) | backend/security/config_guard.py, scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py (+1 more) | no — compose/.env only | config.py default "postgres" |
+| `REDIS_URL_FILE` | `/run/secrets/redis_url` | compose line 148 → secret file | config.py resolves it into 'REDIS_URL' via backend/security/secrets.py:resolve_secret | no — compose/.env only | config.py default: empty |
+| `SQL_AGENT_DB_PASSWORD_FILE` | `<secret>` | compose line 159 → secret file | config.py resolves it into 'SQL_AGENT_DB_PASSWORD' via backend/security/secrets.py:resolve_secret | no — compose/.env only | Path to a Docker secret holding the read-only role's password |
+| `SQL_AGENT_DB_USER` | `fr_readonly` | compose line 158 (literal) | backend/security/config_guard.py, sql_agent/config.py | no — compose/.env only | Read-only role used to execute generated SQL. Must differ from POSTGRES_USER |
+| `WEBHOOK_API_KEYS_FILE` | `<secret>` | compose line 160 → secret file | config.py resolves it into 'WEBHOOK_API_KEYS' via backend/security/secrets.py:resolve_secret | no — compose/.env only | Path to a Docker secret holding WEBHOOK_API_KEYS |
+| `WORKERS` | `1` | compose line 161 (literal) | backend/core/runtime_fingerprint.py, backend/lifespan.py, backend/security/config_guard.py (+2 more) | stored by the Settings page, but only a container recreate applies it | config.py default 4 |
+
+#### `postgres` — image `pgvector/pgvector:pg15` · 4 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `POSTGRES_DB` | `face_recognition` | compose line 65 (literal) | scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py, sql_agent/config.py | no — compose/.env only | config.py default "face_recognition" |
+| `POSTGRES_INITDB_ARGS` | `-E UTF8` | compose line 66 (literal) | postgres image initdb | no — image / entrypoint variable | not an application setting |
+| `POSTGRES_PASSWORD` | `<secret>` | compose line 64 ← 'docker/.env' 'POSTGRES_SUPERUSER_PASSWORD' | backend/security/config_guard.py, scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py (+1 more) | no — compose/.env only | config.py default "admin" |
+| `POSTGRES_USER` | `postgres` | compose line 63 (literal) | backend/security/config_guard.py, scripts/maintenance/dedupe_identity_embeddings.py, scripts/maintenance/wipe_pipelines.py (+1 more) | no — compose/.env only | config.py default "postgres" |
+
+#### `redis` — image `redis:7-alpine` · 1 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `REDISCLI_AUTH` | `<secret>` | compose line 97 ← 'docker/.env' 'REDIS_PASSWORD' | redis-cli in the redis healthcheck | no — image / entrypoint variable | not an application setting |
+
+#### `ollama` — image `ollama/ollama:latest` · 3 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `OLLAMA_HOST` | `0.0.0.0:11434` | compose (overlay) | ollama server | no — image / entrypoint variable | not an application setting |
+| `OLLAMA_KEEP_ALIVE` | `-1` | compose (overlay) | ollama server (how long a model stays loaded) | no — image / entrypoint variable | not an application setting |
+| `OLLAMA_MODELS` | `/root/.ollama/models` | compose (overlay) | ollama server (model store path) | no — image / entrypoint variable | not an application setting |
+
+#### `backup` — image `postgres:15-alpine` · 5 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `BACKUP_INTERVAL_SECONDS` | `86400` | compose line 599 ← 'docker/.env' 'BACKUP_INTERVAL_SECONDS' | backend/routes/stats.py, scripts/backup/backup-loop.sh | stored by the Settings page, but only a container recreate applies it | Interval between backup runs (also consumed by backup-loop.sh) |
+| `BACKUP_RETENTION_DAYS` | `14` | compose line 600 ← 'docker/.env' 'BACKUP_RETENTION_DAYS' | backend/routes/stats.py, scripts/backup/backup-loop.sh, scripts/backup/backup.sh | stored by the Settings page, but only a container recreate applies it | Days of backups to keep (also consumed by scripts/backup/backup.sh) |
+| `PGDATABASE` | `face_recognition` | compose line 598 (literal) | scripts/backup/backup.sh, scripts/backup/restore.sh | no — image / entrypoint variable | not an application setting |
+| `PGHOST` | `postgres` | compose line 592 (literal) | libpq — pg_dump in scripts/backup/backup.sh | no — image / entrypoint variable | not an application setting |
+| `PGUSER` | `fr_backup` | compose line 593 (literal) | libpq — pg_dump in scripts/backup/backup.sh | no — image / entrypoint variable | not an application setting |
+
+#### `grafana` — image `grafana/grafana:13.2.0` · 4 variable(s)
+
+| Variable | Value | Set in | Read by | Runtime change | Meaning |
+|---|---|---|---|---|---|
+| `GF_AUTH_ANONYMOUS_ENABLED` | `false` | compose line 648 (literal) | grafana image | no — image / entrypoint variable | not an application setting |
+| `GF_SECURITY_ADMIN_PASSWORD` | `<secret>` | compose line 646 ← 'docker/.env' 'GRAFANA_ADMIN_PASSWORD' | grafana image | no — image / entrypoint variable | not an application setting |
+| `GF_SERVER_ROOT_URL` | `http://localhost:3000` | compose line 649 ← 'docker/.env' 'GRAFANA_ROOT_URL' | grafana image | no — image / entrypoint variable | not an application setting |
+| `GF_USERS_ALLOW_SIGN_UP` | `false` | compose line 647 (literal) | grafana image | no — image / entrypoint variable | not an application setting |
+
+#### `prometheus` — image `prom/prometheus:v3.14.0` · 0 variable(s)
+
+(no environment variables; configured by mounted files — see §3 for nginx TLS, `docker/prometheus/`, `map-data/` for martin)
+
+#### `nginx` — image `nginx:alpine` · 0 variable(s)
+
+(no environment variables; configured by mounted files — see §3 for nginx TLS, `docker/prometheus/`, `map-data/` for martin)
+
+#### `martin` — image `ghcr.io/maplibre/martin:1.13.0` · 0 variable(s)
+
+(no environment variables; configured by mounted files — see §3 for nginx TLS, `docker/prometheus/`, `map-data/` for martin)
+
+**Regenerate** after any compose or `.env` change: `sudo docker compose --project-directory docker -f docker/docker-compose.prod.yml -f docker/docker-compose.prod.gpu.yml -f docker/gpu-allocation.generated.yml config`, then rebuild these tables from it (the generator scans `settings.NAME` reads across the code base and the apply modes in `backend/core/runtime_settings.py`).
+
+## 14. Volumes and mounts — what every container can read and write (verified 2026-09-07)
+
+Everything below was read from the running containers (`docker inspect`) and then **probed**: each read-only mount was written to from inside the container (as that container's own user) and refused the write; each writable application volume accepted a write-and-delete as uid 1000; engine data directories are owned by their engines. 47 mounts, 0 problems. `tests/test_volume_contract.py` pins the compose side, `./deploy.sh paths` the host ownership.
+
+### 14.1 Named volumes (`face_detector_prod_<name>`, driver local, survive restart/upgrade/rollback/uninstall)
+
+| Volume | Holds | Mounted by (container:path mode) | Size now | Backed up by |
+|---|---|---|---|---|
+| `postgres_data` | PostgreSQL cluster: every table, pgvector embeddings, users, settings, task history | postgres-1:/var/lib/postgresql/data (rw) | 81.09MB | `deploy.sh backup` and the daily backup job: `pg_dump --format=custom`, compressed, checksummed; restore with `sudo ./deploy.sh restore <id> --force` |
+| `storage_data` | face crops, snapshots and uploaded enrolment photos (what `STORAGE_DIR` points at) | backup-1:/data/storage (ro); face_recognition-1:/app/storage (rw) | 9.156kB | daily backup job: `storage.tar.gz` (mounted read-only at /data/storage) |
+| `face_database_data` | local index files and the embedded Chroma store used by the chatbot knowledge base (`/app/database`) | backup-1:/data/database (ro); face_recognition-1:/app/database (rw) | 7.414MB | daily backup job: `artifacts.tar.gz` (mounted read-only at /data/database) |
+| `ml_artifacts_data` | trained ML models, candidates and datasets shared by the API and the ML worker | backup-1:/data/ml (ro); face_recognition-1:/app/models/ml (rw); ml_worker-1:/app/models/ml (rw) | 0B | daily backup job: `ml_artifacts.tar.gz` (mounted read-only at /data/ml) |
+| `logs_data` | application log files of the API and the ML worker (pruned by log cleanup every 48 h) | face_recognition-1:/var/log/face-recognition (rw); ml_worker-1:/var/log/face-recognition (rw) | 4.684MB | not backed up — operational logs |
+| `chromadb_cache` | Chroma's model cache: the ONNX MiniLM embedding model the offline policy verifies at boot | face_recognition-1:/home/appuser/.cache/chroma (rw) | 174.5MB | not backed up — recreated from the image on first mount |
+| `hf_cache_data` | huggingface / sentence-transformers cache (query-history embeddings model) | face_recognition-1:/home/appuser/.cache/huggingface (rw); ml_worker-1:/home/appuser/.cache/huggingface (rw) | 91.62MB | not backed up — rebuildable cache |
+| `redis_data` | Redis persistence for the cache and queues | redis-1:/data (rw) | 23.2kB | not backed up — cache, rebuilt at runtime |
+| `ollama_models` | the LLM weights: qwen2.5:7b, Arctic-Text2SQL, qwen2.5:1.5b | ollama-1:/root/.ollama (rw) | 10.35GB | not in the daily backup (10 GB): re-import from the offline bundle or `ollama pull` on a connected host |
+| `backup_data` | the backup job's output: one directory per run with the dump, the tarballs and SHA256SUMS; pruned after `BACKUP_RETENTION_DAYS` | backup-1:/backups (rw); face_recognition-1:/backups (ro) | 19.45MB | **this is the volume to copy off the host** (§9) |
+| `prometheus_data` | metrics time series (retention set in `monitoring/prometheus.yml`) | prometheus-1:/prometheus (rw) | 38.85MB | not backed up |
+| `grafana_data` | Grafana state (sessions, preferences); dashboards themselves are provisioned from the repo | grafana-1:/var/lib/grafana (rw) | 1.651MB | not backed up |
+| `vllm_models` | (profile `vllm` only) vLLM model store | — (profile-gated service not running) | not created (profile) | — |
+| `milvus_etcd` | (profile `milvus` only) | — (profile-gated service not running) | not created (profile) | — |
+| `milvus_minio` | (profile `milvus` only) | — (profile-gated service not running) | not created (profile) | — |
+| `milvus_data` | (profile `milvus` only) | — (profile-gated service not running) | not created (profile) | — |
+
+### 14.2 Bind mounts (host paths from the checkout)
+
+| Host path | Purpose | Mounted by | Expected owner / mode on the host (`./deploy.sh paths`) |
+|---|---|---|---|
+| `./secrets` | Docker secrets, one file each (§13.2) | backup-1:/run/secrets/backup_db_password (ro); face_recognition-1:/run/secrets/bootstrap_admin_password (ro); face_recognition-1:/run/secrets/database_url_app (ro); face_recognition-1:/run/secrets/jwt_secret (ro); face_recognition-1:/run/secrets/postgres_password_app (ro); face_recognition-1:/run/secrets/redis_url (ro); face_recognition-1:/run/secrets/sql_agent_db_password (ro); face_recognition-1:/run/secrets/webhook_api_keys (ro); ml_worker-1:/run/secrets/database_url_app (ro); ml_worker-1:/run/secrets/postgres_password_app (ro) | 0440 root:1000, directory 0750 |
+| `./scripts/backup` | `backup.sh` and `backup-loop.sh` (bind-mounted, so a fix needs no rebuild) | backup-1:/scripts (ro) | repo files, read-only |
+| `./certs` | TLS: `server.crt`/`server.key` for nginx, `internal-ca.crt` for clients | face_recognition-1:/etc/nginx/certs (ro); nginx-1:/etc/nginx/certs (ro) | 0755 root; `server.key` and `internal-ca.key` 0600 root — move the CA key offline (§3) |
+| `./map-data` | offline basemap archives (.mbtiles), fonts and the content-verdict ledger | face_recognition-1:/app/map-data (ro); martin-1:/map-data (ro) | 0755 1000:1000; `map-data/production` read by martin |
+| `./weights` | SCRFD + ArcFace ONNX weights, verified against `weights/WEIGHTS_MANIFEST.json` by stage 08 | face_recognition-1:/app/weights (ro) | 0755 1000:1000 (files 0755) |
+| `./monitoring/grafana/provisioning` | datasources + dashboard providers | grafana-1:/etc/grafana/provisioning (ro) | repo files, read-only |
+| `./monitoring/grafana/dashboards` | dashboard JSON | grafana-1:/var/lib/grafana/dashboards (ro) | repo files, read-only |
+| `./config/martin.yaml` | Martin tile-server configuration | martin-1:/config/martin.yaml (ro) | repo file, read-only |
+| `./nginx.prod.conf` | the nginx configuration (TLS, security headers, proxy rules) | nginx-1:/etc/nginx/nginx.conf (ro) | repo file, read-only |
+| `./frontend` | the web UI, served by nginx straight from the checkout (no rebuild for HTML/JS/CSS changes) | nginx-1:/usr/share/nginx/html/frontend (ro) | repo files, read-only |
+| `./icons` | static icons served by nginx | nginx-1:/usr/share/nginx/html/icons (ro) | repo files, read-only |
+| `./init-db.sql` | first-boot database initialisation (extensions) | postgres-1:/docker-entrypoint-initdb.d/init-db.sql (ro) | repo file, read-only |
+| `./db` | `db/roles.sql` — least-privilege database roles applied by deploy.sh | postgres-1:/db (ro) | repo files, read-only |
+| `./monitoring/alerts` | alert rules | prometheus-1:/etc/prometheus/alerts (ro) | repo files, read-only |
+| `./monitoring/prometheus.yml` | scrape configuration | prometheus-1:/etc/prometheus/prometheus.yml (ro) | repo file, read-only |
+| `./docker/redis/users.acl` | Redis ACL with the app and monitor users (hashed passwords) | redis-1:/etc/redis/users.acl (ro) | 0640 999:1000 |
+
+### 14.3 Per container
+
+
+The one-shot `migrate` job mounts only its six secret files (§13.2); it has no data volume, which is why it must not run the inference-artifact preflight (§12).
+
+### 14.4 Notes and how to verify yourself
+
+- **`backup` carries an anonymous volume at `/var/lib/postgresql/data`.** It runs the postgres image only for `pg_dump`, and that image declares a data volume; the anonymous volume stays empty. Harmless; a `tmpfs` on that path would silence it.
+- **`ml_artifacts_data` is 0 B** until the first ML training run; `chromadb_cache` (~175 MB) is where the offline embedding model lives; `ollama_models` (~10 GB) is the largest thing on the host after the images.
+- **Networks:** `data` and `monitoring` are `internal: true` — postgres, redis, prometheus and grafana have no route off the host; only nginx publishes ports 80/443.
+- List a container's mounts: `docker inspect <container> --format '{{range .Mounts}}{{.Type}} {{if .Name}}{{.Name}}{{else}}{{.Source}}{{end}} -> {{.Destination}} rw={{.RW}}{{"\n"}}{{end}}'`
+- Prove a read-only mount is read-only: `docker exec -u 1000:1000 face_detector_prod-face_recognition-1 sh -c 'touch /app/weights/x'` must fail with *Read-only file system*.
+- Prove a data volume is writable by the app: `docker exec -u 1000:1000 face_detector_prod-face_recognition-1 sh -c 'touch /app/storage/.probe && rm /app/storage/.probe'` must succeed silently.
+- Sizes: `sudo docker system df -v | grep face_detector_prod_`.
 

@@ -319,7 +319,7 @@ is absent.
 
 Set `OFFLINE_MODE=true` in `.env` and restart: every offline rule now
 applies while `ENVIRONMENT` stays `development`, so you can fix a
-production env file before the real deployment. `GET /api/health/offline-policy`
+production env file before the real deployment. `GET /health/offline-policy`
 (admin token) prints the checklist.
 
 ---
@@ -459,7 +459,7 @@ docker compose -f docker/docker-compose.prod.yml -f docker/docker-compose.prod.g
 - As an administrator:
 
   ```
-  curl -s -H "Authorization: Bearer <admin token>" https://faces.corp.internal/api/health/offline-policy
+  curl -s -H "Authorization: Bearer <admin token>" https://faces.corp.internal/health/offline-policy
   ```
 
   shows the `[PASS]/[FAIL]` list: offline mode, no external inference or
@@ -554,7 +554,7 @@ docker exec face_recognition_api python -m pytest tests/test_offline_policy.py t
 docker exec face_recognition_api python -c "from backend.security.config_guard import enforce; enforce()"
 
 # the checklist (admin token)
-curl -s -H "Authorization: Bearer $TOKEN" http://localhost/api/health/offline-policy | python -m json.tool
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost/health/offline-policy | python -m json.tool
 
 # the MCP catalogue over the protocol (optional profile)
 docker compose ... --profile mcp-sql up -d && docker exec mcp-sql python -c "import mcp; print('ok')"

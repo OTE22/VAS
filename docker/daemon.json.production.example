@@ -1,0 +1,19 @@
+{
+    "runtimes": {
+        "nvidia": {
+            "args": [],
+            "path": "nvidia-container-runtime"
+        }
+    },
+    "builder": {
+        "gc": {
+            "enabled": true,
+            "defaultKeepStorage": "120GB",
+            "policy": [
+                { "keepStorage": "60GB",  "filter": ["type=exec.cachemount"] },
+                { "keepStorage": "60GB",  "filter": ["unused-for=720h"] },
+                { "keepStorage": "120GB", "all": true }
+            ]
+        }
+    }
+}
