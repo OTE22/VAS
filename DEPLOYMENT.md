@@ -25,6 +25,7 @@ SQL bot, faces and enrolment); §2 counts corrected; §6b added.
 - [6a. The chatbot, the GPU, and why it was slow](#6a-the-chatbot-the-gpu-and-why-it-was-slow)
 - [7. Everyday commands](#7-everyday-commands)
 - [7a. Seeing Docker in a GUI](#7a-seeing-docker-in-a-gui)
+- [7b. Seeing a frontend change](#7b-seeing-a-frontend-change)
 - [8. If something breaks](#8-if-something-breaks)
 - [9. Back up these, in this order](#9-back-up-these-in-this-order)
 - [10. Offline policy (production is air-gapped)](#10-offline-policy-production-is-air-gapped)
@@ -34,6 +35,7 @@ SQL bot, faces and enrolment); §2 counts corrected; §6b added.
 - [14. Volumes and mounts — what every container can read and write (verified 2026-09-07)](#14-volumes-and-mounts--what-every-container-can-read-and-write-verified-2026-09-07)
 - [15. The SQL bot (chat agent): how it runs, and its variables](#15-the-sql-bot-chat-agent-how-it-runs-and-its-variables)
 - [16. Faces: how a person is stored, matched and added](#16-faces-how-a-person-is-stored-matched-and-added)
+- [17. Webhooks: how a frame gets in, and how the VMS gets a token](#17-webhooks-how-a-frame-gets-in-and-how-the-vms-gets-a-token)
 
 ---
 
@@ -1075,6 +1077,46 @@ Rancher Desktop has the same problem, for the same reason.
 
 ---
 
+## 7b. Seeing a frontend change
+
+Two different delivery paths, so two different answers:
+
+| File type | Served by | Reaches the server | Reaches the browser |
+|---|---|---|---|
+| `frontend/js/*.js`, `frontend/css/*.css`, `frontend/vendor/*`, `icons/*` | nginx, straight from the checkout (bind mount, read-only) | **immediately** — save the file and nginx serves the new bytes | only when the URL changes: nginx sends `Cache-Control: public, immutable, max-age=1y`, so a browser keeps the old copy until the page references a new `?v=` |
+| the HTML pages (`/home`, `/dashboard`, `/admin/*`, `/signin`, `/change-password`, `/tracking-people`) | the **API**, from the copy baked into its image (`COPY . .` in `Dockerfile.gpu`; the API container has no frontend mount) | **only after a rebuild** | on the next load (HTML is served with revalidation) |
+
+**Procedure**
+
+1. Edit the files in `frontend/` on the host.
+2. If you touched JS or CSS, bump the version string where the page includes it,
+   e.g. `home.js?v=home-5` → `home-6` in `frontend/home.html` (the page and its
+   assets are versioned together on purpose; without the bump users keep the
+   cached asset for a year).
+3. Rebuild and roll out, because step 2 changed HTML:
+   ```bash
+   sudo ./deploy.sh upgrade --yes      # 3–5 min with the wheel cache (§11); backup + health battery included
+   ```
+4. Reload the page normally. For a local check *before* the rebuild you can
+   bypass your own browser cache (Ctrl+Shift+R, or DevTools → Network →
+   "Disable cache") — that shows you the new JS/CSS, but nobody else sees it
+   until step 3.
+
+**Proving what is live**
+
+```bash
+# nginx serves the host file?  (same hash = yes)
+md5sum frontend/js/home.js; curl -sk https://face-detector.internal/frontend/js/home.js | md5sum
+# the API image carries your HTML?  (same hash = yes; different = rebuild needed)
+md5sum frontend/home.html; sudo docker exec face_detector_prod-face_recognition-1 md5sum /app/frontend/home.html
+# what the browser will be told about caching
+curl -skI 'https://face-detector.internal/frontend/js/home.js?v=home-6' | grep -i cache-control
+```
+
+The development stack (`docker-compose.cpu.yml`) bind-mounts `frontend/` into the
+API as well, so HTML edits show up there without a rebuild; production
+deliberately does not, so that what runs is exactly what was built and backed up.
+
 ## 8. If something breaks
 
 | Symptom | Where to look |
@@ -1876,4 +1918,130 @@ Related settings not listed in 16.4: `UNKNOWN_SIMILARITY_THRESHOLD` 0.35,
 0.05 (immediate) — all `config.py` defaults in production.
 
 Code: `backend/core/identity_service.py` (matching, unknown identities, enrichment, merge), `backend/core/enrollment_service.py` (Add Person), `backend/routes/upload.py` and `backend/routes/enrollment_review.py` (the endpoints), `backend/core/identity_index_pgvector.py` (the search), `backend/core/identity_retention.py` and `identity_clustering.py` (housekeeping), `backend/core/merge_compatibility.py` (merge checks).
+
+## 17. Webhooks: how a frame gets in, and how the VMS gets a token
+
+### 17.1 The receiving side
+
+```
+VMS / camera ──HTTPS──▶ nginx  ^/(api/)?webhook/   20 req/s per IP (burst 120), 200 connections, body ≤ 25 MB
+                          │
+                          ▼
+                   API  POST /webhook/{pipeline_id}      (alias: /api/webhook/{pipeline_id})
+                          │  1. credential check (a FastAPI dependency: runs before any byte of the body is parsed)
+                          │  2. pipeline_id shape check  (^[A-Za-z0-9_-]{3,100}$)
+                          │  3. body ≤ WEBHOOK_MAX_BODY_MB (413), valid JSON (400)
+                          │  4. dedup: a frame seen within WEBHOOK_DEDUP_TTL_SECONDS is dropped silently
+                          │  5. enqueue the raw base64 frame  → answers 202 in milliseconds, nothing decoded yet
+                          │     (queue full → 503 with Retry-After: 2 — explicit back-pressure, never unbounded growth)
+                          ▼
+                   ProcessingQueue  → per-camera micro-batches (5 frames / 0.5 s) → QUEUE_WORKERS (15) decode, validate
+                   and run detection + recognition off the event loop (§16), writing detections, faces, appearances.
+```
+
+- **Cameras self-register.** The first frame from a new `pipeline_id` inserts the
+  `pipelines` row (`INSERT … ON CONFLICT DO NOTHING`, race-safe across workers);
+  an optional `location_name` in the body becomes its display name. No admin
+  pre-registration step exists, which is why the credential is a shared key set
+  rather than a per-camera secret.
+- **Body shape.** JSON. The frames travel as base64 strings in a top-level
+  `images` array (a `data:image/jpeg;base64,` prefix is tolerated and stripped),
+  or as `frames: [{"image": "…"}]`. Optional `predictions` (top-level or under
+  `results`) describe what the sender's own detector saw — `class_name`,
+  `confidence` — and point at a frame with `image_index` / `frame_index` /
+  `image_id`; optional `location_name` names the camera on first sighting;
+  `node_id` identifies the sender. The smallest valid body is:
+
+  ```json
+  {"images": ["data:image/jpeg;base64,/9j/4AAQ…"], "location_name": "Gate 1"}
+  ```
+
+  A body with no images is answered `200 {"message": "No images"}` and nothing is
+  queued. Full schema and examples: `Docs/22_WEBHOOK_DEBUG.md` and
+  `Docs/71_IMAGE_INGESTION_WORKFLOW.md` §2; camera-side diagnosis:
+  `Docs/21_WEBHOOK_TROUBLESHOOTING.md`.
+- **Answers:** `202` queued · `401` no/invalid credential (byte-identical for
+  missing, malformed and wrong, so it is not an oracle; `WWW-Authenticate:
+  Bearer, WebhookKey` names the accepted schemes) · `400` invalid JSON ·
+  `413` too large · `503 + Retry-After: 2` queue full.
+- **Self-check for an installer:** `GET https://face-detector.internal/webhook/test`
+  with the credential → `200` means the key works, `401` means fix it.
+
+### 17.2 The credential: two kinds, one wire format
+
+The sender presents the credential in a header — **never in the URL** (nginx,
+gunicorn and the access log all record the request line):
+
+```
+Authorization: Bearer <token>          (external senders; scheme case-insensitive)
+X-Webhook-Key: <token>                 (cameras; the header name is WEBHOOK_AUTH_HEADER)
+```
+
+| | Environment key (`secrets/webhook_api_keys`) | Issued credential (Admin → *Ingest Credentials*) |
+|---|---|---|
+| Created by | `generate-secrets.sh` (48 random bytes), or `openssl rand -base64 48 > secrets/webhook_api_keys` | an admin in the UI (`/admin/ingest-credentials`) or `POST /api/admin/webhook-credentials` with a `name` |
+| Stored as | a file, 0440 root:1000, mounted at `/run/secrets/webhook_api_keys` | SHA-256 only, in the `webhook_credentials` table — the token is **shown once** |
+| Identifies the sender | no — shared by every camera | yes, by name; each has a fingerprint (`GET /api/admin/webhook-credentials`) |
+| Revoke one sender | rotate the whole fleet | `DELETE /api/admin/webhook-credentials/{id}` — takes effect within `WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS` (30 s) on every worker |
+| Survives a database outage | yes | no (the environment key keeps cameras alive; the failure mode is never "accept everything") |
+| Required in production | yes — the config guard refuses to boot without a file that exists, is readable by the service, is ≤ 0444, holds ≥ 1 key of ≥ 32 strong characters, and is neither the repo's published dev key nor a reused secret | no |
+| Rotation | the file is a comma-separated **set**: append the new key, roll it out to senders, remove the old key — no window without a valid key; then `deploy.sh upgrade` (or recreate the API) | mint a new one, update the sender, delete the old row |
+
+`WEBHOOK_AUTH_MODE` is `enforce` in production. `log_only` (verify and log, let
+traffic through) is allowed only with `WEBHOOK_AUTH_INSECURE_ACK=true`, for
+migrating an existing fleet while watching `fr_webhook_auth_total{result="would_reject"}`
+fall to zero; `off` is refused unconditionally (exit 78). These keys are
+security-critical: the Settings page shows them read-only and a change needs a
+restart.
+
+### 17.3 How the VMS gets its token and where it sends
+
+1. **Mint the credential for the VMS.** As an administrator open *Admin →
+   Ingest Credentials* (`/admin/ingest-credentials`), create one named for the
+   VMS (for example `vms-site-1`), and copy the token from the one-time display.
+   (Break-glass alternative: `sudo cat secrets/webhook_api_keys` on the host.)
+2. **Configure the VMS's HTTP-notification / webhook action** with:
+   - URL: `https://face-detector.internal/webhook/<pipeline_id>` — one
+     `pipeline_id` per camera (3–100 characters of `A-Z a-z 0-9 _ -`); the id is
+     created on first use.
+   - Header: `Authorization: Bearer <token>` (or `X-Webhook-Key: <token>` if the
+     VMS can only set one custom header).
+   - Method `POST`, `Content-Type: application/json`, body as in 17.1.
+3. **Trust the certificate.** Plain HTTP is answered with `308` to HTTPS (method
+   and body preserved), so the VMS must speak HTTPS and must trust
+   `certs/internal-ca.crt` (§3) — or resolve `face-detector.internal` (§5) and
+   trust that CA on the VMS host. Do not disable certificate checks on the VMS;
+   install the CA instead.
+4. **Reachability.** Two supported paths:
+   - **over the LAN**, like a browser: DNS name → the host's IP → port 443;
+   - **over the shared Docker network** when the VMS runs in Docker on the same
+     host: both projects declare the external network `webhook_integration`
+     (created once with `docker network create webhook_integration`); only this
+     stack's nginx joins it (today `172.19.0.2`), so the VMS reaches the webhook
+     and nothing else — postgres, redis and the API stay on internal networks it
+     cannot see. Point the VMS at `https://face-detector.internal/…` with the name
+     resolving to nginx's address on that network.
+5. **Verify** from the VMS host: `curl -H "Authorization: Bearer <token>"
+   https://face-detector.internal/webhook/test` → `200`. Then send one frame and
+   watch `docker logs -f face_detector_prod-face_recognition-1` for the
+   `[WEBHOOK]` line and the camera appearing under Pipelines; a wrong key shows
+   up as `fr_webhook_auth_total{result="rejected"}` in Prometheus.
+
+### 17.4 Settings involved (production values)
+
+| Setting | Production | Set in | Runtime change | Meaning |
+|---|---|---|---|---|
+| `WEBHOOK_AUTH_MODE` | `enforce` | compose | no (restart) | enforce / log_only (needs the ack) / off (refused) |
+| `WEBHOOK_API_KEYS_FILE` | `/run/secrets/webhook_api_keys` | compose → secret | no | the environment key set |
+| `WEBHOOK_AUTH_HEADER` | `X-Webhook-Key` | default | no | header name cameras may use instead of Bearer |
+| `WEBHOOK_AUTH_TOKEN` / `_FILE` | empty | default | no | optional alias for one external sender, appended to the key set |
+| `WEBHOOK_AUTH_INSECURE_ACK` | false | default | no | acknowledges `log_only` in production; cannot authorise `off` |
+| `WEBHOOK_CREDENTIAL_CACHE_TTL_SECONDS` | 30 | default | no | revocation latency of issued credentials, per worker |
+| `WEBHOOK_MAX_BODY_MB` | 25 | default | next request | must equal nginx `client_max_body_size` for the webhook location (a test asserts it) |
+| `WEBHOOK_DEDUP_TTL_SECONDS` | 600 | default | next request | identical frames within this window are dropped |
+| `MAX_QUEUE_SIZE` / `QUEUE_WORKERS` | 2000 / 15 | compose | after API restart | back-pressure threshold; decode/recognise workers |
+| `SAVE_WEBHOOK_IMAGES` | false | compose | immediate | keep every received frame on disk (debugging only; unbounded) |
+| `MAX_FILE_SIZE` / `ALLOWED_IMAGE_EXTENSIONS` | 10 MB / `.jpg …` | default | no | per-image limits applied when the frame is decoded |
+
+Code: `backend/routes/webhook.py` (endpoint, dedup, queueing), `backend/security/webhook_auth.py` (key matching, modes), `backend/security/webhook_credentials.py` and `backend/routes/webhook_credentials.py` (issued credentials), `backend/services/image_processing.py` (`ensure_pipeline_registered`, the processing pipeline), `nginx.prod.conf` (edge limits), `tests/test_webhook_auth.py` (the contract).
 

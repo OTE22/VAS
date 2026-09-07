@@ -14,8 +14,11 @@
     -->
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/home.css?v=home-5">
+    <link rel="stylesheet" href="/frontend/css/home-workspace.css?v=workspace-1">
+    <meta name="theme-color" content="#0c121c">
 </head>
-<body class="hp" data-state="loading" data-freshness="never">
+<body class="hp home-workspace" data-state="loading" data-freshness="never">
+    <a class="home-skip-link" href="#main-content">Skip to main content</a>
     <!-- Navbar Component (loaded dynamically by navbar-loader.js) -->
     <div id="navbar-placeholder"></div>
 
@@ -31,7 +34,7 @@
         <p class="hp-boot__text">Checking your access…</p>
     </div>
 
-    <main class="hp-main">
+    <main class="hp-main" id="main-content">
         <div class="hp-container">
 
             <!-- ============================================================
@@ -39,6 +42,7 @@
                  ============================================================ -->
             <header class="hp-hero">
                 <div class="hp-hero__lead">
+                    <span class="home-eyebrow">Identity intelligence / Overview</span>
                     <p class="hp-hero__eyebrow" id="user-info"></p>
                     <h1 class="hp-hero__title" id="hp-service">Face Recognition Service</h1>
                     <p class="hp-hero__desc">Live detection, enrolment and pipeline monitoring across every connected source.</p>
@@ -81,10 +85,78 @@
             </div>
 
             <!-- ============================================================
+                 QUICK ACTIONS — never gated on /api/stats
+                 ============================================================ -->
+            <nav class="hp-section" aria-label="Quick actions">
+                <h2 class="hp-section__title">Quick actions</h2>
+                <div class="hp-action-grid">
+
+                    <a class="hp-action" href="/dashboard">
+                        <span class="hp-action__icon"><i class="fas fa-video" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Live Feeds</span>
+                            <span class="hp-action__sub">Real-time detections &amp; alerts</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <!-- Opens the shared upload modal in place (registered by
+                         upload-modal.js, injected via upload-modal-loader.js).
+                         Used to link to /dashboard, which no longer hosts the
+                         form — it is the live-feeds page now. -->
+                    <button type="button" class="hp-action" data-action="openUploadModal">
+                        <span class="hp-action__icon"><i class="fas fa-user-plus" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Add person</span>
+                            <span class="hp-action__sub">Enrol a new face</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-plus" aria-hidden="true"></i>
+                    </button>
+
+                    <a class="hp-action" href="/admin/unknown">
+                        <span class="hp-action__icon"><i class="fas fa-user-secret" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Unknown faces</span>
+                            <span class="hp-action__sub">Review unmatched identities</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <a class="hp-action" id="tracking-link" href="/tracking-people">
+                        <span class="hp-action__icon"><i class="fas fa-location-crosshairs" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Tracking people</span>
+                            <span class="hp-action__sub">Assistant &amp; tracking</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <a class="hp-action" href="/admin/pipelines">
+                        <span class="hp-action__icon"><i class="fas fa-network-wired" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">Pipelines</span>
+                            <span class="hp-action__sub">Sources &amp; configuration</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
+                    </a>
+
+                    <button type="button" class="hp-action" data-action="focusHealth">
+                        <span class="hp-action__icon"><i class="fas fa-heart-pulse" aria-hidden="true"></i></span>
+                        <span class="hp-action__text">
+                            <span class="hp-action__title">System status</span>
+                            <span class="hp-action__sub">Jump to subsystem detail</span>
+                        </span>
+                        <i class="hp-action__arrow fas fa-arrow-down" aria-hidden="true"></i>
+                    </button>
+
+                </div>
+            </nav>
+
+            <!-- ============================================================
                  KPI GRID — the numeric headline
                  ============================================================ -->
             <section class="hp-section hp-section--kpis">
-                <h2 class="hp-section__title">Key metrics</h2>
+                <div class="home-section-heading"><h2 class="hp-section__title">Operational overview</h2><p>Detection, capacity, and service activity</p></div>
                 <div class="hp-kpi-grid">
 
                     <article class="hp-kpi" id="kpi-pipelines" data-state="loading">
@@ -422,74 +494,6 @@
                 </div>
                 <p class="hp-retention__foot"><i class="fas fa-lock" aria-hidden="true"></i>Shown as the cleanup jobs will apply them. Administrators change them on the Settings page.</p>
             </section>
-
-            <!-- ============================================================
-                 QUICK ACTIONS — never gated on /api/stats
-                 ============================================================ -->
-            <nav class="hp-section" aria-label="Quick actions">
-                <h2 class="hp-section__title">Quick actions</h2>
-                <div class="hp-action-grid">
-
-                    <a class="hp-action" href="/dashboard">
-                        <span class="hp-action__icon"><i class="fas fa-video" aria-hidden="true"></i></span>
-                        <span class="hp-action__text">
-                            <span class="hp-action__title">Live Feeds</span>
-                            <span class="hp-action__sub">Real-time detections &amp; alerts</span>
-                        </span>
-                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
-                    </a>
-
-                    <!-- Opens the shared upload modal in place (registered by
-                         upload-modal.js, injected via upload-modal-loader.js).
-                         Used to link to /dashboard, which no longer hosts the
-                         form — it is the live-feeds page now. -->
-                    <button type="button" class="hp-action" data-action="openUploadModal">
-                        <span class="hp-action__icon"><i class="fas fa-user-plus" aria-hidden="true"></i></span>
-                        <span class="hp-action__text">
-                            <span class="hp-action__title">Add person</span>
-                            <span class="hp-action__sub">Enrol a new face</span>
-                        </span>
-                        <i class="hp-action__arrow fas fa-plus" aria-hidden="true"></i>
-                    </button>
-
-                    <a class="hp-action" href="/admin/unknown">
-                        <span class="hp-action__icon"><i class="fas fa-user-secret" aria-hidden="true"></i></span>
-                        <span class="hp-action__text">
-                            <span class="hp-action__title">Unknown faces</span>
-                            <span class="hp-action__sub">Review unmatched identities</span>
-                        </span>
-                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
-                    </a>
-
-                    <a class="hp-action" id="tracking-link" href="/tracking-people">
-                        <span class="hp-action__icon"><i class="fas fa-location-crosshairs" aria-hidden="true"></i></span>
-                        <span class="hp-action__text">
-                            <span class="hp-action__title">Tracking people</span>
-                            <span class="hp-action__sub">Assistant &amp; tracking</span>
-                        </span>
-                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
-                    </a>
-
-                    <a class="hp-action" href="/admin/pipelines">
-                        <span class="hp-action__icon"><i class="fas fa-network-wired" aria-hidden="true"></i></span>
-                        <span class="hp-action__text">
-                            <span class="hp-action__title">Pipelines</span>
-                            <span class="hp-action__sub">Sources &amp; configuration</span>
-                        </span>
-                        <i class="hp-action__arrow fas fa-arrow-right" aria-hidden="true"></i>
-                    </a>
-
-                    <button type="button" class="hp-action" data-action="focusHealth">
-                        <span class="hp-action__icon"><i class="fas fa-heart-pulse" aria-hidden="true"></i></span>
-                        <span class="hp-action__text">
-                            <span class="hp-action__title">System status</span>
-                            <span class="hp-action__sub">Jump to subsystem detail</span>
-                        </span>
-                        <i class="hp-action__arrow fas fa-arrow-down" aria-hidden="true"></i>
-                    </button>
-
-                </div>
-            </nav>
 
             <!-- ============================================================
                  ADMINISTRATION — gated by exactly ONE mechanism: this inline

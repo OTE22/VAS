@@ -1910,3 +1910,10 @@ input:-webkit-autofill:focus {
 @media (prefers-reduced-motion: reduce) {
     .search-workspace *, .search-workspace *::before, .search-workspace *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+/* Keep batch limitations visible even when optional controls are collapsed. */
+.search-workspace .advanced-section.capability-disabled summary > span::after {
+    content: 'Single image only';
+    color: var(--search-muted);
+    font-size: .65rem;
+    font-weight: 400;
+}
