@@ -17,7 +17,7 @@
     <meta name="referrer" content="strict-origin-when-cross-origin">
 
     <!-- Performance -->
-    <meta name="theme-color" content="#667eea">
+    <meta name="theme-color" content="#0c121c">
 
     <title>Pipeline Management - Admin Panel | Face Recognition Service</title>
 
@@ -25,8 +25,9 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-review-workspace.css?v=review-1">
 </head>
-<body>
+<body class="review-workspace pipelines-workspace">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -34,8 +35,7 @@
     <div id="navbar-placeholder"></div>
 
     <main class="intelligence-main-container" id="main-content" role="main">
-        <div class="intelligence-grid-overlay"></div>
-        <div class="intelligence-scan-line"></div>
+
         
         <div class="intelligence-content">
             <header class="page-header">
@@ -45,6 +45,7 @@
                         <div class="header-icon-glow"></div>
                     </div>
                     <div class="header-text">
+                        <span class="review-eyebrow">Identity intelligence / Source management</span>
                         <h1 class="page-title">Pipeline Management</h1>
                         <p class="page-description">Manage video pipelines and camera configurations</p>
                     </div>
@@ -76,10 +77,10 @@
                     </div>
                     <div class="section-title-text">
                         <h2 id="pipelines-table-heading">Pipeline Configurations</h2>
-                        <p class="section-subtitle">Video Source Registry</p>
+                        <p class="section-subtitle">Review source activity and configure camera locations.</p>
                     </div>
                 </div>
-                <div class="table-container">
+                <div class="table-container" tabindex="0" role="region" aria-label="Pipeline configurations table, scroll to view more columns">
                     <table class="intelligence-data-table" role="table" aria-label="Pipeline configurations list">
                     <thead>
                         <tr role="row">
@@ -123,7 +124,7 @@
             </header>
             <div class="modal-body">
                 <div class="coordinates-form-section">
-                    <label class="form-label">
+                    <label class="form-label" for="location-name-input">
                         <i class="fas fa-tag"></i>
                         Location Name
                     </label>
@@ -144,7 +145,7 @@
                 
                 <div class="coordinates-inputs-grid">
                     <div class="coordinates-form-section">
-                        <label class="form-label">
+                        <label class="form-label" for="latitude-input">
                             <i class="fas fa-globe"></i>
                             Latitude
                         </label>
@@ -153,7 +154,7 @@
                     </div>
                     
                     <div class="coordinates-form-section">
-                        <label class="form-label">
+                        <label class="form-label" for="longitude-input">
                             <i class="fas fa-globe"></i>
                             Longitude
                         </label>

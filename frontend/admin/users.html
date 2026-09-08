@@ -17,7 +17,7 @@
     <meta name="referrer" content="strict-origin-when-cross-origin">
 
     <!-- Performance -->
-    <meta name="theme-color" content="#667eea">
+    <meta name="theme-color" content="#0c121c">
 
     <title>User Management - Admin Panel | Face Recognition Service</title>
 
@@ -25,8 +25,9 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-users.css?v=users-1">
 </head>
-<body>
+<body class="users-workspace">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -34,8 +35,7 @@
     <div id="navbar-placeholder"></div>
 
     <main class="intelligence-main-container" id="main-content" role="main">
-        <div class="intelligence-grid-overlay"></div>
-        <div class="intelligence-scan-line"></div>
+
         
         <div class="intelligence-content">
             <header class="page-header">
@@ -45,7 +45,8 @@
                         <div class="header-icon-glow"></div>
                     </div>
                     <div class="header-text">
-                        <h1 class="page-title">User Management</h1>
+                        <span class="users-eyebrow">Identity intelligence / Access management</span>
+                        <h1 class="page-title">User management</h1>
                         <p class="page-description">Manage user accounts, roles, permissions, and access control</p>
                     </div>
                 </div>
@@ -76,7 +77,7 @@
                     </div>
                     <div class="section-title-text">
                         <h2 id="users-table-heading">User Accounts</h2>
-                        <p class="section-subtitle">System User Registry</p>
+                        <p class="section-subtitle">Review accounts, manage access, and maintain user permissions.</p>
                     </div>
                 </div>
                 <!--
@@ -97,7 +98,16 @@
                         <i class="fas fa-shield-halved" aria-hidden="true"></i> RESTORE SYSTEM PRINCIPAL
                     </button>
                 </div>
-                <div class="table-container">
+                <div class="users-toolbar" role="group" aria-label="Filter user accounts">
+                    <span class="users-toolbar-label">Show accounts</span>
+<button class="btn-secondary btn-active" data-action="showAllUsers" id="btn-all-users">
+                                        <i class="fas fa-users"></i> All users
+                                    </button>
+<button class="btn-secondary" data-action="filterBlockedUsers" id="btn-blocked-only">
+                                        <i class="fas fa-ban"></i> Blocked users
+                                    </button>
+                </div>
+                <div class="table-container" tabindex="0" role="region" aria-label="User accounts table, scroll to view more columns">
                     <table class="intelligence-data-table" role="table" aria-label="User accounts list">
                     <thead>
                         <tr role="row">
@@ -111,20 +121,7 @@
                             <th scope="col" role="columnheader">Actions</th>
                         </tr>
                     </thead>
-                    <tfoot>
-                        <tr>
-                            <td colspan="8" style="padding: 1.5rem; text-align: center; width: 100%;">
-                                <div style="display: flex; justify-content: center; align-items: center; gap: 1rem; width: 100%;">
-                                    <button class="btn-secondary" data-action="filterBlockedUsers" id="btn-blocked-only">
-                                        <i class="fas fa-ban"></i> BLOCKED USERS ONLY
-                                    </button>
-                                    <button class="btn-secondary btn-active" data-action="showAllUsers" id="btn-all-users">
-                                        <i class="fas fa-users"></i> ALL USER
-                                    </button>
-                                </div>
-                            </td>
-                        </tr>
-                    </tfoot>
+
                     <tbody id="users-table-body" role="rowgroup">
                         <tr role="row">
                             <td colspan="8" class="loading" role="cell">
@@ -168,13 +165,13 @@
                         <div class="security-form-section">
                             <div class="section-header">
                                 <i class="fas fa-id-badge"></i>
-                                <span>IDENTITY VERIFICATION</span>
+                                <span>Account details</span>
                             </div>
                             
                             <div class="security-form-group">
                                 <label for="modal-username" class="security-label">
                                     <span class="label-icon"><i class="fas fa-user"></i></span>
-                                    <span class="label-text">USERNAME</span>
+                                    <span class="label-text">Username</span>
                                     <span class="security-badge required">REQUIRED</span>
                                 </label>
                                 <div class="security-input-wrapper">
@@ -198,7 +195,7 @@
                             <div class="security-form-group">
                                 <label for="modal-email" class="security-label">
                                     <span class="label-icon"><i class="fas fa-envelope"></i></span>
-                                    <span class="label-text">EMAIL ADDRESS</span>
+                                    <span class="label-text">Email address</span>
                                     <span class="security-badge required">REQUIRED</span>
                                 </label>
                                 <div class="security-input-wrapper">
@@ -220,7 +217,7 @@
                             <div class="security-form-group">
                                 <label for="modal-password" class="security-label">
                                     <span class="label-icon"><i class="fas fa-key"></i></span>
-                                    <span class="label-text">ACCESS CREDENTIALS</span>
+                                    <span class="label-text">Password</span>
                                     <span class="security-badge required" id="password-badge">REQUIRED</span>
                                 </label>
                                 <div class="security-input-wrapper">
@@ -249,7 +246,7 @@
                             <div class="security-form-group">
                                 <label for="modal-full-name" class="security-label">
                                     <span class="label-icon"><i class="fas fa-id-card"></i></span>
-                                    <span class="label-text">FULL NAME</span>
+                                    <span class="label-text">Full name</span>
                                     <span class="security-badge optional">OPTIONAL</span>
                                 </label>
                                 <div class="security-input-wrapper">
@@ -270,13 +267,13 @@
                         <div class="security-form-section">
                             <div class="section-header">
                                 <i class="fas fa-user-cog"></i>
-                                <span>ACCESS CONTROL & PERMISSIONS</span>
+                                <span>Access &amp; permissions</span>
                             </div>
 
                             <div class="security-form-group">
                                 <label for="modal-role" class="security-label">
                                     <span class="label-icon"><i class="fas fa-user-tag"></i></span>
-                                    <span class="label-text">SECURITY CLEARANCE LEVEL</span>
+                                    <span class="label-text">Role</span>
                                     <span class="security-badge required">REQUIRED</span>
                                 </label>
                                 <div class="security-select-wrapper">
@@ -314,7 +311,7 @@
                                         <div class="permission-content">
                                             <div class="permission-icon"><i class="fas fa-robot"></i></div>
                                             <div class="permission-info">
-                                                <span class="permission-title">AI CHATBOT ACCESS</span>
+                                                <span class="permission-title">Chatbot access</span>
                                                 <span class="permission-desc">Enable AI assistant for tracking queries</span>
                                             </div>
                                         </div>
@@ -330,7 +327,7 @@
                                         <div class="permission-content">
                                             <div class="permission-icon active"><i class="fas fa-power-off"></i></div>
                                             <div class="permission-info">
-                                                <span class="permission-title">ACCOUNT STATUS</span>
+                                                <span class="permission-title">Account status</span>
                                                 <span class="permission-desc">Activate user account</span>
                                             </div>
                                         </div>
@@ -341,7 +338,7 @@
                             <div class="security-form-group">
                                 <label for="modal-pipelines" class="security-label">
                                     <span class="label-icon"><i class="fas fa-video"></i></span>
-                                    <span class="label-text">VIDEO PIPELINE ACCESS</span>
+                                    <span class="label-text">Pipeline access</span>
                                     <span class="security-badge optional">OPTIONAL</span>
                                 </label>
                                 <div id="pipeline-checkboxes" class="security-pipeline-grid" role="group" aria-label="Select accessible pipelines"></div>
@@ -356,17 +353,17 @@
                     <div class="security-form-actions">
                         <div class="security-action-info">
                             <i class="fas fa-shield-alt"></i>
-                            <span>All data encrypted and secured</span>
+                            <span>Review account details and access before saving.</span>
                         </div>
                         <div class="security-action-buttons">
                             <button type="button" class="security-btn-cancel" data-action="closeModal" aria-label="Cancel and close dialog">
                                 <i class="fas fa-times"></i>
-                                <span>ABORT</span>
+                                <span>Cancel</span>
                             </button>
                             <button type="submit" class="security-btn-submit" aria-label="Save user account">
                                 <span class="btn-glow"></span>
                                 <i class="fas fa-check-double"></i>
-                                <span>EXECUTE</span>
+                                <span>Save user</span>
                             </button>
                         </div>
                     </div>

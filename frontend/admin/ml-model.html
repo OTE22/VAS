@@ -13,14 +13,14 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-model.css">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-model.css?v=ml-3">
 </head>
-<body>
+<body class="ml-workspace">
+    <a class="ml-skip-link" href="#main-content">Skip to main content</a>
     <div id="navbar-placeholder"></div>
 
     <main class="intelligence-main-container" id="main-content">
-        <div class="intelligence-grid-overlay"></div>
-        <div class="intelligence-scan-line"></div>
+
         
         <div class="intelligence-content">
             <header class="page-header">
@@ -30,19 +30,48 @@
                         <div class="header-icon-glow"></div>
                     </div>
                     <div class="header-text">
-                        <h1 class="page-title">ML Similarity Model</h1>
-                        <p class="page-description">Train and manage the machine learning model for merge suggestions</p>
+                        <span class="ml-eyebrow">Identity intelligence / Model operations</span>
+                        <h1 class="page-title">ML similarity model</h1>
+                        <p class="page-description">Review model performance, prepare training data, and manage model versions.</p>
                     </div>
                 </div>
             </header>
 
             <div class="ml-model-container">
+                <!-- Statistics Section -->
+                <div class="stats-card">
+                    <div class="card-header">
+                        <h2><i class="fas fa-chart-bar"></i> Training Statistics</h2>
+                    </div>
+                    <div class="card-body" id="stats-body">
+                        <div class="stats-grid">
+                            <div class="stat-item">
+                                <div class="stat-label">Total Samples</div>
+                                <div class="stat-value" id="total-samples">-</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-label">Approved</div>
+                                <div class="stat-value" id="approved-samples">-</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-label">Rejected</div>
+                                <div class="stat-value" id="rejected-samples">-</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-label">Ready to Train</div>
+                                <div class="stat-value" id="ready-status">-</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Model Status Card (refresh wired in admin-ml-model.js — no inline handlers) -->
                 <div class="model-status-card">
                     <div class="card-header">
                         <h2><i class="fas fa-info-circle"></i> Model Status</h2>
                         <button class="refresh-btn" id="refresh-status-btn" type="button" title="Refresh status" aria-label="Refresh model status">
-                            <i class="fas fa-sync-alt"></i>
+                            <i class="fas fa-sync-alt" aria-hidden="true"></i>
+                            <span>Refresh</span>
                         </button>
                     </div>
                     <div class="card-body" id="model-status-body">
@@ -54,7 +83,7 @@
                 </div>
 
                 <!-- Model Lifecycle: active + candidate + rollback -->
-                <div class="model-status-card">
+                <div class="model-status-card lifecycle-card">
                     <div class="card-header">
                         <h2><i class="fas fa-code-branch"></i> Model Lifecycle</h2>
                     </div>
@@ -67,7 +96,7 @@
                 </div>
 
                 <!-- Dataset readiness checks -->
-                <div class="model-status-card">
+                <div class="model-status-card readiness-card">
                     <div class="card-header">
                         <h2><i class="fas fa-clipboard-check"></i> Dataset Readiness</h2>
                     </div>
@@ -87,11 +116,11 @@
                     <div class="card-body">
                         <div class="training-info">
                             <p>The ML similarity model learns from your feedback when you approve or reject merge suggestions.</p>
-                            <p><strong>How it works:</strong></p>
+                            <p><strong>Training workflow</strong></p>
                             <ul>
                                 <li>Each approval/rejection collects training data automatically</li>
-                                <li>After collecting enough samples (default: 50), you can train the model</li>
-                                <li>The trained model improves merge suggestion accuracy over time</li>
+                                <li>Collect enough samples to meet the configured minimum and readiness checks</li>
+                                <li>Review validation results before activating a trained candidate</li>
                             </ul>
                         </div>
                         <div class="training-controls">
@@ -112,7 +141,7 @@
                                 <input type="number" id="min-samples-input" min="10" max="1000" step="10" placeholder="server default">
                             </div>
                         </div>
-                        <div id="training-result" class="training-result"></div>
+                        <div id="training-result" class="training-result" role="status" aria-live="polite"></div>
                     </div>
                 </div>
 
@@ -147,46 +176,34 @@
                     </div>
                 </div>
 
-                <!-- Statistics Section -->
-                <div class="stats-card">
-                    <div class="card-header">
-                        <h2><i class="fas fa-chart-bar"></i> Training Statistics</h2>
-                    </div>
-                    <div class="card-body" id="stats-body">
-                        <div class="stats-grid">
-                            <div class="stat-item">
-                                <div class="stat-label">Total Samples</div>
-                                <div class="stat-value" id="total-samples">-</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-label">Approved</div>
-                                <div class="stat-value" id="approved-samples">-</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-label">Rejected</div>
-                                <div class="stat-value" id="rejected-samples">-</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-label">Ready to Train</div>
-                                <div class="stat-value" id="ready-status">-</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+
             </div>
         </div>
     </main>
 
     <!-- Footer -->
-    <footer id="footer-placeholder"></footer>
+    <footer id="footer-placeholder" class="military-footer" role="contentinfo">
+        <div class="footer-content">
+            <div class="footer-icon">
+                <i class="fas fa-shield-alt" aria-hidden="true"></i>
+            </div>
+            <div class="footer-text">
+                <span class="footer-title">Face Recognition Service</span>
+                <span class="footer-subtitle">Developed and maintained by <strong>ITDIR-AI DEPARTMENT</strong></span>
+            </div>
+            <div class="footer-copyright">
+                <small>&copy; <span id="current-year">2024</span> All rights reserved</small>
+            </div>
+        </div>
+    </footer>
 
     <!-- Scripts -->
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/footer-loader.js"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-ml-model.js?v=ml-2"></script>
+    <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>
 

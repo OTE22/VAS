@@ -17,7 +17,7 @@
     <meta name="referrer" content="strict-origin-when-cross-origin">
 
     <!-- Performance -->
-    <meta name="theme-color" content="#667eea">
+    <meta name="theme-color" content="#0c121c">
 
     <title>Unknown Faces Center - Admin Panel | Face Recognition Service</title>
 
@@ -26,8 +26,9 @@
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/face-cards.css?v=faces-1">
     <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-review-workspace.css?v=review-1">
 </head>
-<body class="unknown-page">
+<body class="unknown-page review-workspace unknown-workspace">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -35,8 +36,7 @@
     <div id="navbar-placeholder"></div>
 
     <main class="intelligence-main-container" id="main-content" role="main">
-        <div class="intelligence-grid-overlay"></div>
-        <div class="intelligence-scan-line"></div>
+
         
         <div class="intelligence-content">
             <header class="page-header">
@@ -46,6 +46,7 @@
                         <div class="header-icon-glow"></div>
                     </div>
                     <div class="header-text">
+                        <span class="review-eyebrow">Identity intelligence / Identity review</span>
                         <h1 class="page-title">Unknown Faces Center</h1>
                         <p class="page-description">Manage and identify unknown faces detected by the system</p>
                         <div id="user-privileges-info" class="user-privileges-info" style="display: none; margin-top: 0.5rem; font-size: 0.85rem; color: #00ff88;">
@@ -58,7 +59,7 @@
                     <a href="/admin/live-alerts" class="intelligence-admin-btn" id="your-live-alerts-btn" style="display: none;">
                         <div class="btn-content">
                             <i class="fas fa-bell"></i>
-                            <span class="btn-title">YOUR LIVE ALERTS</span>
+                            <span class="btn-title">Your live alerts</span>
                         </div>
                     </a>
                     <div style="position: relative; display: inline-block; margin-right: 0.5rem;">
@@ -111,7 +112,8 @@
             </header>
 
             <!-- Filters Section -->
-            <section class="filter-section">
+            <section class="filter-section" aria-labelledby="review-filters-heading">
+                <h2 class="review-section-title" id="review-filters-heading">Refine identities</h2>
                 <div class="filter-controls">
                     <div class="filter-group">
                         <label for="date-from">Date From:</label>
@@ -136,7 +138,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-filter" aria-hidden="true"></i>
                             </div>
-                            <span class="btn-title">APPLY FILTERS</span>
+                            <span class="btn-title">Apply filters</span>
                         </div>
                     </button>
                     <button id="show-all-toggle-btn" class="intelligence-admin-btn" type="button" aria-pressed="false"
@@ -153,7 +155,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-times" aria-hidden="true"></i>
                             </div>
-                            <span class="btn-title">CLEAR</span>
+                            <span class="btn-title">Reset filters</span>
                         </div>
                     </button>
                 </div>
@@ -191,7 +193,8 @@
             </section>
 
             <!-- Unknown Faces Grid -->
-            <section class="unknown-grid-section">
+            <section class="unknown-grid-section" aria-labelledby="review-results-heading">
+                <div class="review-results-heading"><h2 class="review-section-title" id="review-results-heading">Identities by pipeline</h2><p>Review detections, identify people, and resolve duplicate records.</p></div>
                 <div id="unknown-grid" class="unknown-grid">
                     <!-- Identity cards will be inserted here -->
                 </div>
@@ -213,7 +216,7 @@
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-chevron-left"></i>
                             </div>
-                            <span class="btn-title">PREVIOUS</span>
+                            <span class="btn-title">Previous</span>
                         </div>
                     </button>
                     <span class="page-info">
@@ -221,7 +224,7 @@
                     </span>
                     <button id="next-page-btn" class="intelligence-admin-btn" disabled>
                         <div class="btn-content">
-                            <span class="btn-title">NEXT</span>
+                            <span class="btn-title">Next</span>
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-chevron-right"></i>
                             </div>
