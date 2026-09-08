@@ -585,7 +585,6 @@ services:
       webhook_integration:
         aliases:
           - face-webhook
-          - face-detector.internal   # SAN name on FACE's TLS cert; VMS posts here with full verification
 
   backup:
     image: postgres:15-alpine
