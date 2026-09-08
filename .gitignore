@@ -214,9 +214,9 @@ models/mlruns/
 # EXCEPT content_verdicts.json, which records what THIS deployment measured
 # about ITS archives. Committing one machine's verdicts would let another
 # machine's archives inherit them.
-map-data/production/
-map-data/source/
-map-data/metadata/content_verdicts.json
+#map-data/production/
+#map-data/source/
+#map-data/metadata/content_verdicts.json
 
 # Regression map fixtures: generated in seconds by
 # scripts/map_data/make_test_fixtures.py, deterministic, a few MB of binary.
