@@ -150,3 +150,91 @@ For this documentation update, 21 offline assertions from
 `tests/test_documentation_consistency.py` passed using the workspace paths.
 The live OpenAPI comparison was not rerun. Documentation changes require no
 application rebuild or service restart.
+
+
+## Follow-up: read-only request warning
+
+The LAF-AI gate previously audited and forwarded prompts without invoking the
+legacy SQL-agent warning policy. It now returns an explicit read-only RPC warning
+for direct modification requests before forwarding, while retaining the audit
+record. See [blocked users and warning behavior](44_BLOCKED_USERS.md) for scope
+and the distinction between warnings and account blocking.
+
+All 38 isolated gate tests passed, including non-forwarding, audit persistence,
+warning contents and benign wording. Only `vas-assistant-gate` was restarted and
+its health probe passed. Rollback copies are under
+`/home/itdirect-ai/vas-assistant/gate/backups/before-write-warning-20260914`.
+Restore the saved `gate.cjs` and `test/run-unit.cjs`, remove the newly introduced
+`write-request-policy.cjs`, then restart the gate to undo this change. Database
+permissions were not changed. Browser visual verification remains outstanding.
+
+
+## Follow-up: automatic account blocking
+
+The earlier warning-only behavior is superseded: the gate now sends recognized
+user modification requests to the existing VAS security policy through the
+internal audit endpoint. Warnings show the reason and remaining attempts. Three
+qualifying violations in the one-hour counter window block a normal user's VAS
+account; administrators/system principals remain exempt. Only a committed block
+is announced. The gate immediately ends the blocked user's local session.
+
+Validation: 45 isolated backend tests passed, including the real HTTP policy
+path, committed account fields and token rejection; 39 mock gate tests passed,
+including warning messages and session termination. No production users were
+blocked for testing. The warning was validated at the RPC level; no browser
+visual test was performed.
+
+API rollback image: `face_detector_prod-face_recognition:before-chatbot-blocking-20260914`.
+Gate rollback directory:
+`/home/itdirect-ai/vas-assistant/gate/backups/before-account-blocking-20260914`.
+Restore those gate files and restart the gate to return to warning-only behavior;
+restore the prior API image and recreate the API to undo the backend wiring.
+No schema migration is required. Rolling back code does not reactivate blocked
+users: an administrator must restore their access through user management.
+
+Deployment completed: API and gate are healthy; deployed source hashes match the
+tested files. nginx configuration validation and reload succeeded.
+
+
+## Follow-up: security warning popup
+
+Read-only refusals and confirmed account blocks use a centered acknowledgment
+modal instead of a fading toast. The popup shows the server message without
+internal error codes, focuses **I understand**, and restores focus on dismissal.
+The modal remains visible until dismissed; dismissal does not change counters.
+Ordinary application errors retain their existing toast.
+
+Validation: all 90 composer tests passed, including warning/block persistence and
+acknowledgment; TypeScript and client bundle builds passed. The UI localization
+scan reported only the pre-existing hard-coded LAF-AI brand label. Browser visual
+verification was not performed. Image: `vas-assistant:security-popup`, deployed
+as `vas-assistant:local`. Rollback image: `vas-assistant:before-security-popup-20260914`.
+Restore that tag as `vas-assistant:local` and run the assistant start script to
+roll back the popup. Source backup and build logs are retained in the deployment
+report's `popup` subdirectory.
+
+
+## Chatbot context override: 256K
+
+The existing `qwen3.5:9b-32k` alias now sets `num_ctx 262144`. Its legacy name
+is retained so saved sessions use the larger context without changing model
+selection. The persistent source is
+`/home/itdirect-ai/vas-assistant/tools/Modelfile.qwen35-32k`.
+`OLLAMA_CONTEXT_LENGTH` was not added to VAS configuration; this override is
+part of the Ollama model definition.
+
+Verified with a short successful inference and `ollama ps`: context 262144,
+model footprint approximately 15 GB, 91% GPU / 9% CPU with the other two
+production models still resident. Total GPU use was 31347 MiB of 32607 MiB.
+Long-context performance was not benchmarked. No chatbot image rebuild was
+needed.
+
+Rollback inside the Ollama service:
+
+```bash
+docker exec face_detector_prod-ollama-1 ollama cp qwen3.5:9b-before-context-256k-20260914 qwen3.5:9b-32k
+```
+
+Also restore `tools/Modelfile.qwen35-32k.before-256k-20260914` as the source
+Modelfile and its 32K documentation when reverting. The next model load uses
+the restored parameters.

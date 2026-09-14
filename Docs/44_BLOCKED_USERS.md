@@ -1,6 +1,50 @@
 # Blocked Users - Database Storage
 
-## Overview
+## Active LAF-AI chatbot enforcement (September 14)
+
+The LAF-AI gate detects direct data modification requests and sends an internal,
+authenticated `POST /api/audit/chatbot` with `read_only_violation: true`. VAS uses
+the bearer-token identity, not a user ID supplied in the request. Public-proxy
+calls are rejected and the configured gate secret is checked. The handler calls
+`apply_security_policy`, sharing the legacy agent's counter, auditing, privileged
+account exemptions, database block and revocation behavior.
+
+Normal users receive a read-only explanation and **Warning 1 of 3**, then
+**Warning 2 of 3** with one remaining attempt. The third qualifying violation
+within the counter's one-hour window blocks the account. The counter expires one
+hour after its first increment; this is not a continuously sliding window.
+A confirmed block disables the VAS account and chatbot permission, records the
+reason/time, and revokes access. It affects VAS access, not just this chat.
+The gate ends the current local session and returns: **Your account has been
+blocked after repeated violations. Contact an administrator to restore access.**
+Waiting for the counter to expire does not restore an already blocked account.
+
+Administrators and the system principal remain exempt from automatic blocking;
+their requests are denied and audited. A failed block write never produces a
+message claiming the account was blocked. If the gate cannot contact the policy
+endpoint, the modification request is not forwarded, even in best-effort audit
+mode. There is no automatic administrator notification added by this change;
+administrators can review the audit records and restore access through the
+existing user-management process.
+
+Detection covers direct commands, including bare delete/edit/update and supported
+Arabic imperatives. Explanatory wording such as “show the last update” or
+“Explain DELETE in SQL”, and “Do not delete anything”, remains allowed. This is
+an early command detector, not a complete natural-language classifier. The
+`laf_ai_readonly` database role and tool validation remain the SQL execution
+controls. Model-generated SQL errors are not reported as gate user violations.
+
+Gate sources live under `/home/itdirect-ai/vas-assistant/gate`; policy wiring is
+in `backend/routes/audit.py`. The client displays the server's security message in a centered modal popup
+with an **I understand** button. The popup stays visible until dismissed and
+uses **Account blocked** for a confirmed block. Dismissing it does not submit
+a request or change the violation count. There is no image rebuild for gate source changes;
+the VAS API change requires an updated image and container recreation.
+
+## Legacy VAS SQL-agent policy
+
+The following sections describe the VAS SQL-agent path, not LAF-AI's gate.
+
 When a user attempts to perform forbidden database operations (DELETE, UPDATE, INSERT, ALTER, etc.), the system automatically blocks them and stores the blocking information in the database.
 
 ## Database Schema

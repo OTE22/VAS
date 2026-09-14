@@ -79,6 +79,7 @@ class ChatbotAuditCreate(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=255)
     question: str = Field(min_length=1, max_length=20000)
     success: bool = True
+    read_only_violation: bool = False
     error_message: Optional[str] = Field(default=None, max_length=2000)
     processing_time_ms: Optional[float] = None
     source: str = Field(default="laf-ai", max_length=40, pattern=r"^[a-z0-9._-]+$")
@@ -104,6 +105,37 @@ async def record_chatbot_question(
     if sso.came_through_public_proxy(request) or not sso.presented_secret_ok(request):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Chatbot audit writes are internal to the chatbot gate")
+    if body.read_only_violation:
+        # Only the authenticated internal gate can report user-authored requests.
+        # The canonical policy owns audit, counters, exemptions and revocation.
+        from sql_agent.security_policy import (
+            SecurityDecision, apply_security_policy, VIOLATION_THRESHOLD,
+            VIOLATION_WINDOW_SECONDS, OUTCOME_ENFORCEMENT_FAILED,
+        )
+        outcome = await apply_security_policy(
+            user=current_user,
+            decision=SecurityDecision(violation=True, reason="Direct data modification request in LAF-AI"),
+            transport="rest", query=body.question, session_id=body.session_id,
+            attributable=True,
+        )
+        explanation = "This chatbot is read-only. Deleting, editing, or updating stored data is not allowed. Your request was stopped. "
+        if outcome.blocked:
+            message = explanation + "Your account has been blocked after repeated violations. Contact an administrator to restore access."
+        elif outcome.exempt:
+            message = explanation + "Use the authorized management pages to make changes. Your administrator account has not been blocked."
+        elif outcome.outcome == OUTCOME_ENFORCEMENT_FAILED:
+            message = explanation + "We could not confirm an account restriction. Contact an administrator if you need help."
+        else:
+            remaining = max(0, VIOLATION_THRESHOLD - outcome.violations)
+            attempts = "One more violation" if remaining == 1 else f"{remaining} more violations"
+            message = explanation + f"Warning {outcome.violations} of {VIOLATION_THRESHOLD}. {attempts} within the current one-hour window will block your account. You can still ask read-only questions."
+        return {"security": {
+            "code": outcome.error_code, "message": message,
+            "blocked": outcome.blocked, "exempt": outcome.exempt,
+            "violations": outcome.violations, "threshold": VIOLATION_THRESHOLD,
+            "window_seconds": VIOLATION_WINDOW_SECONDS,
+            "reference_id": outcome.reference_id,
+        }}
     row = ChatbotAuditLog(
         user_id=current_user.id,
         username=current_user.username,

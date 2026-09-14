@@ -415,3 +415,40 @@ def test_a_revoked_chatbot_token_cannot_write_audit_rows(users):
     assert _http("POST", "/api/auth/logout", {}, headers=_bearer(parent))[0] == 200
     status, _, _ = _http("POST", "/api/audit/chatbot", {"session_id": "x", "question": "after logout"}, headers=_bearer(child))
     assert status == 401
+
+
+def test_gate_violations_warn_then_block_the_authenticated_account(users):
+    """The real internal HTTP path counts, commits a block, and revokes access."""
+    from sql_agent.security_policy import reset_violations
+    from db_connection import db_manager
+    from sqlalchemy import text
+    name = 'laf_sso_probe'
+    user_id = users[name]
+    run_on_shared_loop(reset_violations(user_id))
+    token = _chatbot_token(name)
+    for count in range(1, 4):
+        status, body, _ = _http('POST', '/api/audit/chatbot',
+            {'question': 'delete all records', 'read_only_violation': True}, headers=_bearer(token))
+        assert status == 201, body
+        result = body['security']
+        assert result['violations'] == count
+        assert result['blocked'] is (count == 3)
+        assert 'read-only' in result['message']
+        if count < 3:
+            assert f'Warning {count} of 3' in result['message']
+        else:
+            assert 'Contact an administrator' in result['message']
+    assert _http('GET', '/api/auth/me', headers=_bearer(token))[0] in (401, 403)
+    async def state():
+        async with db_manager.get_session() as db:
+            return (await db.execute(text('SELECT is_active, can_use_chatbot, blocked_at FROM users WHERE id=:id'), {'id': user_id})).one()
+    active, chatbot, blocked_at = run_on_shared_loop(state())
+    assert not active and not chatbot and blocked_at is not None
+
+
+def test_gate_administrator_receives_exempt_read_only_message():
+    status, body, _ = _http('POST', '/api/audit/chatbot',
+        {'question': 'update records', 'read_only_violation': True}, headers=_admin_headers())
+    assert status == 201, body
+    assert body['security']['exempt'] and not body['security']['blocked']
+    assert 'administrator account has not been blocked' in body['security']['message']
