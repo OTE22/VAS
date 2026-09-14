@@ -76,16 +76,20 @@ def test_a_follow_up_keeps_the_users_words_and_names_what_it_refers_to(monkeypat
     candidates = {"last_result": {"question": "At which cameras was IRON MAN detected?", "row_count": 8}}
     tools._apply_model_tool_call(state, call, trace, candidates)
     composed = state["sql_generation_input"]
-    assert composed == ('Which of those cameras saw him the most? (about IRON MAN; '
-                        'a follow-up to: "At which cameras was IRON MAN detected?")')
-    # nobody resolved, but the previous question names a stored person
+    assert composed == ('Which of those cameras saw him the most? '
+                        '(a follow-up to: "At which cameras was IRON MAN detected?")')
+    # The SUBJECT is never imported into the question: an under-specified new
+    # request must not inherit the previous turn's person (Opik 01a08265-b951).
+    assert "about IRON MAN" not in composed
+    # a non-Latin follow-up is composed the same way
     state3 = {"reasoning_steps_used": 0, "observations": [],
               "normalized_input": "وفي أي كاميرات؟", "identity_index": [{"display_name": "IRON MAN"}]}
     tools._apply_model_tool_call(
         state3, {"name": "query_database", "arguments": {"question": "at which cameras", "uses_context": True}},
         [{"tool": "query_database", "committed": True, "signature": ["query_database", "q"]}],
         {"last_result": {"question": "كم مرة تم رصد IRON MAN؟", "row_count": 1}})
-    assert state3["sql_generation_input"].startswith("وفي أي كاميرات؟ (about IRON MAN;")
+    assert state3["sql_generation_input"] == (
+        'وفي أي كاميرات؟ (a follow-up to: "كم مرة تم رصد IRON MAN؟")')
     # with nobody resolved, the previous question is the reference
     state2 = {"reasoning_steps_used": 0, "observations": [],
               "normalized_input": "Only on 2026-08-18", "identity_index": []}
@@ -154,4 +158,25 @@ def test_isolated_arabic_letters_are_shaped_to_glyphs_the_pdf_font_has():
     for missing_form in ("ﺍ", "ﺕ", "ﺙ", "ﺭ", "ﻑ", "ﻭ", "ﻱ"):
         assert missing_form not in shaped
     assert "ا" in shaped or "ﺎ" in shaped, "alef survives, as its base or joined form"
+
+
+def test_an_underspecified_request_does_not_inherit_the_previous_subject(monkeypatch):
+    """"Help me find a person" names nobody. After "track iron man" the loop
+    said uses_context, and the composition used to inject "about IRON MAN",
+    which made the generator filter on him and report on a person the user
+    never mentioned (Opik 01a08265-b951, 2026-09-08). The previous QUESTION is
+    still named, so a genuine follow-up keeps its referent."""
+    tools = _tools(monkeypatch, [])
+    state = {"reasoning_steps_used": 0, "observations": [],
+             "normalized_input": "Help me find a person",
+             "identity_index": [{"display_name": "IRON MAN"}]}
+    tools._apply_model_tool_call(
+        state,
+        {"name": "query_database", "arguments": {"question": "Help me find a person",
+                                                 "response_shape": "answer", "uses_context": True}},
+        [{"tool": "query_database", "committed": True, "signature": ["query_database", "q"]}],
+        {"last_result": {"question": "track iron man", "row_count": 8}})
+    composed = state["sql_generation_input"]
+    assert "IRON MAN" not in composed.upper().replace("TRACK IRON MAN", "")
+    assert composed.startswith("Help me find a person")
 

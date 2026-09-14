@@ -148,7 +148,7 @@ class DataRetentionManager:
         except Exception as e:
             logger.warning(f"[RETENTION] Failed to send notification: {e}")
 
-        await self.cleanup_old_data()
+        return await self.cleanup_old_data()
 
     async def cleanup_old_data(self, dry_run: bool = False, job_id: str = None,
                                progress_cb=None, cancel_check=None) -> dict:
@@ -251,6 +251,11 @@ class DataRetentionManager:
                                 .limit(5000)  # bounded scan for the estimate
                             )
                             paths = [r[0] for r in path_rows.all()]
+                            from backend.core.storage_references import unreferenced_files
+                            paths = await unreferenced_files(db, paths, {
+                                'faces': Face.detection_id.in_(select(Detection.id).where(
+                                    Detection.timestamp < effective_cutoff)),
+                            })
                             existing, missing, est_bytes = await loop.run_in_executor(
                                 None, _stat_files_sync, paths
                             )
@@ -289,6 +294,10 @@ class DataRetentionManager:
                                 )
                                 paths = [r[0] for r in path_rows.all()]
 
+                                from backend.core.storage_references import unreferenced_files
+                                paths = await unreferenced_files(db, paths, {
+                                    'faces': Face.detection_id.in_(ids),
+                                })
                                 # Files first (off-loop), then rows (DB cascades faces;
                                 # identity_embeddings.detection_id goes NULL via FK)
                                 f_deleted, f_freed, f_missing, f_failures = await loop.run_in_executor(
@@ -298,6 +307,10 @@ class DataRetentionManager:
                                 result["bytes_freed"] += f_freed
                                 result["missing_files"] += f_missing
                                 result["failures"].extend(f_failures[:20])
+                                if f_failures:
+                                    # Keep the rows as retryable references to files
+                                    # that could not be removed; never orphan them.
+                                    raise RuntimeError("Detection file cleanup incomplete")
 
                                 await db.execute(sa_delete(Detection).where(Detection.id.in_(ids)))
                                 await db.commit()
@@ -321,6 +334,7 @@ class DataRetentionManager:
                         # Previously-documented-but-never-enforced retentions
                         if result["status"] != "cancelled":
                             result["extra"] = await self._cleanup_auxiliary(db, dry_run)
+                            result["failures"].extend(result["extra"].pop("failures", []))
 
                         if not dry_run and result["status"] != "cancelled":
                             await loop.run_in_executor(None, self._cleanup_empty_directories_sync)
@@ -346,6 +360,8 @@ class DataRetentionManager:
                     except Exception as e:
                         logger.debug(f"[RETENTION] cache invalidation failed: {e}")
 
+                if result["failures"] and result["status"] != "cancelled":
+                    result["status"] = "failed"
                 result["duration_seconds"] = round(time.time() - start_time, 2)
                 self.last_run_at = datetime.utcnow()
                 self.last_result = result
@@ -368,9 +384,11 @@ class DataRetentionManager:
                         await background_task_notifier.notify_task_completed(
                             task_type=TaskType.DATA_RETENTION,
                             task_name="Data Retention Cleanup",
-                            success=True,
+                            success=result["status"] == "completed",
                             duration_seconds=result["duration_seconds"],
                             details={
+                                "failures": result["failures"],
+                                "extra": result["extra"],
                                 "deleted_detections": result["rows_deleted"],
                                 "deleted_files": result["files_deleted"],
                                 "freed_space_mb": round(result["bytes_freed"] / (1024 * 1024), 2),
@@ -408,6 +426,7 @@ class DataRetentionManager:
         search history, background-task history, audit logs."""
         extra = {"search_history_deleted": 0, "search_history_over_cap": 0,
                  "task_history_deleted": 0, "audit_logs_deleted": 0}
+        extra["failures"] = []
         now = datetime.utcnow()
 
         try:
@@ -423,6 +442,7 @@ class DataRetentionManager:
                 extra["search_history_deleted"] = r.rowcount or 0
         except Exception as e:
             logger.warning(f"[RETENTION] search_history cleanup failed: {e}")
+            extra["failures"].append(f"search_history cleanup failed: {e}")
 
         try:
           async with db.begin_nested():
@@ -430,13 +450,14 @@ class DataRetentionManager:
             th_cutoff = now - timedelta(days=th_days)
             if dry_run:
                 extra["task_history_deleted"] = (await db.execute(sa_text(
-                    "SELECT count(*) FROM background_task_history WHERE created_at < :c"), {"c": th_cutoff})).scalar() or 0
+                    "SELECT count(*) FROM background_task_history WHERE status IN (\'completed\', \'failed\', \'cancelled\') AND created_at < :c"), {"c": th_cutoff})).scalar() or 0
             else:
                 r = await db.execute(sa_text(
-                    "DELETE FROM background_task_history WHERE created_at < :c"), {"c": th_cutoff})
+                    "DELETE FROM background_task_history WHERE status IN ('completed', 'failed', 'cancelled') AND created_at < :c"), {"c": th_cutoff})
                 extra["task_history_deleted"] = r.rowcount or 0
         except Exception as e:
             logger.warning(f"[RETENTION] task_history cleanup failed: {e}")
+            extra["failures"].append(f"task_history cleanup failed: {e}")
 
         try:
           async with db.begin_nested():
@@ -454,6 +475,7 @@ class DataRetentionManager:
             extra["audit_logs_deleted"] = deleted
         except Exception as e:
             logger.warning(f"[RETENTION] audit-log cleanup failed: {e}")
+            extra["failures"].append(f"audit-log cleanup failed: {e}")
 
         # ML pipeline tables: predictions (shadow comparisons cascade with
         # them), feature snapshots, drift reports. ml_labels, ml_datasets,
@@ -523,6 +545,7 @@ class DataRetentionManager:
                         extra[key] = r.rowcount or 0
             except Exception as e:
                 logger.warning(f"[RETENTION] {table} cleanup failed: {e}")
+                extra["failures"].append(f"{table} cleanup failed: {e}")
                 extra.setdefault(key, 0)
 
         # Per-user search-history cap. SEARCH_HISTORY_MAX_PER_USER was declared,
@@ -551,9 +574,12 @@ class DataRetentionManager:
                 extra["search_history_over_cap"] = r.rowcount or 0
         except Exception as e:
             logger.warning(f"[RETENTION] search_history per-user cap failed: {e}")
+            extra["failures"].append(f"search_history per-user cap failed: {e}")
             extra.setdefault("search_history_over_cap", 0)
 
-        extra.update(await self._cleanup_agent_artifacts(db, dry_run))
+        artifacts = await self._cleanup_agent_artifacts(db, dry_run)
+        extra["failures"].extend(artifacts.pop("failures", []))
+        extra.update(artifacts)
 
         if not dry_run:
             await db.commit()
@@ -574,7 +600,7 @@ class DataRetentionManager:
         DB-driven), so a crash between the two leaves garbage, not exposure.
         """
         out = {"agent_artifacts_deleted": 0, "agent_artifact_files_deleted": 0,
-               "agent_artifact_parts_deleted": 0}
+               "agent_artifact_parts_deleted": 0, "failures": []}
         try:
             async with db.begin_nested():
                 cutoff = datetime.utcnow() - timedelta(days=int(settings.DATA_RETENTION_DAYS))
@@ -596,8 +622,8 @@ class DataRetentionManager:
                 # arbitrary files.
                 f_deleted, _freed, _missing, failures = await loop.run_in_executor(
                     None, _delete_files_sync, paths, os.path.realpath(settings.FACES_DIR))
-                for failure in failures:
-                    logger.warning("[RETENTION] artifact file not removed: %s", failure)
+                if failures:
+                    raise RuntimeError("; ".join(failures))
                 out["agent_artifact_files_deleted"] = f_deleted
 
                 r = await db.execute(sa_text(
@@ -605,6 +631,7 @@ class DataRetentionManager:
                 out["agent_artifacts_deleted"] = r.rowcount or 0
         except Exception as e:
             logger.warning(f"[RETENTION] agent_artifacts cleanup failed: {e}")
+            out["failures"].append(f"agent_artifacts cleanup failed: {e}")
 
         # Half-written renders in .incoming/ belong to a process that died
         # mid-commit; nothing references them and nothing ever will.
@@ -615,6 +642,7 @@ class DataRetentionManager:
                     None, self._cleanup_artifact_parts_sync)
         except Exception as e:
             logger.warning(f"[RETENTION] artifact .incoming sweep failed: {e}")
+            out["failures"].append(f"artifact .incoming sweep failed: {e}")
         return out
 
     def _cleanup_artifact_parts_sync(self) -> int:
@@ -632,7 +660,7 @@ class DataRetentionManager:
                 if os.path.isfile(path) and os.path.getmtime(path) < stale_before:
                     os.remove(path)
                     removed += 1
-            except OSError:
+            except FileNotFoundError:
                 pass
         return removed
 
@@ -756,4 +784,3 @@ class DataRetentionManager:
 
 
 retention_manager = DataRetentionManager()
-

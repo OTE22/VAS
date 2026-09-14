@@ -45,10 +45,12 @@ if parent_dir not in sys.path:
 
 from backend.auth.auth_service import require_role
 from backend.core.enrollment_service import (EnrollmentError, claim_pending_enrollment,
+                                             ReviewedEnrollment,
                                              enroll_image, get_active_identity,
                                              peek_pending_enrollment,
                                              pending_absolute_path,
                                              prepare_upload, sha256_of,
+                                             resolve_identity_by_name,
                                              sweep_expired_pending,
                                              validate_person_name,
                                              _safe_unlink_pending)
@@ -90,6 +92,7 @@ _RECOVERABLE_CODES = frozenset({
     "identity_not_active",         # ...or was deactivated or merged
     "identity_forbidden",          # authorization was withdrawn
     "create_new_needs_confirmation",   # answer again to proceed
+    "name_already_exists",         # create_new must never attach by name
     "pending_upload_not_found",    # already consumed — its file is not ours
 })
 
@@ -260,6 +263,7 @@ async def confirm_enrollment(
     actor_id, actor_name = current_user.id, current_user.username
     action = (body.action or "").strip().lower()
     storage_path = None
+    consumed = False
 
     await sweep_expired_pending(db)
 
@@ -308,7 +312,14 @@ async def confirm_enrollment(
                            "top_similarity": row.top_similarity,
                            "candidate_identities": row.candidates or []})
             name = validate_person_name(body.display_name or row.display_name)
-            target_kwargs = {"person_name": name, "allow_create": True}
+            if await resolve_identity_by_name(db, name) is not None:
+                raise EnrollmentError(
+                    "name_already_exists",
+                    "A person with this name already exists. Choose a different "
+                    "name for a new person, or add to a reviewed existing person.",
+                    status_code=409)
+            target_kwargs = {"person_name": name, "allow_create": True,
+                             "require_new": True}
             display_for_log = name
 
         # Copy what enrollment needs into plain values BEFORE consuming the
@@ -318,11 +329,16 @@ async def confirm_enrollment(
         upload_filename = row.original_filename
         upload_content_type = row.content_type
         upload_is_face_image = bool(row.is_face_image)
+        if action == "add_to_existing":
+            target_kwargs["reviewed"] = ReviewedEnrollment(
+                identity_id=target_kwargs["identity_id"],
+                checksum=row.file_checksum, actor_user_id=actor_id)
 
         # ---- consume, then enroll -------------------------------------------
         # Everything above is a read. This is the point of no return, and it is
         # the last thing that can be lost to a concurrent confirmation.
         await claim_pending_enrollment(db, body.upload_token, actor_id)
+        consumed = True
 
         # Same bytes, same is_face_image, so detection takes the same branch it
         # took at review; re-running it here keeps enrollment's ordering,
@@ -347,7 +363,7 @@ async def confirm_enrollment(
         # A ticket that survived validation keeps its file; one that was
         # consumed and then failed to enroll has no owner left, so the file
         # goes with it.
-        if exc.code not in _RECOVERABLE_CODES:
+        if consumed or exc.code not in _RECOVERABLE_CODES:
             _safe_unlink_pending(storage_path)
         return _error_response(exc)
 

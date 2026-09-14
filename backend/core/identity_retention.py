@@ -191,6 +191,12 @@ class IdentityRetentionManager:
                 logger.debug(f"[IDENTITY_RETENTION] Failed to send completion notification: {e}")
         except Exception as e:
             logger.error(f"Identity cleanup failed: {e}", exc_info=True)
+            from backend.core.task_history import task_history_manager
+            await task_history_manager.record_task_completed(
+                task_type="identity_retention", task_name="Identity Retention Cleanup",
+                success=False, duration_seconds=(datetime.utcnow() - start_time).total_seconds(),
+                details={"error": str(e)[:500]}, notify_all_users=True)
+            raise
     
     async def reconcile_orphan_camera_embeddings(self, grace: Optional[timedelta] = None) -> dict:
         """The ONE canonical stale-embedding reconciliation.
@@ -226,6 +232,11 @@ class IdentityRetentionManager:
                 )).all()
                 if not rows:
                     return removed
+                from backend.core.detection_spool import protected_embedding_ids
+                pending_ids = await asyncio.to_thread(protected_embedding_ids)
+                rows = [r for r in rows if int(r[0]) not in pending_ids]
+                if not rows:
+                    return removed
                 ids = [int(r[0]) for r in rows]
                 identity_ids = sorted({str(r[1]) for r in rows})
                 await remove_embedding_keys(db, ids)
@@ -250,6 +261,7 @@ class IdentityRetentionManager:
                 removed["embeddings"], grace, removed["identities"])
         except Exception as e:
             logger.error(f"[IDENTITY_RETENTION] stale camera embedding reconciliation failed: {e}", exc_info=True)
+            raise
         return removed
 
     async def _cleanup_old_snapshots(self) -> int:
@@ -267,33 +279,9 @@ class IdentityRetentionManager:
                 )
                 old_appearances = result.scalars().all()
                 
-                # Enrollment gallery (storage/faces/) must NEVER be swept - snapshots
-                # for KNOWN identities can point at their enrollment photos, and
-                # deleting them silently emptied the gallery.
-                from config import settings as _settings
-                # No fallback: a relative default here would silently mis-scope
-                # the "never sweep enrollment photos" guard below.
-                _faces_dir = os.path.realpath(_settings.FACES_DIR)
-
-                def _is_enrollment_photo(path: str) -> bool:
-                    try:
-                        return os.path.realpath(path).startswith(_faces_dir + os.sep)
-                    except Exception:
-                        return False
-
+                from backend.core.storage_references import retire_snapshot
                 for appearance in old_appearances:
-                    if appearance.best_snapshot_path and os.path.exists(appearance.best_snapshot_path):
-                        if _is_enrollment_photo(appearance.best_snapshot_path):
-                            logger.debug(f"[IDENTITY_RETENTION] Skipping enrollment photo: {appearance.best_snapshot_path}")
-                            continue
-                        try:
-                            os.remove(appearance.best_snapshot_path)
-                            deleted_count += 1
-                        except Exception as e:
-                            logger.error(f"Failed to delete snapshot {appearance.best_snapshot_path}: {e}")
-
-                    # Clear snapshot path in database
-                    appearance.best_snapshot_path = None
+                    deleted_count += await retire_snapshot(db, appearance)
                 
                 # Also clean up identity best_snapshot_path if it's old
                 identity_result = await db.execute(
@@ -307,22 +295,13 @@ class IdentityRetentionManager:
                 old_identities = identity_result.scalars().all()
                 
                 for identity in old_identities:
-                    if identity.best_snapshot_path and os.path.exists(identity.best_snapshot_path):
-                        if _is_enrollment_photo(identity.best_snapshot_path):
-                            logger.debug(f"[IDENTITY_RETENTION] Skipping enrollment photo: {identity.best_snapshot_path}")
-                            continue
-                        try:
-                            os.remove(identity.best_snapshot_path)
-                            deleted_count += 1
-                        except Exception as e:
-                            logger.error(f"Failed to delete identity snapshot {identity.best_snapshot_path}: {e}")
-
-                    identity.best_snapshot_path = None
+                    deleted_count += await retire_snapshot(db, identity)
                 
                 await db.commit()
         
         except Exception as e:
             logger.error(f"Error cleaning up old snapshots: {e}", exc_info=True)
+            raise
         
         return deleted_count
     
@@ -355,6 +334,7 @@ class IdentityRetentionManager:
         
         except Exception as e:
             logger.error(f"Error marking inactive identities: {e}", exc_info=True)
+            raise
         
         return marked_count
     
@@ -419,6 +399,8 @@ class IdentityRetentionManager:
                             IdentityEmbedding.identity_id == identity.id,
                             IdentityEmbedding.pipeline_id.isnot(None),
                             IdentityEmbedding.image_id.is_(None),
+                            # Pending camera evidence belongs to the durable writer.
+                            IdentityEmbedding.detection_id.isnot(None),
                         ).order_by(
                             IdentityEmbedding.quality.desc().nulls_last(),
                             IdentityEmbedding.created_at.desc()
@@ -451,7 +433,7 @@ class IdentityRetentionManager:
                                 "identity %s; keeping %d vector(s) so the "
                                 "database and the index cannot diverge: %s",
                                 identity.id, len(to_remove), index_error)
-                            continue
+                            raise
 
                         for emb in to_remove:
                             await db.delete(emb)
@@ -467,6 +449,7 @@ class IdentityRetentionManager:
         
         except Exception as e:
             logger.error(f"Error cleaning up excess embeddings: {e}", exc_info=True)
+            raise
         
         return removed_count
     
@@ -499,4 +482,3 @@ class IdentityRetentionManager:
 
 # Global instance
 identity_retention_manager = IdentityRetentionManager()
-

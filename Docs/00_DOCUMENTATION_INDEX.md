@@ -3,8 +3,8 @@
 **Face Recognition / Multi-Camera Surveillance System (VAS)**
 **ITDIRECT-AI DEPARTMENT**
 
-59 files: this index and 58 documents, **numbered in the order they are meant to be
-read**. Start at the repository root [`README.md`](../README.md) if you have never run
+The numbered guides follow the recommended reading order; supplemental feature
+notes are linked below. Start at the repository root [`README.md`](../README.md) if you have never run
 this system, then follow Part 1 → Part 8. Each part stands on its own, so an operator
 can stop after Part 4 and a developer can jump to Part 6.
 
@@ -193,3 +193,16 @@ Rules remain the decision system; models run in shadow until an administrator pr
   document is linked here, that no link dangles, that container names and compose
   invocations in the prose are real, and that FAISS-era documents point at
   `23_VECTOR_INDEX_CONTRACT.md`. Add a document → add it to this index in the same commit.
+
+## September feature updates
+
+- [BACKGROUND_JOBS_RELIABILITY.md](BACKGROUND_JOBS_RELIABILITY.md)
+- [DETECTION_STORAGE_LAYOUT.md](DETECTION_STORAGE_LAYOUT.md)
+- [MERGE_RELIABILITY.md](MERGE_RELIABILITY.md)
+- [PROMOTION_RELIABILITY.md](PROMOTION_RELIABILITY.md)
+- [QUICK_SEARCH.md](QUICK_SEARCH.md)
+- [SUGGESTION_WORKFLOW.md](SUGGESTION_WORKFLOW.md)
+- [UNKNOWN_PERSON_EVENT_TIMESTAMPS.md](UNKNOWN_PERSON_EVENT_TIMESTAMPS.md)
+- [99_SQL_AGENT_AUDIT_BRIEF.md](99_SQL_AGENT_AUDIT_BRIEF.md)
+
+- [59_SEPTEMBER_DEPLOYMENT_UPDATE.md](59_SEPTEMBER_DEPLOYMENT_UPDATE.md) — September 14 features, migration, GPU deployment, static-IP rollback and chatbot language fixes.

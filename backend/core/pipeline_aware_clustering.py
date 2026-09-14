@@ -50,6 +50,7 @@ class IdentityPipelineFeatures:
     total_appearances: int
     avg_embedding_quality: float
     global_representative_embedding: np.ndarray  # Best overall embedding
+    embedding_model_version: Optional[str] = None
 
 
 class PipelineAwareClusteringService:
@@ -180,6 +181,7 @@ class PipelineAwareClusteringService:
         """
         logger.info(f"[PIPELINE_CLUSTERING] Building features for {len(identities)} identities...")
         
+        from backend.core.face_quality import QUALITY_SCORER_VERSION
         identity_features = {}
         accessible_pipelines_set = set(accessible_pipelines)
         
@@ -191,6 +193,8 @@ class PipelineAwareClusteringService:
                         IdentityEmbedding.identity_id == identity.id,
                         IdentityEmbedding.faiss_index_type == 'unknown',
                         IdentityEmbedding.quality.isnot(None),
+                        IdentityEmbedding.quality_scorer_version == QUALITY_SCORER_VERSION,
+                        IdentityEmbedding.embedding_model_version.isnot(None),
                         IdentityEmbedding.pipeline_id.in_(accessible_pipelines)  # Filter by accessible pipelines
                     )
                 ).order_by(IdentityEmbedding.quality.desc())
@@ -199,6 +203,12 @@ class PipelineAwareClusteringService:
             
             if not embeddings:
                 continue
+
+            # A representative must belong to one verified embedding space.
+            from collections import Counter
+            versions = Counter(e.embedding_model_version for e in embeddings)
+            model_version = min(versions, key=lambda v: (-versions[v], v))
+            embeddings = [e for e in embeddings if e.embedding_model_version == model_version]
             
             # Group embeddings by pipeline
             pipeline_embeddings: Dict[str, PipelineEmbeddingData] = {}
@@ -266,7 +276,8 @@ class PipelineAwareClusteringService:
                 all_pipelines=set(pipeline_embeddings.keys()),
                 total_appearances=identity.appearances_count,
                 avg_embedding_quality=np.mean(all_qualities) if all_qualities else 0.0,
-                global_representative_embedding=global_embedding
+                global_representative_embedding=global_embedding,
+                embedding_model_version=model_version
             )
         
         logger.info(f"[PIPELINE_CLUSTERING] Built features for {len(identity_features)} identities")
@@ -423,6 +434,9 @@ class PipelineAwareClusteringService:
         Returns:
             (similarity_score, is_similar)
         """
+        if (not features1.embedding_model_version or
+                features1.embedding_model_version != features2.embedding_model_version):
+            return 0.0, False
         # 1. Pipeline overlap score
         common_pipelines = features1.all_pipelines & features2.all_pipelines
         all_pipelines = features1.all_pipelines | features2.all_pipelines
@@ -528,4 +542,3 @@ class PipelineAwareClusteringService:
 
 # Global instance
 pipeline_aware_clustering = PipelineAwareClusteringService()
-

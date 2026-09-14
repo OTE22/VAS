@@ -553,6 +553,7 @@ def test_an_unresolved_person_asks_rather_than_guesses(monkeypatch):
     """Guessing at somebody's identity is the wrong kind of confident."""
     tools, calls = _tools(monkeypatch)
     out = tools.observe_and_replan(_state(
+        generated_sql="SELECT f.name FROM faces f WHERE f.name = 'Alii'",
         planned_action={"action": "query_database"},
         working_context={"dialogue_state": {
             "fields": {"referenced_entity": {"value": "Alii"}}}},
@@ -573,6 +574,7 @@ def test_the_clarifying_question_is_asked_in_the_users_language(monkeypatch):
     tools, _ = _tools(monkeypatch)
     out = tools.observe_and_replan(_state(
         response_language="ar",
+        generated_sql="SELECT f.name FROM faces f WHERE f.name = '\u0639\u0644\u064a'",
         planned_action={"action": "query_database"},
         working_context={"dialogue_state": {
             "fields": {"referenced_entity": {"value": "علي"}}}},

@@ -142,7 +142,7 @@ def _sql(statement, params=None, fetch="all"):
 QA_PIPELINE = "qa-pmint-cam"
 
 
-def _make_unknown(name):
+def _make_unknown(name, *, usable_embedding=False):
     """SQL-seed an ACTIVE unknown identity the Unknown list will actually show.
 
     The list endpoint SKIPS identities with no resolvable pipeline ("completely
@@ -160,6 +160,16 @@ def _make_unknown(name):
          {"p": QA_PIPELINE})
     _sql("INSERT INTO identity_appearances (identity_id, pipeline_id, start_time, created_at) "
          "VALUES (:i, :p, now(), now())", {"i": identity_id, "p": QA_PIPELINE})
+    if usable_embedding:
+        import numpy as np
+        from config import settings
+        vector = np.random.default_rng(int(uuid_module.UUID(identity_id))).normal(size=512)
+        vector /= np.linalg.norm(vector)
+        _sql("INSERT INTO identity_embeddings (identity_id, pipeline_id, embedding, "
+             "faiss_index_type, vector_index_sync_state, embedding_model_version, created_at) "
+             "VALUES (:i, :p, CAST(:v AS vector), 'unknown', 'pending', :m, now())",
+             {"i": identity_id, "p": QA_PIPELINE, "v": '[' + ','.join(map(str, vector)) + ']',
+              "m": os.path.splitext(os.path.basename(settings.RECOGNITION_MODEL))[0]})
     return identity_id
 
 
@@ -219,7 +229,7 @@ UNKNOWN_LIST = "/api/admin/unknown?page=1&page_size=100"
 def test_successful_promote_writes_an_audit_row(token):
     """Proof 1 (+ person_code metadata). log_promote() existed and was called
     from NOWHERE — a successful promotion left no audit trace at all."""
-    unknown_id = _make_unknown(TEST_PREFIX + "audit-probe")
+    unknown_id = _make_unknown(TEST_PREFIX + "audit-probe", usable_embedding=True)
     status, body = _http(
         "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
         body={"display_name": TEST_PREFIX + "Promoted One",
@@ -227,24 +237,23 @@ def test_successful_promote_writes_an_audit_row(token):
     assert status == 200 and body.get("success"), body
 
     rows = _sql(
-        "SELECT action_type, success, username, action_details, notes "
+        "SELECT action_type, success, username, action_details, after_state "
         "FROM identity_audit_log WHERE identity_id = :i AND action_type='promote'",
         {"i": unknown_id})
     assert rows, "successful promotion wrote no audit row"
-    action_type, success, username, details, notes = rows[0]
+    action_type, success, username, details, after_state = rows[0]
     assert success is True
     assert username == "admin"
     details = details if isinstance(details, dict) else json.loads(details or "{}")
     assert details.get("display_name") == TEST_PREFIX + "Promoted One"
-    # person_code's one honest use: audit metadata. It was previously accepted
-    # and silently discarded.
-    assert "QA-CODE-77" in (notes or ""), notes
+    after_state = after_state if isinstance(after_state, dict) else json.loads(after_state or "{}")
+    assert after_state["person_code"] == "QA-CODE-77"
 
 
 def test_promoted_identity_disappears_from_the_unknown_list(token):
     """Proof 3. The list is cached for 30 HOURS; without post-commit
     invalidation the stale page keeps showing the promoted face."""
-    unknown_id = _make_unknown(TEST_PREFIX + "vanish-probe")
+    unknown_id = _make_unknown(TEST_PREFIX + "vanish-probe", usable_embedding=True)
 
     status, body = _http("GET", UNKNOWN_LIST, token=token)
     assert status == 200
@@ -266,7 +275,7 @@ def test_promoted_identity_disappears_from_the_unknown_list(token):
 def test_repromoting_a_known_identity_is_refused_and_audited(token):
     """Proofs 2 + 16 (promote half). The refusal is the controlled response —
     and it must leave an audit row, which it previously did not."""
-    unknown_id = _make_unknown(TEST_PREFIX + "repromote-probe")
+    unknown_id = _make_unknown(TEST_PREFIX + "repromote-probe", usable_embedding=True)
     status, _body = _http(
         "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
         body={"display_name": TEST_PREFIX + "Promoted Twice",
@@ -277,16 +286,16 @@ def test_repromoting_a_known_identity_is_refused_and_audited(token):
         "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
         body={"display_name": TEST_PREFIX + "Promoted Again",
               "decision": "create_new"})
-    assert status == 400, body
+    assert status == 409 and body["code"] == "IDENTITY_NOT_ACTIVE", body
     detail = json.dumps(body)
-    assert "not unknown" in detail.lower()
+    assert "no longer an active unknown" in detail.lower()
 
     rows = _sql(
         "SELECT success, error_message FROM identity_audit_log "
         "WHERE identity_id = :i AND action_type='promote' AND success = false",
         {"i": unknown_id})
     assert rows, "refused promotion left no audit row"
-    assert "not unknown" in (rows[0][1] or "").lower()
+    assert "no longer an active unknown" in (rows[0][1] or "").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +603,12 @@ def test_cache_invalidation_happens_only_after_commit():
     for handler_name in ("promote_unknown_to_known", "merge_identities",
                          "merge_multiple_identities", "approve_merge_suggestion"):
         source = inspect.getsource(getattr(routes_module, handler_name))
-        invalidate_at = source.find("invalidate_unknown_cache")
+        notification = {"promote_unknown_to_known": "publish_promotion",
+                        "approve_merge_suggestion": "publish_merge"}.get(handler_name)
+        invalidate_at = source.find("await " + notification + "(") if notification else source.find("invalidate_unknown_cache")
+        if notification:
+            from backend.core import merge_notifications
+            assert "invalidate_unknown_cache" in inspect.getsource(getattr(merge_notifications, notification))
         assert invalidate_at != -1, f"{handler_name} never invalidates the cache"
         commit_at = source.find("await db.commit()")
         assert commit_at != -1 and commit_at < invalidate_at, \

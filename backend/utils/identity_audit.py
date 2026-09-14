@@ -88,7 +88,8 @@ class IdentityAuditLogger:
         user_agent: Optional[str] = None,
         success: bool = True,
         error_message: Optional[str] = None,
-        notes: Optional[str] = None
+        notes: Optional[str] = None,
+        strict: bool = False
     ) -> IdentityAuditLog:
         """
         Log an identity management action to the database.
@@ -143,6 +144,8 @@ class IdentityAuditLogger:
             try:
                 await db.flush()
             except Exception as flush_error:
+                if strict:
+                    raise
                 # If flush fails (e.g., transaction aborted), try to rollback and continue
                 try:
                     await db.rollback()
@@ -156,6 +159,8 @@ class IdentityAuditLogger:
             return audit_log
             
         except Exception as e:
+            if strict:
+                raise
             # Never fail the main operation due to audit logging errors
             logger.error(f"[AUDIT] Failed to log action: {e}", exc_info=True)
             # Try to rollback if transaction is in bad state
@@ -178,7 +183,8 @@ class IdentityAuditLogger:
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
         notes: Optional[str] = None,
-        decision: str = DECISION_CREATE_NEW
+        decision: str = DECISION_CREATE_NEW,
+        review: Optional[Dict[str, Any]] = None
     ) -> IdentityAuditLog:
         """Log identity promotion action.
 
@@ -195,12 +201,15 @@ class IdentityAuditLogger:
         # Already validated at the request boundary; the mutation and this
         # record therefore carry the identical value.
         details["decision"] = coerce_decision(decision)
+        if review is not None:
+            details['promotion_review'] = review
 
         return await IdentityAuditLogger.log_action(
             db=db,
             user_id=user_id,
             username=username,
             action_type="promote",
+            strict=True,
             identity_id=identity_id,
             action_details=details,
             before_state=before_state,
@@ -243,6 +252,7 @@ class IdentityAuditLogger:
             user_id=user_id,
             username=username,
             action_type="merge",
+            strict=True,
             identity_id=to_identity_id,
             related_identity_id=from_identity_id,
             action_details=details,

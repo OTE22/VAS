@@ -30,7 +30,7 @@ class FaceTracker:
     """
     Tracks identified faces to avoid re-processing the same person
     Uses embedding similarity + time-based expiration with memory limits
-    
+
     Separate tracking for:
     - Database writes: Uses window_seconds (default 30s) to prevent duplicate DB entries
     - Frontend notifications: Uses frontend_notification_window (2 hours) to allow re-notifications
@@ -202,6 +202,21 @@ class FaceTracker:
         # Embedding (float32) + name (str) + timestamp (float) + hash key overhead
         return dims * 4 + 100  # Rough estimate
 
+    async def forget_names(self, names) -> None:
+        """Drop transient face signatures when a person is permanently erased."""
+        names = {n for n in names if n}
+        async with self._lock:
+            for pipeline, entries in list(self.tracked_faces.items()):
+                for key, (embedding, name, _seen) in list(entries.items()):
+                    if name in names:
+                        del entries[key]
+                        self._memory_estimate_bytes = max(0, self._memory_estimate_bytes - self._estimate_embedding_size(len(embedding)))
+                if not entries:
+                    del self.tracked_faces[pipeline]
+            for key in list(self.frontend_notification_times):
+                if any(key.endswith(':' + name) for name in names):
+                    del self.frontend_notification_times[key]
+
     async def _enforce_memory_limit(self):
         """Enforce memory limit by removing oldest entries"""
         all_entries = []
@@ -225,57 +240,57 @@ class FaceTracker:
             logger.warning(f"[TRACKER] Enforced memory limit: removed {removed} oldest entries")
 
     async def _periodic_cleanup(self):
-        """Remove expired tracked faces and frontend notification times"""
-        while True:
-            try:
-                await asyncio.sleep(60)  # Cleanup every minute
+        from backend.core.service_supervisor import supervised_loop
+        await supervised_loop(
+            "face_tracker_cleanup",
+            lambda: max(1, float(settings.FACE_TRACKING_CLEANUP_INTERVAL)),
+            self._cleanup_once,
+            initial_delay=max(1, float(settings.FACE_TRACKING_CLEANUP_INTERVAL)),
+        )
 
-                async with self._lock:
-                    current_time = time.time()
-                    removed_count = 0
+    async def _cleanup_once(self):
+        async with self._lock:
+            current_time = time.time()
+            removed_count = 0
 
-                    for pipeline_id in list(self.tracked_faces.keys()):
-                        pipeline_faces = self.tracked_faces[pipeline_id]
+            for pipeline_id in list(self.tracked_faces.keys()):
+                pipeline_faces = self.tracked_faces[pipeline_id]
 
-                        # Remove expired faces
-                        expired_hashes = [
-                            face_hash
-                            for face_hash, (_, _, last_seen) in pipeline_faces.items()
-                            if current_time - last_seen > self.window_seconds
-                        ]
+                # Remove expired faces
+                expired_hashes = [
+                    face_hash
+                    for face_hash, (_, _, last_seen) in pipeline_faces.items()
+                    if current_time - last_seen > self.window_seconds
+                ]
 
-                        for face_hash in expired_hashes:
-                            del pipeline_faces[face_hash]
-                            removed_count += 1
-                            self._memory_estimate_bytes -= self._estimate_embedding_size(512)
+                for face_hash in expired_hashes:
+                    del pipeline_faces[face_hash]
+                    removed_count += 1
+                    self._memory_estimate_bytes -= self._estimate_embedding_size(512)
 
-                        # Remove empty pipelines
-                        if not pipeline_faces:
-                            del self.tracked_faces[pipeline_id]
+                # Remove empty pipelines
+                if not pipeline_faces:
+                    del self.tracked_faces[pipeline_id]
 
-                    # Clean up old frontend notification times (older than 3 hours)
-                    frontend_cleanup_threshold = 3 * 60 * 60  # 3 hours
-                    expired_notifications = []
-                    for key, value in self.frontend_notification_times.items():
-                        # Handle both tuple (time, similarity) and old float format
-                        if isinstance(value, tuple):
-                            timestamp, _ = value
-                        else:
-                            timestamp = value  # Old format (just timestamp)
-                        
-                        if current_time - timestamp > frontend_cleanup_threshold:
-                            expired_notifications.append(key)
-                    
-                    for key in expired_notifications:
-                        del self.frontend_notification_times[key]
+            # Clean up old frontend notification times (older than 3 hours)
+            frontend_cleanup_threshold = 3 * 60 * 60  # 3 hours
+            expired_notifications = []
+            for key, value in self.frontend_notification_times.items():
+                # Handle both tuple (time, similarity) and old float format
+                if isinstance(value, tuple):
+                    timestamp, _ = value
+                else:
+                    timestamp = value  # Old format (just timestamp)
 
-                    if removed_count > 0 or expired_notifications:
-                        logger.info(f"[TRACKER] Cleaned up {removed_count} expired faces, {len(expired_notifications)} expired notification times")
+                if current_time - timestamp > frontend_cleanup_threshold:
+                    expired_notifications.append(key)
 
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[TRACKER] Cleanup error: {e}")
+            for key in expired_notifications:
+                del self.frontend_notification_times[key]
+
+            if removed_count > 0 or expired_notifications:
+                logger.info(f"[TRACKER] Cleaned up {removed_count} expired faces, {len(expired_notifications)} expired notification times")
+
 
     async def should_send_frontend_notification(self, pipeline_id: str, name: str, current_similarity: float) -> bool:
         """
@@ -283,29 +298,29 @@ class FaceTracker:
         Returns True if we should send:
         - First time seeing this person
         - After 1 hour since last notification (to save bandwidth)
-        
+
         Within 1 hour: Drop notification completely (don't send to frontend)
         """
         async with self._lock:
             current_time = time.time()
             key = f"{pipeline_id}:{name}"
-            
+
             if key not in self.frontend_notification_times:
                 # First time seeing this person in this pipeline
                 self.frontend_notification_times[key] = (current_time, current_similarity)
                 logger.debug(f"[FRONTEND NOTIF] First notification for {name} in {pipeline_id} (sim={current_similarity:.3f})")
                 return True
-            
+
             last_notification_time, last_similarity = self.frontend_notification_times[key]
             time_since_last = current_time - last_notification_time
-            
+
             # Check if 1 hour has passed (changed from 2 hours to save bandwidth)
             if time_since_last >= self.frontend_notification_window:
                 # More than 1 hour since last notification - send again
                 self.frontend_notification_times[key] = (current_time, current_similarity)
                 logger.info(f"[FRONTEND NOTIF] Re-notifying {name} in {pipeline_id} after {time_since_last/3600:.1f} hours")
                 return True
-            
+
             # Less than 1 hour - drop notification to save bandwidth (regardless of confidence)
             logger.debug(f"[FRONTEND NOTIF] ⏭️ Dropping notification for {name} in {pipeline_id} (within 1-hour window, last sent {time_since_last/60:.1f} min ago) - saving bandwidth")
             return False

@@ -22,10 +22,53 @@ let showAllUnknowns = false;
 let currentIdentityId = null;
 let multiSelectMode = false;
 let selectedIdentities = new Set();
+let selectionDetailsSequence = 0;
+let mergePreviewSequence = 0;
+let activeMergePreview = null;
+let activeSuggestionPipeline = null;
+let pipelineSuggestionsSequence = 0;
+const selectionKey = () => Array.from(selectedIdentities).sort().join(',');
+function syncSelectionCards() {
+    document.querySelectorAll('.identity-card-compact').forEach(card =>
+        card.classList.toggle('selected', multiSelectMode && selectedIdentities.has(card.dataset.identityId)));
+}
+function invalidateMergePreview() {
+    activeMergePreview = null;
+    ++mergePreviewSequence;
+    const button = document.querySelector('#merge-preview-modal .execute-merge-btn');
+    if (button) button.disabled = true;
+}
+
 // (pipelineGroupsPerPage removed: it drove a SECOND pagination layer over the
 // server's, sharing currentPage with it. Paging is the server's alone.)
 let allPipelineGroups = []; // Pipeline groups built from the current server page
 let pageClampRetried = false; // bounds the re-fetch when the result set shrinks
+
+let imageVisibilityQueued = false;
+function refreshUnknownImageVisibility() {
+    if (imageVisibilityQueued) return;
+    imageVisibilityQueued = true;
+    queueMicrotask(() => {
+        imageVisibilityQueued = false;
+        const grid = document.getElementById('unknown-grid');
+        if (!grid) return;
+        let visible = 0, pending = 0;
+        grid.querySelectorAll('.pipeline-group').forEach(group => {
+            const cards = [...group.querySelectorAll('.identity-card-compact')];
+            const count = cards.filter(card => !card.hidden).length;
+            pending += cards.filter(card => card.querySelector('img')?.dataset.imageState === 'loading').length;
+            group.hidden = count === 0;
+            const label = group.querySelector('[data-visible-identity-count]');
+            if (label) label.textContent = `${count} ${count === 1 ? 'identity' : 'identities'}`;
+            visible += count;
+        });
+        const empty = document.getElementById('no-results');
+        if (grid.querySelector('.identity-card-compact')) {
+            empty.querySelector('p').textContent = 'No face images available on this page. Try another page or adjust the filters.';
+            empty.style.display = visible === 0 && pending === 0 ? 'flex' : 'none';
+        }
+    });
+}
 
 // WebSocket connection for real-time unknown face updates
 let ws = null;
@@ -369,7 +412,7 @@ function setupEventListeners() {
 
     // Quick search
     document.getElementById('search-by-image-btn').addEventListener('click', () => {
-        ModalStack.open(document.getElementById('search-image-modal'));
+        ModalStack.open(document.getElementById('search-image-modal'), {onClose: cancelQuickSearch});
     });
 
     document.getElementById('close-search-modal').addEventListener('click', () => {
@@ -380,12 +423,16 @@ function setupEventListeners() {
         ModalStack.close(document.getElementById('search-image-modal'));
     });
 
+    document.getElementById('search-scope').addEventListener('change', cancelQuickSearch);
     // Image preview
     document.getElementById('search-image-file').addEventListener('change', (e) => {
+        cancelQuickSearch();
+        document.getElementById('image-preview').style.display = 'none';
         const file = e.target.files[0];
         if (file) {
             const reader = new FileReader();
             reader.onload = (event) => {
+                if (e.target.files[0] !== file) return;
                 document.getElementById('preview-img').src = event.target.result;
                 document.getElementById('image-preview').style.display = 'block';
             };
@@ -448,6 +495,8 @@ function setupEventListeners() {
 
     // Merge suggestions
     document.getElementById('merge-suggestions-btn').addEventListener('click', () => {
+        activeSuggestionPipeline = null;
+        ++pipelineSuggestionsSequence;
         ModalStack.open(document.getElementById('merge-suggestions-modal'));
         loadMergeSuggestions();
     });
@@ -559,7 +608,9 @@ function updateShowAllToggle(data) {
     }
 }
 
+let unknownLoadSequence = 0;
 async function loadUnknownFaces() {
+    const loadSequence = ++unknownLoadSequence;
     const grid = document.getElementById('unknown-grid');
     const loading = document.getElementById('loading-indicator');
     const noResults = document.getElementById('no-results');
@@ -567,6 +618,7 @@ async function loadUnknownFaces() {
     grid.innerHTML = '';
     loading.style.display = 'flex';
     noResults.style.display = 'none';
+    noResults.querySelector('p').textContent = 'No unknown faces found';
 
     try {
         const params = new URLSearchParams({
@@ -587,6 +639,11 @@ async function loadUnknownFaces() {
 
         const data = await response.json();
 
+        if (loadSequence !== unknownLoadSequence) return;
+        // A current API response can restore an identity after an admin unmerge.
+        for (const identity of data.identities || []) {
+            if (String(identity.status).toLowerCase() === 'active') mergedAwayIdentities.delete(identity.id);
+        }
         updateShowAllToggle(data);
 
         console.log('[UNKNOWN] Loaded data:', {
@@ -662,7 +719,7 @@ async function loadUnknownFaces() {
             if (!isUnknown) {
                 console.warn(`[SECURITY] Frontend filtered out non-unknown identity: ${identity.id} (type: ${identity.type})`);
             }
-            return isUnknown;
+            return isUnknown && !mergedAwayIdentities.has(identity.id);
         });
 
         // Render identities grouped by pipeline
@@ -690,7 +747,12 @@ async function loadUnknownFaces() {
                     if (!groupedByPipeline[pipelineId]) {
                         groupedByPipeline[pipelineId] = [];
                     }
-                    groupedByPipeline[pipelineId].push(identity);
+                    const event = identity.camera_events?.[pipelineId];
+                    if (event) groupedByPipeline[pipelineId].push({
+                        ...identity, ...event, id: identity.id,
+                        last_seen_at: event.timestamp, best_snapshot_path: event.snapshot_path,
+                        snapshot_url: event.snapshot_url
+                    });
                 });
             }
             // Identities with no pipeline IDs are completely skipped
@@ -711,6 +773,7 @@ async function loadUnknownFaces() {
         loading.style.display = 'none';
     } catch (error) {
         console.error('Error loading unknown faces:', error);
+        if (loadSequence !== unknownLoadSequence) return;
         loading.style.display = 'none';
         const errorMessage = error.message || 'Error loading unknown faces';
         showNotification(errorMessage, 'error');
@@ -813,96 +876,35 @@ function attemptReconnect() {
     }
 }
 
+const mergedAwayIdentities = new Set();
+let mergeRefreshTimer = null;
 function handleWebSocketMessage(message) {
     console.log('[UNKNOWN] 📨 Handling WebSocket message:', message.type);
     console.log('[UNKNOWN] 📦 Full message data:', JSON.stringify(message).substring(0, 500));
 
     switch (message.type) {
-        case 'new_unknown_detection':
-            console.log('[UNKNOWN] 🆕 Processing new_unknown_detection message');
-            // Handle new unknown face detection in real-time
-            const unknownData = message.data;
-            const pipelineId = unknownData.pipeline_id;
-            const face = unknownData.face;
-
-            // Keep friendly card titles in sync with the live payload
-            recordPipelineDisplayName(pipelineId, unknownData.location_name);
-            
-            console.log(`[UNKNOWN] 📊 Unknown detection data:`, {
-                pipeline_id: pipelineId,
-                timestamp: unknownData.timestamp,
-                face_name: face?.name,
-                identity_id: unknownData.identity_id,
-                has_image: !!face?.image
-            });
-            
-            // Filter: Only process if user has access to this pipeline
-            if (window.userPipelines !== null && !window.userPipelines.includes(pipelineId)) {
-                console.log(`[UNKNOWN] [FILTER] Skipping unknown face from pipeline ${pipelineId} - user does not have access (user pipelines: ${window.userPipelines})`);
-                break;
-            }
-            console.log(`[UNKNOWN] ✅ Processing unknown face from pipeline ${pipelineId}`);
-            
-            // Check if identity already exists (if identity_id is provided)
-            if (unknownData.identity_id) {
-                // Try to find existing identity in current data
-                const existingIdentity = findIdentityInPipelineGroups(unknownData.identity_id, pipelineId);
-                if (existingIdentity) {
-                    // Update existing identity (refresh its data) - OPTIMIZED: Update only the card, not entire page
-                    console.log(`[UNKNOWN] 🔄 Updating existing identity ${unknownData.identity_id} in pipeline ${pipelineId}`);
-                    
-                    // Update the identity data in memory
-                    const updatedIdentity = {
-                        ...existingIdentity,
-                        snapshot_url: face.image ? `data:image/jpeg;base64,${face.image}` : (face.face_image_path ? `/storage/${face.face_image_path.replace(/^.*storage[\/\\]/, '')}` : existingIdentity.snapshot_url),
-                        last_seen_at: unknownData.timestamp,
-                        appearances_count: (existingIdentity.appearances_count || 1) + 1,
-                        best_snapshot_path: face.face_image_path || existingIdentity.best_snapshot_path
-                    };
-                    
-                    // Update the identity in the pipeline group
-                    const pipelineGroup = allPipelineGroups.find(g => g.id === pipelineId);
-                    if (pipelineGroup) {
-                        const identityIndex = pipelineGroup.identities.findIndex(id => id.id === unknownData.identity_id);
-                        if (identityIndex >= 0) {
-                            pipelineGroup.identities[identityIndex] = updatedIdentity;
-                        }
-                    }
-                    
-                    // Try to update the card in place (only if visible on current page)
-                    const updated = updateIdentityCard(unknownData.identity_id, updatedIdentity);
-                    
-                    if (!updated) {
-                        // Card not visible (on different page), just update data in memory
-                        console.log(`[UNKNOWN] 📄 Identity ${unknownData.identity_id} updated in memory (not visible on current page)`);
-                    } else {
-                        console.log(`[UNKNOWN] ✅ Identity ${unknownData.identity_id} card updated in place`);
-                    }
-                    
-                    // Update stats without re-rendering
-                    updateStatsFromPipelineGroups();
-                    break;
-                }
-            }
-            
-            // Create new identity object from detection data
-            const newIdentity = {
-                id: unknownData.identity_id || `temp_${Date.now()}`, // Use identity_id if available, otherwise temp ID
-                type: 'unknown',
-                display_name: face.name || 'Unknown',
-                status: 'active',
-                first_seen_at: unknownData.timestamp,
-                last_seen_at: unknownData.timestamp,
-                appearances_count: 1,
-                best_snapshot_path: face.face_image_path || null,
-                snapshot_url: face.image ? `data:image/jpeg;base64,${face.image}` : (face.face_image_path ? `/storage/${face.face_image_path.replace(/^.*storage[\/\\]/, '')}` : null),
-                pipeline_ids: [pipelineId] // Single pipeline for this detection
-            };
-            
-            // Add to the appropriate pipeline group
-            addUnknownFaceToPipeline(pipelineId, newIdentity);
+        case 'identity_promoted':
+            if (!message.data?.identity_id) break;
+            // Use the same refresh/tombstone handling as a merge, but keep the ID.
+            handleWebSocketMessage({type: 'identities_merged', data: {source_ids: [message.data.identity_id]}});
             break;
-            
+        case 'identities_merged':
+            ++unknownLoadSequence; // Ignore requests started before this commit.
+            for (const id of message.data?.source_ids || []) {
+                mergedAwayIdentities.add(id);
+                if (selectedIdentities.delete(id)) invalidateMergePreview();
+            }
+            clearTimeout(mergeRefreshTimer);
+            mergeRefreshTimer = setTimeout(() => {
+                updateMergeMultipleButton();
+                updateMultiMergeForm();
+                loadUnknownFaces();
+            }, 150);
+            break;
+        case 'new_unknown_detection':
+            applyUnknownEvent(message.data);
+            break;
+
         case 'ping':
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'pong' }));
@@ -910,53 +912,43 @@ function handleWebSocketMessage(message) {
             break;
             
         case 'initial_unknown_data':
-            console.log('[UNKNOWN] 📥 Processing initial_unknown_data message');
-            // Handle initial unknown faces data from WebSocket
-            const unknownInitialData = message.data || [];
-            console.log(`[UNKNOWN] 📊 Received ${unknownInitialData.length} pipeline entries with unknown faces`);
-            
-            // Process each pipeline entry
-            for (const entry of unknownInitialData) {
-                const pipelineId = entry.pipeline_id;
-                recordPipelineDisplayName(pipelineId, entry.location_name);
-
-                // Filter: Only process if user has access to this pipeline
-                if (window.userPipelines !== null && !window.userPipelines.includes(pipelineId)) {
-                    console.log(`[UNKNOWN] [FILTER] Skipping pipeline ${pipelineId} - user does not have access`);
-                    continue;
-                }
-                
-                // Process each face in this pipeline entry
-                for (const faceData of entry.faces || []) {
-                    const identityId = faceData.identity_id || `temp_${Date.now()}`;
-                    
-                    // Create identity object from face data
-                    const identity = {
-                        id: identityId,
-                        type: 'unknown',
-                        display_name: faceData.name || 'Unknown',
-                        status: 'active',
-                        first_seen_at: entry.timestamp,
-                        last_seen_at: entry.timestamp,
-                        appearances_count: 1,
-                        best_snapshot_path: faceData.face_image_path || null,
-                        snapshot_url: faceData.image ? `data:image/jpeg;base64,${faceData.image}` : (faceData.face_image_path ? `/storage/${faceData.face_image_path.replace(/^.*storage[\/\\]/, '')}` : null),
-                        pipeline_ids: [pipelineId]
-                    };
-                    
-                    // Add to the appropriate pipeline group
-                    addUnknownFaceToPipeline(pipelineId, identity);
-                }
+            for (const entry of message.data || []) {
+                for (const event of entry.faces || []) applyUnknownEvent(event);
             }
-            
-            console.log('[UNKNOWN] ✅ Initial unknown data processed');
             break;
-            
+
         case 'initial_data':
         case 'new_detection':
             // Known faces and initial data - ignore on unknown page
             break;
     }
+}
+
+// Only persisted backend events can advance a camera-specific card.
+function applyUnknownEvent(event) {
+    if (mergedAwayIdentities.has(event?.identity_id)) return;
+    if (!event?.identity_id || !event.pipeline_id || !event.event_id || !event.timestamp) return;
+    const pipelineId = event.pipeline_id;
+    if (window.userPipelines !== null && !window.userPipelines.includes(pipelineId)) return;
+    if (currentFilters.pipeline_id && currentFilters.pipeline_id !== pipelineId) return;
+    const existing = findIdentityInPipelineGroups(event.identity_id, pipelineId);
+    if (existing) {
+        if (existing.event_id === event.event_id) return;
+        const incomingTime = Date.parse(event.timestamp);
+        const previousTime = Date.parse(existing.last_seen_at);
+        if (!Number.isFinite(incomingTime) || incomingTime < previousTime) return;
+        if (incomingTime === previousTime &&
+            Number(event.appearance_id || 0) <= Number(existing.appearance_id || 0)) return;
+    }
+    recordPipelineDisplayName(pipelineId, event.location_name);
+    addUnknownFaceToPipeline(pipelineId, {
+        ...existing, ...event, id: event.identity_id, type: 'unknown', status: 'active',
+        display_name: event.face?.name || existing?.display_name || 'Unknown',
+        last_seen_at: event.timestamp,
+        best_snapshot_path: event.snapshot_path,
+        snapshot_url: event.snapshot_url,
+        pipeline_ids: [pipelineId]
+    });
 }
 
 // Helper function to find identity in current pipeline groups
@@ -982,7 +974,7 @@ function getCurrentPageGroups() {
 // Update a single identity card in place (without reloading page)
 function updateIdentityCard(identityId, updatedIdentity) {
     // Find the card element by identity ID
-    const card = document.querySelector(`[data-identity-id="${CSS.escape(identityId)}"]`);
+    const card = document.querySelector(`[data-identity-id="${CSS.escape(identityId)}"][data-pipeline-id="${CSS.escape(updatedIdentity.pipeline_id || '')}"]`);
     
     if (!card) {
         return false; // Card not visible (on different page)
@@ -990,8 +982,9 @@ function updateIdentityCard(identityId, updatedIdentity) {
     
     // Replace the image in its stable frame; never stack absolute clones.
     const img = card.querySelector('.identity-img');
-    if (img && updatedIdentity.snapshot_url) {
-        FaceImage.update(img, updatedIdentity.snapshot_url, card.querySelector('.face-placeholder'));
+    if (img) {
+        FaceImage.update(img, updatedIdentity.snapshot_url, card.querySelector('.face-placeholder'),
+                         { eventId: updatedIdentity.event_id });
     }
 
     // Update appearances count
@@ -1013,7 +1006,7 @@ function updateIdentityCard(identityId, updatedIdentity) {
     // Update last seen date
     const dateEl = card.querySelector('[data-last-seen]');
     if (dateEl) {
-        const newDate = new Date(updatedIdentity.last_seen_at || updatedIdentity.first_seen_at).toLocaleDateString();
+        const newDate = new Date(updatedIdentity.last_seen_at || updatedIdentity.first_seen_at).toLocaleString();
         if (dateEl.textContent !== newDate) {
             dateEl.textContent = newDate;
         }
@@ -1056,18 +1049,12 @@ function updatePipelineGroupInPlace(pipelineId, pipelineGroup) {
             const newCard = createIdentityCard(identity);
             groupGrid.insertBefore(newCard, groupGrid.firstChild); // Add at top
             
-            // Update group header count
-            const countSpan = groupSection.querySelector('.pipeline-group-header span');
-            if (countSpan) {
-                // Count unique identities (remove duplicates)
-                const uniqueCount = new Set(pipelineGroup.identities.map(id => id.id)).size;
-                countSpan.textContent = `${uniqueCount} ${uniqueCount === 1 ? 'identity' : 'identities'}`;
-            }
+            refreshUnknownImageVisibility();
             
             // Smooth scroll to show new card if needed (only for first new card)
             if (identity === sortedIdentities[0]) {
                 setTimeout(() => {
-                    newCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    if (!newCard.hidden) newCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 }, 100);
             }
             break; // Only add the most recent new identity to avoid multiple additions
@@ -1099,7 +1086,7 @@ function addUnknownFaceToPipeline(pipelineId, identity) {
         pipelineGroup.identities[existingIndex] = {
             ...existingIdentity,
             ...identity,
-            appearances_count: (existingIdentity.appearances_count || 1) + 1,
+            appearances_count: identity.appearances_count ?? existingIdentity.appearances_count,
             last_seen_at: identity.last_seen_at || existingIdentity.last_seen_at
         };
         console.log(`[UNKNOWN] 🔄 Updated identity ${identity.id} in pipeline ${pipelineId}`);
@@ -1240,7 +1227,7 @@ function createPipelineGroup(pipelineId, identities) {
         <i class="fas fa-video" style="color: #00ff96; font-size: 1.1rem;"></i>
         <div style="flex: 1; min-width: 0;">
             <h2 class="pipeline-group-title" data-pipeline-id="${escapeHtml(pipelineId)}" title="${escapeHtml(pipelineId)}" style="margin: 0; color: #00ff96; font-size: 0.95rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(getPipelineDisplayName(pipelineId))}</h2>
-            <span style="color: #999; font-size: 0.7rem; display: block; margin-top: 0.15rem;">${identities.length} ${identities.length === 1 ? 'identity' : 'identities'}</span>
+            <span data-visible-identity-count style="color: #999; font-size: 0.7rem; display: block; margin-top: 0.15rem;">${identities.length} ${identities.length === 1 ? 'identity' : 'identities'}</span>
         </div>
         <button class="pipeline-merge-suggestions-btn merge-hover-btn" data-pipeline-id="${pipelineId}" title="View merge suggestions for this pipeline" data-action="openPipelineMergeSuggestions" data-arg="${pipelineId}" style="
             background: rgba(0, 255, 150, 0.2);
@@ -1308,6 +1295,7 @@ function createPipelineGroup(pipelineId, identities) {
 function createIdentityCard(identity) {
     const card = document.createElement('div');
     card.className = 'identity-card-compact';
+    card.classList.toggle('selected', multiSelectMode && selectedIdentities.has(identity.id));
 
     // Click handler - depends on mode.
     //
@@ -1332,6 +1320,7 @@ function createIdentityCard(identity) {
 
     card.setAttribute('title', 'Click to view details and create alerts for this unknown person');
     card.setAttribute('data-identity-id', identity.id);
+    card.setAttribute('data-pipeline-id', identity.pipeline_id || '');
 
     const sightings = identity.appearances_count || 1;
     const lastSeen = new Date(identity.last_seen_at || identity.first_seen_at);
@@ -1342,7 +1331,7 @@ function createIdentityCard(identity) {
             <div class="face-placeholder">No image available</div>
         </div>
         <div class="identity-meta">
-            <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${lastSeen.toLocaleDateString()}</span>
+            <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${lastSeen.toLocaleString()}</span>
             <div class="identity-badge" data-appearances-count="${sightings}" title="${sightings} sighting${sightings === 1 ? '' : 's'}">
                 <i class="fas fa-eye"></i>${sightings}
             </div>
@@ -1364,7 +1353,14 @@ function createIdentityCard(identity) {
             </div>
         </div>
     `;
-    FaceImage.update(card.querySelector('.identity-img'), identity.snapshot_url, card.querySelector('.face-placeholder'));
+    card.hidden = true;
+    const image = card.querySelector('.identity-img');
+    image.addEventListener('face-image-state', event => {
+        card.hidden = !['ready', 'previous'].includes(event.detail.status);
+        refreshUnknownImageVisibility();
+    });
+    FaceImage.update(image, identity.snapshot_url, card.querySelector('.face-placeholder'));
+    refreshUnknownImageVisibility();
     return card;
 }
 
@@ -1565,9 +1561,9 @@ function renderAdvancedTimeline(appearances) {
                         }
                     </div>
                     <div class="node-info">
-                        <div class="node-pipeline" title="${escapeHtml(app.pipeline_id || '')}">
+                        <div class="node-pipeline" title="${escapeHtml(`Camera: ${app.pipeline_id || ''} | Event: ${app.event_id || app.id} | Detection: ${app.detection_uuid || app.detection_id || 'legacy link unavailable'}`)}">
                             <i class="fas fa-video"></i>
-                            <span>${escapeHtml(app.pipeline_id ? getPipelineDisplayName(app.pipeline_id) : 'Unknown')}</span>
+                            <span>${escapeHtml(app.location_name || (app.pipeline_id ? getPipelineDisplayName(app.pipeline_id) : 'Unknown'))}</span>
                         </div>
                         <div class="node-time">
                             <i class="fas fa-clock"></i>
@@ -1909,6 +1905,7 @@ async function loadPromoteCandidates(identityId) {
             `/api/admin/unknown/${encodeURIComponent(identityId)}/match-candidates`,
             { credentials: 'include' });
         if (!response.ok) {
+            if (currentIdentityId !== identityId) return;
             list.replaceChildren();
             warning.textContent =
                 'Could not check for existing people. You can still promote this face as a new person.';
@@ -1916,6 +1913,7 @@ async function loadPromoteCandidates(identityId) {
         }
         data = await response.json();
     } catch (err) {
+        if (currentIdentityId !== identityId) return;
         list.replaceChildren();
         warning.textContent =
             'Could not reach the server to check for existing people. You can still promote this face as a new person.';
@@ -1997,8 +1995,8 @@ function buildCandidateRow(candidate) {
     const percent = Math.round((Number(candidate.similarity) || 0) * 1000) / 10;
     const score = document.createElement('p');
     score.className = 'promote-candidate-score';
-    score.textContent = `${percent}% match · ${String(candidate.confidence_band || '')
-        .replace(/_/g, ' ').toLowerCase()}`;
+    score.textContent = candidate.similarity == null ? 'Same name — verify the person' :
+        `${percent}% similarity · ${String(candidate.confidence_band || '').replace(/_/g, ' ').toLowerCase()}`;
     info.appendChild(score);
 
     const seenAt = candidate.last_seen_location_at || candidate.last_seen_at;
@@ -2056,6 +2054,7 @@ function buildCandidateRow(candidate) {
 async function mergeIntoKnownCandidate(knownIdentityId, knownDisplayName) {
     if (!currentIdentityId) return;
     if (mergeSubmitInFlight) return;   // one candidate merge at a time
+    const identityId = currentIdentityId;
     const label = knownDisplayName || knownIdentityId;
 
     // Ordinary application confirmation (stacked above the promote modal).
@@ -2072,12 +2071,12 @@ async function mergeIntoKnownCandidate(knownIdentityId, knownDisplayName) {
         cancelLabel: 'Cancel',
         danger: true
     });
-    if (!intent) return;
+    if (!intent || currentIdentityId !== identityId || mergeSubmitInFlight) return;
 
     mergeSubmitInFlight = true;
     try {
         const result = await postMergeWithRiskGate('/api/admin/identities/merge', {
-            from_identity_id: currentIdentityId,   // the unknown = loser
+            from_identity_id: identityId,          // the unknown = loser
             to_identity_id: knownIdentityId,       // the known  = winner
             notes: 'Merged from the promote match suggestions',
             // Recorded in the merge audit row, so this is distinguishable
@@ -2086,7 +2085,7 @@ async function mergeIntoKnownCandidate(knownIdentityId, knownDisplayName) {
         });
         if (result === null) { return; }   // cancelled at the risk confirmation
         showNotification(result.message || `Merged into ${label}`, 'success');
-        ModalStack.close(document.getElementById('promote-modal'));
+        if (currentIdentityId === identityId) ModalStack.close(document.getElementById('promote-modal'));
         loadUnknownFaces();
     } catch (err) {
         showNotification(err.message || 'Could not reach the server. Nothing was merged.', 'error');
@@ -2097,62 +2096,56 @@ async function mergeIntoKnownCandidate(knownIdentityId, knownDisplayName) {
 
 // Promote identity - ALL VALIDATION IN BACKEND
 async function promoteIdentity() {
+    if (mergeSubmitInFlight || !currentIdentityId) return;
+    const identityId = currentIdentityId;
     const name = document.getElementById('promote-name').value.trim();
     const code = document.getElementById('promote-code').value.trim();
-
-    // Frontend just sends data - backend handles all validation
+    const button = document.querySelector('#promote-form button[type="submit"]');
+    mergeSubmitInFlight = true;
+    if (button) button.disabled = true;
+    const payload = {display_name: name, person_code: code || null, decision: 'create_new'};
     try {
-        const response = await fetch(`/api/admin/unknown/${currentIdentityId}/promote`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            credentials: 'include', // Include HttpOnly cookies
-            body: JSON.stringify({
-                display_name: name,
-                person_code: code || null,
-                // Mandatory. This form is the create-new branch; the merge
-                // branch lives in mergeIntoKnownCandidate().
-                decision: 'create_new'
-            })
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            const errorMessage = error.detail || 'Failed to promote identity';
-            
-            // Check if it's a face detection error - show popup modal
-            if (errorMessage.includes('No face detected') || errorMessage.includes('face detected')) {
-                showFaceDetectionAlert(
-                    'The image does not contain a detectable face. This may happen if the image was processed before face detection was enabled. Please choose another image for this identity.'
-                );
-            } else if (errorMessage.includes('snapshot image file is missing') || errorMessage.includes('Could not read')) {
-                showFaceDetectionAlert(
-                    'The identity\'s snapshot image is missing or corrupted. Please choose another image for this identity.'
-                );
-            } else {
-                // For other errors, show notification but also show alert modal
-                showFaceDetectionAlert(errorMessage);
+        for (let attempt = 0; attempt < 2; attempt++) {
+            if (currentIdentityId !== identityId) return;
+            const response = await fetch(`/api/admin/unknown/${encodeURIComponent(identityId)}/promote`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                credentials: 'include', body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+            if (response.status === 409 && result.code === 'PROMOTION_REVIEW_REQUIRED' && attempt === 0) {
+                const candidates = result.review?.candidates || [];
+                const list = document.getElementById('promote-candidates');
+                if (list) list.replaceChildren(...candidates.map(buildCandidateRow));
+                const section = document.getElementById('promote-candidates-section');
+                if (section) section.style.display = '';
+                const proceed = await AppConfirm.confirm({
+                    title: 'Create a separate known person?',
+                    lines: [
+                        'An existing person has a strong face match or the same name.',
+                        ...candidates.map(candidate => candidate.display_name || candidate.identity_id),
+                        'Cancel to review and merge into an existing person. Continue only if this is a different person.'
+                    ],
+                    confirmLabel: 'Create Separate Person', cancelLabel: 'Review Existing People', danger: true
+                });
+                if (!proceed || currentIdentityId !== identityId) return;
+                payload.confirm_create_new = true;
+                continue;
             }
-            return; // Don't close modal on error
+            if (!response.ok) {
+                throw new Error(typeof result.detail === 'string' ? result.detail : 'Could not promote this identity.');
+            }
+            mergedAwayIdentities.add(identityId);
+            ++unknownLoadSequence;
+            showNotification(result.message || 'Identity promoted successfully', 'success');
+            if (currentIdentityId === identityId) ModalStack.close(document.getElementById('promote-modal'));
+            loadUnknownFaces();
+            return;
         }
-
-        const result = await response.json(); // Backend sends success message
-        showNotification(result.message || 'Identity promoted successfully', 'success');
-        ModalStack.close(document.getElementById('promote-modal'));
-        loadUnknownFaces();
     } catch (error) {
-        console.error('Error promoting identity:', error);
-        const errorMessage = error.message || 'Error promoting identity';
-        
-        // Show alert modal for any error
-        if (errorMessage.includes('No face detected') || errorMessage.includes('face detected')) {
-            showFaceDetectionAlert(
-                'No face detected in the image. Please choose another image for this identity.'
-            );
-        } else {
-            showFaceDetectionAlert(errorMessage);
-        }
+        showFaceDetectionAlert(error.message || 'Could not complete promotion. Refresh to check its current status.');
+    } finally {
+        mergeSubmitInFlight = false;
+        if (button) button.disabled = false;
     }
 }
 
@@ -2189,106 +2182,98 @@ function closeFaceDetectionAlert() {
     }
 }
 
-// Quick search
+// Quick Search is read-only; only its separate Promote action can enroll a person.
+let quickSearchSequence = 0;
+let quickSearchController = null;
+function cancelQuickSearch() {
+    ++quickSearchSequence;
+    quickSearchController?.abort();
+    quickSearchController = null;
+    document.querySelector('#search-image-form button[type="submit"]').disabled = false;
+    document.getElementById('search-results').style.display = 'none';
+    document.getElementById('search-results-grid').replaceChildren();
+}
 async function searchByImage() {
-    const fileInput = document.getElementById('search-image-file');
-    const scope = document.getElementById('search-scope').value;
-    const resultsDiv = document.getElementById('search-results');
-    const resultsGrid = document.getElementById('search-results-grid');
-
-    if (!fileInput.files || !fileInput.files[0]) {
-        showNotification('Please select an image', 'error');
-        return;
-    }
-
-    const formData = new FormData();
-    formData.append('image', fileInput.files[0]);
-    formData.append('scope', scope);
-    formData.append('top_k', '10');
-
+    if (quickSearchController) return;
+    const file = document.getElementById('search-image-file').files?.[0];
+    if (!file) { showNotification('Please select an image', 'error'); return; }
+    const sequence = ++quickSearchSequence;
+    const controller = new AbortController();
+    quickSearchController = controller;
+    const button = document.querySelector('#search-image-form button[type="submit"]');
+    button.disabled = true;
+    const grid = document.getElementById('search-results-grid');
+    const form = new FormData();
+    form.append('image', file);
+    form.append('scope', document.getElementById('search-scope').value);
+    form.append('top_k', '10');
+    document.getElementById('search-results').style.display = 'block';
+    grid.textContent = 'Searching...';
     try {
-        resultsGrid.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> Searching...</div>';
-        resultsDiv.style.display = 'block';
-
         const response = await fetch('/api/search/by-image', {
-            method: 'POST',
-            credentials: 'include', // Include HttpOnly cookies
-            body: formData
+            method:'POST', credentials:'include', body:form, signal:controller.signal
         });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Search failed');
+        const data = await response.json();
+        if (sequence !== quickSearchSequence) return;
+        if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Search failed. Check the image and search options.');
+        if (!Array.isArray(data)) throw new Error('Invalid search response. Please try again.');
+        grid.replaceChildren();
+        const count = Number(response.headers.get('X-Faces-Detected'));
+        if (count > 1) {
+            const note = document.createElement('p');
+            note.textContent = `${count} faces detected. Results are for the largest face only. Crop to a single person to search someone else.`;
+            grid.appendChild(note);
         }
-
-        const results = await response.json();
-        resultsGrid.innerHTML = '';
-
-        if (results.length === 0) {
-            resultsGrid.innerHTML = '<div class="no-results"><p>No matches found</p></div>';
-            return;
+        if (!data.length) {
+            const note = document.createElement('p');
+            note.textContent = 'No matches met the configured threshold in the selected scope.';
+            grid.appendChild(note);
         }
-
-        results.forEach(result => {
-            const card = createSearchResultCard(result);
-            resultsGrid.appendChild(card);
-        });
+        data.forEach(result => grid.appendChild(createSearchResultCard(result)));
     } catch (error) {
-        console.error('Error in quick search:', error);
-        resultsGrid.innerHTML = `<div class="error">${error.message}</div>`;
-        showNotification(error.message || 'Error in quick search', 'error');
+        if (sequence !== quickSearchSequence || error.name === 'AbortError') return;
+        grid.textContent = error.message || 'Search failed.';
+        showNotification(error.message || 'Search failed.', 'error');
+    } finally {
+        if (sequence === quickSearchSequence) {
+            quickSearchController = null;
+            button.disabled = false;
+        }
     }
 }
-
-// Create search result card
 function createSearchResultCard(result) {
     const card = document.createElement('div');
     card.className = 'identity-card';
-    card.innerHTML = `
-        <div class="card-image">
-            ${result.snapshot_url || result.best_snapshot_path ? 
-                `<img src="${result.snapshot_url || `/${result.best_snapshot_path}`}" alt="Match" data-fallback-class="no-image" data-fallback-icon="fas fa-user">` :
-                `<div class="no-image"><i class="fas fa-user"></i></div>`
+    card.innerHTML = `<div class="card-image"><div class="no-image">No image available</div><div class="similarity-badge"></div></div>
+        <div class="card-content"><div class="card-header"><h3></h3><span class="card-badge"></span></div>
+        <div class="card-info"><p class="search-appearances"></p><p class="search-last-seen"></p></div><div class="card-actions"></div></div>`;
+    card.querySelector('h3').textContent = result.display_name || 'Unknown';
+    card.querySelector('.card-badge').textContent = result.type === 'known' ? 'known' : 'unknown';
+    card.querySelector('.similarity-badge').textContent = `${(Number(result.similarity) * 100).toFixed(1)}% similarity`;
+    card.querySelector('.search-appearances').textContent = `${Number(result.appearances_count) || 0} appearances`;
+    const stamp = result.last_seen_at ? new Date(result.last_seen_at) : null;
+    card.querySelector('.search-last-seen').textContent = stamp && !isNaN(stamp) ? `Last seen: ${stamp.toLocaleString()}` : 'Last seen: unavailable';
+    const raw = result.snapshot_url || (result.best_snapshot_path ? '/' + result.best_snapshot_path.replace(/^\/+/, '') : null);
+    if (raw) {
+        try {
+            const url = new URL(raw, window.location.origin);
+            if (url.origin === window.location.origin && ['http:', 'https:'].includes(url.protocol)) {
+                const image = document.createElement('img');
+                image.alt = 'Match'; image.src = url.href; image.style.objectFit = 'contain';
+                image.addEventListener('error', () => image.remove());
+                image.addEventListener('load', () => card.querySelector('.no-image')?.remove());
+                card.querySelector('.card-image').prepend(image);
             }
-            <div class="similarity-badge">${(result.similarity * 100).toFixed(1)}%</div>
-        </div>
-        <div class="card-content">
-            <div class="card-header">
-                <h3>${result.display_name || 'Unknown'}</h3>
-                <span class="card-badge ${result.type}">${result.type}</span>
-            </div>
-            <div class="card-info">
-                <div class="info-item">
-                    <i class="fas fa-eye"></i>
-                    <span>${result.appearances_count} appearances</span>
-                </div>
-                <div class="info-item">
-                    <i class="fas fa-clock"></i>
-                    <span>Last seen: ${new Date(result.last_seen_at).toLocaleDateString()}</span>
-                </div>
-            </div>
-            <div class="card-actions">
-                <button class="intelligence-admin-btn small" data-action="viewIdentityDetails" data-arg="${result.identity_id}">
-                    <div class="btn-content">
-                        <div class="btn-icon-wrapper">
-                            <i class="fas fa-eye"></i>
-                        </div>
-                        <span class="btn-title">VIEW</span>
-                    </div>
-                </button>
-                ${result.type === 'unknown' ? `
-                    <button class="intelligence-admin-btn small" data-action="promoteIdentityModal" data-arg="${result.identity_id}">
-                        <div class="btn-content">
-                            <div class="btn-icon-wrapper">
-                                <i class="fas fa-arrow-up"></i>
-                            </div>
-                            <span class="btn-title">PROMOTE</span>
-                        </div>
-                    </button>
-                ` : ''}
-            </div>
-        </div>
-    `;
+        } catch { /* Keep the placeholder for an invalid URL. */ }
+    }
+    for (const [label, action] of [['VIEW','viewIdentityDetails'], ...(result.type === 'unknown' ? [['PROMOTE','promoteIdentityModal']] : [])]) {
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'intelligence-admin-btn small';
+        button.dataset.action = action; button.dataset.arg = result.identity_id;
+        const content = document.createElement('div'); content.className = 'btn-content';
+        const title = document.createElement('span'); title.className = 'btn-title'; title.textContent = label;
+        content.appendChild(title); button.appendChild(content); card.querySelector('.card-actions').appendChild(button);
+    }
     return card;
 }
 
@@ -2299,7 +2284,7 @@ function showNotification(message, type = 'info', duration = 3000) {
     notification.className = `notification ${type}`;
     notification.innerHTML = `
         <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
-        <span>${message}</span>
+        <span>${escapeHtml(message)}</span>
     `;
     
     document.body.appendChild(notification);
@@ -2320,6 +2305,8 @@ function showNotification(message, type = 'info', duration = 3000) {
 
 // Toggle multi-select mode
 function toggleMultiSelectMode() {
+    invalidateMergePreview();
+    ++selectionDetailsSequence;
     multiSelectMode = !multiSelectMode;
     selectedIdentities.clear();
     
@@ -2380,6 +2367,8 @@ function toggleIdentitySelection(identityId, event) {
         selectedIdentities.add(identityId);
     }
     
+    invalidateMergePreview();
+    syncSelectionCards();
     // Update UI to show selection state (styled by .identity-card-compact.selected)
     const card = event.currentTarget.closest('.identity-card-compact');
     if (card) {
@@ -2393,6 +2382,7 @@ function toggleIdentitySelection(identityId, event) {
 
 // Update multi-merge form with selected identities
 function updateMultiMergeForm() {
+    const sequence = ++selectionDetailsSequence;
     const count = selectedIdentities.size;
     document.getElementById('selected-count').textContent = count;
     
@@ -2405,6 +2395,7 @@ function updateMultiMergeForm() {
     // Fetch identity details for display
     Promise.all(Array.from(selectedIdentities).map(id => fetchIdentityDetails(id)))
         .then(identities => {
+            if (sequence !== selectionDetailsSequence) return;
             listDiv.innerHTML = identities.map(identity => `
                 <div style="display: flex; align-items: center; gap: 1rem; padding: 0.75rem; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(0, 255, 150, 0.2); border-radius: 6px; margin-bottom: 0.5rem;">
                     <div style="width: 50px; height: 50px; border-radius: 4px; overflow: hidden; background: rgba(0, 0, 0, 0.5); flex-shrink: 0;">
@@ -2429,6 +2420,7 @@ function updateMultiMergeForm() {
             `).join('');
         })
         .catch(err => {
+            if (sequence !== selectionDetailsSequence) return;
             console.error('Error loading identity details:', err);
             listDiv.innerHTML = '<p style="color: #ff9800;">Error loading identity details. Please try again.</p>';
         });
@@ -2452,6 +2444,9 @@ async function fetchIdentityDetails(identityId) {
 // Remove identity from selection
 function removeFromSelection(identityId) {
     selectedIdentities.delete(identityId);
+    invalidateMergePreview();
+    updateMergeMultipleButton();
+    syncSelectionCards();
     updateMultiMergeForm();
     // Refresh grid to update visual state
     loadUnknownFaces();
@@ -2647,7 +2642,13 @@ async function postMergeWithRiskGate(url, payload) {
         let result = {};
         try { result = await response.json(); } catch (ignored) { /* empty body */ }
 
-        if (response.ok) { return result; }
+        if (response.ok) {
+            const survivor = result.identity?.id || payload.to_identity_id;
+            for (const id of payload.identity_ids || [payload.from_identity_id]) {
+                if (id && id !== survivor) mergedAwayIdentities.add(id);
+            }
+            return result;
+        }
 
         if (response.status === 409
                 && result && result.code === 'MERGE_CONFIRMATION_REQUIRED'
@@ -2676,6 +2677,11 @@ async function mergeIdentities() {
 
     // Check if multi-merge or single merge
     const multiMergeForm = document.getElementById('multi-merge-form');
+    if (multiMergeForm.style.display !== 'none' && selectedIdentities.size < 2) {
+        mergeSubmitInFlight = false;
+        showNotification('Select at least two identities before merging.', 'error');
+        return;
+    }
     const isMultiMerge = multiMergeForm.style.display !== 'none' && selectedIdentities.size >= 2;
 
     try {
@@ -2710,6 +2716,8 @@ async function mergeIdentities() {
         if (isMultiMerge) {
             selectedIdentities.clear();
             document.getElementById('multi-merge-target-id').value = '';
+            updateMergeMultipleButton();
+            updateMultiMergeForm();
         }
 
         loadUnknownFaces(); // Refresh the list
@@ -2732,6 +2740,9 @@ async function openAdvancedMergePreview() {
         return;
     }
     
+    invalidateMergePreview();
+    const previewSequence = mergePreviewSequence;
+    const expectedSelection = selectionKey();
     const previewModal = document.getElementById('merge-preview-modal');
     const previewContent = document.getElementById('merge-preview-content');
     const previewLoading = document.getElementById('merge-preview-loading');
@@ -2764,9 +2775,13 @@ async function openAdvancedMergePreview() {
         }
         
         const preview = await response.json();
+        if (previewSequence !== mergePreviewSequence || expectedSelection !== selectionKey()) return;
+        activeMergePreview = {identity_ids: [...identityIds], target_identity_id: preview.target_identity.id,
+                              selection: expectedSelection};
         renderMergePreview(preview);
         
     } catch (error) {
+        if (previewSequence !== mergePreviewSequence) return;
         console.error('Error fetching merge preview:', error);
         previewContent.innerHTML = `
             <div style="text-align: center; padding: 2rem; color: #ff6b6b;">
@@ -2777,13 +2792,14 @@ async function openAdvancedMergePreview() {
         `;
         previewContent.style.display = 'block';
     } finally {
-        previewLoading.style.display = 'none';
+        if (previewSequence === mergePreviewSequence) previewLoading.style.display = 'none';
     }
 }
 
 // Render merge preview content
 function renderMergePreview(preview) {
     const previewContent = document.getElementById('merge-preview-content');
+    document.querySelector('#merge-preview-modal .execute-merge-btn').disabled = false;
     
     // Build warnings HTML
     const warningsHtml = preview.warnings && preview.warnings.length > 0 ? `
@@ -2959,8 +2975,15 @@ function renderMergePreview(preview) {
 
 // Execute merge from preview modal
 async function executeMergeFromPreview() {
-    const identityIds = Array.from(selectedIdentities);
-    const targetId = document.getElementById('multi-merge-target-id')?.value.trim() || null;
+    if (mergeSubmitInFlight) return;
+    mergeSubmitInFlight = true;
+    if (!activeMergePreview || activeMergePreview.selection !== selectionKey()) {
+        mergeSubmitInFlight = false;
+        showNotification('Selection changed. Open a fresh merge preview before merging.', 'error');
+        return;
+    }
+    const identityIds = [...activeMergePreview.identity_ids];
+    const targetId = activeMergePreview.target_identity_id;
     const notes = document.getElementById('merge-preview-notes')?.value.trim() || '';
     
     // Show loading state
@@ -3005,12 +3028,14 @@ async function executeMergeFromPreview() {
         showNotification(error.message || 'Error merging identities', 'error');
     } finally {
         executeBtn.innerHTML = originalText;
-        executeBtn.disabled = false;
+        executeBtn.disabled = !activeMergePreview;
+        mergeSubmitInFlight = false;
     }
 }
 
 // Close preview modal — the merge modal underneath becomes active again.
 function closeMergePreviewModal() {
+    invalidateMergePreview();
     ModalStack.close(document.getElementById('merge-preview-modal'));
 }
 
@@ -3104,7 +3129,7 @@ async function loadMergeSuggestions() {
                         <h3>${escapeHtml(suggestion.display_name || `Cluster ${suggestion.cluster_id}`)}</h3>
                         ${badgeHtml}
                     </div>
-                    <span class="confidence-badge ${confidenceClass}">${suggestion.confidence_percent}% confidence</span>
+                    <span class="confidence-badge ${confidenceClass}">${suggestion.confidence_percent}% match score</span>
                 </div>
                 ${suggestion.is_cross_camera ? `
                 <div style="padding: 0.5rem 0.75rem; background: rgba(255, 165, 0, 0.1); border-radius: 4px; margin: 0.5rem 0; border: 1px solid rgba(255, 165, 0, 0.3);">
@@ -3145,6 +3170,7 @@ async function loadMergeSuggestions() {
                     </div>
                 ` : '<div style="padding: 1rem; text-align: center; color: #999; font-style: italic;">No snapshots available</div>'}
                 <div class="suggestion-actions" style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                    <button class="intelligence-admin-btn small" data-action="selectSuggestion" data-arg="${encodeURIComponent(JSON.stringify(suggestion.identity_ids || []))}"><div class="btn-content"><span class="btn-title">SELECT &amp; REVIEW</span></div></button>
                     ${suggestion.id ? `
                         <button class="intelligence-admin-btn small" data-action="approveMergeSuggestion" data-arg="${suggestion.id}" style="flex: 1;">
                             <div class="btn-content">
@@ -3177,8 +3203,35 @@ async function loadMergeSuggestions() {
     }
 }
 
+async function reviewSuggestion(action, suggestionId) {
+    if (mergeSubmitInFlight) return;
+    mergeSubmitInFlight = true;
+    const pipeline = activeSuggestionPipeline;
+    try { await action(suggestionId); }
+    finally {
+        mergeSubmitInFlight = false;
+        if (pipeline && activeSuggestionPipeline === pipeline) loadPipelineMergeSuggestions(pipeline);
+    }
+}
+function approveMergeSuggestion(id) { return reviewSuggestion(approveMergeSuggestionImpl, id); }
+function rejectMergeSuggestion(id) { return reviewSuggestion(rejectMergeSuggestionImpl, id); }
+function selectSuggestion(encodedIds) {
+    if (mergeSubmitInFlight) return;
+    const ids = JSON.parse(decodeURIComponent(encodedIds));
+    if (!Array.isArray(ids) || ids.length < 2) return;
+    if (!multiSelectMode) toggleMultiSelectMode();
+    selectedIdentities = new Set(ids);
+    invalidateMergePreview();
+    document.getElementById('multi-merge-target-id').value = '';
+    ModalStack.close(document.getElementById('pipeline-merge-suggestions-modal'));
+    ModalStack.close(document.getElementById('merge-suggestions-modal'));
+    syncSelectionCards();
+    updateMergeMultipleButton();
+    openMergeModal(null);
+}
+
 // Approve merge suggestion
-async function approveMergeSuggestion(suggestionId) {
+async function approveMergeSuggestionImpl(suggestionId) {
     // Safety check: prevent approving suggestions without IDs (on-the-fly DBSCAN suggestions)
     if (!suggestionId || suggestionId === null || suggestionId === 'null' || suggestionId === undefined) {
         showNotification('Cannot approve on-the-fly suggestions. Please use the regular merge suggestions page.', 'error');
@@ -3212,7 +3265,7 @@ async function approveMergeSuggestion(suggestionId) {
 }
 
 // Reject merge suggestion - ALL LOGIC IN BACKEND
-async function rejectMergeSuggestion(suggestionId) {
+async function rejectMergeSuggestionImpl(suggestionId) {
     const intent = await AppConfirm.confirm({
         title: 'Reject this merge suggestion?',
         lines: ['The suggestion is dismissed; the identities stay separate.'],
@@ -3254,6 +3307,7 @@ async function openPipelineMergeSuggestions(pipelineId) {
         return;
     }
 
+    activeSuggestionPipeline = pipelineId;
     // Show the friendly name in the modal header (raw id stays on hover)
     const mergeTitleEl = document.getElementById('pipeline-merge-pipeline-id');
     mergeTitleEl.textContent = getPipelineDisplayName(pipelineId);
@@ -3268,6 +3322,7 @@ async function openPipelineMergeSuggestions(pipelineId) {
 
 // Load merge suggestions for a specific pipeline
 async function loadPipelineMergeSuggestions(pipelineId) {
+    const sequence = ++pipelineSuggestionsSequence;
     const listDiv = document.getElementById('pipeline-merge-suggestions-list');
 
     try {
@@ -3283,6 +3338,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
         }
 
         const suggestions = await response.json();
+        if (sequence !== pipelineSuggestionsSequence || activeSuggestionPipeline !== pipelineId) return;
 
         if (suggestions.length === 0) {
             listDiv.innerHTML = `
@@ -3325,7 +3381,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
                             ${suggestion.identity_count} Identities to Merge
                         </h3>
                         <p style="margin: 0; color: #ccc; font-size: 0.85rem;">
-                            ${suggestion.display_name || 'Merge suggestion'}
+                            ${escapeHtml(suggestion.display_name || 'Merge suggestion')}
                         </p>
                     </div>
                     <div style="text-align: right;">
@@ -3333,14 +3389,14 @@ async function loadPipelineMergeSuggestions(pipelineId) {
                             ${suggestion.confidence_percent}%
                         </div>
                         <div style="color: ${confidenceColor}; font-size: 0.75rem; margin-top: 0.25rem;">
-                            ${confidenceLabel} Confidence
+                            ${confidenceLabel} Similarity
                         </div>
                     </div>
                 </div>
                 
                 <div style="margin-bottom: 0.75rem;">
                     <p style="margin: 0 0 0.5rem 0; color: #999; font-size: 0.8rem;">
-                        <strong>Recommendation:</strong> ${suggestion.recommendation || 'Review carefully'}
+                        <strong>Recommendation:</strong> ${escapeHtml(suggestion.recommendation || 'Review carefully')}
                     </p>
                     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                         ${snapshotsHtml}
@@ -3348,6 +3404,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
                 </div>
                 
                 <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                    <button class="intelligence-admin-btn small" data-action="selectSuggestion" data-arg="${encodeURIComponent(JSON.stringify(suggestion.identity_ids || []))}"><div class="btn-content"><span class="btn-title">SELECT &amp; REVIEW</span></div></button>
                     ${suggestion.id ? `
                         <button class="intelligence-admin-btn small" data-action="approveMergeSuggestion" data-arg="${suggestion.id}" style="flex: 1;">
                             <div class="btn-content">
@@ -3367,7 +3424,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
                         </button>
                     ` : `
                         <div style="flex: 1; padding: 0.75rem; text-align: center; color: #999; font-size: 0.85rem; font-style: italic;">
-                            <i class="fas fa-info-circle"></i> DBSCAN-generated cluster (on-the-fly suggestion - cannot be approved directly)
+                            <i class="fas fa-info-circle"></i> Select and review these identities before merging
                         </div>
                     `}
                 </div>
@@ -3375,6 +3432,7 @@ async function loadPipelineMergeSuggestions(pipelineId) {
         `;
         }).join('');
     } catch (error) {
+        if (sequence !== pipelineSuggestionsSequence || activeSuggestionPipeline !== pipelineId) return;
         console.error('Error loading pipeline merge suggestions:', error);
         listDiv.innerHTML = `
             <div class="no-results">
@@ -3725,6 +3783,7 @@ window.loadPipelineMergeSuggestions = loadPipelineMergeSuggestions;
 Actions.register({
     loadUnknownFaces,
     loadMergeSuggestions,
+    selectSuggestion: (el) => selectSuggestion(el.dataset.arg),
     searchIdentityForMerge,
     openAdvancedMergePreview,
     closeMergePreviewModal,

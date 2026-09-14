@@ -10,6 +10,7 @@
 // submit used to fire into a freshly reopened dialog and blank the name field
 // or close it outright.
 let uploadTimers = [];
+let uploadTarget = null;
 
 function scheduleUploadTimer(callback, delayMs) {
     const id = setTimeout(callback, delayMs);
@@ -85,7 +86,7 @@ function describeUploadFailure(status, data) {
     return 'The upload could not be completed. Please try again.';
 }
 
-function openUploadModal() {
+function openUploadModal(target = null) {
     // Backend handles authentication - just check if user is admin
     fetch('/api/auth/me', {
         credentials: 'include' // Include HttpOnly cookies
@@ -107,6 +108,22 @@ function openUploadModal() {
             // person's filename caption, keep their photo in the preview <img>,
             // and offer an enabled "Upload Person" button with no file chosen.
             resetUploadForm();
+            uploadTarget = target && target.identityId ? target : null;
+            const nameInput = document.getElementById('globalPersonName');
+            if (nameInput) {
+                nameInput.readOnly = Boolean(uploadTarget);
+                nameInput.value = uploadTarget ? uploadTarget.displayName : '';
+            }
+            const title = modal.querySelector('.upload-modal-title');
+            if (title) title.textContent = uploadTarget ? 'Add photo to ' + uploadTarget.displayName : 'Add Person to Track';
+            const targetPreview = document.getElementById('uploadTargetPreview');
+            if (targetPreview) {
+                const url = uploadTarget && uploadTarget.photoUrl;
+                const safe = typeof url === 'string' && /^\/(?!\/)/.test(url) && !url.includes('..') && !url.includes('\\');
+                targetPreview.hidden = !safe;
+                if (safe) { targetPreview.src = url; targetPreview.alt = uploadTarget.displayName; }
+                else targetPreview.removeAttribute('src');
+            }
             initUploadDragAndDrop();
             updateUploadHint();
             // ONE open path. The stack owns layering, Escape, backdrop,
@@ -267,6 +284,7 @@ function closeUploadModal() {
         }
         modal.style.display = 'none';
         modal.classList.remove('active');
+        uploadTarget = null;
         // Reset form
         const form = modal.querySelector('.upload-form');
         if (form) form.reset();
@@ -440,7 +458,10 @@ function handleGlobalUpload(event) {
     // any other site could enrol someone into this system while an admin is
     // logged in. Content-Type is deliberately NOT set — the browser must add
     // the multipart boundary itself.
-    fetch('/api/upload-person', {
+    const uploadUrl = uploadTarget
+        ? '/api/identities/' + encodeURIComponent(uploadTarget.identityId) + '/images'
+        : '/api/upload-person';
+    fetch(uploadUrl, {
         method: 'POST',
         credentials: 'include', // Include HttpOnly cookies
         headers: { 'X-Requested-With': 'XMLHttpRequest' },
@@ -521,6 +542,7 @@ function handleGlobalUpload(event) {
         
         // Success
         if (data.success) {
+            window.dispatchEvent(new CustomEvent('enrollment:saved', { detail: data }));
             // Same rule as the review flow: a duplicate is a successful no-op.
             // The server stored nothing, so this must not look like an add.
             if (data.duplicate === true || data.image_created === false) {
@@ -536,7 +558,7 @@ function handleGlobalUpload(event) {
             }
             // Show success message
             if (successMsg && successText) {
-                successText.textContent = `✅ ${data.message} (Total: ${data.total_faces || 0} faces)`;
+                successText.textContent = data.message;
                 successMsg.style.display = 'block';
             }
 
@@ -740,6 +762,8 @@ function showEnrollmentDecision(data) {
     };
 
     const candidates = data.candidate_identities || [];
+    const newName = document.getElementById('enrollmentNewName');
+    if (newName) newName.value = data.target_identity_id ? '' : pendingDecision.displayName;
     // The person who already holds these EXACT bytes. Adding to them is a
     // correct no-op, so that action is withdrawn rather than offered.
     const duplicateId = data.duplicate_of_identity_id || null;
@@ -929,6 +953,7 @@ function submitDecision(payload) {
         // image_002.jpg that, correctly, was never written. `image_created`
         // is the authoritative flag; `duplicate` is the reason.
         const nothingStored = data.duplicate === true || data.image_created === false;
+        window.dispatchEvent(new CustomEvent('enrollment:saved', { detail: data }));
         hideEnrollmentDecision();
 
         if (nothingStored) {
@@ -1015,9 +1040,16 @@ Actions.register({
     },
     enrollmentCreateNew: () => {
         if (!pendingDecision) return;
+        const nameInput = document.getElementById('enrollmentNewName');
+        const displayName = nameInput ? nameInput.value.trim() : pendingDecision.displayName;
+        if (!displayName) {
+            if (nameInput) nameInput.focus();
+            showUploadAlert('Name Required', 'Enter a name for the new person.', 'error');
+            return;
+        }
         submitDecision({
             action: 'create_new',
-            display_name: pendingDecision.displayName,
+            display_name: displayName,
             upload_token: pendingDecision.token
         });
     },

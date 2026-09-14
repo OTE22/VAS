@@ -91,7 +91,7 @@ class LogCleanupManager:
             await background_task_notifier.notify_task_starting(
                 task_type=TaskType.LOG_CLEANUP,
                 task_name="Log Cleanup",
-                description=f"Removing log entries older than {self.retention_hours} hours from app.log, error.log, and access.log files",
+                description=f"Removing expired closed log files and diagnostic artifacts; application rotations retained for {self.retention_hours} hours",
                 estimated_duration="1-3 minutes",
                 scheduled_time=next_run_time
             )
@@ -101,107 +101,36 @@ class LogCleanupManager:
 
         import time
         start_time = time.time()
-        result = await self.cleanup_old_logs()
-        duration = time.time() - start_time
-        deleted_lines, freed_space_mb = result
-
-        # Send completion notification
+        error = None
         try:
-            from backend.core.background_task_notifier import background_task_notifier, TaskType
-            await background_task_notifier.notify_task_completed(
-                task_type=TaskType.LOG_CLEANUP,
-                task_name="Log Cleanup",
-                success=True,
-                duration_seconds=duration,
-                details={
-                    "deleted_lines": deleted_lines,
-                    "freed_space_mb": round(freed_space_mb, 2)
-                }
-            )
-        except Exception as e:
-            logger.debug(f"[LOG_CLEANUP] Failed to send completion notification: {e}")
-    
+            deleted_files, freed_space_mb = await self.cleanup_old_logs()
+        except Exception as exc:
+            error = exc
+            deleted_files = getattr(self, "last_result", {}).get("deleted_files", 0)
+            freed_space_mb = getattr(self, "last_result", {}).get("freed_space_mb", 0)
+        duration = time.time() - start_time
+        from backend.core.background_task_notifier import background_task_notifier, TaskType
+        await background_task_notifier.notify_task_completed(
+            task_type=TaskType.LOG_CLEANUP, task_name="Log Cleanup",
+            success=error is None, duration_seconds=duration,
+            details={**getattr(self, "last_result", {}),
+                     "deleted_files": deleted_files,
+                     "freed_space_mb": round(freed_space_mb, 2),
+                     "error": str(error)[:500] if error else None})
+        if error:
+            raise error
+
+    async def preview(self):
+        from backend.core.log_retention import clean
+        return await asyncio.to_thread(clean, self.log_dir, self.retention_hours, dry_run=True)
+
     async def cleanup_old_logs(self) -> Tuple[int, float]:
-        """Apply the retention window by deleting whole ROTATED log files.
-
-        It never touches the ACTIVE file. That file is held open by the
-        RotatingFileHandler in utils/logging.py, which tracks its own write
-        offset; the previous implementation read the whole file, filtered the
-        lines, and rewrote it with open(..., 'w'). Two things went wrong with
-        that:
-
-          * the handler's next write lands at its remembered offset in a file
-            that just got shorter, producing NUL padding or losing records;
-          * it fights the handler's own maxBytes rotation, so the two mechanisms
-            take turns undoing each other.
-
-        Deleting a rotated file is atomic from the handler's point of view — it
-        has no descriptor open on app.log.N — and it is what every other log
-        retention system does. A rotated file's mtime is the time of its LAST
-        record, so a file whose mtime predates the cutoff contains nothing worth
-        keeping.
-
-        Returns (files_deleted, freed_space_mb) — the tuple shape is unchanged
-        for existing callers, but the first element now counts FILES, not lines.
-        """
-        if not self.log_dir.exists():
-            logger.warning(f"Log directory not found: {self.log_dir}")
-            return 0, 0.0
-
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.retention_hours)
-        logger.info(
-            "🔄 Starting log cleanup - deleting rotated files last written before "
-            f"{cutoff_time} ({self.retention_hours}h retention)"
-        )
-
-        from utils.logging import active_log_path, rotated_log_paths
-
-        active = os.path.realpath(active_log_path())
-        # rotated_log_paths() is the SAME configured set the logger writes and
-        # /api/logs reads, so retention can never act on a file outside it.
-        candidates = [p for p in rotated_log_paths()
-                      if os.path.realpath(p) != active]
-
-        def _delete_expired_sync():
-            removed = 0
-            freed_mb = 0.0
-            for path in candidates:
-                try:
-                    stat = os.stat(path)
-                    modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                    if modified >= cutoff_time:
-                        continue
-                    size_mb = stat.st_size / (1024 * 1024)
-                    os.remove(path)
-                    removed += 1
-                    freed_mb += size_mb
-                    logger.info(
-                        f"✅ Deleted rotated log {os.path.basename(path)} "
-                        f"(last written {modified}, freed {size_mb:.2f} MB)"
-                    )
-                except FileNotFoundError:
-                    continue                       # rotated away underneath us
-                except PermissionError as e:
-                    logger.error(f"Permission denied deleting log file {path}: {e}")
-                except Exception as e:             # noqa: BLE001
-                    logger.error(f"Error deleting log file {path}: {e}", exc_info=True)
-            return removed, freed_mb
-
-        loop = asyncio.get_running_loop()
-        deleted_files, freed_space_mb = await loop.run_in_executor(None, _delete_expired_sync)
-
-        if deleted_files:
-            logger.info(
-                f"✅ Log cleanup completed: deleted {deleted_files} rotated file(s), "
-                f"freed {freed_space_mb:.2f} MB"
-            )
-        else:
-            logger.info(
-                "ℹ️ Log cleanup completed: no rotated logs past retention "
-                f"(retention: {self.retention_hours}h, cutoff: {cutoff_time})"
-            )
-
-        return deleted_files, freed_space_mb
+        """Keep the existing tuple API; expose full outcomes through last_result."""
+        from backend.core.log_retention import clean
+        self.last_result = await asyncio.to_thread(clean, self.log_dir, self.retention_hours)
+        if self.last_result["failures"]:
+            raise RuntimeError("; ".join(self.last_result["failures"][:3]))
+        return self.last_result["deleted_files"], self.last_result["freed_space_mb"]
 
     
     def _extract_timestamp_from_line(self, line: str) -> Optional[datetime]:
@@ -249,4 +178,3 @@ class LogCleanupManager:
 
 # Global instance
 log_cleanup_manager = LogCleanupManager()
-

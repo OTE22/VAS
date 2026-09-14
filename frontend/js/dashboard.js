@@ -523,8 +523,8 @@
     function buildEmptyState() {
         const empty = el('div', 'no-data');
         empty.appendChild(icon('fa-inbox'));
-        empty.appendChild(el('h3', null, 'No detections yet'));
-        empty.appendChild(el('p', null, 'Waiting for webhook requests...'));
+        empty.appendChild(el('h3', null, 'No known persons detected'));
+        empty.appendChild(el('p', null, 'Camera panels appear when a known person is detected.'));
         return empty;
     }
 
@@ -535,7 +535,6 @@
 
         const visiblePipelines = new Set();
         faceStore.forEach((faces, pid) => { if (faces.size && hasPipelineAccess(pid)) visiblePipelines.add(pid); });
-        unknownCounts.forEach((count, pid) => { if (count > 0 && hasPipelineAccess(pid)) visiblePipelines.add(pid); });
 
         for (const pid of [...pipelineCardElements.keys()]) {
             if (!visiblePipelines.has(pid)) removePipelineCard(pid);
@@ -552,7 +551,8 @@
     }
 
     function renderPipelineCard(grid, pipelineId) {
-        const faces = faceStore.get(pipelineId) || new Map();
+        const faces = faceStore.get(pipelineId);
+        if (!faces?.size) { removePipelineCard(pipelineId); return; }
         let card = pipelineCardElements.get(pipelineId);
 
         if (!card) {
@@ -579,22 +579,6 @@
 
         const content = card.querySelector('.pipeline-content');
         if (!content) return;
-
-        // Unknown-only explanatory note
-        let note = content.querySelector('.unknown-only-note');
-        if (faces.size === 0 && (unknownCounts.get(pipelineId) || 0) > 0) {
-            if (!note) {
-                note = el('div', 'unknown-only-note');
-                note.appendChild(icon('fa-user-secret'));
-                note.appendChild(el('p', null, 'No known faces detected'));
-                const link = el('a', null, 'Review unknown faces →');
-                link.href = '/admin/unknown?pipeline=' + encodeURIComponent(pipelineId);
-                note.appendChild(link);
-                content.appendChild(note);
-            }
-        } else if (note) {
-            note.remove();
-        }
 
         faces.forEach((entry, name) => renderDetectionItem(content, pipelineId, name, entry));
     }

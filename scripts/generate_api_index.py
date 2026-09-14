@@ -31,4 +31,6 @@ for path in sorted(glob.glob('backend/routes/*.py')) + ['sql_agent/api/routes.py
             doc = (ast.get_docstring(node) or '').strip().split('\n')[0][:110]
             writes = 'WRITE' if WRITE.search(src) else 'read'
             audit = ' audit' if re.search(r"audit\(|ChatbotAuditLog|UserAuthorizationAuditLog|_audit", src) else ''
-            print(f"{m.group(1).upper():6} {m.group(3):55} {node.name:42} [{writes}{audit}] deps={deps(node)}\n       {doc}")
+            print(f"{m.group(1).upper():6} {m.group(3):55} {node.name:42} [{writes}{audit}] deps={deps(node)}\n       {doc}".rstrip())
+
+    print("```")

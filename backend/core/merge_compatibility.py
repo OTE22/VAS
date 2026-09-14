@@ -11,10 +11,8 @@ Method
 ------
 Only stored, validated embeddings participate: a vector must parse, be finite,
 non-zero and unit-norm (the storage contract) to count. Comparisons happen
-only between embeddings that share an `embedding_model_version` — cosine
-similarity across embedding spaces is meaningless, and NULL provenance is its
-own bucket (two unknowns may be compared with each other, never with a
-stamped vector).
+only between embeddings that share a verified `embedding_model_version`.
+Missing model provenance is insufficient evidence and is never compared.
 
 For each identity PAIR the score is the MEDIAN of all cross-identity cosine
 similarities, never the maximum: one contaminated embedding — a frame of
@@ -39,23 +37,15 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import select, case, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-# How many stored embeddings per identity participate, newest first. Enough
-# for a stable median; bounded so a 200-embedding identity cannot turn one
-# gate check into 10k comparisons.
+# Up to eight distinct views per model, from a bounded camera-balanced pool.
 _MAX_EMBEDDINGS_PER_IDENTITY = 8
-
-# NULL embedding_model_version bucket key. NULL-with-NULL comparisons are
-# allowed (both unknown, in practice the one deployed model); NULL-with-known
-# is not provable and is skipped.
-_UNKNOWN_MODEL = "(unknown-model)"
-
 
 @dataclass
 class MergeCompatibility:
@@ -135,25 +125,36 @@ async def _load_valid_embeddings(
 ) -> Tuple[Dict[str, List[np.ndarray]], int]:
     """{model_version_bucket: [unit vectors]} plus how many rows were skipped."""
     from db_models import IdentityEmbedding
+    from backend.core.face_quality import QUALITY_SCORER_VERSION
 
-    rows = (await db.execute(
-        select(IdentityEmbedding.embedding,
-               IdentityEmbedding.embedding_model_version)
-        .where(IdentityEmbedding.identity_id == identity_id,
-               IdentityEmbedding.embedding.isnot(None))
-        .order_by(IdentityEmbedding.created_at.desc())
-        .limit(_MAX_EMBEDDINGS_PER_IDENTITY * 3))).all()
+    # Balance cameras/models, ranking current measured quality ahead of recency.
+    # Legacy scores have no comparable scale and are not used for ranking.
+    quality = case((IdentityEmbedding.quality_scorer_version == QUALITY_SCORER_VERSION,
+                    IdentityEmbedding.quality), else_=None)
+    candidates = select(
+        IdentityEmbedding.embedding, IdentityEmbedding.embedding_model_version,
+        IdentityEmbedding.id,
+        func.row_number().over(
+            partition_by=(IdentityEmbedding.embedding_model_version, IdentityEmbedding.pipeline_id),
+            order_by=(quality.desc().nullslast(), IdentityEmbedding.created_at.desc(),
+                      IdentityEmbedding.id.desc())).label('rank')
+    ).where(IdentityEmbedding.identity_id == identity_id,
+            IdentityEmbedding.embedding.isnot(None)).subquery()
+    rows = (await db.execute(select(candidates.c.embedding, candidates.c.embedding_model_version)
+             .order_by(candidates.c.rank, candidates.c.id).limit(128))).all()
 
     by_model: Dict[str, List[np.ndarray]] = {}
     skipped = 0
     for raw, model_version in rows:
         vector = _parse_vector(raw)
-        if vector is None:
+        if vector is None or not model_version:
             skipped += 1
             continue
-        bucket = model_version or _UNKNOWN_MODEL
+        bucket = model_version
         vectors = by_model.setdefault(bucket, [])
-        if len(vectors) < _MAX_EMBEDDINGS_PER_IDENTITY:
+        # Repeated frames should not crowd out different views of the person.
+        if len(vectors) < _MAX_EMBEDDINGS_PER_IDENTITY and not any(
+                float(vector @ previous) >= 0.995 for previous in vectors):
             vectors.append(vector)
     return by_model, skipped
 

@@ -598,7 +598,7 @@ def test_html_accessibility_and_no_inline_handlers():
     assert 'aria-pressed="false"' in src, "password toggle must expose its state"
     assert 'tabindex="-1"' not in src.split('class="toggle-password-btn"')[1][:200], \
         "the password toggle must be keyboard reachable"
-    assert "signin.js?v=signin-3" in src
+    assert "signin.js?v=signin-4" in src
     assert 'for="username"' in src and 'for="password"' in src
 
 

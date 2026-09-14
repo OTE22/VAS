@@ -27,6 +27,8 @@
     let activeConversationId = null;
     let activeBranchId = null;
     let branches = [];
+    let listGeneration = 0;
+    const listedIds = new Set();
 
     // ------------------------------------------------------------------
     // API helper (cookie auth + CSRF header on mutations)
@@ -102,6 +104,7 @@
         if (!listEl) return;
         ensureSearchInput();
 
+        const generation = ++listGeneration;
         if (listController) { try { listController.abort(); } catch (e) { } }
         listController = new AbortController();
         if (!append) offset = 0;
@@ -110,6 +113,7 @@
         const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
         if (searchTerm) params.set('q', searchTerm);
         const result = await api(`/conversations?${params}`, { controller: listController });
+        if (generation !== listGeneration) return;
         if (loadingEl) loadingEl.style.display = 'none';
         if (result.aborted) return;
         if (!result.ok || !result.payload) {
@@ -133,7 +137,7 @@
         const conversations = result.payload.conversations || [];
         hasMore = conversations.length === PAGE_SIZE;
 
-        if (!append) listEl.replaceChildren();
+        if (!append) { listEl.replaceChildren(); listedIds.clear(); }
         if (!conversations.length && !listEl.childElementCount) {
             if (emptyEl) {
                 emptyEl.replaceChildren(document.createTextNode(
@@ -146,14 +150,19 @@
         if (emptyEl) emptyEl.style.display = 'none';
         listEl.style.display = 'block';
 
-        const pinned = conversations.filter(c => c.pinned);
-        const recent = conversations.filter(c => !c.pinned);
-        if (!append && pinned.length) {
-            listEl.appendChild(sectionHeader('Pinned'));
+        const fresh = conversations.filter(c => {
+            if (listedIds.has(c.id)) return false;
+            listedIds.add(c.id);
+            return true;
+        });
+        const pinned = fresh.filter(c => c.pinned);
+        const recent = fresh.filter(c => !c.pinned);
+        if (pinned.length) {
+            if (!append) listEl.appendChild(sectionHeader('Pinned'));
             pinned.forEach(c => listEl.appendChild(buildItem(c)));
         }
         if (recent.length) {
-            if (!append && pinned.length) listEl.appendChild(sectionHeader('Recent'));
+            if (!append) listEl.appendChild(sectionHeader('Recent chats'));
             recent.forEach(c => listEl.appendChild(buildItem(c)));
         }
         renderLoadMore(listEl);
@@ -202,13 +211,16 @@
         const title = document.createElement('div');
         title.className = 'history-item-query';
         title.textContent = conversation.title || 'Untitled';
+        title.dir = 'auto';
+        title.title = title.textContent;
+        node.dataset.title = title.textContent;
         node.appendChild(title);
 
         const meta = document.createElement('div');
         meta.className = 'history-item-meta';
         const time = document.createElement('span');
         time.className = 'history-item-time';
-        time.textContent = formatTime(conversation.last_message_at);
+        time.textContent = formatTime(conversation.last_message_at || conversation.created_at);
         meta.appendChild(time);
         if (isOrphaned) {
             const author = document.createElement('span');
@@ -228,6 +240,23 @@
         node.appendChild(meta);
 
         if (!isOrphaned) {
+            const menu = document.createElement('details');
+            menu.className = 'conv-menu';
+            const toggle = document.createElement('summary');
+            toggle.textContent = '\u2022\u2022\u2022';
+            toggle.title = 'Conversation options';
+            toggle.setAttribute('aria-label', 'Conversation options');
+            menu.appendChild(toggle);
+            menu.addEventListener('click', e => e.stopPropagation());
+            menu.addEventListener('keydown', e => {
+                e.stopPropagation();
+                if (e.key === 'Escape') { menu.open = false; toggle.focus(); }
+            });
+            menu.addEventListener('toggle', () => {
+                if (menu.open) document.querySelectorAll('.conv-menu[open]').forEach(other => {
+                    if (other !== menu) other.open = false;
+                });
+            });
             const actions = document.createElement('div');
             actions.className = 'conv-item-actions';
             actions.appendChild(actionButton('fa-thumbtack', conversation.pinned ? 'Unpin' : 'Pin',
@@ -238,13 +267,14 @@
                 (e) => { e.stopPropagation(); toggleArchive(conversation); }));
             actions.appendChild(actionButton('fa-trash', 'Delete',
                 (e) => { e.stopPropagation(); confirmDelete(conversation); }));
-            node.appendChild(actions);
+            menu.appendChild(actions);
+            node.appendChild(menu);
         }
 
         const open = () => openConversation(conversation.id);
         node.addEventListener('click', open);
         node.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+            if (e.target === node && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); open(); }
         });
         return node;
     }
@@ -363,7 +393,11 @@
         if (welcome) { container.appendChild(welcome); welcome.classList.add('hidden'); }
 
         renderBranchBar(container);
-        (messagesResult.payload.messages || []).forEach(m => renderMessage(container, m));
+        let precedingQuery = '';
+        (messagesResult.payload.messages || []).forEach(m => {
+            if (m.role === 'user') precedingQuery = messageText(m);
+            renderMessage(container, m, precedingQuery);
+        });
         if (ui().scrollToBottom) ui().scrollToBottom(true);
         if (window.innerWidth <= 968 && document.getElementById('historySidebar')?.classList.contains('open') && ui().toggleSidebar) ui().toggleSidebar();
     }
@@ -398,7 +432,11 @@
         return btn;
     }
 
-    function renderMessage(container, message) {
+    function messageText(message) {
+        return (message.content_blocks || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n');
+    }
+
+    function renderMessage(container, message, query = '') {
         const wrap = document.createElement('div');
         wrap.className = `message chat-message ${message.role === 'user' ? 'user-message user' : 'assistant-message assistant'}`;
         const inner = document.createElement('div');
@@ -435,6 +473,9 @@
         inner.appendChild(content);
         wrap.appendChild(inner);
         container.appendChild(wrap);
+        if (message.role === 'assistant' && ui().addResponseTools) {
+            ui().addResponseTools({ responseEl: text, raw: messageText(message), query });
+        }
     }
 
     /**

@@ -75,9 +75,9 @@ class ProductionCacheManager:
 
     async def start(self):
         """Start background workers"""
-        if self._enabled:
+        if self._enabled and (self._write_behind_task is None or self._write_behind_task.done()):
             self._write_behind_task = asyncio.create_task(self._write_behind_worker())
-            self._warming_task = asyncio.create_task(self._cache_warming_worker())
+            # Warming has no implementation; do not advertise an idle placeholder as a worker.
             logger.info("ProductionCacheManager background workers started")
 
     async def stop(self):
@@ -86,6 +86,7 @@ class ProductionCacheManager:
             self._write_behind_task.cancel()
         if self._warming_task:
             self._warming_task.cancel()
+        await asyncio.gather(*(t for t in (self._write_behind_task, self._warming_task) if t), return_exceptions=True)
         logger.info("ProductionCacheManager stopped")
 
     # ==================== CORE CACHE METHODS ====================
@@ -238,7 +239,7 @@ class ProductionCacheManager:
             # Queue full, set directly (blocking)
             await self._direct_set(key, value, ttl)
 
-    async def _direct_set(self, key: str, value, ttl: int):
+    async def _direct_set(self, key: str, value, ttl: int, *, strict=False):
         """Direct Redis set"""
         try:
             serialized = self._serialize(value)
@@ -250,6 +251,8 @@ class ProductionCacheManager:
             logger.debug(f"[CACHE] ✅ Cached key: {key[:50]}... (TTL: {ttl}s, value type: {type(value)})")
         except Exception as e:
             logger.warning(f"[CACHE] Direct set error: {e}", exc_info=True)
+            if strict:
+                raise
 
     def _serialize(self, value) -> str:
         """Serialize value with metadata"""
@@ -297,25 +300,22 @@ class ProductionCacheManager:
     # ==================== BACKGROUND WORKERS ====================
 
     async def _write_behind_worker(self):
-        """Background worker for write-behind cache updates"""
-        logger.info("[CACHE] Write-behind worker started")
+        from backend.core.service_supervisor import supervised_loop
 
-        while True:
+        async def write_one():
             try:
-                key, value, ttl = await self._write_behind_queue.get()
-
-                try:
-                    await self._direct_set(key, value, ttl)
-                except Exception as e:
-                    logger.warning(f"[CACHE] Write-behind error: {e}")
-
+                key, value, ttl = await asyncio.wait_for(self._write_behind_queue.get(), timeout=5)
+            except asyncio.TimeoutError:
+                return  # Idle is healthy; unlike a missing consumer.
+            try:
+                await asyncio.wait_for(self._direct_set(key, value, ttl, strict=True), timeout=5)
+            finally:
+                # Cache is derived state. A failed optional cache write does
+                # not block recognition; the supervisor reports the failure.
                 self._write_behind_queue.task_done()
 
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[CACHE] Write-behind worker error: {e}")
-                await asyncio.sleep(1)
+        await supervised_loop("cache_write_behind", 0, write_one,
+                              error_backoff_base=1, error_backoff_max=30, jitter=0)
 
     async def _cache_warming_worker(self):
         """Warm cache with frequently accessed items"""
@@ -354,4 +354,3 @@ class ProductionCacheManager:
 
 
 production_cache_manager = ProductionCacheManager(redis_client=None)
-

@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
-    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-3">
+    <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=playback-1">
     <style>
         /* Backend Map Container - Uses Folium-generated maps from server (no frontend Leaflet needed) */
         .offline-map-container {
@@ -175,8 +175,8 @@
                         <button class="view-btn" id="map-btn" type="button">Map</button>
                     </div>
                     <!-- Map Settings Panel (shown when Map view is active) -->
-                    <div id="map-settings-panel" style="display: none; margin-bottom: 1rem; padding: 1rem; background: rgba(0, 0, 0, 0.3); border-radius: 8px; border: 1px solid rgba(0, 255, 150, 0.2);">
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; align-items: end;">
+                    <div id="map-settings-panel" class="map-settings-panel">
+                        <div class="map-settings-grid">
                             <div>
                                 <label style="display: block; margin-bottom: 0.5rem; font-weight: 600; color: #00ff96;">Map Style:</label>
                                 <select id="map-style-select" class="form-control">
@@ -219,11 +219,11 @@
                                         <span>Risk Heatmap</span>
                                     </label>
                                     <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-                                        <input type="checkbox" id="map-show-timeline">
+                                        <input type="checkbox" id="map-show-timeline" checked>
                                         <span>Timeline Playback</span>
                                     </label>
                                     <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; padding: 0.25rem; border-radius: 4px; transition: background 0.2s;">
-                                        <input type="checkbox" id="map-show-animated-avatar" style="cursor: pointer;">
+                                        <input type="checkbox" id="map-show-animated-avatar" checked style="cursor: pointer;">
                                         <span style="display: flex; align-items: center; gap: 0.5rem;">
                                             <i class="fas fa-user-circle" style="color: #00ff96;"></i>
                                             <strong>Animated Avatar</strong>
@@ -232,7 +232,7 @@
                                 </div>
                             </div>
                             <div>
-                                <button class="btn-primary" id="refresh-map-btn" style="width: 100%;">
+                                <button class="btn-primary" id="refresh-map-btn" type="button" style="width: 100%;">
                                     <i class="fas fa-sync"></i> Refresh Map
                                 </button>
                             </div>
@@ -274,8 +274,8 @@
     <!-- The map renderer is an ES module (MapLibre GL JS is ESM-only). It
          bridges onto window.IdentityMap; the classic page script awaits
          window.IdentityMap.ready before drawing. -->
-    <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
-    <script src="/frontend/js/admin-intelligence.js?v=intel-6"></script>
+    <script type="module" src="/frontend/js/identity-map.js?v=playback-1"></script>
+    <script src="/frontend/js/admin-intelligence.js?v=intel-6-playback-1"></script>
 </body>
 </html>
 

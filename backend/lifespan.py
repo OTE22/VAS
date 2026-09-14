@@ -912,6 +912,26 @@ async def lifespan(app: FastAPI):
         if worker_tasks:
             initialized_components.append(f"workers_{len(worker_tasks)}")
 
+        from backend.core.background_maintenance import background_maintenance
+        consumers = {f"queue_worker_{i + 1}": (lambda task=task: task)
+                     for i, task in enumerate(worker_tasks)}
+        # Include missing worker slots, so startup failures cannot disappear from health.
+        for i in range(len(worker_tasks), worker_count):
+            consumers[f"queue_worker_{i + 1}"] = lambda: None
+        if CACHE_ENABLED:
+            consumers["cache_write_behind"] = lambda: production_cache_manager._write_behind_task
+        if CACHE_ENABLED:
+            consumers["websocket_redis_listener"] = lambda: ws_manager._redis_listener_task
+        expected = {"batch_writer", "data_retention", "map_availability", "log_cleanup",
+                    "identity_retention", "system_metrics", "cache_metrics",
+                    "batch_flusher", "loop_lag_monitor"}
+        if 'identity_clustering' in initialized_components:
+            expected.add("identity_clustering")
+        if FACE_TRACKING_ENABLED:
+            expected.add("face_tracker_cleanup")
+        await background_maintenance.start(consumers, expected)
+        initialized_components.append("background_maintenance")
+
         # ==================== PHASE 5: Health Verification ====================
         logger.info("🏥 Phase 5: Health Verification...")
 
@@ -1096,6 +1116,7 @@ async def lifespan(app: FastAPI):
 
         # Stop components in REVERSE order of initialization
         components_to_stop = [
+            ("background_maintenance", "Stopping expiration and liveness checks", lambda: background_maintenance if 'background_maintenance' in initialized_components else None),
             ("workers", "Stopping worker pool", lambda: worker_tasks),
             ("cache_metrics", "Stopping cache metrics", lambda: cache_metrics_task if 'cache_metrics' in initialized_components else None),
             # These three were STARTED but never stopped here — the audit's
@@ -1304,4 +1325,3 @@ async def lifespan(app: FastAPI):
         logger.info("📊 Shutdown Summary:")
         logger.info(f"  • Components: {successful}/{total} successful")
         logger.info(f"  • Duration: {shutdown_duration:.2f}s")
-

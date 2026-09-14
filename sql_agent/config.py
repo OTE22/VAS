@@ -140,6 +140,13 @@ class Config:
         default_factory=lambda: settings.RAG_SIMILARITY_THRESHOLD)
 
     @property
+    def use_knowledge_base(self) -> bool:
+        # The global Config is imported before boot hydrates stored settings.
+        # Read the authoritative setting at use time instead of freezing the
+        # environment default before the operator's OFF value is applied.
+        return bool(settings.SQL_AGENT_USE_KNOWLEDGE_BASE)
+
+    @property
     def db_connection_string(self) -> str:
         """Get database connection string."""
         if self.db_url:

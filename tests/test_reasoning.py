@@ -178,12 +178,12 @@ def test_an_observation_never_carries_rows_sql_or_narrative():
     assert "REPORT" not in blob
 
 
-def test_the_raw_database_error_is_clipped_not_pasted():
+def test_internal_database_diagnostics_are_complete():
     """The raw driver error used to be interpolated into the user's reply."""
     observation = r.build_observation(_sql_state(
         query_result={"success": False, "row_count": 0,
                       "error": "x" * 5000, "rows": []}))
-    assert len(observation["sanitized_detail"]) <= 200
+    assert observation["sanitized_detail"] == "x" * 5000
 
 
 # -------------------------------------------------- executor invariants

@@ -1285,7 +1285,6 @@
             timelineView.prepend(el('p', { className: 'timeline-warning', text: skipped + ' invalid movement record(s) were skipped' }));
         }
         const mapInner = el('div', { attrs: { id: 'tracking-map' } });
-        mapInner.style.cssText = 'width:100%;height:600px;position:relative;border-radius:8px;';
         const mapView = el('div', { className: 'map-view', attrs: { id: 'tracking-map-view' } }, mapInner);
         mapView.style.display = 'none';
 
@@ -1351,6 +1350,9 @@
         document.querySelectorAll('.view-btn').forEach(function (btn) {
             btn.classList.toggle('active', btn.id === 'map-btn');
         });
+        if (state.mapController) {
+            window.requestAnimationFrame(function () { state.mapController.resize(); });
+        }
 
         let mapContainer = document.getElementById('tracking-map');
         if (!mapContainer) {
@@ -1412,7 +1414,7 @@
                 if (ctl) ctl.destroy();
                 renderLoading(mapContainer, 'Loading map...');
                 ctl = new IM.Controller(mapContainer, {
-                    style: 'light',
+                    style: style,
                     onError: function (kind, detail) {
                         if (kind === 'dataset') {
                             showNotification('That map style is not installed on this system (' + detail.code + ')', 'error');
@@ -1424,6 +1426,12 @@
                 state.mapController = ctl;
                 state.mapDataKey = null;
             }
+            // MapLibre cannot measure a display:none ancestor. Recalculate the
+            // canvas after the Map tab has entered layout, including reuse of
+            // an existing controller after returning from Timeline.
+            await new Promise(function (resolve) {
+                window.requestAnimationFrame(function () { ctl.resize(); resolve(); });
+            });
             if (!req.isCurrent()) return;
 
             if (ctl.isStyleAvailable(style)) {

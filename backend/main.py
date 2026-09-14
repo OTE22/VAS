@@ -609,6 +609,8 @@ app.include_router(webhook_router)
 app.include_router(detections_router)
 app.include_router(stats_router)
 app.include_router(upload_router)
+from backend.routes.known_faces import router as known_faces_router
+app.include_router(known_faces_router)
 # Phase two of a name-based upload: the administrator's identity decision.
 app.include_router(enrollment_review_router)
 app.include_router(health_router)

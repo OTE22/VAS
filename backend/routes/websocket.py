@@ -458,7 +458,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception as e:
                             logger.warning(f"[WS] Failed to load face image {face.face_image_path}: {e}")
                     
-                    # If no image loaded, try to find in storage/pipeline_id/person_name/
+                    # Capped events can have no file of their own. Resolve an
+                    # earlier saved crop through the DB for either layout.
+                    if not face_image_b64:
+                        fallback = saved_camera_photos.get((face.identity_id, detection.pipeline_id))
+                        if fallback:
+                            try:
+                                with open(fallback, 'rb') as f:
+                                    face_image_b64 = base64.b64encode(f.read()).decode()
+                            except OSError:
+                                pass
+
+                    # Historical name folders remain supported.
                     if not face_image_b64:
                         safe_name = "".join(c for c in display_name if c.isalnum() or c in ('-', '_')).lower()
                         if display_name.lower() == "unknown":
@@ -522,6 +533,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         face.bbox_y2 = row.bbox_y2
                         faces_by_detection.setdefault(face.detection_id, []).append((face, row.Identity))
 
+                from backend.core.detection_storage import camera_photo_fallbacks
+                saved_camera_photos = await camera_photo_fallbacks(db, {
+                    (face.identity_id, detection.pipeline_id)
+                    for detection in detections
+                    for face, _identity in faces_by_detection.get(detection.id, [])
+                    if face.identity_id is not None
+                })
                 _loop = asyncio.get_running_loop()
 
                 for detection in detections:
@@ -623,27 +641,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 logger.info(f"[WS] Prepared {len(initial_data)} KNOWN pipeline entries with {sum(len(d['faces']) for d in initial_data)} KNOWN faces for dashboard")
                 
-                # Group UNKNOWN faces by pipeline_id for unknown page
-                initial_unknown_data = []
-                unknown_pipeline_groups = {}  # pipeline_id -> list of face_data
-                
-                for (pipeline_id, identity_id), data in unique_unknown_faces_map.items():
-                    if pipeline_id not in unknown_pipeline_groups:
-                        unknown_pipeline_groups[pipeline_id] = []
-                    unknown_pipeline_groups[pipeline_id].append(data)
-                
-                # Create detection entries grouped by pipeline for UNKNOWN faces
-                for pipeline_id, face_list in unknown_pipeline_groups.items():
-                    # Use the most recent detection timestamp for this pipeline
-                    most_recent = max(face_list, key=lambda x: x["detection"].timestamp)
-                    
-                    initial_unknown_data.append({
-                        "pipeline_id": pipeline_id,
-                        "timestamp": iso_utc(most_recent["detection"].timestamp),
-                        "processing_time_ms": most_recent["detection"].processing_time_ms,
-                        "faces": [f["face_data"] for f in face_list],  # Unique faces with unique images
-                    })
-                
+                # Each face carries its own persisted event; no camera-wide timestamp.
+                from backend.core.appearance_events import latest_camera_events
+                occurrence_map = await latest_camera_events(db, [
+                    face.identity_id for rows in faces_by_detection.values() for face, identity in rows
+                    if identity is not None and identity.type == IdentityType.UNKNOWN
+                ], user_pipelines)
+                unknown_pipeline_groups = {}
+                for iid, events in occurrence_map.items():
+                    for pid, event in events.items():
+                        unknown_pipeline_groups.setdefault(pid, []).append(event)
+                initial_unknown_data = [
+                    {"pipeline_id": pid, "faces": events}
+                    for pid, events in unknown_pipeline_groups.items()
+                ]
+
                 logger.info(f"[WS] Prepared {len(initial_unknown_data)} UNKNOWN pipeline entries with {sum(len(d['faces']) for d in initial_unknown_data)} UNKNOWN faces for unknown page")
 
                 # Get system stats - filtered by user's pipeline access
@@ -1070,4 +1082,3 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"[WS] 🧹 Cleaning up WebSocket connection...")
         await ws_manager.disconnect(websocket)
         logger.info(f"[WS] ✅ WebSocket connection cleaned up. Remaining connections: {len(ws_manager.active_connections)}")
-

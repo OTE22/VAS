@@ -118,6 +118,7 @@
         if (path.startsWith('/admin/tutorial')) return 'tutorial';
         if (path.startsWith('/admin/settings')) return 'settings';
         if (path.startsWith('/admin/audit')) return 'audit';
+        if (path.startsWith('/admin/known')) return 'known';
         if (path.startsWith('/admin/logs')) return 'logs';
         if (path.startsWith('/tracking-people')) return 'tracking';
         if (path.startsWith('/docs')) return 'docs';

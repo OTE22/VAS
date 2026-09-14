@@ -232,7 +232,9 @@ async def process_image_async(
     use_batch_write: bool = True,
     send_realtime_updates: bool = True,
     worker_id: Optional[int] = None,
-    location_name: Optional[str] = None
+    location_name: Optional[str] = None,
+    observed_at: Optional[datetime] = None,
+    timestamp_source: str = 'server_processed',
 ) -> Optional[dict]:
     """
     OPTIMIZED VERSION with fixes:
@@ -247,6 +249,8 @@ async def process_image_async(
     """
 
     start_time = time.time()
+    captured_at = observed_at or datetime.utcnow()
+    capture_id = uuid.uuid4().hex
 
     # EARLY pipeline registration: ensures every row written during this request
     # (identity embeddings/appearances included) references a registered pipeline.
@@ -639,7 +643,7 @@ async def process_image_async(
                     similarity_threshold=FACE_TRACKING_SIMILARITY_THRESHOLD
                 )
 
-                if is_tracked:
+                if is_tracked and identity and identity.type == IdentityType.KNOWN:
                     logger.info(f"[PROCESS] Skipping {name} - already tracked recently")
                     continue
             except Exception as e:
@@ -664,88 +668,22 @@ async def process_image_async(
                 # Continue processing - tracker failure shouldn't block saving
 
         # =====================================================
-        # SAVE THE FACE IMAGE (ORGANIZED BY PERSON FOLDER)
-        # =====================================================
+        # SAVE CAMERA CROPS by date/camera/capture; enrollment stays separate.
+        # Allocate once and reuse in the evidence event for traceability.
+        face_event_id = uuid.uuid4().hex
         face_filename = None
-        if settings.SAVE_IMAGES:
-            # Check if we should save unknown faces
-            is_unknown = name.lower() == "unknown"
-            if is_unknown and not settings.SAVE_UNKNOWN_FACES:
-                # Still generate path for database, but don't save file to disk
-                safe_name = "unknown"
-                person_dir = os.path.join(settings.STORAGE_DIR, pipeline_id, safe_name)
-                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-                face_filename = os.path.normpath(os.path.join(person_dir, f"{safe_name}_{timestamp}.jpg"))
-                logger.debug(f"[PROCESS] Unknown face - path saved to DB: {face_filename}, but file NOT saved to disk (SAVE_UNKNOWN_FACES=False)")
-            else:
-                try:
-                    # Create folder structure: storage/pipeline_id/name/ (or storage/pipeline_id/unknown/)
-                    if is_unknown:
-                        safe_name = "unknown"
-                    else:
-                        safe_name = "".join(c for c in name if c.isalnum() or c in ('-', '_')).lower()
-                    
-                    person_dir = os.path.join(settings.STORAGE_DIR, pipeline_id, safe_name)
-                    os.makedirs(person_dir, exist_ok=True)
-
-                    # Count existing images in the person's folder
-                    existing_images = []
-                    if os.path.exists(person_dir):
-                        for filename in os.listdir(person_dir):
-                            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-                                existing_images.append(filename)
-                    
-                    # Get threshold from settings
-                    max_photos_per_person = settings.MAX_PHOTOS_PER_PERSON
-                    
-                    # For unknown faces, don't apply the threshold limit (save all unknown faces)
-                    # This allows multiple different unknown people to have their images saved
-                    apply_threshold = not is_unknown
-                    
-                    # Always generate path for database (regardless of threshold)
-                    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-                    face_filename = os.path.join(person_dir, f"{safe_name}_{timestamp}.jpg")
-                    face_filename = os.path.normpath(face_filename)
-                    
-                    # Threshold only controls whether to save the file to disk (NOT database)
-                    # For unknown faces, always save (no threshold)
-                    if apply_threshold and len(existing_images) >= max_photos_per_person:
-                        # The log used to say "Path saved to DB: <path>" on the
-                        # line above `face_filename = None`, so it advertised a
-                        # stored path while the column received NULL — anyone
-                        # debugging from logs went looking for a row that says
-                        # something it does not say.
-                        logger.info(
-                            "[PROCESS] MAX_PHOTOS_PER_PERSON reached for %s "
-                            "(%d/%d): no file written and no path stored.",
-                            name, len(existing_images), max_photos_per_person)
-                        face_filename = None
-                    else:
-                        # Save the aligned face image to disk (off-loop: JPEG encode + disk write)
-                        success = await loop.run_in_executor(
-                            INFERENCE_POOL, cv2.imwrite, face_filename, aligned_face,
-                            [cv2.IMWRITE_JPEG_QUALITY, 90]
-                        )
-                        if success:
-                            logger.info(f"[PROCESS] Saved face image to disk: {face_filename} ({len(existing_images) + 1}/{max_photos_per_person if apply_threshold else 'unlimited'})")
-                        else:
-                            logger.error(f"[PROCESS] Failed to write image to {face_filename}, but path still saved to database")
-                            # face_filename is still set for database even if write failed
-                except Exception as e:
-                    logger.error(f"[PROCESS] Error processing face image for {name}: {e}", exc_info=True)
-                    # Try to still generate a path for database even on error
-                    try:
-                        if is_unknown:
-                            safe_name = "unknown"
-                        else:
-                            safe_name = "".join(c for c in name if c.isalnum() or c in ('-', '_')).lower()
-                        person_dir = os.path.join(settings.STORAGE_DIR, pipeline_id, safe_name)
-                        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-                        face_filename = os.path.normpath(os.path.join(person_dir, f"{safe_name}_{timestamp}.jpg"))
-                        logger.warning(f"[PROCESS] Generated path for database despite error: {face_filename}")
-                    except:
-                        face_filename = None
-                        logger.error(f"[PROCESS] Could not generate path for database")
+        try:
+            from backend.core.detection_storage import save_camera_crop
+            face_filename = await save_camera_crop(
+                aligned_face, pipeline_id=pipeline_id, capture_id=capture_id,
+                face_id=face_event_id, captured_at=captured_at,
+                identity_id=identity.id if identity else None, name=name,
+                session_factory=db_manager.get_session, executor=INFERENCE_POOL,
+                already_saved=sum(1 for f in detected_faces
+                    if f.get("identity_id") == (identity.id if identity else None)
+                    and f.get("face_image_path")))
+        except Exception:
+            logger.exception("[PROCESS] Camera crop save failed for %s; no image path recorded", name)
 
         # Encode aligned face for database/frontend (off-loop JPEG encode)
         try:
@@ -786,7 +724,7 @@ async def process_image_async(
             "_embedding_created_by_this_frame": frame_embedding_id is not None,
             "_secondary_embedding_ids": list(frame_secondary_embedding_ids),
             "_identity_created_by_this_frame": bool(frame_identity_created),
-            "_event_id": uuid.uuid4().hex,
+            "_event_id": face_event_id,
             "_is_known": bool(identity and identity.type == IdentityType.KNOWN),
         }
         
@@ -881,68 +819,7 @@ async def process_image_async(
                     else:
                         logger.debug(f"✅ Real-time: Sent KNOWN face {name} (sim={similarity:.2f}) from {pipeline_id} [UPDATE ONLY - within 1-hour window]")
                 else:
-                    # For UNKNOWN faces: Send to unknown page via WebSocket (grouped by pipeline)
-                    # Unknown faces should appear in real-time on the unknown page, organized by pipeline
-                    logger.info(f"[PROCESS] Unknown person detected: {name} (sim={similarity:.3f}) in {pipeline_id} - sending to unknown page")
-                    
-                    # Watchlist alerts for unknown identities are persisted and
-                    # broadcast after commit as `detection_alerts` — not here.
-                    # Prepare unknown face data for unknown page
-                    # Include identity_id if available so frontend can update existing identity or create new one
-                    unknown_realtime_result = {
-                        "pipeline_id": pipeline_id,
-                        "location_name": display_name,  # friendly display title (may be None)
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
-                        "processing_time_ms": (time.time() - start_time) * 1000,
-                        "face": {k: v for k, v in face_data.items() if not k.startswith("_")},  # Single face object (not array)
-                        "identity_id": str(identity.id) if identity else None,  # Include identity ID if available
-                        "label_state": label_state.value if label_state else None,
-                    }
-                    
-                    # Get stats for context
-                    stats = await processing_queue.get_stats()
-                    tracker_stats = await face_tracker.get_stats() if FACE_TRACKING_ENABLED else {"enabled": False}
-                    
-                    # REDIS CACHE INVALIDATION: Invalidate cache when new UNKNOWN face is detected
-                    try:
-                        from backend.core.redis_cache import redis_cache_service
-                        if redis_cache_service._enabled:
-                            # Invalidate both dashboard and unknown page caches
-                            deleted_dashboard = await redis_cache_service.invalidate_dashboard_cache(user_id=None)
-                            deleted_unknown = await redis_cache_service.invalidate_unknown_cache(user_id=None)
-                            if deleted_dashboard > 0 or deleted_unknown > 0:
-                                logger.debug(f"[PROCESS] [CACHE] 🗑️  Invalidated {deleted_dashboard} dashboard + {deleted_unknown} unknown cache entries (new UNKNOWN face detected)")
-                    except Exception as cache_error:
-                        logger.debug(f"[PROCESS] [CACHE] Cache invalidation error (non-critical): {cache_error}")
-                    
-                    # Broadcast to all connected clients (filtered by pipeline access)
-                    # Unknown faces go to unknown page, so we use a different message type
-                    logger.debug(f"[PROCESS] 📡 Broadcasting new_unknown_detection for '{name}' (sim={similarity:.3f}) in pipeline '{pipeline_id}' to WebSocket clients")
-                    logger.debug(f"[PROCESS] 📦 Unknown message data: pipeline_id={pipeline_id}, location_name={display_name!r}, timestamp={unknown_realtime_result['timestamp']}, identity_id={unknown_realtime_result.get('identity_id')}")
-                    try:
-                        await ws_manager.broadcast({
-                            "type": "new_unknown_detection",
-                            "data": unknown_realtime_result,
-                            "stats": stats,
-                            "tracker_stats": tracker_stats,
-                        }, pipeline_id=pipeline_id)
-                        logger.debug(f"[PROCESS] ✅ Broadcast completed for UNKNOWN '{name}' in '{pipeline_id}'")
-                        logger.debug(f"✅ Real-time: Sent UNKNOWN face {name} (sim={similarity:.2f}) from {pipeline_id} to unknown page")
-
-                        # Also notify dashboard clients with a LIGHTWEIGHT event (no image
-                        # data) so they can show an "N unknown" badge on the camera card.
-                        # new_unknown_detection itself is filtered to unknown-page clients.
-                        await ws_manager.broadcast({
-                            "type": "unknown_activity",
-                            # Stable id so clients can deduplicate badge bumps
-                            "event_id": face_data["_event_id"],
-                            "created_at": datetime.utcnow().isoformat() + "Z",
-                            "pipeline_id": pipeline_id,
-                            "location_name": display_name,
-                            "identity_id": unknown_realtime_result.get("identity_id"),
-                        }, pipeline_id=pipeline_id)
-                    except Exception as broadcast_error:
-                        logger.error(f"[PROCESS] ❌ Broadcast error for UNKNOWN '{name}' in '{pipeline_id}': {broadcast_error}", exc_info=True)
+                    pass  # Unknown cards are published by the committed evidence path.
             except Exception as e:
                 logger.error(f"❌ Real-time broadcast error: {e}")
                 # Don't fail the whole process due to WebSocket error
@@ -985,9 +862,10 @@ async def process_image_async(
     detection_data = {
         "pipeline_id": pipeline_id,
         "location_name": display_name,
+        "timestamp_source": timestamp_source,
         "detection": {
             "pipeline_id": pipeline_id,
-            "timestamp": datetime.utcnow(),
+            "timestamp": captured_at,
             "image_size_bytes": 0,
             "processing_time_ms": processing_time,
             "worker_id": worker_id,
@@ -1045,7 +923,9 @@ async def process_image_async(
                 metrics_db_operation_failures.labels(reason="detection_core").inc()
             logger.error(f"[PROCESS] detection NOT persisted (core failure): {e}", exc_info=True)
             await compensate_failed_detection(detection_data)
-        if outcome is not None and outcome.bundles:
+        if outcome is not None:
+            from backend.core.appearance_events import publish_unknown_events
+            await publish_unknown_events(outcome.unknown_events)
             await broadcast_detection_alerts(outcome.bundles, location_name=display_name)
 
     # =====================================================
@@ -1326,4 +1206,3 @@ if __name__ == "__main__":
         print(f"\n❌ Fatal error: {e}")
         import traceback
         traceback.print_exc()
-

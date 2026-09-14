@@ -247,6 +247,69 @@ GROUP BY fs.first_at, fs.first_pipeline_id""",
 ]
 
 # ---------------------------------------------------------------------------
+# 1d. The 2026-09-08 pair: both died on CTE column scope, not on the idea
+# ---------------------------------------------------------------------------
+CATALOG += [
+E("Which hour of the day has the highest ratio of identified to unidentified faces, and what is that ratio",
+f"""SELECT EXTRACT(HOUR FROM d.timestamp)::int AS hour_of_day,
+    COUNT(*) FILTER (WHERE {IDENT}) AS identified_faces,
+    COUNT(*) FILTER (WHERE {UNID}) AS unidentified_faces,
+    ROUND(COUNT(*) FILTER (WHERE {IDENT})::numeric
+          / NULLIF(COUNT(*) FILTER (WHERE {UNID}), 0), 3) AS identified_to_unidentified_ratio
+FROM faces f
+JOIN detections d ON f.detection_id = d.id
+GROUP BY EXTRACT(HOUR FROM d.timestamp)
+ORDER BY identified_to_unidentified_ratio DESC NULLS LAST, hour_of_day""",
+"A ratio between two subsets of the SAME rows: conditional counts (FILTER) in ONE pass, never two CTEs joined on a shared column name. NULLIF guards the division; an hour with no unidentified faces sorts last, not first"),
+E("For the person with the most detections, on what percentage of the days they were seen did they appear at more than one camera",
+f"""WITH top_person AS (
+    SELECT f.name
+    FROM faces f
+    JOIN detections d ON f.detection_id = d.id
+    WHERE {IDENT}
+    GROUP BY f.name
+    ORDER BY COUNT(*) DESC
+    LIMIT 1),
+days_seen AS (
+    SELECT DATE(d.timestamp) AS detection_day,
+        COUNT(DISTINCT d.pipeline_id) AS cameras_that_day
+    FROM faces f
+    JOIN detections d ON f.detection_id = d.id
+    WHERE f.name = (SELECT name FROM top_person)
+    GROUP BY DATE(d.timestamp))
+SELECT (SELECT name FROM top_person) AS person_name,
+    COUNT(*) AS days_seen,
+    COUNT(*) FILTER (WHERE cameras_that_day > 1) AS days_at_more_than_one_camera,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE cameras_that_day > 1) / COUNT(*), 1) AS percent_of_days
+FROM days_seen""",
+"Pick the subject in its own CTE, measure per day in a second, then read the share. Every column the final SELECT names is exposed by the CTE it selects FROM - a later step can only read what the step before it emitted"),
+]
+
+# ---------------------------------------------------------------------------
+# 1e. 2026-09-09: a share whose denominator was filtered away
+# ---------------------------------------------------------------------------
+CATALOG += [
+E("Between the two busiest cameras, which one has the higher share of unidentified faces, and by how much",
+f"""WITH per_camera AS (
+    SELECT {CAM} AS camera_name,
+        COUNT(*) AS faces,
+        COUNT(*) FILTER (WHERE {UNID}) AS unidentified_faces,
+        ROUND(100.0 * COUNT(*) FILTER (WHERE {UNID}) / COUNT(*), 1) AS unidentified_percent
+    {FDP}
+    {GROUP_CAM}),
+busiest_two AS (
+    SELECT camera_name, faces, unidentified_faces, unidentified_percent
+    FROM per_camera
+    ORDER BY faces DESC, camera_name
+    LIMIT 2)
+SELECT camera_name, faces, unidentified_faces, unidentified_percent,
+    ROUND(unidentified_percent - MIN(unidentified_percent) OVER (), 1) AS points_above_the_other
+FROM busiest_two
+ORDER BY unidentified_percent DESC""",
+"A share compares a PART with the WHOLE of the same rows: the unidentified test belongs in FILTER, never in WHERE - a WHERE removes the rows the denominator counts and every camera returns 100%. 100.0 (not 100) keeps the division out of integer arithmetic. The gap is read with a window over the two rows, so no alias is used inside its own OVER clause"),
+]
+
+# ---------------------------------------------------------------------------
 CATALOG += [
 E("Which pair of cameras is most often visited one after the other by the same identified person, and how many times",
 f"""WITH steps AS (

@@ -516,6 +516,11 @@ class IdentityAppearance(Base):
     __tablename__ = "identity_appearances"
 
     id = Column(Integer, primary_key=True)
+    event_id = Column(String(64), nullable=True, unique=True)
+    detection_id = Column(Integer, ForeignKey('detections.id', ondelete='SET NULL'), nullable=True)
+    detection_uuid = Column(String(36), nullable=True)
+    location_name = Column(String(255), nullable=True)
+    timestamp_source = Column(String(32), nullable=True)
     # single-column indexes omitted: idx_appearance_identity_start /
     # idx_appearance_pipeline composites cover these lookups
     identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id', ondelete='CASCADE'), nullable=False)
@@ -533,6 +538,7 @@ class IdentityAppearance(Base):
 
     __table_args__ = (
         Index('idx_appearance_identity_start', 'identity_id', 'start_time'),
+        Index('idx_appearance_camera_latest', 'identity_id', 'pipeline_id', 'start_time', 'id'),
         Index('idx_appearance_pipeline', 'pipeline_id', 'start_time'),
         # Serves the Advanced Search camera filter's correlated EXISTS, which
         # drives from a small candidate set of identities. Neither index above

@@ -473,3 +473,22 @@ Also in the modal: `triggerFileInput` / `handleGlobalFileSelect` (choose or drop
 - **API index:** `Docs/47_API_INDEX.md` is generated from the route files (method, path, handler, auth dependencies, whether the handler writes to the database, whether it audits, first docstring line). Regenerate after changing routes: `python3 scripts/generate_api_index.py > Docs/47_API_INDEX.md`.
 - **Tables most pages touch:** `users`, `user_pipeline_access`, `pipelines`, `detections`, `faces`, `identities`, `identity_images`, `identity_appearances`, `identity_relationships`, `identity_merges`, `merge_suggestions`, `pending_enrollments`, `watchlists`, `watchlist_entries`, `watchlist_alerts`, `live_search_alerts`, `live_alert_triggers`, `live_alert_audit_log`, `threat_assessments`, `risk_signal_results`, `risk_model_versions`, `learned_thresholds`, `search_history`, `chatbot_audit_log`, `user_authorization_audit_log`, `settings`, `settings_audit_log`, `background_task_history`, `webhook_credentials`, `ml_*`. Relationships: `Docs/29_DATABASE_RELATIONSHIPS.md`.
 - **Conventions used above:** "WRITE" = the handler changes the database; "audit" = it also records who did it (`user_authorization_audit_log`, `chatbot_audit_log`, `settings_audit_log`, or the structured security log via `auth_security.audit`).
+
+
+## September 14 deployment update
+
+See [the deployment and feature update](59_SEPTEMBER_DEPLOYMENT_UPDATE.md) for
+known-face administration, appearance provenance, GPU/CPU runtime selection,
+static-IP recovery, and the separate chatbot deployment and saved-title fixes.
+
+### Known Faces: `/admin/known`
+
+The administrator directory loads `GET /api/admin/known-faces` for filtered,
+sorted and paginated cards. `PATCH /api/admin/known-faces/{identity_id}` renames;
+`POST /api/admin/known-faces/{identity_id}/activation` changes active state.
+Deletion first loads `GET /api/admin/known-faces/{identity_id}/deletion-preview`,
+then submits the confirmation name and preview token to
+`DELETE /api/admin/known-faces/{identity_id}`. Photo additions use enrollment.
+The backend enforces administrator access and mutation CSRF checks; disabled
+buttons are not the access boundary. Merged records direct the operator to the
+surviving profile. See the generated API reference for request schemas.

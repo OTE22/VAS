@@ -118,6 +118,8 @@ class Settings(BaseSettings):
         description="Level for the rotating file. Empty = same as LOG_LEVEL (the default)."
     )
     LOGS_LIFE_TIME_HOURS: int = Field(default=48, description="Log retention period in hours (default: 48 hours)")
+    LEGACY_LOG_RETENTION_DAYS: int = Field(default=14, ge=0, description="Closed legacy access/error logs; 0 disables deletion; restart required")
+    DIAGNOSTIC_LOG_RETENTION_DAYS: int = Field(default=30, ge=0, description="Smoke/regression artifacts and audit text logs; 0 disables deletion; restart required")
 
     # Bounds for GET /api/logs. A log read must never become a way to pin the
     # event loop or exhaust memory on a multi-gigabyte file.
@@ -1722,6 +1724,16 @@ class Settings(BaseSettings):
     CHROMA_COLLECTION_NAME: str = Field(
         default="sql_knowledge_base"
     )
+    # Retrieval can be switched OFF for a controlled comparison: the same
+    # question, with and without the verified seeds in front of the SQL
+    # specialist. RAG_TOP_K cannot express this - the knowledge base
+    # clamps it with max(1, ...), so zero still returns one example.
+    # Development aid: leave it on in production, where the seeds are the
+    # difference between a correct query and a plausible one.
+    SQL_AGENT_USE_KNOWLEDGE_BASE: bool = Field(
+        default=True,
+        description="Put retrieved examples in front of SQL generation. "
+                    "Turn OFF only to measure what the seeds contribute.")
     RAG_TOP_K: int = Field(
         default=5
     )

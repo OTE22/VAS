@@ -36,6 +36,7 @@ from backend.core.metrics import metrics_db_operations
 from db_connection import db_manager
 from db_models import Pipeline
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError, DataError
 from backend.core.detection_evidence import (
     persist_detection, broadcast_detection_alerts, compensate_failed_detection,
     EmbeddingLinkError,
@@ -59,9 +60,15 @@ class BatchDatabaseWriter:
             flush_interval = settings.BATCH_WRITE_INTERVAL
         self.flush_interval = flush_interval
 
-        self.pending_detections: list[dict] = []
         self._lock = asyncio.Lock()
         self._flush_task: Optional[asyncio.Task] = None
+        self._queued_since_flush = 0
+
+    @property
+    def pending_detections(self):
+        """Compatibility for the shutdown pending-count check; disk owns the queue."""
+        from backend.core.detection_spool import root
+        return [p for p in root().glob('*.json') if not p.name.endswith('.failed.json')]
 
     async def start(self):
         if self._flush_task and not self._flush_task.done():
@@ -96,120 +103,76 @@ class BatchDatabaseWriter:
         logger.info("Batch DB writer stopped")
 
     async def add_detection(self, detection_data: dict):
-        async with self._lock:
-            self.pending_detections.append(detection_data)
-
-            if len(self.pending_detections) >= self.batch_size:
-                await self._flush_internal()
+        import uuid
+        from backend.core import detection_spool
+        detection_data["detection"].setdefault("uuid", str(uuid.uuid4()))
+        # Once accepted, failure belongs to the retry queue, not the caller's
+        # direct-write fallback (which would compensate pending embeddings).
+        await asyncio.to_thread(detection_spool.enqueue, detection_data)
+        self._queued_since_flush += 1
+        # Preserve size-triggered flushing as well as the timer; high camera
+        # traffic must not be capped at one batch per timer interval.
+        if self._queued_since_flush >= self.batch_size and not self._lock.locked():
+            try:
+                await self.flush()
+            except Exception:
+                logger.exception("[BATCH] Immediate flush failed; accepted frames remain queued")
 
     async def flush(self):
         async with self._lock:
+            self._queued_since_flush = 0
             await self._flush_internal()
+            from backend.core.detection_spool import stats
+            return await asyncio.to_thread(stats)
 
     async def _flush_internal(self):
-        if not self.pending_detections:
+        from backend.core import detection_spool
+        batch = await asyncio.to_thread(detection_spool.pending, self.batch_size)
+        if not batch:
             return
-
         if not await db_circuit_breaker.can_execute():
-            logger.warning("DB circuit open — dropping batch")
-            self.pending_detections.clear()
-            return
-
-        batch = self.pending_detections
-        self.pending_detections = []
-
-        start_time = time.time()
-
-        # Add timeout to prevent hanging connections
-        DB_OPERATION_TIMEOUT = 150.0  # seconds
-
-        try:
-            async with asyncio.timeout(DB_OPERATION_TIMEOUT):
-                # =====================================================
-                # TX 1 — ensure pipelines exist (SHORT TX)
-                # =====================================================
-                # Race-safe UPSERT: concurrent workers first-sighting the same new
-                # pipeline name must never collide on the unique index (the old
-                # SELECT-then-INSERT dropped the whole batch on UniqueViolation).
-                pipeline_ids = list({d["pipeline_id"] for d in batch})
-                async with db_manager.get_session() as db:
-                    now = datetime.utcnow()
-                    stmt = pg_insert(Pipeline).values([
-                        {
-                            "pipeline_id": pid,
-                            "total_detections": 0,
-                            "is_active": 1,
-                            "created_at": now,
-                            "updated_at": now,
-                        }
-                        for pid in pipeline_ids
-                    ]).on_conflict_do_nothing(index_elements=["pipeline_id"])
-                    await db.execute(stmt)
-
-                # =====================================================
-                # per detection — ONE transaction each (core atomic), then
-                # broadcast only what was committed
-                # =====================================================
-                persisted = 0
-                for d in batch:
-                    outcome = None
-                    try:
-                        async with db_manager.get_session() as db:
-                            outcome = await persist_detection(db, detection_data=d)
-                        # session exit committed the transaction
-                    except EmbeddingLinkError as link_err:
-                        from backend.core.metrics import metrics_db_operation_failures
-                        if metrics_db_operation_failures:
-                            metrics_db_operation_failures.labels(reason="detection_core").inc()
-                        logger.error("[BATCH] detection NOT persisted (%s) pipeline=%s — embedding "
-                                     "provenance inconsistent: %s", link_err.outcome.value,
-                                     d.get("pipeline_id"), link_err)
-                        await compensate_failed_detection(d)
-                        continue
-                    except Exception:
-                        from backend.core.metrics import metrics_db_operation_failures
-                        if metrics_db_operation_failures:
-                            metrics_db_operation_failures.labels(reason="detection_core").inc()
-                        logger.exception("[BATCH] detection NOT persisted (core failure) pipeline=%s",
-                                         d.get("pipeline_id"))
-                        await compensate_failed_detection(d)
-                        continue
-                    persisted += 1
+            raise RuntimeError("Database circuit open; detections retained on disk")
+        failures = []
+        for path, d in batch:
+            started = time.time()
+            try:
+                async with asyncio.timeout(150):
+                    async with db_manager.get_session() as db:
+                        now = datetime.utcnow()
+                        await db.execute(pg_insert(Pipeline).values(
+                            pipeline_id=d["pipeline_id"], total_detections=0,
+                            is_active=1, created_at=now, updated_at=now
+                        ).on_conflict_do_nothing(index_elements=["pipeline_id"]))
+                        outcome = await persist_detection(db, detection_data=d)
+                    # Commit is complete. Replays after an ambiguous commit
+                    # return the existing detection UUID without side effects.
+                    from backend.core.appearance_events import publish_unknown_events
+                    await publish_unknown_events(getattr(outcome, 'unknown_events', []))
+                    await asyncio.to_thread(detection_spool.acknowledge, path)
                     if outcome.bundles:
                         await broadcast_detection_alerts(outcome.bundles,
                                                          location_name=d.get("location_name"))
-
-            await db_circuit_breaker.call_succeeded()
-            metrics_db_operations.observe(time.time() - start_time)
-
-            logger.info(
-                f"✅ flushed {persisted}/{len(batch)} detections "
-                f"in {time.time() - start_time:.3f}s"
-            )
-
-        except asyncio.CancelledError:
-            # Shutdown in progress, re-raise to allow proper cleanup
-            logger.info("⚠️  Batch write cancelled (shutdown in progress)")
-            self.pending_detections = batch + self.pending_detections  # Re-add to pending
-            raise
-        except asyncio.TimeoutError:
-            await db_circuit_breaker.call_failed()
-            # The histogram used to observe ONLY successes, so a database
-            # slowdown made writes disappear from the latency data at exactly
-            # the moment they mattered. Record the duration and the failure.
-            metrics_db_operations.observe(time.time() - start_time)
+                await db_circuit_breaker.call_succeeded()
+            except asyncio.CancelledError:
+                raise  # Disk entry survives; committed UUIDs safely deduplicate.
+            except (EmbeddingLinkError, IntegrityError, DataError) as exc:
+                await compensate_failed_detection(d)
+                await asyncio.to_thread(detection_spool.quarantine, path, exc)
+                failures.append(str(exc))
+                logger.exception("[BATCH] Invalid evidence quarantined: %s", path.name)
+            except Exception as exc:
+                await db_circuit_breaker.call_failed()
+                failures.append(str(exc))
+                logger.exception("[BATCH] Write failed; frame retained for retry: %s", path.name)
+                # Let other entries run first on the next cycle.
+                if path.exists():
+                    await asyncio.to_thread(os.utime, path, None)
+            finally:
+                metrics_db_operations.observe(time.time() - started)
+        if failures:
             from backend.core.metrics import metrics_db_operation_failures
             if metrics_db_operation_failures:
-                metrics_db_operation_failures.labels(reason="timeout").inc()
-            logger.error(f"❌ Batch write timeout after {DB_OPERATION_TIMEOUT}s - database may be overloaded")
-            # Don't re-add to pending as this might cause infinite retries
-        except Exception as e:
-            await db_circuit_breaker.call_failed()
-            metrics_db_operations.observe(time.time() - start_time)
-            from backend.core.metrics import metrics_db_operation_failures
-            if metrics_db_operation_failures:
-                metrics_db_operation_failures.labels(reason="error").inc()
-            logger.exception("❌ Batch write failed")
+                metrics_db_operation_failures.labels(reason="detection_core").inc(len(failures))
+            raise RuntimeError(f"{len(failures)} detection write(s) failed; see retry queue/logs")
 
 batch_writer = BatchDatabaseWriter()
-

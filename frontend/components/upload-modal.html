@@ -48,6 +48,7 @@
             </button>
         </div>
 
+        <img id="uploadTargetPreview" class="upload-target-preview" alt="" hidden>
         <div class="success-message" id="uploadSuccessMessage" style="display: none;">
             <i class="fas fa-check-circle"></i>
             <span id="uploadSuccessText"></span>
@@ -78,6 +79,12 @@
             </div>
 
             <div class="enrollment-decision__candidates" id="enrollmentCandidates"></div>
+
+            <div class="form-group">
+                <label for="enrollmentNewName">Name if creating a new person</label>
+                <input type="text" id="enrollmentNewName" class="form-input" maxlength="255"
+                       autocomplete="off" placeholder="Enter a different name for a new person">
+            </div>
 
             <div class="enrollment-decision__actions">
                 <button type="button" class="upload-submit-btn enrollment-decision__new"

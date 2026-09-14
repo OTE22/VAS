@@ -222,38 +222,21 @@ class WebSocketManager:
             return False
     
     async def _redis_listener(self):
-        """Listen for messages from other workers via Redis pub/sub"""
-        logger.info(f"[WS-MANAGER] 👂 Starting Redis listener (Worker PID: {PROCESS_ID})")
-        try:
-            while True:
-                try:
-                    message = await self.redis_pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                    if message and message['type'] == 'message':
-                        try:
-                            data = json.loads(message['data'])
-                            # Don't broadcast to local connections if this message came from this worker
-                            if data.get('worker_pid') != PROCESS_ID:
-                                logger.info(f"[WS-MANAGER] 📥 Received broadcast from worker {data.get('worker_pid')} via Redis")
-                                # Broadcast to local connections
-                                await self._broadcast_local(
-                                    data['message'],
-                                    data.get('pipeline_id'),
-                                    data.get('admin_only', False)
-                                )
-                            else:
-                                logger.debug(f"[WS-MANAGER] 🔄 Ignoring own broadcast (Worker PID: {PROCESS_ID})")
-                        except Exception as e:
-                            logger.error(f"[WS-MANAGER] ❌ Error processing Redis message: {e}", exc_info=True)
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.error(f"[WS-MANAGER] ❌ Error in Redis listener: {e}", exc_info=True)
-                    await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            logger.info(f"[WS-MANAGER] 🛑 Redis listener stopped (Worker PID: {PROCESS_ID})")
-        except Exception as e:
-            logger.error(f"[WS-MANAGER] ❌ Redis listener fatal error: {e}", exc_info=True)
-    
+        """Receive cross-worker events; report connection failures to health."""
+        from backend.core.service_supervisor import supervised_loop
+
+        async def receive_one():
+            message = await self.redis_pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message['type'] == 'message':
+                data = json.loads(message['data'])
+                if data.get('worker_pid') != PROCESS_ID:
+                    await self._broadcast_local(data['message'], data.get('pipeline_id'),
+                                                data.get('admin_only', False))
+            await asyncio.sleep(0.01)
+
+        await supervised_loop("websocket_redis_listener", 0, receive_one,
+                              error_backoff_base=1, error_backoff_max=30, jitter=0)
+
     async def _broadcast_local(self, message: dict, pipeline_id: Optional[str] = None, admin_only: bool = False):
         """Broadcast message to local connections only (called from Redis listener)"""
         message_type = message.get('type', 'unknown')

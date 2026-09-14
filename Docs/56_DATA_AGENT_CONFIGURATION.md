@@ -562,3 +562,10 @@ docker compose ... --profile mcp-sql up -d && docker exec mcp-sql python -c "imp
 # the offline bundle
 scripts/verify_offline_bundle.sh /opt/face_detector/bundle
 ```
+
+
+## September 14 deployment update
+
+See [the deployment and feature update](59_SEPTEMBER_DEPLOYMENT_UPDATE.md) for
+known-face administration, appearance provenance, GPU/CPU runtime selection,
+static-IP recovery, and the separate chatbot deployment and saved-title fixes.

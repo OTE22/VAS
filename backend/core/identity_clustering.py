@@ -196,7 +196,15 @@ class IdentityClusteringService:
 
         import time
         start_time = time.time()
-        await self.generate_merge_suggestions()
+        try:
+            await self.generate_merge_suggestions()
+        except Exception as exc:
+            from backend.core.task_history import task_history_manager
+            await task_history_manager.record_task_completed(
+                task_type="identity_clustering", task_name="Identity Clustering",
+                success=False, duration_seconds=time.time() - start_time,
+                details={"error": str(exc)[:500]})
+            raise
         duration = time.time() - start_time
 
         try:
@@ -291,6 +299,7 @@ class IdentityClusteringService:
         except Exception as e:
             duration = (datetime.utcnow() - start_time).total_seconds()
             logger.error(f"[CLUSTERING] ❌ Error generating merge suggestions after {duration:.2f}s: {e}", exc_info=True)
+            raise
     
     async def _cluster_by_similarity(
         self,
@@ -738,7 +747,7 @@ class IdentityClusteringService:
                 f"[CLUSTERING] [PGVECTOR_VERIFY] ❌ Error calculating similarity: {e}",
                 exc_info=True
             )
-            return False, 0.0
+            raise
     
     async def _verify_face_similarity_faiss(
         self,
@@ -808,7 +817,7 @@ class IdentityClusteringService:
 
         except Exception as e:
             logger.debug(f"Error in vector similarity verification: {e}")
-            return False, 0.0
+            raise
 
     async def _create_graph_based_suggestions(
         self,
@@ -1090,6 +1099,7 @@ class IdentityClusteringService:
                             break
             except Exception as e:
                 logger.debug(f"Error checking existing suggestions: {e}, continuing anyway")
+                raise
             
             if cluster_exists:
                 continue
@@ -1268,4 +1278,3 @@ class IdentityClusteringService:
 
 # Global instance - uses config values
 clustering_service = IdentityClusteringService()
-

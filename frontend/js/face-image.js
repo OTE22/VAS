@@ -3,15 +3,26 @@
     'use strict';
     const states = new WeakMap();
 
-    function update(img, source, placeholder) {
+    function update(img, source, placeholder, options = {}) {
         let state = states.get(img);
+        if (state && options.eventId && state.eventId !== options.eventId) {
+            state.revision++;
+            state.shown = null;
+            state.requested = null;
+            img.hidden = true;
+        }
         if (!state) {
             state = { requested: null, shown: null, revision: 0, loader: null };
             states.set(img, state);
             img.hidden = true;
         }
+        if (options.eventId) state.eventId = options.eventId;
         if (source === state.requested) return;
         state.requested = source;
+        const publish = status => {
+            img.dataset.imageState = status;
+            img.dispatchEvent(new CustomEvent('face-image-state', { detail: { status } }));
+        };
         const revision = ++state.revision;
         if (state.loader) {
             state.loader.onload = state.loader.onerror = null;
@@ -22,7 +33,7 @@
             if (revision !== state.revision) return;
             state.loader = null;
             // Keep the last successfully decoded image on a failed update.
-            img.dataset.imageState = state.shown ? 'previous' : 'unavailable';
+            publish(state.shown ? 'previous' : 'unavailable');
             if (placeholder) {
                 placeholder.hidden = !!state.shown;
                 placeholder.textContent = source ? 'Image unavailable' : 'No image available';
@@ -37,14 +48,14 @@
             failed(); return;
         }
         if (state.shown === url.href) {
-            img.dataset.imageState = 'ready';
+            publish('ready');
             return;
         }
         if (placeholder && !state.shown) {
             placeholder.hidden = false;
             placeholder.textContent = 'Loading image…';
         }
-        img.dataset.imageState = 'loading';
+        publish(state.shown ? 'previous' : 'loading');
         const loader = new Image();
         state.loader = loader;
         loader.decoding = 'async';
@@ -58,7 +69,7 @@
             state.shown = url.href;
             state.loader = null;
             img.hidden = false;
-            img.dataset.imageState = 'ready';
+            publish('ready');
             if (placeholder) placeholder.hidden = true;
         };
         loader.src = url.href;

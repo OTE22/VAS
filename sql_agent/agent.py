@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 from .config import config
+from config import settings
 from .state import AgentState
 from .database import DatabaseManager
 from .knowledge_base import SQLKnowledgeBase
@@ -727,7 +728,7 @@ class SQLIntelligenceAgent:
                             yield {"type": "status", "message": "Planning the request...", "step": "plan"}
                         elif node_name == "check_schema":
                             yield {"type": "status", "message": "Loading database schema...", "step": "schema"}
-                        elif node_name == "retrieve_examples":
+                        elif node_name == "retrieve_examples" and getattr(config, "use_knowledge_base", True):
                             yield {"type": "status", "message": "Retrieving similar examples...", "step": "rag"}
                         elif node_name == "generate_sql":
                             yield {"type": "status", "message": "Building a read-only query...", "step": "generate_sql"}
@@ -789,7 +790,7 @@ class SQLIntelligenceAgent:
                             yield {"type": "status", "message": "Preparing document...", "step": "document"}
                         elif node_name == "translate_artifact":
                             yield {"type": "status", "message": "Translating report...", "step": "document"}
-                        elif node_name == "learn_from_query":
+                        elif node_name == "learn_from_query" and settings.SQL_AGENT_LEARN_FROM_QUERIES:
                             yield {"type": "status", "message": "Learning from query...", "step": "learn"}
                     
                     if stream_ended_early:

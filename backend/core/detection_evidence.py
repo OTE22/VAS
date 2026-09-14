@@ -171,6 +171,7 @@ class DetectionPersistOutcome:
     faces_persisted: int
     bundles: List[DetectionAlertBundle]
     link_outcomes: Dict[int, str]          # embedding_id -> LinkOutcome value
+    unknown_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def face_row_columns(f: Dict[str, Any]) -> Dict[str, Any]:
@@ -191,8 +192,39 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
     """
     from backend.core.identity_service import identity_service
 
+    from backend.core.identity_merge_lock import lock_identity_mutation, resolve_survivor
+    await lock_identity_mutation(db)
     pipeline_id = detection_data["pipeline_id"]
     det_cols = dict(detection_data["detection"])
+    if det_cols.get("uuid"):
+        # Serializes concurrent replay of the same durable frame across workers.
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                         {"key": str(det_cols["uuid"])})
+        existing = (await db.execute(select(Detection.id).where(
+            Detection.uuid == str(det_cols["uuid"])))).scalar_one_or_none()
+        if existing is not None:
+            return DetectionPersistOutcome(int(existing), 0, [], {})
+    # Work on a copy: a failed attempt must leave the durable queue replayable.
+    detection_data = {**detection_data, 'faces': [dict(f) for f in detection_data.get('faces', [])]}
+    for pending_face in detection_data['faces']:
+        original_id = pending_face.get('identity_id')
+        if not original_id:
+            continue
+        survivor = await resolve_survivor(db, original_id)
+        if str(survivor.id) == str(original_id) and survivor.type == IdentityType.UNKNOWN:
+            continue
+        pending_face['identity_id'] = survivor.id
+        pending_face['_is_known'] = survivor.type != IdentityType.UNKNOWN
+        if survivor.type != IdentityType.UNKNOWN and pending_face.get('name') == 'Unknown':
+            from db_models import LabelState
+            pending_face['name'] = survivor.display_name or 'Unknown'
+            pending_face['label_state'] = LabelState.MANUAL_LABELED
+        embedding_ids = [pending_face.get('_embedding_id'), *(pending_face.get('_secondary_embedding_ids') or [])]
+        await db.execute(sa_update(IdentityEmbedding).where(
+            IdentityEmbedding.id.in_([i for i in embedding_ids if i is not None]),
+            IdentityEmbedding.identity_id == uuid.UUID(str(original_id))
+        ).values(identity_id=survivor.id,
+                 faiss_index_type='unknown' if survivor.type == IdentityType.UNKNOWN else 'known'))
     detection = Detection(**det_cols)
     db.add(detection)
     await db.flush()
@@ -206,21 +238,43 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
 
     bundles: List[DetectionAlertBundle] = []
     link_outcomes: Dict[int, str] = {}
+    unknown_events = []
 
     for face in faces:
         if not face.identity_id or identity_service is None:
             continue
         # ---- CORE: identity, appearance, exact link
         identity = (await db.execute(
-            select(Identity).where(Identity.id == uuid.UUID(face.identity_id))
+            select(Identity).where(Identity.id == uuid.UUID(face.identity_id)).with_for_update()
         )).scalar_one_or_none()
         if identity is None:
             raise RuntimeError(f"identity {face.identity_id} vanished before its detection was persisted")
-        await identity_service.create_appearance(
+        if identity.type == IdentityType.UNKNOWN:
+            identity.first_seen_at = min(identity.first_seen_at, timestamp) if identity.appearances_count else timestamp
+            identity.last_seen_at = max(identity.last_seen_at, timestamp) if identity.appearances_count else timestamp
+        appearance = await identity_service.create_appearance(
             identity=identity, pipeline_id=pipeline_id, track_id=None, start_time=timestamp,
             best_snapshot_path=face.face_image_path, db=db,
             quality_score=face.quality, quality_scorer_version=face.quality_scorer,
             similarity=face.similarity)
+        appearance.event_id = face.event_id or str(uuid.uuid4())
+        appearance.detection_id = detection_id
+        appearance.detection_uuid = detection.uuid
+        appearance.location_name = detection_data.get('location_name')
+        appearance.timestamp_source = detection_data.get('timestamp_source', 'server_processed')
+        await db.flush()
+        if identity.type == IdentityType.UNKNOWN:
+            from backend.core.appearance_events import event_payload
+            event = event_payload(appearance)
+            from db_models import IdentityAppearance
+            from sqlalchemy import func
+            event['appearances_count'] = (await db.execute(select(func.count()).select_from(IdentityAppearance).where(
+                IdentityAppearance.identity_id == identity.id,
+                IdentityAppearance.pipeline_id == pipeline_id))).scalar_one()
+            event['face'] = {'name': identity.display_name or 'Unknown',
+                             'face_image_path': face.face_image_path,
+                             'similarity': face.similarity}
+            unknown_events.append(event)
         for emb_id in ([face.embedding_id] if face.embedding_id is not None else []) + face.secondary_embedding_ids:
             outcome = await link_embedding_to_detection(db, embedding_id=emb_id, detection_id=detection_id)
             link_outcomes[emb_id] = outcome.value
@@ -273,7 +327,7 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
         .values(total_detections=Pipeline.total_detections + 1, updated_at=datetime.utcnow()))
     await db.flush()
     return DetectionPersistOutcome(detection_id=detection_id, faces_persisted=len(faces),
-                                   bundles=bundles, link_outcomes=link_outcomes)
+                                   bundles=bundles, link_outcomes=link_outcomes, unknown_events=unknown_events)
 
 
 async def compensate_failed_detection(detection_data: Dict[str, Any]) -> Dict[str, int]:

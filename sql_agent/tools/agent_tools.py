@@ -675,26 +675,17 @@ class SQLAgentTools:
             # paraphrase is kept only as a hint.
             previous = (candidates.get("last_result") or {})
             prev_q = " ".join(str(previous.get("question") or "").split())[:300]
+            # The user's own words are what the generator is asked, with the
+            # previous QUESTION named as the thing being followed up. The
+            # subject is NOT imported: injecting the previous turn's person
+            # made "help me find a person" - which names nobody and should be
+            # asked about - filter on IRON MAN and report on somebody the user
+            # never mentioned (Opik 01a08265-b951, 2026-09-08). The prior turns
+            # still reach generation through the conversation-context block,
+            # which `about_previous` already gates.
             spoken = " ".join(str(state.get("normalized_input") or "").split())
-            refs = [n for n in people if n]
-            if not refs and prev_q:
-                # Nobody was resolved this turn ("at which cameras?" names
-                # no one): the subject is whoever the previous question named,
-                # read from the stored names, so an Arabic follow-up keeps
-                # IRON MAN in front of the generator (Opik 01a07891-f749).
-                try:
-                    refs = list(self._names_in_text(prev_q, state))
-                except Exception:
-                    refs = []
             if spoken and prev_q and spoken.casefold() != prev_q.casefold():
-                # Short, subject first; the previous SQL also reaches the
-                # generator through its conversation-context block.
-                if refs:
-                    composed = (f"{spoken} (about {', '.join(refs)}; "
-                                f"a follow-up to: \"{prev_q}\")")
-                else:
-                    composed = f"{spoken} (a follow-up to: \"{prev_q}\")"
-                question = composed
+                question = f"{spoken} (a follow-up to: \"{prev_q}\")"
                 logger.info("[REACT] follow-up composed from the message and "
                             "the previous question")
         if name == "query_database" and question:
@@ -1434,6 +1425,13 @@ class SQLAgentTools:
             parts.append(f"Rejected SQL:\n{hint['sql']}")
         if hint.get("reason"):
             parts.append(f"Why it was rejected: {hint['reason']}")
+        # The database names the column; the parser names where that column
+        # does and does not live. Both are machine output about THIS query.
+        # Recorded when the hint was attached, from the untruncated SQL.
+        facts = (hint.get("scope_facts")
+                 or SQLAgentTools._sql_scope_facts(hint.get("sql") or ""))
+        if facts:
+            parts.append(facts)
         parts.append("Produce a DIFFERENT query that fixes that problem.")
         return "\n".join(parts)
 
@@ -1456,14 +1454,139 @@ class SQLAgentTools:
             return
         reason = (observation.get("sanitized_detail")
                   or state.get("sql_validation_error") or "")
+        # The facts are derived HERE, from the whole query. Deriving them
+        # later from the stored copy silently produced nothing: a query cut
+        # off mid-identifier does not parse (Opik 01a08599-6c8d, 2026-09-09).
+        full_sql = state.get("generated_sql") or ""
+        # Rejecting a repeated candidate clears generated_sql. Do not replace
+        # the useful database error with "No SQL to validate" on the next node.
+        if not full_sql and state.get("sql_correction_hint"):
+            return
         state["sql_correction_hint"] = {
-            "sql": (state.get("generated_sql") or "")[:600],
-            "reason": str(reason)[:200],
+            "sql": full_sql,
+            "reason": reasoning._sanitize(reason),
+            "scope_facts": SQLAgentTools._sql_scope_facts(full_sql),
         }
         failed = list(state.get("failed_sql_hashes") or [])
         digest = SQLAgentTools._sql_digest(state.get("generated_sql") or "")
         if digest and digest not in failed:
             state["failed_sql_hashes"] = failed + [digest]
+
+
+    @staticmethod
+    def _sql_scope_facts(sql: str) -> str:
+        """What every SELECT in the rejected query exposes, and which of its own
+        references cannot resolve there.
+
+        MEASURED with the parser the guard already uses - not a list of error
+        phrases. Three findings, each a fact about the query:
+
+          * a name exposed by more than one source in the same scope
+            (`column reference "hour_of_day" is ambiguous`);
+          * a name no source in that scope exposes
+            (`column "cameras_per_day" does not exist`);
+          * an output alias used inside a window's ORDER BY or PARTITION BY,
+            which PostgreSQL does not resolve - the expression must be
+            repeated (`column "unidentified_share" does not exist`, raised
+            from INSIDE a CTE, which is why every scope is walked).
+
+        Never raises: an unparseable candidate simply yields no facts.
+        """
+        try:
+            import sqlglot
+            from sqlglot import exp
+
+            tree = sqlglot.parse_one(str(sql or ""), dialect="postgres")
+            if tree is None:
+                return ""
+
+            exposed = {}
+            for cte in tree.find_all(exp.CTE):
+                body = cte.this
+                exposed[cte.alias_or_name] = [
+                    proj.alias_or_name
+                    for proj in (getattr(body, "expressions", None) or [])
+                    if proj.alias_or_name]
+            if not exposed:
+                return ""
+
+            findings = []
+            for select in tree.find_all(exp.Select):
+                sources = []
+                source_ctes = {}
+                frm = select.args.get("from") or select.args.get("from_")
+                if frm:
+                    for src in [frm.this] + [j.this for j in (select.args.get("joins") or [])]:
+                        name = getattr(src, "alias_or_name", None)
+                        if name:
+                            sources.append(name)
+                            if isinstance(src, exp.Table) and src.name in exposed:
+                                source_ctes[name] = src.name
+                if not sources:
+                    continue
+                own = {proj.alias_or_name for proj in (select.expressions or [])
+                       if proj.alias_or_name}
+                where = "the final SELECT"
+                cte = select.find_ancestor(exp.CTE)
+                if cte is not None:
+                    where = f"CTE {cte.alias_or_name}"
+
+                # An output alias is invisible inside a window specification.
+                for window in select.find_all(exp.Window):
+                    if window.find_ancestor(exp.Select) is not select:
+                        continue
+                    for col in window.find_all(exp.Column):
+                        if col.table:
+                            continue
+                        name = col.name
+                        if name in own and not any(
+                                name in exposed.get(source_ctes.get(src, src), []) for src in sources):
+                            line = (f"  in {where}: '{name}' is an output alias of that "
+                                    f"same SELECT, and a window's ORDER BY/PARTITION BY "
+                                    f"cannot see it - repeat the expression instead")
+                            if line not in findings:
+                                findings.append(line)
+
+                for col in select.find_all(exp.Column):
+                    if col.find_ancestor(exp.Select) is not select:
+                        continue
+                    if col.table:
+                        source = source_ctes.get(col.table)
+                        columns = exposed.get(source, [])
+                        if source and "*" not in columns and col.name not in columns:
+                            line = (f"  in {where}: '{col.table}.{col.name}' is not exposed "
+                                    f"by CTE {source} (alias {col.table})")
+                            if col.name in own and col.find_ancestor(exp.Order) is not None:
+                                line += "; ORDER BY may use the output alias without the source qualifier"
+                            if line not in findings:
+                                findings.append(line)
+                        continue
+                    if col.find_ancestor(exp.Window) is not None:
+                        continue
+                    name = col.name
+                    owners = [src for src in sources if name in exposed.get(src, [])]
+                    if len(owners) > 1:
+                        line = (f"  in {where}: '{name}' is exposed by {len(owners)} "
+                                f"sources ({', '.join(owners)}) - qualify it")
+                    elif name in own:
+                        continue
+                    elif not owners and any(source_ctes.get(src, src) in exposed for src in sources):
+                        line = (f"  in {where}: '{name}' is not exposed by any source "
+                                f"({', '.join(sources)})")
+                    else:
+                        continue
+                    if line not in findings:
+                        findings.append(line)
+
+            parts = ["What each CTE in your query actually exposes:"]
+            for name, cols in exposed.items():
+                parts.append(f"  {name}: {', '.join(cols) if cols else '(no named columns)'}")
+            if findings:
+                parts.append("References that cannot resolve where they are written:")
+                parts.extend(findings)
+            return "\n".join(parts)
+        except Exception:
+            return ""
 
     @staticmethod
     def _sql_digest(sql: str) -> str:
@@ -1580,7 +1703,7 @@ class SQLAgentTools:
             # A genuine misspelling: the filter never could have matched, so
             # the query is worth running again with the stored spelling.
             state["sql_correction_hint"] = {
-                "sql": (state.get("generated_sql") or "")[:600],
+                "sql": state.get("generated_sql") or "",
                 "reason": (f"the filter used {needle!r}, but this person is "
                            f"stored as {canonical!r} - use that exactly")}
             state["generated_sql"] = ""
@@ -2340,7 +2463,7 @@ class SQLAgentTools:
         """Regenerate once with the invented filter named, on the same
         deterministic path as the stored-spelling correction."""
         state["sql_correction_hint"] = {
-            "sql": (state.get("generated_sql") or "")[:600],
+            "sql": state.get("generated_sql") or "",
             "reason": (f"The user did not mention a camera named {needle!r}. "
                        "Remove that camera filter and add no constraint the "
                        "user did not state."),
@@ -2409,7 +2532,7 @@ class SQLAgentTools:
             # and a hint that says only "stored as X" had the model put the
             # label into the id column, which matches nothing.
             state["sql_correction_hint"] = {
-                "sql": (state.get("generated_sql") or "")[:600],
+                "sql": state.get("generated_sql") or "",
                 "reason": (f"the filter used {needle!r}, but this camera is "
                            f"stored with pipelines.location_name = {stored!r} "
                            f"(pipelines.pipeline_id = "
@@ -2576,6 +2699,15 @@ class SQLAgentTools:
         STEP 3.5: RAG Retrieval
         Search knowledge base for similar questions and their SQL queries.
         """
+        if not getattr(config, "use_knowledge_base", True):
+            # Off by operator choice: the turn runs on the schema alone, so a
+            # comparison can attribute an answer to the seeds or to the model.
+            state["retrieved_examples"] = []
+            state["rag_context"] = ""
+            logger.info("[STEP_3.5] knowledge base disabled "
+                        "(SQL_AGENT_USE_KNOWLEDGE_BASE=false); no examples")
+            return state
+
         logger.info("[STEP_3.5] RAG retrieval (query_chars=%d)",
                     len(state.get("normalized_input") or ""))
         logger.info("\n" + "="*60)
@@ -2916,10 +3048,18 @@ If no query is possible:
                    if (state.get("sql_generation_input")
                        and self._is_companion_question(state.get("normalized_input") or ""))
                    else f"{state['normalized_input']}\n")
-                + (("\nPLANNER PARAPHRASE (interpretation aid only; the "
-                    "authoritative request wins on any conflict):\n"
+                # The heading is deliberately lower-case prose. As "PLANNER
+                # PARAPHRASE" it was the only capitalised token in a prompt
+                # whose request named nobody, and the specialist filtered on
+                # `f.name = 'PLANNER'` (Opik 01a08276-d04c, 2026-09-08).
+                # Omitted entirely when it only repeats the request.
+                + (("\nHow the assistant read that request (an aid only; the "
+                    "request above wins on any conflict):\n"
                     f"{state['sql_generation_input']}\n")
-                   if state.get("sql_generation_input") else "")
+                   if (state.get("sql_generation_input")
+                       and " ".join(str(state["sql_generation_input"]).split())
+                       != " ".join(str(state.get("normalized_input") or "").split()))
+                   else "")
                 # How much was asked for comes from the reading. A report is
                 # every row about its subject ("report for tracking joey" had
                 # produced a "last seen" query); a summary is a computed
@@ -2999,7 +3139,8 @@ If no query is possible:
                     state["generated_sql"] = ""
                     state["sql_purpose"] = "identical to a query that already failed"
                     state["sql_correction_hint"] = {
-                        "sql": prepared["sql"][:600],
+                        "sql": prepared["sql"],
+                        "scope_facts": self._sql_scope_facts(prepared["sql"]),
                         "reason": ("This is the SAME query that already failed "
                                    "this turn" + (f": {earlier}" if earlier else "")
                                    + ". Write a materially different query."),
@@ -3280,8 +3421,8 @@ Provide the corrected SQL:""")
                                  len(result["rows"]))
             else:
                 error = result.get('error', 'Unknown error')
-                logger.error(f"[STEP_5] Query execution failed: {error}")
-                logger.error(f"❌ Query failed: {error}")
+                logger.error("[STEP_5] Query execution failed (code=%s)",
+                             result.get("error_code") or "DATABASE_ERROR")
                 
                 # SECURITY LAYER 4: Mark user for blocking (handled in the API route).
                 #
@@ -3626,6 +3767,18 @@ Provide the corrected SQL:""")
                     f"yet — no camera has seen them.")
 
         missing = state.get("entity_not_found")
+        if missing and not SQLAgentTools._user_named(state, missing):
+            # The name came from the model, not the user: repeating it back
+            # ("No person named PLANNER is enrolled") reads as though they
+            # had asked for it. Ask who they mean instead.
+            logger.info("[STEP_6] the unresolved name is absent from the "
+                        "message; asking who is meant instead of naming it")
+            if arabic:
+                return "\u0645\u0646 \u0627\u0644\u0634\u062e\u0635 "\
+                       "\u0627\u0644\u0630\u064a \u062a\u0631\u064a\u062f "\
+                       "\u0627\u0644\u0628\u062d\u062b \u0639\u0646\u0647\u061f"
+            return ("Who would you like me to find? Give me the name as it "
+                    "is enrolled, and I will look them up.")
         if missing:
             if arabic:
                 return (f"لا يوجد "
@@ -3639,9 +3792,25 @@ Provide the corrected SQL:""")
                     "\u0633\u062c\u0644\u0627\u062a "
                     "\u0645\u0637\u0627\u0628\u0642\u0629 "
                     "\u0644\u0647\u0630\u0627 \u0627\u0644\u0628\u062d\u062b."
-                    + self._latest_detection_hint(state, arabic=True))
+                    + SQLAgentTools._latest_detection_hint(self, state, arabic=True))
         return ("I searched the database and found no matching records."
-                + self._latest_detection_hint(state, arabic=False))
+                + SQLAgentTools._latest_detection_hint(self, state, arabic=False))
+
+    @staticmethod
+    def _user_named(state, needle: str) -> bool:
+        """Did the user's own message contain this name?
+
+        A fact about the message, checked with the same folded comparison
+        the reading uses - not a judgement about the name.
+        """
+        try:
+            from . import interpreter as _interp
+
+            spoken = str(state.get("normalized_input")
+                         or state.get("original_input") or "")
+            return bool(needle) and _interp._mentions_any(spoken, [str(needle)])
+        except Exception:
+            return True          # fail toward the existing wording
 
     @staticmethod
     def _grounding_section(state) -> str:
@@ -3849,10 +4018,11 @@ Do not expose internal workings or SQL queries."""),
             ])
         else:
             # SQL-based response
-            query_result = state.get("query_result", {})
+            query_result = state.get("query_result") or {}
 
             if not query_result.get("success"):
                 state["final_response"] = self._failure_narration(state)
+                state["turn_failed"] = True
                 return state
 
             rows = query_result.get("rows", [])
@@ -3892,7 +4062,7 @@ Do not expose internal workings or SQL queries."""),
             # Process and format results for LLM with actual data extraction
             # Extract key information from actual data
             processed_data = self._process_tracking_data(rows) if is_tracking_query else rows
-            results_preview = json.dumps(processed_data[:100], indent=2, default=str)  # Increased limit
+            results_preview = json.dumps(processed_data, indent=2, default=str)
 
             if direct_prompt is not None:
                 prompt = direct_prompt
@@ -4006,7 +4176,7 @@ CRITICAL DATA USAGE RULES:
 - You MUST extract all values EXACTLY as they appear in the data
 - NEVER invent or create fake values, names, or statistics
 - NEVER use placeholder values like [X], [Y], [number], [time range], [percentage]
-- ALWAYS calculate real statistics from the actual data provided
+- Use only the supplied computed statistics or values explicitly present in result rows; do not calculate additional statistics.
 - ALWAYS use exact field names and values from the data
 - If a field is missing in the data, state "Data not available" rather than inventing values
 
@@ -4022,9 +4192,8 @@ REPORT STRUCTURE:
 1. HEADER: "SURVEILLANCE INTELLIGENCE REPORT" or "INTELLIGENCE BRIEFING"
 2. EXECUTIVE SUMMARY: Brief overview with actual statistics from data
 3. KEY FINDINGS: Main data points with exact values from the data
-4. DETAILED ANALYSIS: Intelligence analysis with quantitative metrics
-5. STATISTICAL INSIGHTS: Calculated statistics and patterns from actual data
-6. ASSESSMENT: Operational assessment with data-driven recommendations
+4. RECORDED OBSERVATIONS: Describe the returned records and supplied quantitative metrics.
+5. DATA LIMITATIONS: Explain what these observations cannot establish. Do not add behavioral interpretations or operational recommendations.
 
 LANGUAGE STYLE:
 - Professional, formal, and authoritative
@@ -4040,14 +4209,17 @@ TERMINOLOGY:
 - "Observation points" or "Detection points" for cameras (use actual names from data)
 - "Confidence levels" for recognition quality (convert similarity to percentage)
 - "Operational metrics" for system statistics
-- "Activity patterns" for behavioral trends
+- Describe only recorded observations; do not assign behavioral meaning to timing or location.
 - Use formal time references with actual timestamps
 - Present statistics clearly with exact numbers
 
 CRITICAL RULES:
 - ALWAYS use formal report structure
 - ALWAYS extract and use EXACT values from the data provided
-- ALWAYS calculate real statistics from the actual data (count rows, sum values, calculate averages, etc.)
+- Use the provided computed statistics; do not invent additional arithmetic.
+- A timestamp span measures the gap between observations, not continuous presence.
+- Observations at one camera do not establish movement, transitions between locations, activities, motives, purpose, isolation, or continuous presence. Do not speculate about these, even using "possible", "may", or "suggests".
+- State those limitations explicitly when interpreting an observed time span.
 - NEVER use placeholder values or invented data
 - NEVER use generic examples - use the actual data provided
 - ALWAYS use professional security terminology
@@ -4074,7 +4246,7 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
 - Do NOT invent or create fake values, names, or statistics
 - Use exact field names and values from the data
 - Present all findings with precise data points from the actual results
-- Provide advanced analysis based on the actual patterns in the data""")
+- Describe the recorded facts and their limitations. Do not infer behavior, movement, or purpose from their timing or location.""")
                 ])
 
         self._trace_envelope("generate_story_response", prompt)
@@ -4219,7 +4391,7 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
     def _row_facts(cls, rows, sql: str = "") -> str:
         """Counts computed in Python from ALL returned rows, for the narrator.
 
-        The preview it sees is capped at 100 rows and it was told to
+        The preview used to be capped at 100 rows and it was told to
         "calculate statistics" from it: "KSA, 57" for a camera with 25,
         "260 events" for a person with 8. These figures are exact for the
         rows returned, and the note says so.
@@ -4244,6 +4416,33 @@ Generate a professional SURVEILLANCE INTELLIGENCE REPORT using ONLY the actual d
         lines = [f"- rows returned: {len(rows)}"
                  + (" (each row is a computed group; its figures are in "
                     "the row)" if aggregated else "")]
+        # Timestamp ranges are measured, never mental arithmetic by the
+        # narrator. Opik's restricted four-event replay misstated 809.572s
+        # as 13m13s and inferred isolation from missing camera observations.
+        from datetime import datetime
+        for column in rows[0]:
+            stamps = []
+            for row in rows:
+                value = row.get(column)
+                if isinstance(value, datetime):
+                    stamps.append(value)
+                elif isinstance(value, str) and len(value) >= 19 and ":" in value:
+                    try:
+                        stamps.append(datetime.fromisoformat(value.replace("Z", "+00:00")))
+                    except ValueError:
+                        pass
+            if len(stamps) != len(rows):
+                continue
+            try:
+                earliest, latest = min(stamps), max(stamps)
+                seconds = (latest - earliest).total_seconds()
+            except TypeError:
+                continue  # mixed aware/naive values do not define a range
+            minutes, remainder = divmod(seconds, 60)
+            lines.append(f"- {column}: earliest={earliest.isoformat(sep=' ')}, "
+                         f"latest={latest.isoformat(sep=' ')}, observed span="
+                         f"{seconds:.3f} seconds ({int(minutes)} minutes {remainder:.3f} seconds). "
+                         "This is the span between observations, not continuous presence or dwell time.")
         for column in cls._COUNTABLE_COLUMNS:
             if column not in rows[0]:
                 continue

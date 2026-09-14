@@ -1127,20 +1127,38 @@ def test_an_inactive_identity_is_not_offered(token):
 
 
 # ---------------------------------------------------------------------------
-# Ordering: name resolution happens BEFORE the gate
+# Existing names still require face evidence before attachment.
 # ---------------------------------------------------------------------------
 
-def test_an_existing_name_is_never_sent_for_review(token):
-    """The operator already answered "who is this?" by typing a known name."""
+def test_an_existing_name_with_uncertain_face_requires_review(token):
+    """A matching name cannot bypass the new strong face-evidence requirement."""
     name = _unique("known")
     owner = _enroll_new(token, name, FACE_A)
-
+    before = _counts(owner)
     status, body = _upload(token, name, FACE_B)
-    assert status == 200, f"a known name was sent for review: {body}"
-    assert body["identity_id"] == owner
-    assert body["identity_created"] is False
-    images, _embeddings, _ = _counts(owner)
-    assert images == 2
+    assert status == 202 and body["decision_required"], body
+    assert body["target_identity_id"] == owner
+    assert _counts(owner) == before
+
+
+@pytest.mark.parametrize("by_name", [False, True])
+def test_existing_person_with_a_different_face_requires_review(token, by_name):
+    name = _unique("mismatch")
+    owner = _enroll_new(token, name, FACE_A)
+    before = _counts(owner)
+    if by_name:
+        status, body = _upload(token, name, FACE_C)
+    else:
+        status, body = _http("POST", f"/api/identities/{owner}/images", token=token,
+            fields={"is_face_image": "false"},
+            files={"photo": ("face_c.png", _read(FACE_C), "image/png")})
+    assert status == 202, body
+    assert body["decision_required"] is True
+    assert body["target_identity_id"] == owner
+    assert any(c["identity_id"] == owner for c in body["candidate_identities"])
+    assert _counts(owner) == before
+    status, cancelled = _confirm(token, action="cancel", upload_token=body["upload_token"])
+    assert status == 200 and cancelled["cancelled"]
 
 
 # ---------------------------------------------------------------------------

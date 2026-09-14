@@ -358,6 +358,8 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
         description="Local speech-to-text model file (checked when STT_PROVIDER is not none)"),
     "OFFLINE_BUNDLE_MANIFEST": SettingMeta("string", None, None, None, None, "container_recreate", allow_empty=True,
         description="Path of the verified offline bundle manifest; must exist when set"),
+    "SQL_AGENT_USE_KNOWLEDGE_BASE": SettingMeta("boolean", None, None, None, None, "api_restart",
+        description="Put verified examples in front of SQL generation. Off only to measure what they contribute."),
     "SQL_AGENT_LEARN_FROM_QUERIES": SettingMeta("boolean", None, None, None, None, "api_restart",
         description="Add answered turns to the knowledge base (keep off: only verified seeds belong there)"),
 }

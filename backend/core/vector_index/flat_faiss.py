@@ -345,6 +345,31 @@ class FlatFaissIndex:
         except OSError:
             pass
 
+    def purge(self, keys: Sequence[int]) -> None:
+        """Privacy deletion: remove keys and obsolete snapshots, including quarantine.
+
+        Called under the manager's distributed snapshot lock. Old generations
+        are derived caches, but still contain biometrics until removed.
+        Unlike routine pruning, any cleanup failure is propagated to the
+        durable person-deletion journal for retry.
+        """
+        from pathlib import Path
+        with self._lock:
+            self.remove(keys)
+            self.save()
+            root = Path(self._snapshot_root()).resolve()
+            if not root.is_relative_to(Path(self.storage_dir).resolve()):
+                raise ValueError("Snapshot directory escaped index storage")
+            current = Path(self._pointer_path()).read_text().strip()
+            for child in root.iterdir():
+                if child.name == current:
+                    continue
+                if child.name.startswith('snapshot-') or child.name == QUARANTINE_DIR:
+                    if child.is_symlink() or not child.resolve().is_relative_to(root):
+                        raise ValueError("Unsafe snapshot cleanup target")
+                    if child.is_dir():
+                        shutil.rmtree(child)
+
     def load(self) -> LoadResult:
         """Restore the pointed-to snapshot, verifying it before trusting it.
 

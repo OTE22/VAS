@@ -867,3 +867,31 @@ camera identifiers.
 [`10_SECURITY_CHECKLIST.md`](10_SECURITY_CHECKLIST.md) ·
 [`21_WEBHOOK_TROUBLESHOOTING.md`](21_WEBHOOK_TROUBLESHOOTING.md) ·
 [`27_RECOGNITION_DEBUG_GUIDE.md`](27_RECOGNITION_DEBUG_GUIDE.md)
+
+
+## September 14 deployment update
+
+See [the deployment and feature update](59_SEPTEMBER_DEPLOYMENT_UPDATE.md) for
+known-face administration, appearance provenance, GPU/CPU runtime selection,
+static-IP recovery, and the separate chatbot deployment and saved-title fixes.
+
+### Chatbot label or conversation title is Chinese
+
+**Data Mode** comes from the persisted chatbot preset. The separate chatbot
+entrypoint installs the English deployment preset for recognized original
+Chinese files; rebuilding VAS does not run that entrypoint. See the September
+update for source, volume and backup locations.
+
+A Chinese sidebar/header/browser-tab title is saved conversation metadata.
+Rename that conversation through the supported session rename operation and
+refresh the page. Existing messages and titles are not retroactively translated
+by changing the preset. The screenshot's title was renamed to
+**Database Registration Count** and verified on September 14.
+
+### Firefox cannot find `armyeye-chatbot`
+
+Check hostname resolution on the computer showing the error. Configure LAN DNS
+or that computer's hosts file so both application hostnames point to the server.
+The static-IP migration script does not configure client DNS. Once the hostname
+resolves, use HTTPS and trust the internal CA on that client; then test the VAS
+Tracking People SSO launch again.

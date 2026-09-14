@@ -53,6 +53,7 @@
     // ------------------------------------------------------------------
     let currentUser = null;
     let currentSessionId = null;
+    let preparingRequest = false;
     let activeRequestId = null;               // at most one in-flight query
     const activeRequests = new Map();         // request_id -> request record
     const timers = new Set();
@@ -604,11 +605,12 @@
         const input = document.getElementById('chatInput');
         const messagesContainer = document.getElementById('chatMessages');
         if (!input || !messagesContainer) return;
-        if (activeRequestId) return; // double-submit guard (state, not luck)
+        if (activeRequestId || preparingRequest) return; // includes conversation creation
 
         const query = input.value.trim();
         if (!query) return;
 
+        preparingRequest = true;
         window.lastQuery = query;
         const welcomeMsg = document.getElementById('welcomeMessage');
         if (welcomeMsg) welcomeMsg.classList.add('hidden');
@@ -625,6 +627,8 @@
             } catch (e) { conversationId = null; }
         }
 
+        preparingRequest = false;
+        if (activeRequestId) return;
         addMessage('user', query);
         input.value = '';
         if (input.tagName === 'TEXTAREA') input.style.height = 'auto';
@@ -1001,6 +1005,15 @@
     // ------------------------------------------------------------------
     // Response tools (copy / retry / export) — raw markdown, never DOM scrape
     // ------------------------------------------------------------------
+    // Report exports require substantial prose and report structure, in either language.
+    function isExportableReport(raw) {
+        const text = String(raw || '').trim();
+        const long = text.length >= 1200 && text.split(/\s+/u).length >= 180;
+        const structured = /^#{1,6}\s|^\|.+\|$|^\s*(?:[-*]|\d+[.)])\s/m.test(text);
+        const report = /\b(report|summary|findings|analysis|recommendations)\b|\u062a\u0642\u0631\u064a\u0631|\u0645\u0644\u062e\u0635|\u0646\u062a\u0627\u0626\u062c|\u062a\u062d\u0644\u064a\u0644|\u062a\u0648\u0635\u064a\u0627\u062a/iu.test(text);
+        return long && (structured || report);
+    }
+
     function addResponseTools(req) {
         const messageDiv = req.responseEl && req.responseEl.closest('.chat-message');
         if (!messageDiv) return;
@@ -1017,6 +1030,7 @@
             b.type = 'button';
             b.className = `export-btn ${cls}`;
             b.title = title;
+            b.setAttribute('aria-label', title);
             const i = document.createElement('i');
             i.className = `fas ${iconCls}`;
             b.appendChild(i);
@@ -1053,8 +1067,10 @@
 
         bar.appendChild(copyBtn);
         bar.appendChild(retryBtn);
-        bar.appendChild(pdfBtn);
-        bar.appendChild(wordBtn);
+        if (isExportableReport(raw)) {
+            bar.appendChild(pdfBtn);
+            bar.appendChild(wordBtn);
+        }
         messageContent.appendChild(bar);
     }
 
@@ -1291,6 +1307,7 @@
         const sidebar = document.getElementById('historySidebar');
         const toggleBtn = document.getElementById('sidebarToggleBtn');
         if (!sidebar) return;
+        const focusWasInside = sidebar.contains(document.activeElement);
         const isOpening = !sidebar.classList.contains('open');
         sidebar.classList.toggle('open');
         sidebar.setAttribute('aria-hidden', isOpening ? 'false' : 'true');
@@ -1302,8 +1319,10 @@
             toggleBtn.style.display = isOpening ? 'none' : 'flex';
             toggleBtn.setAttribute('aria-expanded', String(isOpening));
         }
-        if (!isOpening && sidebar.contains(document.activeElement)) toggleBtn?.focus();
-        if (isOpening && window.innerWidth <= 968) document.getElementById('sidebarCloseBtn')?.focus();
+        if (!isOpening && focusWasInside) toggleBtn?.focus();
+        if (isOpening && window.innerWidth <= 968) requestAnimationFrame(() => {
+            if (sidebar.classList.contains('open')) document.getElementById('sidebarCloseBtn')?.focus();
+        });
     }
 
     function startNewChat() {
@@ -1387,6 +1406,63 @@
         });
     }
 
+    function setupSidebarResize() {
+        const sidebar = document.getElementById('historySidebar');
+        const handle = document.getElementById('sidebarResizeHandle');
+        if (!sidebar || !handle) return;
+        let preferredWidth = 260;
+        let drag = null;
+        try {
+            const saved = Number(localStorage.getItem('tracking_sidebar_width'));
+            if (Number.isFinite(saved) && saved >= 240) preferredWidth = Math.min(560, saved);
+        } catch (e) { }
+        const maximum = () => Math.min(560, Math.floor(window.innerWidth * 0.45));
+        const apply = () => {
+            const width = Math.max(240, Math.min(maximum(), preferredWidth));
+            document.body.style.setProperty('--conversation-sidebar-width', `${width}px`);
+            handle.setAttribute('aria-valuemax', String(Math.max(240, maximum())));
+            handle.setAttribute('aria-valuenow', String(width));
+        };
+        const save = () => {
+            try { localStorage.setItem('tracking_sidebar_width', String(preferredWidth)); } catch (e) { }
+        };
+        const change = width => {
+            preferredWidth = Math.max(240, Math.min(maximum(), width));
+            apply();
+        };
+        handle.addEventListener('pointerdown', e => {
+            if (e.button !== 0 || window.innerWidth <= 968) return;
+            e.preventDefault();
+            handle.focus();
+            drag = { id: e.pointerId, x: e.clientX, width: sidebar.getBoundingClientRect().width };
+            handle.setPointerCapture(e.pointerId);
+            document.body.classList.add('sidebar-resizing');
+        });
+        handle.addEventListener('pointermove', e => {
+            if (drag && e.pointerId === drag.id) change(drag.width + e.clientX - drag.x);
+        });
+        const finish = () => {
+            if (!drag) return;
+            drag = null;
+            document.body.classList.remove('sidebar-resizing');
+            save();
+        };
+        handle.addEventListener('pointerup', finish);
+        handle.addEventListener('pointercancel', finish);
+        handle.addEventListener('lostpointercapture', finish);
+        handle.addEventListener('dblclick', () => { change(260); save(); });
+        handle.addEventListener('keydown', e => {
+            const width = Number(handle.getAttribute('aria-valuenow'));
+            const choices = { ArrowLeft: width - 20, ArrowRight: width + 20, Home: 240, End: maximum() };
+            if (!(e.key in choices)) return;
+            e.preventDefault();
+            change(choices[e.key]);
+            save();
+        });
+        window.addEventListener('resize', apply);
+        apply();
+    }
+
     function setupSidebar() {
         const toggleBtn = document.getElementById('sidebarToggleBtn');
         const closeBtn = document.getElementById('sidebarCloseBtn');
@@ -1468,6 +1544,7 @@
 
         setupChatInterface();
         setupSidebar();
+        setupSidebarResize();
         setupHelpers();
 
         window.addEventListener('pagehide', destroy);
@@ -1517,6 +1594,8 @@
     // ONE escape-first markdown pipeline and ONE notice system on the page.
     window.trackingUI = {
         renderInto,
+        addResponseTools,
+        isExportableReport,
         showNotice,
         scrollToBottom,
         toggleSidebar,

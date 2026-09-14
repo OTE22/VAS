@@ -45,10 +45,17 @@ const user = { role: 'admin', user: { role: 'admin' }, username: 'test', permiss
                 first_seen_at: new Date().toISOString(), last_seen_at: new Date().toISOString(),
                 appearances_count: 1, pipeline_ids: ['camera-1'],
             }));
+            for (const identity of identities) identity.camera_events = {
+                'camera-1': { identity_id: identity.id, pipeline_id: 'camera-1',
+                    event_id: 'initial-' + identity.id, appearance_id: 1,
+                    timestamp: identity.last_seen_at, appearances_count: 1,
+                    snapshot_url: identity.snapshot_url }
+            };
             await page.route('**/*', async route => {
                 const request = route.request(), url = new URL(request.url());
                 const json = data => route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
-                if (!['GET', 'HEAD'].includes(request.method())) writes.push(url.pathname);
+                if (!['GET', 'HEAD'].includes(request.method()) && url.pathname !== '/api/search/by-image') writes.push(url.pathname);
+                if (url.pathname === '/api/search/by-image') return route.fulfill({contentType:'application/json', headers:{'X-Faces-Detected':'2'}, body:JSON.stringify([{identity_id:identities[0].id,type:'unknown',display_name:'<img src=x onerror=alert(1)>',similarity:.9,appearances_count:2,last_seen_at:null}])});
                 if (url.pathname.startsWith('/test-images/')) {
                     const name = path.basename(url.pathname, '.jpg');
                     if (name === 'slow') await new Promise(resolve => setTimeout(resolve, 350));
@@ -59,6 +66,8 @@ const user = { role: 'admin', user: { role: 'admin' }, username: 'test', permiss
                 if (url.pathname === '/api/dashboard/pipelines') return json({ complete: true, pipelines: [{ pipeline_id: 'camera-1', display_name: 'Test camera' }] });
                 if (url.pathname === '/api/pipelines') return json([{ pipeline_id: 'camera-1', location_name: 'Test camera' }]);
                 if (url.pathname === '/api/admin/unknown') return json({ identities, total: identities.length, total_pages: 1, stats: { total_unknown: 4, total_appearances: 4, active_cameras: 1 } });
+                if (url.pathname === '/api/admin/merge-suggestions') return json([{id:42, identity_ids:identities.slice(0,2).map(p=>p.id), identity_count:2, confidence_percent:90, representative_snapshots:[]}]);
+                if (url.pathname.startsWith('/api/admin/identity/')) return json(identities.find(p=>p.id === url.pathname.split('/').at(-1)) || {});
                 if (url.pathname.startsWith('/api/auth/me')) return json(user);
                 if (url.pathname.startsWith('/api/')) return json({});
                 if (url.pathname.endsWith('/navbar-loader.js')) return route.fulfill({ contentType: 'text/javascript', body: `window.getAuthMe = window.getAuthPrivileges = async () => (${JSON.stringify(user)}); const logout = document.createElement('button'); logout.id = 'logout-btn'; logout.hidden = true; document.getElementById('navbar-placeholder').append(logout);` });
@@ -75,16 +84,49 @@ const user = { role: 'admin', user: { role: 'admin' }, username: 'test', permiss
                 await page.waitForFunction(() => window.testSocket?.readyState === 1 && window.testSocket.onmessage);
                 const dashboard = target === '/dashboard';
                 const emit = message => page.evaluate(message => window.emitTestEvent(message), message);
-                if (dashboard) await emit({ type: 'initial_data', data: [{ pipeline_id: 'camera-1', timestamp: new Date().toISOString(), faces: ['portrait', 'landscape', 'square', 'missing'].map(name => ({ name, similarity: 0.5, image: images[name] || null })) }] });
+                if (dashboard) {
+                    await emit({ type: 'initial_data', unknown_counts: { 'camera-1': 4, 'camera-empty': 21 }, data: [] });
+                    assert.equal(await page.locator('.pipeline-card').count(), 0, 'unknown counts alone never create known-person panels');
+                    await emit({ type: 'initial_data', unknown_counts: { 'camera-1': 4, 'camera-empty': 21 }, data: [{ pipeline_id: 'camera-1', timestamp: new Date().toISOString(), faces: ['portrait', 'landscape', 'square', 'missing'].map(name => ({ name, similarity: 0.5, image: images[name] || null })) }] });
+                    await emit({ type: 'unknown_activity', pipeline_id: 'camera-empty', event_id: 'unknown-only-live' });
+                    await page.waitForTimeout(150);
+                    assert.equal(await page.locator('.pipeline-card').count(), 1, 'live unknown-only activity does not create a panel');
+                    assert.match(await page.locator('.unknown-badge').innerText(), /4 unknown/i);
+                }
                 await page.waitForFunction(() => document.querySelectorAll('.face-preview[data-image-state="ready"]').length === 3);
+                if (!dashboard) {
+                    await page.locator('#merge-suggestions-btn').click();
+                    await page.locator('#merge-suggestions-list [data-action="selectSuggestion"]').click();
+                    await page.waitForFunction(() => document.getElementById('selected-count-header').textContent === '2');
+                    await page.waitForFunction(() => document.querySelectorAll('#selected-identities-list [data-action="removeFromSelection"]').length === 2);
+                    await page.locator('#selected-identities-list [data-action="removeFromSelection"]').first().click();
+                    assert.equal(await page.locator('#selected-count-header').innerText(), '1');
+                    assert.equal(await page.locator('#merge-multiple-btn').isDisabled(), true);
+                    await page.locator('#cancel-merge-btn').click();
+                    await page.locator('#multi-select-toggle').click();
+                    await page.waitForFunction(() => document.querySelectorAll('.face-preview[data-image-state="ready"]').length === 3);
+                    await page.locator('#search-by-image-btn').click();
+                    await page.locator('#search-image-file').setInputFiles({name:'face.jpg',mimeType:'image/jpeg',buffer:Buffer.from(images.portrait,'base64')});
+                    await page.locator('#search-image-form button[type="submit"]').click();
+                    await page.waitForFunction(() => document.querySelectorAll('#search-results-grid .identity-card').length === 1);
+                    assert.equal(await page.locator('#search-results-grid h3').innerText(), '<img src=x onerror=alert(1)>');
+                    assert.equal(await page.locator('#search-results-grid h3 img').count(), 0);
+                    assert.match(await page.locator('#search-results-grid').innerText(), /2 faces detected/);
+                    await page.locator('#close-search-modal').click();
+                }
                 const missing = dashboard ? '.detection-item[data-face="missing"]' : `[data-identity-id="${identities[3].id}"]`;
-                assert.equal(await page.locator(`${missing} .face-placeholder`).isVisible(), true);
+                assert.equal(await page.locator(`${missing} .face-placeholder`).isVisible(), dashboard);
+                if (!dashboard) {
+                    assert.equal(await page.locator(missing).isVisible(), false, 'empty unknown cards are hidden');
+                    assert.equal(await page.locator('[data-visible-identity-count]').innerText(), '3 identities');
+                }
                 const arrival = (shape, similarity) => dashboard
                     ? { type: 'new_detection', data: { pipeline_id: 'camera-1', event_id: `event-${similarity}`, timestamp: new Date().toISOString(), should_show_alert: false, faces: [{ name: 'missing', similarity, image: images[shape] }] } }
-                    : { type: 'new_unknown_detection', data: { pipeline_id: 'camera-1', identity_id: identities[3].id, timestamp: new Date().toISOString(), face: { name: 'Unknown', image: images[shape] } } };
+                    : { type: 'new_unknown_detection', data: { pipeline_id: 'camera-1', identity_id: identities[3].id, event_id: `live-${similarity}`, appearance_id: Math.round(similarity * 100), appearances_count: 2, snapshot_url: `/test-images/${shape}.jpg`, timestamp: new Date().toISOString(), face: { name: 'Unknown', image: images[shape] } } };
                 await emit(arrival('portrait', 0.6));
                 await page.waitForFunction(selector => document.querySelector(selector + ' img').naturalHeight === 360, missing);
                 assert.equal(await page.locator(`${missing} .face-placeholder`).isVisible(), false, 'missing image replaced on live arrival');
+                assert.equal(await page.locator(missing).isVisible(), true, 'valid live image restores the card');
                 await page.evaluate(selector => { window.originalImageNode = document.querySelector(selector + ' img'); }, missing);
                 await emit(arrival('landscape', 0.7));
                 await emit(arrival('square', 0.8));
@@ -121,6 +163,20 @@ const user = { role: 'admin', user: { role: 'admin' }, username: 'test', permiss
 
                 for (const [width, height] of [[1920, 1080], [1366, 768], [390, 844]]) {
                     await page.setViewportSize({ width, height });
+                    if (dashboard) {
+                        const panels = await page.locator('.pipeline-card').evaluateAll(cards => cards.map(card => {
+                            const content = card.querySelector('.pipeline-content');
+                            const bounds = card.getBoundingClientRect();
+                            return {
+                                noScroll: content.scrollHeight <= content.clientHeight + 1 && content.scrollWidth <= content.clientWidth + 1,
+                                fits: [...content.children].every(tile => {
+                                    const rect = tile.getBoundingClientRect();
+                                    return rect.bottom <= bounds.bottom && rect.right <= bounds.right && rect.left >= bounds.left;
+                                })
+                            };
+                        }));
+                        assert.ok(panels.every(panel => panel.noScroll && panel.fits), `${width}: complete face cards fit without internal scrolling`);
+                    }
                     const geometry = await page.locator('.face-media').evaluateAll(frames => frames.map(frame => {
                         const img = frame.querySelector('img'), box = frame.getBoundingClientRect(), rect = img.getBoundingClientRect(), style = getComputedStyle(img);
                         return { fit: style.objectFit, filter: style.filter, transform: style.transform, square: Math.abs(box.width - box.height) < 2,
@@ -140,6 +196,61 @@ const user = { role: 'admin', user: { role: 'admin' }, username: 'test', permiss
                             rect.bottom <= (footer ? footer.getBoundingClientRect().top : innerHeight) + 1;
                     }), true, `${target} ${width}: first image can be fully viewed above footer`);
                     await page.screenshot({ path: path.join(os.tmpdir(), `face-cards-${dashboard ? 'dashboard' : 'unknown'}-${width}.png`), fullPage: true });
+                }
+                if (dashboard) {
+                    await emit({ type: 'initial_data', data: [], unknown_counts: { 'camera-1': 10 } });
+                    assert.equal(await page.locator('.pipeline-card').count(), 0, 'clearing known detections removes the existing panel despite unknown activity');
+                }
+                if (!dashboard) {
+                    await page.evaluate(() => {
+                        document.getElementById('unknown-grid').replaceChildren(createPipelineGroup('deleted-seed-camera', [{
+                            id: 'deleted-seed', type: 'unknown', snapshot_url: '/test-images/broken.jpg',
+                            last_seen_at: new Date().toISOString(), appearances_count: 1
+                        }]));
+                    });
+                    await page.waitForFunction(() => document.querySelector('[data-identity-id="deleted-seed"] img').dataset.imageState === 'unavailable');
+                    assert.equal(await page.locator('[data-identity-id="deleted-seed"]').isVisible(), false, '404 images leave no visible small card');
+                    assert.equal(await page.locator('#unknown-grid .pipeline-group').isVisible(), false, 'empty camera group hidden');
+                    assert.equal(await page.locator('#no-results').isVisible(), true, 'all-missing page shows an empty state');
+                    assert.match(await page.locator('#no-results').innerText(), /No face images available/);
+                    await page.evaluate(image => updateIdentityCard('deleted-seed', {snapshot_url: 'data:image/jpeg;base64,' + image}), images.portrait);
+                    await page.waitForFunction(() => !document.querySelector('[data-identity-id="deleted-seed"]').hidden);
+                    assert.equal(await page.locator('#unknown-grid .pipeline-group').isVisible(), true, 'live photo restores hidden group');
+                    assert.equal(await page.locator('#no-results').isVisible(), false);
+                    await page.evaluate(() => {
+                        const person = (id, pipeline_id, timestamp) => ({id, pipeline_id, type:'unknown',
+                            event_id:`initial-${id}-${pipeline_id}`, appearance_id:1,
+                            last_seen_at:timestamp, appearances_count:1, snapshot_url:'/test-images/portrait.jpg'});
+                        allPipelineGroups = [
+                            {id:'01', identities:[person('a','01','2026-09-13T10:15:32Z'), person('b','01','2026-09-13T10:16:00Z')]},
+                            {id:'04', identities:[person('a','04','2026-09-13T10:21:07Z')]}
+                        ];
+                        document.getElementById('unknown-grid').replaceChildren(...allPipelineGroups.map(g => createPipelineGroup(g.id,g.identities)));
+                    });
+                    const cardA1 = '[data-identity-id="a"][data-pipeline-id="01"] [data-last-seen]';
+                    const cardA4 = '[data-identity-id="a"][data-pipeline-id="04"] [data-last-seen]';
+                    const cardB1 = '[data-identity-id="b"][data-pipeline-id="01"] [data-last-seen]';
+                    const beforeA1 = await page.locator(cardA1).innerText();
+                    const beforeA4 = await page.locator(cardA4).innerText();
+                    const beforeB1 = await page.locator(cardB1).innerText();
+                    const occurrence = {identity_id:'a',pipeline_id:'01',event_id:'committed-4',appearance_id:4,
+                        timestamp:'2026-09-13T10:45:18Z',appearances_count:2,snapshot_url:'/test-images/square.jpg'};
+                    await emit({type:'new_unknown_detection',data:occurrence});
+                    assert.notEqual(await page.locator(cardA1).innerText(), beforeA1);
+                    assert.equal(await page.locator(cardA4).innerText(), beforeA4);
+                    assert.equal(await page.locator(cardB1).innerText(), beforeB1);
+                    const current = await page.locator(cardA1).innerText();
+                    await emit({type:'new_unknown_detection',data:{...occurrence,event_id:'delayed-5',appearance_id:5,timestamp:'2026-09-13T10:17:00Z'}});
+                    assert.equal(await page.locator(cardA1).innerText(), current);
+                    await emit({type:'identities_merged', data:{source_ids:['a'], target_id:'b'}});
+                    await page.waitForTimeout(400);
+                    assert.equal(await page.locator('[data-identity-id="a"]').count(), 0, 'merge event refreshes cards in another browser');
+                    await emit({type:'new_unknown_detection',data:{...occurrence,event_id:'late-after-merge',appearance_id:6,timestamp:'2026-09-13T11:00:00Z'}});
+                    assert.equal(await page.locator('[data-identity-id="a"]').count(), 0, 'late broadcast cannot recreate merged-away cards');
+                    await emit({type:'identity_promoted', data:{identity_id:'b'}});
+                    await page.waitForTimeout(400);
+                    await emit({type:'new_unknown_detection',data:{...occurrence,identity_id:'b',event_id:'late-after-promotion',appearance_id:7,timestamp:'2026-09-13T11:01:00Z'}});
+                    assert.equal(await page.locator('[data-identity-id="b"]').count(), 0, 'promotion event prevents stale unknown cards');
                 }
                 assert.deepEqual(errors, []); assert.deepEqual(writes, []);
                 console.log(`PASS ${target}: aspect ratios, missing-to-live image, rapid updates, stale loads, failed loads, stable nodes, desktop/mobile geometry; no API writes.`);

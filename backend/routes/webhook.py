@@ -400,6 +400,11 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
 
     OPTIMIZED: Uses face tracking to avoid duplicate processing
     """
+    from backend.core.event_time import observation_time
+    try:
+        observed_at, timestamp_source = observation_time(payload.get('captured_at'), datetime.utcnow())
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     request_id = str(uuid.uuid4())[:8]  # short unique ID for logging
 
     try:
@@ -551,6 +556,8 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
                 "image_b64": img_b64,
                 "predictions": image_predictions,
                 "timestamp": time.time(),
+                "observed_at": observed_at.isoformat(),
+                "timestamp_source": timestamp_source,
                 "request_id": request_id,
                 "image_index": idx,  # Track which image this is
             })
@@ -742,4 +749,3 @@ async def get_webhook_image(pipeline_id: str, filename: str,
 
     return FileResponse(path=str(filepath), media_type="image/jpeg",
                         filename=filename)
-

@@ -2,7 +2,7 @@
 
 **Generated from the running application's OpenAPI document — do not edit by hand.** Regenerate with `scripts/generate_api_reference.py` after any route change; a stale copy is worse than none.
 
-- **292 operations** across **266 paths**
+- **298 operations** across **271 paths**
 - Service: `Face Recognition Service` v`5.0.0`
 
 ## How to read this
@@ -49,7 +49,8 @@
 - [System Management](#system-management) — 6 operations
 - [Metrics](#metrics) — 1 operations
 - [Admin Tutorial](#admin-tutorial) — 2 operations
-- [Admin Pages](#admin-pages) — 26 operations
+- [Admin Pages](#admin-pages) — 27 operations
+- [Known Faces](#known-faces) — 5 operations
 - [SSO](#sso) — 3 operations
 
 ---
@@ -525,6 +526,7 @@ Server-rendered HTML pages for the admin console. These return pages, not JSON, 
 | `GET` | `/admin/identity/{identity_id}` | Identity Profile | `identity_id` | — | — | 200, 422 |
 | `GET` | `/admin/ingest-credentials` | Ingest Credentials Page | — | — | — | 200 |
 | `GET` | `/admin/intelligence` | Admin Intelligence | — | — | — | 200 |
+| `GET` | `/admin/known` | Admin Known Faces | — | — | — | 200 |
 | `GET` | `/admin/live-alerts` | Admin Live Alerts | — | — | — | 200, 422 |
 | `GET` | `/admin/logs` | Logs Page | — | — | — | 200 |
 | `GET` | `/admin/ml-model` | Admin Ml Model | — | — | — | 200 |
@@ -545,6 +547,16 @@ Server-rendered HTML pages for the admin console. These return pages, not JSON, 
 | `GET` | `/ping` | Ping | — | — | — | 200 |
 | `GET` | `/signin` | Signin | — | — | — | 200 |
 | `GET` | `/tracking-people` | Tracking People | — | — | — | 200 |
+
+## Known Faces
+
+| Method | Path | Summary | Path params | Query | Body | Returns |
+|---|---|---|---|---|---|---|
+| `GET` | `/api/admin/known-faces` | List Known Faces | — | `q`, `status`, `sort`, `page`, `page_size` | — | 200, 422 |
+| `DELETE` | `/api/admin/known-faces/{identity_id}` | Delete Known Face | `identity_id` | — | yes | 200, 422 |
+| `PATCH` | `/api/admin/known-faces/{identity_id}` | Rename Known Face | `identity_id` | — | yes | 200, 422 |
+| `POST` | `/api/admin/known-faces/{identity_id}/activation` | Activate Known Face | `identity_id` | — | yes | 200, 422 |
+| `GET` | `/api/admin/known-faces/{identity_id}/deletion-preview` | Preview Known Face Deletion | `identity_id` | — | — | 200, 422 |
 
 ## SSO
 

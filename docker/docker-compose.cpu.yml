@@ -26,6 +26,39 @@
 name: face_detector_dev
 
 services:
+  # Development backups use the same storage and database as the API.
+  # Separate destination volume; source volumes are mounted read-only.
+  backup:
+    image: pgvector/pgvector:pg15
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:-admin}
+      PGDATABASE: face_recognition
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ../scripts/backup:/scripts:ro
+      - backup_data:/backups
+      - ../storage:/data/storage:ro
+      - face_database_data:/data/database:ro
+      - ../models/ml:/data/ml:ro
+    entrypoint: ["/bin/sh", "/scripts/backup-loop.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "/scripts/healthcheck.sh"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    restart: unless-stopped
+    networks:
+      - face_recognition_network
   # PostgreSQL Database with pgvector extension
   postgres:
     image: pgvector/pgvector:pg15  # pgvector for vector similarity search
@@ -301,6 +334,9 @@ services:
       OLLAMA_INTERPRETER_MODEL: ${OLLAMA_INTERPRETER_MODEL:-}
       # Storing question->SQL pairs after execution: OFF - the bot learned
       # its own wrong answers and they outranked every correction.
+      # Verified examples in front of SQL generation. Off ONLY to measure
+      # what the knowledge base contributes to a hard query.
+      SQL_AGENT_USE_KNOWLEDGE_BASE: ${SQL_AGENT_USE_KNOWLEDGE_BASE:-true}
       SQL_AGENT_LEARN_FROM_QUERIES: ${SQL_AGENT_LEARN_FROM_QUERIES:-false}
       OLLAMA_TEMPERATURE: "0.1"
       # Per-call ceiling sized for the 7B on CPU (a planner-sized prompt
@@ -393,6 +429,7 @@ services:
       - ../assets:/app/assets:ro
       - ../storage:/app/storage  # Unified storage: faces/ for known faces, {pipeline_id}/ for detected faces
       - face_database_data:/app/database
+      - backup_data:/backups:ro
       - chromadb_cache:/home/appuser/.cache/chroma
       # HF_HOME points here (line ~223), but without a volume the
       # sentence-transformers model was re-downloaded from huggingface.co on
@@ -666,6 +703,8 @@ services:
       - face_recognition_network
 
 volumes:
+  backup_data:
+    driver: local
   postgres_data:
     driver: local
   redis_data:

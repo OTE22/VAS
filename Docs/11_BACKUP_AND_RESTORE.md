@@ -177,3 +177,10 @@ failure mode that actually loses data. The rule carries an explicit
 Prometheus gauge reads 0 and `time() - 0` would otherwise fire it permanently.
 
 The API container mounts `/backups` read-only purely so this metric has data.
+
+
+## September 14 deployment update
+
+See [the deployment and feature update](59_SEPTEMBER_DEPLOYMENT_UPDATE.md) for
+known-face administration, appearance provenance, GPU/CPU runtime selection,
+static-IP recovery, and the separate chatbot deployment and saved-title fixes.

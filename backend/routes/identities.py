@@ -8,7 +8,7 @@ import os
 import sys
 import logging
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request, Query, Response
 from fastapi.responses import JSONResponse
@@ -320,6 +320,7 @@ def _validated_decision(value):
 class PromoteRequest(BaseModel):
     display_name: str
     person_code: Optional[str] = None
+    confirm_create_new: bool = False
     # MANDATORY. Promoting is one of two mutually exclusive answers to "who is
     # this?", and the audit trail is only useful if it records which was given.
     decision: str
@@ -389,7 +390,8 @@ class SearchResult(BaseModel):
     display_name: Optional[str]
     similarity: float
     best_snapshot_path: Optional[str]
-    last_seen_at: str
+    snapshot_url: Optional[str] = None
+    last_seen_at: Optional[str] = None
     appearances_count: int
 
 
@@ -862,6 +864,7 @@ async def list_unknown_identities(
             filters=filters
         )
 
+        cache_key += ":camera-events-v1"
         # Try to get from cache
         cached_result = await redis_cache_service.get(cache_key)
         if cached_result:
@@ -905,17 +908,18 @@ async def list_unknown_identities(
         else:
             conditions.append(Identity.status == IdentityStatus.ACTIVE)
 
+        event_conditions = [IdentityAppearance.identity_id == Identity.id]
+        if pipeline_id:
+            event_conditions.append(IdentityAppearance.pipeline_id == pipeline_id)
+        if user_pipelines is not None:
+            event_conditions.append(IdentityAppearance.pipeline_id.in_(user_pipelines))
         if date_from:
-            conditions.append(Identity.last_seen_at >= _parse_filter_bound(date_from))
+            event_conditions.append(IdentityAppearance.start_time >= _parse_filter_bound(date_from))
         elif window_cutoff is not None:
-            # UNKNOWN_FACE_DISPLAY_HOURS display window (Show-all toggle bypasses)
-            conditions.append(Identity.last_seen_at >= window_cutoff)
-
+            event_conditions.append(IdentityAppearance.start_time >= window_cutoff)
         if date_to:
-            # EXCLUSIVE. A date-only bound was widened to cover its own day by
-            # _parse_filter_bound; `<=` on a bare date meant midnight, so
-            # From = To = today matched nothing at all.
-            conditions.append(Identity.last_seen_at < _parse_filter_bound(date_to, end=True))
+            event_conditions.append(IdentityAppearance.start_time < _parse_filter_bound(date_to, end=True))
+        conditions.append(select(IdentityAppearance.id).where(*event_conditions).exists())
 
         if min_appearances:
             conditions.append(Identity.appearances_count >= min_appearances)
@@ -955,6 +959,8 @@ async def list_unknown_identities(
         pipelines_by_identity = await pipelines_for(
             db, [identity.id for identity in identities])
 
+        from backend.core.appearance_events import latest_camera_events
+        camera_events = await latest_camera_events(db, [i.id for i in identities], user_pipelines)
         # Get camera counts and pipeline IDs for each identity
         identity_list = []
 
@@ -1082,7 +1088,8 @@ async def list_unknown_identities(
                 "appearances_count": identity.appearances_count,
                 "best_snapshot_path": best_snapshot_path,  # Keep original path for reference
                 "snapshot_url": snapshot_url,  # Backend provides ready-to-use URL
-                "pipeline_ids": pipeline_ids  # List of pipeline IDs where this identity was seen
+                "pipeline_ids": pipeline_ids,  # List of pipeline IDs where this identity was seen
+                "camera_events": camera_events.get(str(identity.id), {})
             })
         
         
@@ -1243,7 +1250,9 @@ async def get_identity_details(
         for app in appearances:
             app_snapshot_url = path_to_url(app.best_snapshot_path, storage_dir) if app.best_snapshot_path else None
             
+            from backend.core.appearance_events import event_payload
             appearances_data.append({
+                **event_payload(app),
                 "id": app.id,
                 "pipeline_id": app.pipeline_id,
                 "track_id": app.track_id,
@@ -1478,535 +1487,99 @@ async def promote_unknown_to_known(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Promote an unknown identity to known.
-    - Admin: can promote any unknown identity
-    - Regular users: can only promote unknown identities from their accessible pipelines
-    """
-    logger.info(f"[PROMOTE] ========================================")
-    logger.info(f"[PROMOTE] 🚀 Starting promotion request")
-    logger.info(f"[PROMOTE] User: {current_user.username} (ID: {current_user.id}, Role: {current_user.role})")
-    logger.info(f"[PROMOTE] Identity ID: {identity_id}")
-    logger.info(f"[PROMOTE] Requested display name: '{request.display_name}'")
-    logger.info(f"[PROMOTE] Person code: {getattr(request, 'person_code', None)}")
-    
+    """Promote in one transaction; existing-person review is enforced by the service."""
+    from backend.core.promotion_review import PromotionError
+    from backend.core.identity_merge_lock import lock_identity_mutation
+    from backend.core.enrollment_service import normalize_person_code, PersonCodeError
+    from backend.utils.identity_audit import DECISION_CREATE_NEW
+    # Rollback expires ORM objects; audit refusals using scalar actor data.
+    actor_id, actor_username = current_user.id, current_user.username
+    copied_files = []
     try:
-        # Get identity_service dynamically (may be set during startup)
-        logger.info(f"[PROMOTE] Step 1: Getting identity service...")
-        identity_service = get_identity_service()
-        if not identity_service:
-            logger.error(f"[PROMOTE] ❌ Identity service not available")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Identity service not available"
-            )
-        logger.info(f"[PROMOTE] ✅ Identity service available")
-        logger.info(f"[PROMOTE]   Backend: {'pgvector' if identity_service.use_pgvector else 'faiss'}")
-        
-        # Validate display name (backend handles all validation)
-        logger.info(f"[PROMOTE] Step 2: Validating display name...")
-        if not request.display_name or not request.display_name.strip():
-            logger.error(f"[PROMOTE] ❌ Display name is empty or whitespace")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Display name is required and cannot be empty"
-            )
-        display_name_clean = request.display_name.strip()
-
-        # The schema already guaranteed a valid enum member; this rejects the
-        # one member that contradicts the endpoint. "Promote this as a merge"
-        # is not a coherent instruction, and refusing it here — before any row
-        # is touched — keeps the audit's decision honest rather than recording
-        # a merge that never happened.
-        from backend.utils.identity_audit import DECISION_CREATE_NEW
+        service = get_identity_service()
+        if service is None:
+            raise HTTPException(503, "Identity service not available")
+        identifier = uuid.UUID(identity_id)
+        name = request.display_name.strip()
+        if not name:
+            raise HTTPException(400, "Display name is required")
         if request.decision != DECISION_CREATE_NEW:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(f"decision must be '{DECISION_CREATE_NEW}' on the promote "
-                        f"endpoint; use the merge endpoint to merge into an "
-                        f"existing person"))
-        logger.info(f"[PROMOTE] ✅ Display name validated: '{display_name_clean}'")
-        
-        identity_uuid = uuid.UUID(identity_id)
-        logger.info(f"[PROMOTE] Step 3: Parsed identity UUID: {identity_uuid}")
-
-        # person_code is normalized and format-checked BEFORE anything is
-        # written, so a malformed code cannot half-promote an identity. It used
-        # to be accepted, logged and discarded — there was no column for it.
-        from backend.core.enrollment_service import (PersonCodeError,
-                                                     normalize_person_code)
-        try:
-            person_code_display, person_code_key = normalize_person_code(
-                getattr(request, "person_code", None))
-        except PersonCodeError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                                detail=str(exc))
-
-        if person_code_key:
-            taken = (await db.execute(
-                select(Identity.id, Identity.display_name)
-                .where(Identity.person_code_key == person_code_key,
-                       Identity.id != identity_uuid))).first()
-            if taken is not None:
-                # 409, not 422: the code is well-formed, it just already
-                # identifies somebody else. Naming them is what lets the
-                # operator resolve it — they are looking at a typo or a genuine
-                # duplicate person.
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(f"Person code '{person_code_display}' is already used by "
-                            f"{taken[1] or taken[0]}."))
-
-        
-        # Check access for non-admin users
-        logger.info(f"[PROMOTE] Step 4: Checking user access...")
+            raise HTTPException(422, "Use the merge endpoint to merge into an existing person")
         if current_user.role != "admin":
             from backend.auth.auth_service import check_identity_access
-            has_access = await check_identity_access(identity_id, current_user, db)
-            if not has_access:
-                logger.warning(f"[PROMOTE] ❌ Access denied: User {current_user.username} does not have access to identity {identity_id}")
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied to this identity"
-                )
-            logger.info(f"[PROMOTE] ✅ User has access to identity")
-        else:
-            logger.info(f"[PROMOTE] ✅ Admin user - has access to all identities")
-        
-        # Get identity from database to check current state
-        logger.info(f"[PROMOTE] Step 5: Fetching identity from database...")
-        identity_result = await db.execute(
-            select(Identity).where(Identity.id == identity_uuid)
-        )
-        identity_before = identity_result.scalar_one_or_none()
-        
-        if not identity_before:
-            logger.error(f"[PROMOTE] ❌ Identity {identity_id} not found in database")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Identity {identity_id} not found"
-            )
-        
-        logger.info(f"[PROMOTE] ✅ Identity found in database")
-        logger.info(f"[PROMOTE]   Current type: {identity_before.type.value}")
-        logger.info(f"[PROMOTE]   Current status: {identity_before.status.value}")
-        logger.info(f"[PROMOTE]   Current display_name: {identity_before.display_name}")
-        logger.info(f"[PROMOTE]   First seen: {identity_before.first_seen_at}")
-        logger.info(f"[PROMOTE]   Last seen: {identity_before.last_seen_at}")
-        logger.info(f"[PROMOTE]   Appearances count: {identity_before.appearances_count}")
-        logger.info(f"[PROMOTE]   Best snapshot path: {identity_before.best_snapshot_path}")
-        
-        if identity_before.type != IdentityType.UNKNOWN:
-            logger.error(f"[PROMOTE] ❌ Identity is not UNKNOWN (current type: {identity_before.type.value})")
-            # Audit the refusal: re-promoting an already-known identity is the
-            # one business failure an operator will actually hit, and it used
-            # to leave no trace — only unexpected exceptions were audited.
+            if not await check_identity_access(identity_id, current_user, db):
+                raise HTTPException(403, "Access denied to this identity")
+        await lock_identity_mutation(db, exclusive=True)
+        person = (await db.execute(select(Identity).where(Identity.id == identifier)
+                   .with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+        if person is None:
+            raise HTTPException(404, "Identity not found")
+        before = {"type": person.type.value, "status": person.status.value,
+                  "display_name": person.display_name, "person_code": person.person_code}
+        code, key = normalize_person_code(request.person_code)
+        if key and (await db.execute(select(Identity.id).where(
+                Identity.person_code_key == key, Identity.id != identifier))).first():
+            raise HTTPException(409, "This person code is already assigned. Select the existing person or use a different code.")
+        review = {}
+        person = await service.promote_unknown_to_known(
+            identifier, name, current_user.id, db,
+            confirm_create_new=request.confirm_create_new,
+            copied_files=copied_files, review_result=review)
+        person.person_code, person.person_code_key = code, key
+        ip_address, user_agent = get_client_info(http_request)
+        await IdentityAuditLogger.log_promote(
+            db=db, user_id=actor_id, username=actor_username,
+            identity_id=identifier, display_name=name, before_state=before,
+            after_state={"type": person.type.value, "status": person.status.value,
+                         "display_name": person.display_name, "person_code": person.person_code},
+            ip_address=ip_address, user_agent=user_agent, decision=request.decision,
+            review=review)
+        response = {"success": True, "message": f"Identity promoted to known with name: {name}",
+                    "identity": {"id": str(person.id), "type": person.type.value,
+                                 "display_name": person.display_name, "person_code": person.person_code,
+                                 "status": person.status.value}}
+        await db.commit()
+        copied_files.clear()
+        from backend.core.merge_notifications import publish_promotion
+        await publish_promotion(db, identifier)
+        try:
+            await request_snapshot(trigger="promote")
+        except Exception:
+            logger.exception("Post-commit promotion index snapshot failed")
+        return response
+    except PromotionError as exc:
+        await db.rollback()
+        _cleanup_copied_files(copied_files)
+        if exc.review is None:
             try:
-                from backend.utils.identity_audit import IdentityAuditLogger, get_client_info
                 ip_address, user_agent = get_client_info(http_request)
                 await IdentityAuditLogger.log_error(
-                    db=db,
-                    user_id=current_user.id,
-                    username=current_user.username,
-                    action_type="promote",
-                    error_message=f"refused: identity is not unknown "
-                                  f"(type={identity_before.type.value}, "
-                                  f"status={identity_before.status.value})",
-                    identity_id=identity_uuid,
-                    ip_address=ip_address,
-                    user_agent=user_agent,
-                )
+                    db=db, user_id=actor_id, username=actor_username,
+                    action_type="promote", error_message=str(exc), identity_id=uuid.UUID(identity_id),
+                    ip_address=ip_address, user_agent=user_agent)
                 await db.commit()
-            except Exception as audit_error:                   # noqa: BLE001
-                logger.warning(f"[PROMOTE] Failed to audit refusal: {audit_error}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Identity is not unknown (current type: {identity_before.type.value}, "
-                       f"status: {identity_before.status.value})"
-            )
-        
-        # Skip face detection validation - we already have a face detected when promoting
-        # The identity was created from a detection that already had a face, so validation is unnecessary
-        logger.info(f"[PROMOTE] Step 5.5: Skipping face detection validation (face already detected during identity creation)...")
-        skip_face_validation = True  # Always skip for promotion since face was already detected
-        
-        if False:  # Disabled - kept for reference
-            # Validate that at least one image for this identity contains a face
-            logger.info(f"[PROMOTE] Step 5.5: Validating face detection in identity images...")
-            try:
-                import cv2
-                import os
-                from backend.core.model_manager import model_manager
-                
-                if not model_manager or not model_manager.detector:
-                    logger.warning(f"[PROMOTE] ⚠️ Face detector not available, skipping face validation")
-                else:
-                    # Collect all available image paths for this identity
-                    image_paths_to_check = []
-                    
-                    # 1. Best snapshot path (highest priority)
-                    if identity_before.best_snapshot_path:
-                        snapshot_path = identity_before.best_snapshot_path
-                        if not os.path.isabs(snapshot_path):
-                            storage_dir = settings.STORAGE_DIR
-                            snapshot_path = os.path.join(storage_dir, snapshot_path.lstrip('storage/').lstrip('/'))
-                        if os.path.exists(snapshot_path):
-                            image_paths_to_check.append(('best_snapshot', snapshot_path))
-                    
-                    # 2. Get other snapshots from IdentityAppearance records
-                    appearance_result = await db.execute(
-                        select(IdentityAppearance.best_snapshot_path)
-                        .where(
-                            IdentityAppearance.identity_id == identity_uuid,
-                            IdentityAppearance.best_snapshot_path.isnot(None)
-                        )
-                        .distinct()
-                        .limit(10)
-                    )
-                    for row in appearance_result.scalars().all():
-                        if row and row not in [path for _, path in image_paths_to_check]:
-                            if not os.path.isabs(row):
-                                storage_dir = settings.STORAGE_DIR
-                                full_path = os.path.join(storage_dir, row.lstrip('storage/').lstrip('/'))
-                            else:
-                                full_path = row
-                            if os.path.exists(full_path):
-                                image_paths_to_check.append(('appearance', full_path))
-                    
-                    # 3. Get images from Face records
-                    # PostgreSQL requires ORDER BY columns to be in SELECT when using DISTINCT
-                    # So we select both columns, then extract unique paths in Python
-                    face_result = await db.execute(
-                        select(Face.face_image_path, Detection.timestamp)
-                        .join(Detection, Face.detection_id == Detection.id)
-                        .where(
-                            Face.identity_id == identity_uuid,
-                            Face.face_image_path.isnot(None)
-                        )
-                        .order_by(Detection.timestamp.desc())
-                        .limit(50)  # Get more rows to ensure we have enough unique paths
-                    )
-                    # Extract unique paths (keeping first occurrence = most recent)
-                    seen_paths = set()
-                    for row in face_result.all():
-                        face_path = row[0]  # face_image_path
-                        if face_path and face_path not in seen_paths and face_path not in [path for _, path in image_paths_to_check]:
-                            seen_paths.add(face_path)
-                            if len(seen_paths) >= 10:  # Limit to 10 unique paths
-                                break
-                            if not os.path.isabs(face_path):
-                                storage_dir = settings.STORAGE_DIR
-                                full_path = os.path.join(storage_dir, face_path.lstrip('storage/').lstrip('/'))
-                            else:
-                                full_path = face_path
-                            if os.path.exists(full_path):
-                                image_paths_to_check.append(('face_record', full_path))
-                    
-                    logger.info(f"[PROMOTE]   Found {len(image_paths_to_check)} images to check for face detection")
-                    
-                    if not image_paths_to_check:
-                        logger.warning(f"[PROMOTE] ⚠️ No images found for identity, skipping face validation")
-                    else:
-                        # Try each image until we find one with a face
-                        face_found = False
-                        valid_image_path = None
-                        
-                        for source, image_path in image_paths_to_check:
-                            try:
-                                logger.info(f"[PROMOTE]   Checking {source}: {image_path}")
-                                
-                                # Read image
-                                image = cv2.imread(image_path)
-                                if image is None:
-                                    logger.debug(f"[PROMOTE]     ⚠️ Could not read image, skipping")
-                                    continue
-                                
-                                # Detect face using SCRFD
-                                bboxes, kpss = model_manager.detector.detect(image, max_num=1)
-                                
-                                if kpss is not None and len(kpss) > 0:
-                                    confidence = bboxes[0][4] if len(bboxes) > 0 and len(bboxes[0]) > 4 else 'N/A'
-                                    logger.info(f"[PROMOTE]     ✅ Face detected! (confidence: {confidence}, source: {source})")
-                                    face_found = True
-                                    valid_image_path = image_path
-                                    
-                                    # Update best_snapshot_path if we found a better image
-                                    if source != 'best_snapshot' and valid_image_path != identity_before.best_snapshot_path:
-                                        logger.info(f"[PROMOTE]     📸 Updating best_snapshot_path to image with detected face")
-                                        # Convert to relative path for storage
-                                        storage_dir = settings.STORAGE_DIR
-                                        storage_dir_abs = os.path.abspath(storage_dir)
-                                        if os.path.isabs(valid_image_path):
-                                            valid_path_abs = os.path.abspath(valid_image_path)
-                                            if valid_path_abs.startswith(storage_dir_abs):
-                                                relative_path = os.path.relpath(valid_path_abs, storage_dir_abs)
-                                                identity_before.best_snapshot_path = 'storage/' + relative_path.replace('\\', '/')
-                                            else:
-                                                identity_before.best_snapshot_path = valid_image_path
-                                        else:
-                                            identity_before.best_snapshot_path = valid_image_path
-                                        # Flush (not commit) so the change is visible in the same transaction
-                                        # The main promotion will commit everything together
-                                        await db.flush()
-                                        logger.info(f"[PROMOTE]     ✅ Updated best_snapshot_path to: {identity_before.best_snapshot_path} (flushed, will commit with promotion)")
-                                    
-                                    break  # Found a valid image, stop checking
-                                else:
-                                    logger.debug(f"[PROMOTE]     ❌ No face detected in {source}")
-                            except Exception as e:
-                                logger.debug(f"[PROMOTE]     ⚠️ Error checking {source}: {e}, continuing...")
-                                continue
-                        
-                        if not face_found:
-                            logger.warning(f"[PROMOTE] ⚠️ No face detected in any of {len(image_paths_to_check)} images for this identity")
-                            # Rollback any pending changes (flushes) before raising error
-                            try:
-                                await db.rollback()
-                            except Exception:
-                                pass  # Ignore rollback errors
-                            raise HTTPException(
-                                status_code=status.HTTP_400_BAD_REQUEST,
-                                detail="Promotion failed: No face detected in any of the identity's images. This may happen if the images were processed before face detection was enabled. Please ensure the identity has at least one image with a detectable face before promoting."
-                            )
-                        
-                        logger.info(f"[PROMOTE] ✅ Face validation passed - found valid image: {valid_image_path}")
-            except HTTPException:
-                # Rollback any pending changes before re-raising HTTP exceptions
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass  # Ignore rollback errors
-                # Re-raise HTTP exceptions (our validation errors)
-                raise
-            except Exception as e:
-                logger.error(f"[PROMOTE] ⚠️ Error during face detection validation: {e}", exc_info=True)
-                # Rollback transaction to clear any aborted state before continuing
-                try:
-                    await db.rollback()
-                except Exception as rollback_err:
-                    logger.debug(f"[PROMOTE] Rollback error (may already be rolled back): {rollback_err}")
-                # Don't block promotion if face detection fails due to technical issues
-                logger.warning(f"[PROMOTE] ⚠️ Continuing with promotion despite face detection error")
-        
-        # Check embeddings before promotion
-        logger.info(f"[PROMOTE] Step 6: Checking embeddings before promotion...")
-        emb_before_result = await db.execute(
-            select(func.count(IdentityEmbedding.id), func.count(IdentityEmbedding.id).filter(IdentityEmbedding.faiss_index_type == 'unknown'))
-            .where(IdentityEmbedding.identity_id == identity_uuid)
-        )
-        emb_before_row = emb_before_result.first()
-        total_embeddings_before = emb_before_row[0] or 0
-        unknown_embeddings_before = emb_before_row[1] or 0
-        
-        logger.info(f"[PROMOTE]   Total embeddings: {total_embeddings_before}")
-        logger.info(f"[PROMOTE]   UNKNOWN embeddings: {unknown_embeddings_before}")
-        logger.info(f"[PROMOTE]   KNOWN embeddings: {total_embeddings_before - unknown_embeddings_before}")
-        
-        # Check Face records before promotion
-        logger.info(f"[PROMOTE] Step 7: Checking Face records before promotion...")
-        face_before_result = await db.execute(
-            select(func.count(Face.id)).where(Face.identity_id == identity_uuid)
-        )
-        face_count_before = face_before_result.scalar() or 0
-        logger.info(f"[PROMOTE]   Total Face records: {face_count_before}")
-        
-        # Capture the before-state as plain strings NOW: identity_before and
-        # the object the service returns are the SAME row in the session's
-        # identity map, so reading identity_before after promotion would show
-        # the new values.
-        before_state = {
-            "type": identity_before.type.value,
-            "status": identity_before.status.value,
-            "display_name": identity_before.display_name,
-            "person_code": identity_before.person_code,
-        }
-
-        # Persisted on the SAME row and in the SAME transaction as the
-        # promotion, so a failure cannot leave a code attached to a face that
-        # was never promoted.
-        identity_before.person_code = person_code_display
-        identity_before.person_code_key = person_code_key
-
-        # Promote identity
-        logger.info(f"[PROMOTE] Step 8: Calling identity_service.promote_unknown_to_known()...")
-        identity = await identity_service.promote_unknown_to_known(
-            identity_id=identity_uuid,
-            display_name=display_name_clean,
-            user_id=current_user.id,
-            db=db
-        )
-        logger.info(f"[PROMOTE] ✅ Promotion function completed")
-        
-        # Check identity after promotion
-        await db.refresh(identity)
-        logger.info(f"[PROMOTE] Step 9: Verifying identity changes...")
-        logger.info(f"[PROMOTE]   ✅ Type changed: {identity_before.type.value} → {identity.type.value}")
-        logger.info(f"[PROMOTE]   ✅ Status changed: {identity_before.status.value} → {identity.status.value}")
-        logger.info(f"[PROMOTE]   ✅ Display name changed: '{identity_before.display_name}' → '{identity.display_name}'")
-        logger.info(f"[PROMOTE]   Updated at: {identity.updated_at}")
-        logger.info(f"[PROMOTE]   Best snapshot path: {identity.best_snapshot_path}")
-        
-        # Check embeddings after promotion
-        logger.info(f"[PROMOTE] Step 10: Verifying embedding changes...")
-        emb_after_result = await db.execute(
-            select(func.count(IdentityEmbedding.id), func.count(IdentityEmbedding.id).filter(IdentityEmbedding.faiss_index_type == 'known'))
-            .where(IdentityEmbedding.identity_id == identity_uuid)
-        )
-        emb_after_row = emb_after_result.first()
-        total_embeddings_after = emb_after_row[0] or 0
-        known_embeddings_after = emb_after_row[1] or 0
-        
-        logger.info(f"[PROMOTE]   Total embeddings: {total_embeddings_after} (was {total_embeddings_before})")
-        logger.info(f"[PROMOTE]   KNOWN embeddings: {known_embeddings_after} (was {total_embeddings_before - unknown_embeddings_before})")
-        logger.info(f"[PROMOTE]   UNKNOWN embeddings: {total_embeddings_after - known_embeddings_after} (was {unknown_embeddings_before})")
-        
-        if known_embeddings_after == 0:
-            logger.warning(f"[PROMOTE] ⚠️ WARNING: No KNOWN embeddings found after promotion!")
-        else:
-            logger.info(f"[PROMOTE]   ✅ {unknown_embeddings_before} embeddings moved from UNKNOWN to KNOWN")
-        
-        # Check Face records after promotion
-        logger.info(f"[PROMOTE] Step 11: Verifying Face record changes...")
-        face_after_result = await db.execute(
-            select(func.count(Face.id), func.count(Face.id).filter(Face.name == display_name_clean))
-            .where(Face.identity_id == identity_uuid)
-        )
-        face_after_row = face_after_result.first()
-        face_count_after = face_after_row[0] or 0
-        faces_with_name = face_after_row[1] or 0
-        
-        logger.info(f"[PROMOTE]   Total Face records: {face_count_after} (was {face_count_before})")
-        logger.info(f"[PROMOTE]   Faces with name '{display_name_clean}': {faces_with_name}")
-        if faces_with_name == face_count_after:
-            logger.info(f"[PROMOTE]   ✅ All {face_count_after} Face records updated with new name")
-        else:
-            logger.warning(f"[PROMOTE]   ⚠️ Only {faces_with_name}/{face_count_after} Face records have the new name")
-        
-        # Snapshot request. Promotion changed no vector — only the identity's
-        # type column — so a skipped snapshot loses nothing.
-        _snap = await request_snapshot(trigger="promote")
-        logger.info(f"[PROMOTE] Step 12: snapshot {_snap}")
-        
-        await db.commit()
-        logger.info(f"[PROMOTE] Step 13: Database transaction committed")
-
-        # Audit the SUCCESS — after the commit, same pattern as the merge route
-        # below: log_action swallows its own failures, so a lost audit row can
-        # never roll back a durable promotion. Before this call, log_promote()
-        # existed and was called from nowhere; only failed promotions were ever
-        # audited.
-        try:
-            from backend.utils.identity_audit import IdentityAuditLogger, get_client_info
-            ip_address, user_agent = get_client_info(http_request)
-            person_code = getattr(request, "person_code", None)
-            action_notes = None
-            if person_code and str(person_code).strip():
-                # person_code has no column and no business logic; recording it
-                # here is its one honest use — previously it was accepted,
-                # logged, and silently discarded.
-                action_notes = f"person_code={str(person_code).strip()}"
-            await IdentityAuditLogger.log_promote(
-                db=db,
-                user_id=current_user.id,
-                username=current_user.username,
-                identity_id=identity_uuid,
-                display_name=display_name_clean,
-                before_state=before_state,
-                after_state={
-                    "type": identity.type.value,
-                    "status": identity.status.value,
-                    "display_name": identity.display_name,
-                    "person_code": identity.person_code,
-                },
-                ip_address=ip_address,
-                user_agent=user_agent,
-                notes=action_notes,
-                # The value the request carried and the guard above accepted —
-                # the mutation and the audit record cannot diverge.
-                decision=request.decision,
-            )
-            await db.commit()
-        except Exception as audit_error:                       # noqa: BLE001
-            logger.warning(f"[PROMOTE] Failed to audit successful promotion: {audit_error}")
-
-        # Invalidate ONLY after the commit: the cached Unknown list has a 30h
-        # TTL, so without this a promoted face keeps appearing there for over a
-        # day. A Redis outage must not fail a durable promotion.
-        try:
-            from backend.core.redis_cache import redis_cache_service
-            await redis_cache_service.invalidate_unknown_cache()
-            await redis_cache_service.invalidate_dashboard_cache()
-        except Exception as cache_error:                       # noqa: BLE001
-            logger.warning(f"[PROMOTE] Cache invalidation failed (non-fatal): {cache_error}")
-
-        logger.info(f"[PROMOTE] ✅✅✅ Promotion successful!")
-        logger.info(f"[PROMOTE]   Identity: {identity_id}")
-        logger.info(f"[PROMOTE]   New name: '{display_name_clean}'")
-        logger.info(f"[PROMOTE]   Type: {identity.type.value}")
-        logger.info(f"[PROMOTE]   Status: {identity.status.value}")
-        logger.info(f"[PROMOTE]   Embeddings: {known_embeddings_after} KNOWN, {total_embeddings_after - known_embeddings_after} UNKNOWN")
-        logger.info(f"[PROMOTE]   Face records: {face_count_after} updated")
-        logger.info(f"[PROMOTE] ========================================")
-        
-        return {
-            "success": True,
-            "message": f"Identity promoted to known with name: {display_name_clean}",
-            "identity": {
-                "id": str(identity.id),
-                "type": identity.type.value,
-                "display_name": identity.display_name,
-                "person_code": identity.person_code,
-                "status": identity.status.value
-            }
-        }
-    
-    except ValueError as e:
-        # Rollback before raising
-        try:
-            await db.rollback()
-        except Exception:
-            pass  # Ignore rollback errors
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+            except Exception:
+                await db.rollback()
+                logger.exception("Could not audit promotion refusal")
+        return JSONResponse(status_code=exc.status_code,
+                            content={"code": exc.code, "detail": str(exc), "review": exc.review})
+    except PersonCodeError as exc:
+        await db.rollback()
+        _cleanup_copied_files(copied_files)
+        raise HTTPException(422, str(exc))
     except HTTPException:
-        # Re-raise HTTP exceptions (already handled above with rollback)
+        await db.rollback()
+        _cleanup_copied_files(copied_files)
         raise
-    except Exception as e:
-        logger.error(f"Error promoting identity: {e}", exc_info=True)
-        
-        # Rollback transaction first to clear any aborted state
-        try:
-            await db.rollback()
-        except Exception as rollback_error:
-            logger.debug(f"[PROMOTE] Error during rollback (may already be rolled back): {rollback_error}")
-        
-        # Log error to audit (in a fresh transaction state)
-        try:
-            ip_address, user_agent = get_client_info(http_request)
-            await IdentityAuditLogger.log_error(
-                db=db,
-                user_id=current_user.id,
-                username=current_user.username,
-                action_type="promote",
-                error_message=str(e),
-                identity_id=uuid.UUID(identity_id) if identity_id else None,
-                ip_address=ip_address,
-                user_agent=user_agent
-            )
-            # Commit audit log separately
-            try:
-                await db.commit()
-            except Exception as commit_error:
-                logger.debug(f"[PROMOTE] Error committing audit log (non-critical): {commit_error}")
-        except Exception as audit_error:
-            logger.error(f"Failed to log audit error: {audit_error}")
-        
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to promote identity: {str(e)}"
-        )
+    except ValueError as exc:
+        await db.rollback()
+        _cleanup_copied_files(copied_files)
+        raise HTTPException(400, str(exc))
+    except Exception:
+        await db.rollback()
+        _cleanup_copied_files(copied_files)
+        logger.exception("Promotion failed before completion")
+        raise HTTPException(500, "Could not complete promotion. Please refresh and try again.")
 
 
 # =====================================================
@@ -2044,7 +1617,6 @@ def _identity_iso_z(dt) -> Optional[str]:
     if dt is None:
         return None
     return iso_utc(dt)
-
 
 @router.get("/admin/identities", summary="List / Search Identities", description="List identities for Intelligence Analysis. Pass 'page' for the server-side paginated search mode - Admin only")
 async def list_all_identities(
@@ -2438,6 +2010,8 @@ async def merge_identities(
         
         from_uuid = uuid.UUID(request.from_identity_id)
         to_uuid = uuid.UUID(request.to_identity_id)
+        if from_uuid == to_uuid:
+            raise HTTPException(status_code=400, detail='Cannot merge identity with itself')
         
         # Get identities before merge for audit
         from_result = await db.execute(
@@ -2545,8 +2119,6 @@ async def merge_identities(
         # Save identity index
         await request_snapshot(trigger="identity_mutation")
         
-        await db.commit()
-        
         # Log audit entry
         await IdentityAuditLogger.log_merge(
             db=db,
@@ -2565,6 +2137,9 @@ async def merge_identities(
             decision=request.decision,
         )
         await db.commit()
+        copied_files.clear()  # These files now belong to committed database rows.
+        from backend.core.merge_notifications import publish_merge
+        await publish_merge(db, [from_uuid], to_uuid)
 
         logger.info(f"Admin {current_user.username} merged identity {request.from_identity_id} into {request.to_identity_id}")
 
@@ -2915,36 +2490,18 @@ async def preview_merge(
             "new_path": None
         }
         
-        # Get quality scores from embeddings
-        target_quality = 0.0
-        target_emb_result = await db.execute(
-            select(IdentityEmbedding)
-            .where(IdentityEmbedding.identity_id == target_uuid)
-            .order_by(IdentityEmbedding.quality.desc().nullslast())
-            .limit(1)
-        )
-        target_emb = target_emb_result.scalar_one_or_none()
-        if target_emb and target_emb.quality:
-            target_quality = target_emb.quality
-        
-        for source in source_identities:
-            if source.best_snapshot_path:
-                source_emb_result = await db.execute(
-                    select(IdentityEmbedding)
-                    .where(IdentityEmbedding.identity_id == source.id)
-                    .order_by(IdentityEmbedding.quality.desc().nullslast())
-                    .limit(1)
-                )
-                source_emb = source_emb_result.scalar_one_or_none()
-                source_quality = source_emb.quality if source_emb and source_emb.quality else 0.0
-                
-                if source_quality > target_quality:
+        target_quality = await identity_service.measured_snapshot_quality(db, target_identity)
+        if type_promotion["to_type"] == IdentityType.UNKNOWN.value:
+            for source in sorted(source_identities, key=lambda person: str(person.id)):
+                source_quality = await identity_service.measured_snapshot_quality(db, source)
+                if source_quality is not None and (target_quality is None or source_quality > target_quality):
+                    previous = f"{target_quality:.3f}" if target_quality is not None else "unavailable"
                     best_snapshot = {
                         "current_path": target_identity.best_snapshot_path,
                         "will_change": True,
                         "new_source": str(source.id),
                         "new_path": source.best_snapshot_path,
-                        "quality_improvement": f"{target_quality:.3f} → {source_quality:.3f}"
+                        "quality_improvement": f"{previous} → {source_quality:.3f}"
                     }
                     target_quality = source_quality
         
@@ -3200,8 +2757,6 @@ async def merge_multiple_identities(
         # Save identity index
         await request_snapshot(trigger="identity_mutation")
         
-        await db.commit()
-        
         # Log audit entry with enhanced details
         source_ids = [id for id in identity_uuids if id != merged_identity.id]
         if source_ids:
@@ -3225,8 +2780,11 @@ async def merge_multiple_identities(
                 user_agent=user_agent,
                 notes=enhanced_notes
             )
-            await db.commit()
-        
+        await db.commit()
+        copied_files.clear()
+        from backend.core.merge_notifications import publish_merge
+        await publish_merge(db, source_ids, merged_identity.id)
+
         logger.info(f"Admin {current_user.username} merged {len(source_ids)} identities into {merged_identity.id} "
                    f"(pipelines: {merge_statistics.get('pipeline_count', 0)}, type_changed: {type_promotion.get('changed', False)})")
 
@@ -3305,8 +2863,8 @@ async def merge_multiple_identities(
 async def search_by_image(
     response: Response,
     image: UploadFile = File(...),
-    scope: str = Form("both"),
-    top_k: int = Form(10),
+    scope: Literal["known", "unknown", "both"] = Form("both"),
+    top_k: int = Form(10, ge=1, le=100),
     date_from: Optional[str] = Form(None),
     date_to: Optional[str] = Form(None),
     pipeline_id: Optional[str] = Form(None),
@@ -3327,42 +2885,21 @@ async def search_by_image(
     _search_id = str(uuid.uuid4())
     response.headers["X-Search-Id"] = _search_id
     try:
-        # Check if pgvector backend is enabled
-        use_pgvector = settings.VECTOR_BACKEND.lower() == 'pgvector'
-        
-        # Get pgvector index if enabled, otherwise use FAISS
-        if use_pgvector:
-            from backend.core.identity_index_pgvector import get_pgvector_index
-            pgvector_index = get_pgvector_index()
-            
-            if not pgvector_index or not model_manager:
-                logger.error(f"[SEARCH] Service unavailable: pgvector_index={pgvector_index is not None}, model_manager={model_manager is not None}")
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="pgvector search service not available. Please wait for system initialization or check VECTOR_BACKEND configuration."
-                )
-        else:
-            # Fallback to FAISS
-            current_identity_index = get_identity_index()
-            
-            if not current_identity_index or not model_manager:
-                logger.error(f"[SEARCH] Service unavailable: vector_index={current_identity_index is not None}, model_manager={model_manager is not None}")
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Identity search service not available. Please wait for system initialization."
-                )
-        
-        # Read and decode image
-        image_bytes = await image.read()
-        _image_hash = _hashlib.sha256(image_bytes).hexdigest()   # never the bytes
-        frame = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-        
-        if frame is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid image file"
-            )
-        
+        from backend.core.quick_image_search import search_dates, decode_search_image, rank_people
+        from starlette.concurrency import run_in_threadpool
+        if scope not in ('known', 'unknown', 'both') or not 1 <= top_k <= 100:
+            raise HTTPException(422, 'Choose a valid search scope and between 1 and 100 results.')
+        start, end = search_dates(date_from, date_to)
+        service = get_identity_service()
+        if service is None or not service.embedding_model_version:
+            raise HTTPException(503, 'Recognition service is not ready for search.')
+        model_version = service.embedding_model_version
+        image_bytes = await image.read(int(settings.MAX_FILE_SIZE) + 1)
+        if len(image_bytes) > int(settings.MAX_FILE_SIZE):
+            raise HTTPException(413, 'Image exceeds the maximum upload size.')
+        _image_hash = _hashlib.sha256(image_bytes).hexdigest()
+        frame = await run_in_threadpool(decode_search_image, image_bytes)
+
         # Detect the face and embed it, through the SAME extractor enrollment
         # uses. Two defects lived in the code this replaces:
         #
@@ -3386,7 +2923,7 @@ async def search_by_image(
                                                   select_largest)
 
         try:
-            faces = extract_faces(frame)
+            faces = await run_in_threadpool(extract_faces, frame)
             if not faces:
                 raise FaceExtractionError(
                     "no_face",
@@ -3397,7 +2934,7 @@ async def search_by_image(
                              "nothing."),
                     padded_retry=True)
             best = select_largest(faces)
-            embedding = embed_face_normalized(frame, best)
+            embedding = await run_in_threadpool(embed_face_normalized, frame, best)
         except FaceExtractionError as exc:
             logger.info("[SEARCH] by-image refused: %s (%d face(s) found)",
                         exc.code, exc.faces_found)
@@ -3410,127 +2947,18 @@ async def search_by_image(
         response.headers["X-Faces-Detected"] = str(len(faces))
         response.headers["X-Padded-Retry"] = "true" if best.padded_retry else "false"
 
-        # Search based on scope using pgvector or FAISS
-        results = []
-        
-        if use_pgvector:
-            # Use pgvector for search
-            logger.info(f"[SEARCH] Using pgvector backend for image search")
-            
-            if scope in ["known", "both"]:
-                # Configured, not hardcoded: this endpoint used a literal 0.4
-                # and so ignored SIMILARITY_THRESHOLD entirely — an operator
-                # tuning recognition saw no effect here. Over-fetch, because
-                # these rows are per-EMBEDDING and collapse to fewer people.
-                known_matches = await pgvector_index.search_known(
-                    embedding=embedding,
-                    db=db,
-                    top_k=max(top_k * 5, top_k),
-                    threshold=float(settings.SIMILARITY_THRESHOLD)
-                )
-                results.extend([(id_str, sim, "known") for id_str, sim in known_matches])
-            
-            if scope in ["unknown", "both"]:
-                unknown_matches = await pgvector_index.search_unknown(
-                    embedding=embedding,
-                    db=db,
-                    top_k=max(top_k * 5, top_k),
-                    threshold=float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
-                )
-                results.extend([(id_str, sim, "unknown") for id_str, sim in unknown_matches])
-        else:
-            # In-process index search, through the contract.
-            #
-            # The index returns embedding keys; identity resolution and the
-            # KNOWN/UNKNOWN split happen in the database, so this route no
-            # longer needs two indexes or hardcoded thresholds — it reuses the
-            # same resolution path recognition uses.
-            logger.info(f"[SEARCH] Using the in-process vector index for image search")
-            from backend.core.identity_service import identity_service as _svc
+        # best_by_identity ranking is performed in the database before top_k.
+        matches = await rank_people(db, embedding, model_version, scope, top_k, start, end, pipeline_id)
+        from backend.utils.path_utils import path_to_url
+        search_results = [{
+            "identity_id": str(person.id), "type": person.type.value,
+            "display_name": person.display_name, "similarity": min(1.0, max(-1.0, float(similarity))),
+            "best_snapshot_path": person.best_snapshot_path,
+            "snapshot_url": path_to_url(person.best_snapshot_path, settings.STORAGE_DIR) if person.best_snapshot_path else None,
+            "last_seen_at": _identity_iso_z(person.last_seen_at),
+            "appearances_count": person.appearances_count or 0
+        } for person, similarity in matches]
 
-            if _svc is None:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Identity service not available. Please wait for system initialization."
-                )
-
-            if scope in ["known", "both"]:
-                known_matches = await _svc.search_vector_index(
-                    db, embedding, top_k=top_k,
-                    threshold=_svc.known_threshold, index_type="known")
-                results.extend([(id_str, sim, "known") for id_str, sim in known_matches])
-
-            if scope in ["unknown", "both"]:
-                unknown_matches = await _svc.search_vector_index(
-                    db, embedding, top_k=top_k,
-                    threshold=_svc.unknown_threshold, index_type="unknown")
-                results.extend([(id_str, sim, "unknown") for id_str, sim in unknown_matches])
-        
-        # Collapse to one row per identity, keeping that identity's BEST score,
-        # before truncating. search_known/search_unknown return one row per
-        # EMBEDDING, so without this a person holding several vectors occupied
-        # several of the top_k slots and crowded out other people — and the
-        # truncation happened before the date/pipeline filters below, which then
-        # shrank the list rather than promoting the next distinct person.
-        # Mirrors AdvancedSearchService's collapse so the two endpoints agree.
-        best_by_identity = {}
-        for id_str, sim, idx_type in results:
-            current = best_by_identity.get(id_str)
-            if current is None or sim > current[1]:
-                best_by_identity[id_str] = (id_str, sim, idx_type)
-        results = sorted(best_by_identity.values(), key=lambda x: x[1], reverse=True)
-        results = results[:top_k]
-        
-        # Get identity details from database
-        identity_ids = [uuid.UUID(id_str) for id_str, _, _ in results]
-        
-        # A search that found nothing is still a search: it is audited below
-        # with results_count 0 (no early return before the audit row).
-        identities_dict = {}
-        if identity_ids:
-            identities_result = await db.execute(
-                select(Identity).where(Identity.id.in_(identity_ids))
-            )
-            identities_dict = {str(id.id): id for id in identities_result.scalars().all()}
-        
-        # Build response
-        search_results = []
-        for id_str, similarity, id_type in results:
-            identity = identities_dict.get(id_str)
-            if not identity:
-                continue
-            
-            # Apply date/pipeline filters if specified
-            if date_from or date_to or pipeline_id:
-                appearance_query = select(IdentityAppearance).where(
-                    IdentityAppearance.identity_id == identity.id
-                )
-                
-                if date_from:
-                    date_from_dt = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-                    appearance_query = appearance_query.where(IdentityAppearance.start_time >= date_from_dt)
-                
-                if date_to:
-                    date_to_dt = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-                    appearance_query = appearance_query.where(IdentityAppearance.start_time <= date_to_dt)
-                
-                if pipeline_id:
-                    appearance_query = appearance_query.where(IdentityAppearance.pipeline_id == pipeline_id)
-                
-                appearance_result = await db.execute(appearance_query)
-                if appearance_result.scalar_one_or_none() is None:
-                    continue  # Skip if no matching appearances
-            
-            search_results.append({
-                "identity_id": id_str,
-                "type": identity.type.value,
-                "display_name": identity.display_name,
-                "similarity": float(similarity),
-                "best_snapshot_path": identity.best_snapshot_path,
-                "last_seen_at": _identity_iso_z(identity.last_seen_at),
-                "appearances_count": identity.appearances_count
-            })
-        
         # Audit — one row, one writer
         from backend.core.search_audit import record_image_search
         from db_models import SearchType as _SearchType
@@ -3553,7 +2981,7 @@ async def search_by_image(
         logger.error(f"Error searching by image: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to search by image: {str(e)}"
+            detail="Search could not be completed. Please try again."
         )
 
 
@@ -3629,194 +3057,11 @@ async def get_merge_suggestions_for_pipeline(
             logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ========================================")
             return []
         
-        # Step 2: Collect all embeddings for these identities
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] 🔍 Step 2: Collecting embeddings for {len(pipeline_identities)} identities...")
-        identity_embeddings_map = {}  # identity_id -> (embedding_vector, quality)
-        embeddings_list = []  # List of embeddings for DBSCAN
-        identity_order = []  # Track order of identities for cluster mapping
-        
-        # Determine which backend to use
-        USE_PGVECTOR = settings.VECTOR_BACKEND.lower() == 'pgvector'
-        
-        if USE_PGVECTOR:
-            # Get embeddings from pgvector (PostgreSQL)
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] Using pgvector backend to extract embeddings...")
-            for identity in pipeline_identities:
-                # Get all embedding records for this identity (pgvector stores as vector type)
-                emb_result = await db.execute(
-                    select(IdentityEmbedding).where(
-                        and_(
-                            IdentityEmbedding.identity_id == identity.id,
-                            IdentityEmbedding.faiss_index_type == 'unknown'
-                        )
-                    ).order_by(IdentityEmbedding.quality.desc().nulls_last())
-                )
-                embedding_records = emb_result.scalars().all()
-                
-                logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   Identity {identity.id}: Found {len(embedding_records)} embedding records")
-                
-                # Find the first record with a non-NULL embedding (pgvector stores as vector type)
-                embedding_record = None
-                for emb_rec in embedding_records:
-                    # Check if embedding exists using raw SQL (pgvector vector type)
-                    check_result = await db.execute(
-                        text("""
-                            SELECT embedding IS NOT NULL as has_embedding
-                            FROM identity_embeddings
-                            WHERE id = :emb_id
-                        """),
-                        {"emb_id": emb_rec.id}
-                    )
-                    has_embedding = check_result.scalar()
-                    logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   Embedding record {emb_rec.id}: has_embedding={has_embedding}, quality={emb_rec.quality}")
-                    if has_embedding:
-                        embedding_record = emb_rec
-                        break
-                
-                if embedding_record:
-                    try:
-                        # Extract vector from pgvector using raw SQL
-                        vector_result = await db.execute(
-                            text("""
-                                SELECT embedding::text 
-                                FROM identity_embeddings 
-                                WHERE id = :emb_id
-                            """),
-                            {"emb_id": embedding_record.id}
-                        )
-                        vector_text = vector_result.scalar()
-                        
-                        if vector_text:
-                            # Parse vector string like "[0.1, 0.2, ...]"
-                            vector_str = vector_text.strip('[]')
-                            embedding_array = np.array([float(x) for x in vector_str.split(',')], dtype=np.float32)
-                            
-                            # Normalize for cosine similarity
-                            norm = np.linalg.norm(embedding_array)
-                            if norm > 0:
-                                embedding_array = embedding_array / norm
-                            
-                            identity_embeddings_map[str(identity.id)] = (embedding_array, embedding_record.quality or 0.5)
-                            embeddings_list.append(embedding_array)
-                            identity_order.append(str(identity.id))
-                            logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   ✅ Extracted embedding for {identity.id}: shape={embedding_array.shape}, norm={np.linalg.norm(embedding_array):.6f}")
-                        else:
-                            logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ No vector text returned for identity {identity.id}")
-                    except Exception as e:
-                        logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Failed to extract embedding for {identity.id}: {e}", exc_info=True)
-                else:
-                    if len(embedding_records) == 0:
-                        logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ No embedding records found for identity {identity.id} (faiss_index_type='unknown')")
-                        logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   This means the identity was created but no embedding was saved (possibly quality too low)")
-                    else:
-                        logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Found {len(embedding_records)} embedding records but all have NULL embeddings for identity {identity.id}")
-        else:
-            # FAISS backend - read the stored vectors, same source of truth
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] Reading stored vectors...")
-            if True:
-                for identity in pipeline_identities:
-                    emb_result = await db.execute(
-                        select(IdentityEmbedding).where(
-                            and_(
-                                IdentityEmbedding.identity_id == identity.id,
-                                IdentityEmbedding.embedding.isnot(None),
-                                IdentityEmbedding.faiss_index_type == 'unknown'
-                            )
-                        ).order_by(IdentityEmbedding.quality.desc().nulls_last()).limit(1)
-                    )
-                    embedding_record = emb_result.scalar_one_or_none()
-
-                    if embedding_record is not None:
-                        try:
-                            _vecs = await load_vectors(db, [embedding_record.id])
-                            embedding_array = _vecs.get(int(embedding_record.id))
-                            if embedding_array is not None and embedding_array.size:
-                                norm = np.linalg.norm(embedding_array)
-                                if norm > 0:
-                                    embedding_array = embedding_array / norm
-
-                                identity_embeddings_map[str(identity.id)] = (embedding_array.astype(np.float32), embedding_record.quality or 0.5)
-                                embeddings_list.append(embedding_array.astype(np.float32))
-                                identity_order.append(str(identity.id))
-                                logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   ✅ Loaded stored vector for {identity.id}")
-                        except Exception as e:
-                            logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Failed to load vector for {identity.id}: {e}")
-        
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ✅ Collected {len(embeddings_list)} embeddings from {len(pipeline_identities)} identities")
-        
-        if len(embeddings_list) < 2:
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ⚠️ Not enough embeddings ({len(embeddings_list)}) for clustering (need at least 2)")
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ========================================")
-            return []
-        
-        if not SKLEARN_AVAILABLE:
-            logger.warning(f"[MERGE_SUGGESTIONS] [PIPELINE] ⚠️ scikit-learn not available, cannot run DBSCAN clustering")
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ========================================")
-            return []
-        
-        # Step 3: Run DBSCAN clustering
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] 🔍 Step 3: Running DBSCAN clustering on {len(embeddings_list)} embeddings...")
-        
-        # Get DBSCAN parameters from config
-        eps = settings.CLUSTER_EPS
-        min_samples = settings.CLUSTER_MIN_SAMPLES
-        
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] DBSCAN parameters: eps={eps}, min_samples={min_samples}")
-        
-        # Convert embeddings list to numpy array
-        embeddings_matrix = np.array(embeddings_list, dtype=np.float32)
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] Embeddings matrix shape: {embeddings_matrix.shape}")
-        
-        # Run DBSCAN (using cosine distance via 'cosine' metric)
-        # Note: DBSCAN with cosine distance works well for normalized embeddings
-        dbscan = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine', algorithm='brute')
-        cluster_labels = dbscan.fit_predict(embeddings_matrix)
-        
-        # Analyze clusters
-        unique_clusters = set(cluster_labels)
-        noise_count = sum(1 for label in cluster_labels if label == -1)
-        valid_clusters = [c for c in unique_clusters if c != -1]
-        
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ✅ DBSCAN clustering complete:")
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE]   • Total clusters found: {len(valid_clusters)}")
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE]   • Noise points (outliers): {noise_count}")
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE]   • Cluster sizes: {[sum(1 for l in cluster_labels if l == c) for c in valid_clusters]}")
-        
-        if len(valid_clusters) == 0:
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ⚠️ No clusters found - all identities are unique or too dissimilar")
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ========================================")
-            return []
-        
-        # Step 4: Generate merge suggestions from clusters
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] 🔍 Step 4: Generating merge suggestions from {len(valid_clusters)} clusters...")
+        from backend.core.suggestion_review import pipeline_groups
+        groups = await pipeline_groups(db, pipeline_identities)
         suggestions_data = []
-        
-        for cluster_id in valid_clusters:
-            # Get all identity IDs in this cluster
-            cluster_identity_ids = [identity_order[i] for i, label in enumerate(cluster_labels) if label == cluster_id]
+        for cluster_id, (cluster_identity_ids, confidence) in enumerate(groups):
             cluster_size = len(cluster_identity_ids)
-            
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE]   Cluster {cluster_id}: {cluster_size} identities")
-            
-            if cluster_size < 2:
-                logger.debug(f"[MERGE_SUGGESTIONS] [PIPELINE]   ⚠️ Cluster {cluster_id} has only {cluster_size} identity, skipping")
-                continue
-            
-            # Calculate average similarity within cluster (for confidence score)
-            similarities = []
-            for i, id1 in enumerate(cluster_identity_ids):
-                for id2 in cluster_identity_ids[i+1:]:
-                    emb1, _ = identity_embeddings_map[id1]
-                    emb2, _ = identity_embeddings_map[id2]
-                    # Cosine similarity for normalized vectors
-                    similarity = np.dot(emb1, emb2)
-                    similarities.append(similarity)
-            
-            avg_similarity = np.mean(similarities) if similarities else 0.0
-            confidence = min(0.95, max(0.5, avg_similarity))  # Clamp between 0.5 and 0.95
-            
-            logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE]   ✅ Cluster {cluster_id}: {cluster_size} identities, avg similarity: {avg_similarity:.3f}, confidence: {confidence:.3f}")
-            
             # Get representative snapshots
             snapshots = []
             for identity_id in cluster_identity_ids[:3]:  # Get up to 3 snapshots
@@ -3840,17 +3085,10 @@ async def get_merge_suggestions_for_pipeline(
                             snap = 'storage/' + snap.lstrip('/')
                         formatted_snapshots.append(snap)
             
-            # Generate recommendation
-            if confidence >= 0.7:
-                recommendation = "✅ High confidence - safe to approve"
-            elif confidence >= 0.5:
-                recommendation = "⚡ Medium confidence - review carefully"
-            else:
-                recommendation = "⚠️ Low confidence - review very carefully"
-            
+            recommendation = "Review every person before merging. Similarity is not identity certainty."
             suggestion_data = {
                 "id": None,  # Not saved to DB, generated on-the-fly
-                "cluster_id": f"pipeline_dbscan_{pipeline_id}_cluster_{cluster_id}",
+                "cluster_id": f"pipeline_compatible_{pipeline_id}_group_{cluster_id}",
                 "identity_ids": cluster_identity_ids,
                 "identity_count": cluster_size,
                 "confidence": float(confidence),
@@ -3860,11 +3098,11 @@ async def get_merge_suggestions_for_pipeline(
                 "snapshot_count": len(formatted_snapshots),
                 "created_at": iso_utc(utc_now()),
                 "recommendation": recommendation,
-                "display_name": f"Pipeline {pipeline_id} - Cluster of {cluster_size} identities (DBSCAN)"
+                "display_name": f"Pipeline {pipeline_id} - {cluster_size} compatible identities"
             }
             suggestions_data.append(suggestion_data)
         
-        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ✅ Generated {len(suggestions_data)} merge suggestions from {len(valid_clusters)} clusters")
+        logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ✅ Generated {len(suggestions_data)} merge suggestions from {len(groups)} groups")
         logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] 📤 Returning {len(suggestions_data)} merge suggestions for pipeline {pipeline_id}")
         logger.info(f"[MERGE_SUGGESTIONS] [PIPELINE] ========================================")
         
@@ -4069,6 +3307,8 @@ async def approve_merge_suggestion(
     """
     try:
         from db_models import MergeSuggestion, MergeSuggestionStatus
+        from backend.core.identity_merge_lock import lock_identity_mutation
+        await lock_identity_mutation(db, exclusive=True)
         
         # Get identity_service dynamically (may be set during startup)
         identity_service = get_identity_service()
@@ -4081,6 +3321,7 @@ async def approve_merge_suggestion(
         # Get suggestion
         result = await db.execute(
             select(MergeSuggestion).where(MergeSuggestion.id == suggestion_id)
+            .with_for_update().execution_options(populate_existing=True)
         )
         suggestion = result.scalar_one_or_none()
         
@@ -4157,6 +3398,13 @@ async def approve_merge_suggestion(
         # suggestion is a hypothesis, never an authorization. A blocked pair
         # aborts the whole approval (transaction rolls back; nothing partial).
         confirm_merge_risk = bool(request and request.confirm_merge_risk)
+        from backend.core.identity_merge_lock import lock_merge_members
+        await lock_merge_members(db, _ids)
+        # Assess the original group before sequential moves change its samples.
+        await identity_service._gate_merge_compatibility(
+            db, _ids, current_user.id, confirm_merge_risk)
+        from backend.core.suggestion_review import record_feedback
+        await record_feedback(db, _ids, current_user.id, 1.0)
         for identity_id_str in suggestion.identity_ids[1:]:
             from_id = uuid.UUID(identity_id_str)
             await identity_service.merge_identities(
@@ -4174,101 +3422,12 @@ async def approve_merge_suggestion(
         suggestion.reviewed_at = datetime.utcnow()
         suggestion.reviewed_by = current_user.id
         
-        # Collect training data for similarity model
-        try:
-            from backend.core.similarity_model import similarity_model
-            from backend.core.pipeline_aware_clustering import pipeline_aware_clustering
-            
-            # Get identity features to extract training features
-            identity_ids = suggestion.identity_ids if isinstance(suggestion.identity_ids, list) else []
-            if len(identity_ids) >= 2:
-                # Fetch identities to get their features
-                id1_result = await db.execute(
-                    select(Identity).where(Identity.id == uuid.UUID(identity_ids[0]))
-                )
-                id2_result = await db.execute(
-                    select(Identity).where(Identity.id == uuid.UUID(identity_ids[1]))
-                )
-                identity1 = id1_result.scalar_one_or_none()
-                identity2 = id2_result.scalar_one_or_none()
-                
-                if identity1 and identity2:
-                    # Get user pipelines for feature extraction
-                    from backend.auth.auth_service import AuthService
-                    user_pipelines = await AuthService.get_user_pipelines(current_user.id, db) or []
-                    
-                    # Build features (simplified - we'll extract what we can)
-                    # Get embeddings to calculate similarity
-                    emb1_result = await db.execute(
-                        select(IdentityEmbedding).where(
-                            IdentityEmbedding.identity_id == identity1.id
-                        ).order_by(IdentityEmbedding.quality.desc()).limit(1)
-                    )
-                    emb2_result = await db.execute(
-                        select(IdentityEmbedding).where(
-                            IdentityEmbedding.identity_id == identity2.id
-                        ).order_by(IdentityEmbedding.quality.desc()).limit(1)
-                    )
-                    
-                    emb1 = emb1_result.scalar_one_or_none()
-                    emb2 = emb2_result.scalar_one_or_none()
-                    
-                    if emb1 and emb2:
-                        # Calculate features from the stored vectors
-                        _vecs= await load_vectors(db, [emb1.id, emb2.id])
-                        if _vecs:
-                            try:
-                                emb1_vec = _vecs.get(int(emb1.id))
-                                emb2_vec = _vecs.get(int(emb2.id))
-                                
-                                if emb1_vec is not None and emb2_vec is not None:
-                                    emb1_vec = emb1_vec / np.linalg.norm(emb1_vec)
-                                    emb2_vec = emb2_vec / np.linalg.norm(emb2_vec)
-                                    embedding_sim = float(np.dot(emb1_vec, emb2_vec))
-                                    
-                                    # Get pipeline overlap
-                                    from db_models import IdentityAppearance
-                                    app1_result = await db.execute(
-                                        select(IdentityAppearance.pipeline_id).where(
-                                            IdentityAppearance.identity_id == identity1.id
-                                        ).distinct()
-                                    )
-                                    app2_result = await db.execute(
-                                        select(IdentityAppearance.pipeline_id).where(
-                                            IdentityAppearance.identity_id == identity2.id
-                                        ).distinct()
-                                    )
-                                    pipelines1 = {row[0] for row in app1_result if row[0]}
-                                    pipelines2 = {row[0] for row in app2_result if row[0]}
-                                    common = pipelines1 & pipelines2
-                                    all_pipelines = pipelines1 | pipelines2
-                                    pipeline_overlap = len(common) / len(all_pipelines) if all_pipelines else 0.0
-                                    is_cross = len(common) == 0
-                                    
-                                    # Add training sample (approved = 1.0)
-                                    similarity_model.add_training_sample(
-                                        embedding_similarity=embedding_sim,
-                                        pipeline_overlap=pipeline_overlap,
-                                        quality_score_1=emb1.quality or 0.5,
-                                        quality_score_2=emb2.quality or 0.5,
-                                        appearances_diff=abs(identity1.appearances_count - identity2.appearances_count),
-                                        is_cross_pipeline=is_cross,
-                                        label=1.0,  # Approved = positive sample
-                                        db_session=db,
-                                        identity_id_1=identity1.id,
-                                        identity_id_2=identity2.id,
-                                        user_id=current_user.id
-                                    )
-                            except Exception as e:
-                                logger.debug(f"Could not collect training data: {e}")
-        except Exception as e:
-            logger.debug(f"Training data collection failed: {e}")
-        
-        # Save identity index
-        await request_snapshot(trigger="identity_mutation")
-        
         await db.commit()
-        
+        copied_files.clear()
+        await request_snapshot(trigger="suggestion_approved")
+        from backend.core.merge_notifications import publish_merge
+        await publish_merge(db, [uuid.UUID(i) for i in suggestion.identity_ids[1:]], primary_id)
+
         logger.info(f"Admin {current_user.username} approved merge suggestion {suggestion_id}")
 
         # Invalidate ONLY after the commit (30h Unknown-list TTL); a Redis
@@ -4336,9 +3495,12 @@ async def reject_merge_suggestion(
     """
     try:
         from db_models import MergeSuggestion, MergeSuggestionStatus
+        from backend.core.identity_merge_lock import lock_identity_mutation
+        await lock_identity_mutation(db, exclusive=True)
         
         result = await db.execute(
             select(MergeSuggestion).where(MergeSuggestion.id == suggestion_id)
+            .with_for_update().execution_options(populate_existing=True)
         )
         suggestion = result.scalar_one_or_none()
         
@@ -4361,88 +3523,15 @@ async def reject_merge_suggestion(
                         detail="Access denied to one or more identities in this merge suggestion"
                     )
         
+        if suggestion.status != MergeSuggestionStatus.PENDING:
+            raise HTTPException(409, f"Suggestion already {suggestion.status.value}")
         suggestion.status = MergeSuggestionStatus.REJECTED
         suggestion.reviewed_at = datetime.utcnow()
         suggestion.reviewed_by = current_user.id
         
-        # Collect training data for similarity model (rejected = negative sample)
-        try:
-            from backend.core.similarity_model import similarity_model
-            
-            identity_ids = suggestion.identity_ids if isinstance(suggestion.identity_ids, list) else []
-            if len(identity_ids) >= 2:
-                id1_result = await db.execute(
-                    select(Identity).where(Identity.id == uuid.UUID(identity_ids[0]))
-                )
-                id2_result = await db.execute(
-                    select(Identity).where(Identity.id == uuid.UUID(identity_ids[1]))
-                )
-                identity1 = id1_result.scalar_one_or_none()
-                identity2 = id2_result.scalar_one_or_none()
-                
-                if identity1 and identity2:
-                    emb1_result = await db.execute(
-                        select(IdentityEmbedding).where(
-                            IdentityEmbedding.identity_id == identity1.id
-                        ).order_by(IdentityEmbedding.quality.desc()).limit(1)
-                    )
-                    emb2_result = await db.execute(
-                        select(IdentityEmbedding).where(
-                            IdentityEmbedding.identity_id == identity2.id
-                        ).order_by(IdentityEmbedding.quality.desc()).limit(1)
-                    )
-                    
-                    emb1 = emb1_result.scalar_one_or_none()
-                    emb2 = emb2_result.scalar_one_or_none()
-                    
-                    if emb1 and emb2:
-                        _vecs = await load_vectors(db, [emb1.id, emb2.id])
-                        if _vecs:
-                            try:
-                                emb1_vec = _vecs.get(int(emb1.id))
-                                emb2_vec = _vecs.get(int(emb2.id))
-                                
-                                if emb1_vec is not None and emb2_vec is not None:
-                                    emb1_vec = emb1_vec / np.linalg.norm(emb1_vec)
-                                    emb2_vec = emb2_vec / np.linalg.norm(emb2_vec)
-                                    embedding_sim = float(np.dot(emb1_vec, emb2_vec))
-                                    
-                                    app1_result = await db.execute(
-                                        select(IdentityAppearance.pipeline_id).where(
-                                            IdentityAppearance.identity_id == identity1.id
-                                        ).distinct()
-                                    )
-                                    app2_result = await db.execute(
-                                        select(IdentityAppearance.pipeline_id).where(
-                                            IdentityAppearance.identity_id == identity2.id
-                                        ).distinct()
-                                    )
-                                    pipelines1 = {row[0] for row in app1_result if row[0]}
-                                    pipelines2 = {row[0] for row in app2_result if row[0]}
-                                    common = pipelines1 & pipelines2
-                                    all_pipelines = pipelines1 | pipelines2
-                                    pipeline_overlap = len(common) / len(all_pipelines) if all_pipelines else 0.0
-                                    is_cross = len(common) == 0
-                                    
-                                    # Add training sample (rejected = 0.0)
-                                    similarity_model.add_training_sample(
-                                        embedding_similarity=embedding_sim,
-                                        pipeline_overlap=pipeline_overlap,
-                                        quality_score_1=emb1.quality or 0.5,
-                                        quality_score_2=emb2.quality or 0.5,
-                                        appearances_diff=abs(identity1.appearances_count - identity2.appearances_count),
-                                        is_cross_pipeline=is_cross,
-                                        label=0.0,  # Rejected = negative sample
-                                        db_session=db,
-                                        identity_id_1=identity1.id,
-                                        identity_id_2=identity2.id,
-                                        user_id=current_user.id
-                                    )
-                            except Exception as e:
-                                logger.debug(f"Could not collect training data: {e}")
-        except Exception as e:
-            logger.debug(f"Training data collection failed: {e}")
-        
+        from backend.core.suggestion_review import record_feedback
+        await record_feedback(db, [uuid.UUID(i) for i in suggestion.identity_ids], current_user.id, 0.0)
+
         await db.commit()
         
         return {
@@ -4450,6 +3539,9 @@ async def reject_merge_suggestion(
             "message": "Merge suggestion rejected"
         }
     
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception as e:
         logger.error(f"Error rejecting merge suggestion: {e}", exc_info=True)
         await db.rollback()
@@ -4835,4 +3927,3 @@ async def get_model_status(
 
     except Exception as e:
         raise _ml_safe_500("model status", e)
-

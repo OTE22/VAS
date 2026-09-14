@@ -212,7 +212,7 @@ def test_fresh_threshold_columns_seeds_and_principal(fresh):
     cols = {r[0] for r in fresh.sql("SELECT column_name FROM information_schema.columns "
                                     "WHERE table_name = 'ml_model_thresholds'")}
     assert cols == THRESHOLD_COLUMNS, cols ^ THRESHOLD_COLUMNS
-    assert fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True) == 26
+    assert fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True) == 38
     assert fresh.sql("SELECT count(*) FROM ml_retraining_policies", scalar=True) == 4
     assert fresh.sql("SELECT count(*) FROM users WHERE username = 'system'", scalar=True) == 1
     for col in ("image_path",):
@@ -244,6 +244,14 @@ def test_feature_seed_is_idempotent_and_matches_the_runtime_inventory(fresh):
         frozen[(name, 1)]["is_active"] = False
     for r in mod2.V2_DEFINITIONS:
         frozen[(r["name"], r["version"])] = dict(r)
+    spec3 = importlib.util.spec_from_file_location(
+        "fbb2", os.path.join(REPO, "alembic", "versions", "fbb2c3d4e5f6_relational_ml_features.py"))
+    mod3 = importlib.util.module_from_spec(spec3)
+    spec3.loader.exec_module(mod3)
+    for name, entity_type, window, computation, description in mod3.FEATURES:
+        frozen[(name, 1)] = dict(name=name, version=1, entity_type=entity_type,
+            value_type="float", window=window, source="identity_relationships",
+            computation=computation, params={}, leakage_class="safe", is_active=True)
     before = fresh.sql("SELECT count(*) FROM ml_feature_definitions", scalar=True)
     for r in frozen.values():
         fresh.sql("INSERT INTO ml_feature_definitions (id, name, version, entity_type, value_type, source, computation, "

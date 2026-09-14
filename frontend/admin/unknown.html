@@ -24,7 +24,7 @@
     <!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
-    <link rel="stylesheet" href="/frontend/css/face-cards.css?v=faces-1">
+    <link rel="stylesheet" href="/frontend/css/face-cards.css?v=faces-2">
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/css/admin-review-workspace.css?v=review-1">
 </head>
@@ -402,7 +402,7 @@
                                 </button>
                             </div>
                             <p style="margin: 0.5rem 0 0 0; font-size: 0.8rem; color: #999; font-style: italic;">
-                                This identity will be merged into the target identity below
+                                This identity will be merged into the target below across ALL cameras, including its detection history and embeddings.
                             </p>
                         </div>
                         <div class="form-group">
@@ -782,6 +782,7 @@
                 <form id="search-image-form">
                     <div class="form-group">
                         <label for="search-image-file">Upload Image *</label>
+                        <p>Searches the largest detected face against stored identities. Use a single-person photo for an unambiguous search.</p>
                         <input type="file" id="search-image-file" accept="image/*" class="intelligence-input" required>
                         <div id="image-preview" style="margin-top: 1rem; display: none;">
                             <img id="preview-img" style="max-width: 300px; max-height: 300px; border: 2px solid #00ff96;">
@@ -834,7 +835,7 @@
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
-    <script src="/frontend/js/face-image.js?v=faces-1"></script>
-    <script src="/frontend/js/admin-unknown.js?v=unknown-10"></script>
+    <script src="/frontend/js/face-image.js?v=faces-3"></script>
+    <script src="/frontend/js/admin-unknown.js?v=unknown-16"></script>
 </body>
 </html>

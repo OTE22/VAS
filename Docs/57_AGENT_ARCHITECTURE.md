@@ -1296,6 +1296,185 @@ structural one; none adds a phrase list.
   drops letters and can miss Latin names; render page 1 with PyMuPDF
   (`fitz`) and read the image. Names must appear in Latin letters.
 
+## Sixth battery (2026-09-08): two hard questions, both lost to CTE scope
+
+Two unseeded analytical questions were replayed as the test account and read
+in Opik. Both failed with "I could not build a query that the database would
+accept", and both for the same reason - not the idea, the column scope:
+
+| Question | Database's complaint |
+|---|---|
+| highest identified-to-unidentified ratio per hour | `column reference "hour_of_day" is ambiguous` |
+| share of the top person's days spent at more than one camera | `column "cameras_per_day" does not exist` |
+
+The first joined two CTEs that both expose `hour_of_day` and then wrote
+`ON hour_of_day = hour_of_day`. The second read `cameras_per_day` from a CTE
+whose projection does not emit it. In both turns the repair loop spent every
+attempt: the hint carried the database's sentence and the rejected SQL, and
+the model answered by shuffling column order until `failed_sql_hashes` refused
+an identical candidate and the turn ended honestly.
+
+Two changes, both measured rather than lexical:
+
+- **The regeneration is told what its own query exposes.** `_sql_scope_facts`
+  parses the rejected SQL with the parser the guard already uses and reports
+  each CTE's output columns, plus every unqualified reference in the final
+  SELECT that resolves to more than one source (ambiguous) or to none
+  (missing). A SELECT's own alias used in `ORDER BY` is not reported missing.
+  It never raises: an unparseable candidate yields no facts, and a query
+  without CTEs yields none either. `_correction_hint` appends it after the
+  database's reason, so the second attempt has the structure of its own
+  mistake in front of it rather than one sentence about it.
+- **Both shapes became verified seeds** (`seed_catalog.py` section 1d): a
+  ratio between two subsets of the same rows belongs in one pass with
+  conditional `FILTER` counts rather than two CTEs joined on a shared column
+  name, and a "pick the subject, then measure per day" question wants each CTE
+  to emit exactly what the next step reads.
+
+After both changes each question is answered correctly on the FIRST attempt
+with no repair at all, the seeds retrieving at 0.97-0.98 similarity. What
+remains is model quality, not machinery: a one-fact question still comes back
+as a full report, and the phrasing of a percentage can garble the relationship
+even when the figure is right.
+
+## A prompt heading became a person (2026-09-08)
+
+"Help me find a person" was answered with a full tracking report on IRON MAN,
+and on a later run with *No person named "PLANNER" is enrolled*. Opik
+01a08265-b951 and 01a08276-d04c hold both. Neither name came from the user.
+
+**IRON MAN came from the follow-up composition.** The reading was honest -
+`people: []` - but the loop set `uses_context`, and the composition then
+imported the subject of the PREVIOUS question, so the SQL input read
+`Help me find a person (about IRON MAN; ...)`. The subject is no longer
+imported. The previous QUESTION is still named, which is what a genuine
+elliptical follow-up needs, and the prior turns still reach generation through
+the conversation-context block that `about_previous` already gates. Verified
+live: the vague request now asks who is meant, and "At which cameras?" after
+"How many times was IRON MAN detected?" still resolves to him.
+
+**PLANNER came from the prompt itself.** The SQL specialist was handed:
+
+```
+Generate SQL for the AUTHORITATIVE USER REQUEST:
+Help me find a person
+
+PLANNER PARAPHRASE (interpretation aid only; ...):
+Help me find a person (a follow-up to: "Which hour has the highest ...")
+```
+
+With a request that names nobody, the only capitalised token in the prompt was
+the heading of the next block, and the model filtered on `f.name = 'PLANNER'`.
+The heading is now lower-case prose that cannot read as a value, and the block
+is omitted entirely when it would only repeat the request. A heading is not
+inert: anything shaped like a proper noun is a candidate value to a small model.
+
+**And a name the user never typed is no longer handed back.** `_empty_narration`
+checked whether the unresolved name appears in the user's own message
+(`_user_named`, the same folded comparison the reading uses). When it does not,
+the reply asks who they would like found instead of naming the invention. A
+name the user *did* type is still named back, unchanged.
+
+After both fixes the turn plans `clarify` and generates no SQL at all:
+"What is the name of the person you are looking for?"
+
+## Measuring what the knowledge base contributes
+
+`SQL_AGENT_USE_KNOWLEDGE_BASE=false` runs a turn with no retrieved examples
+(`RAG_TOP_K` cannot express this: the knowledge base floors top_k at one).
+Same two hard questions, same 11B model, tracing on:
+
+| Question | seeds on | seeds off |
+|---|---|---|
+| highest identified-to-unidentified ratio per hour | hour 11, ratio 1.000 | hour 11, "ratio of 0" |
+| share of the top person's multi-camera days | IRON MAN, 100% | no query could be built |
+
+The seeds are what make these answerable; they were not the thing misleading
+the loop. **Two traps when running this comparison:** recreating the API
+container re-reads `docker/.env`, so a missing file silently drops the stack to
+Ollama 1.5B with tracing off - and a recreate also erases the Opik SDK, which
+is pinned in `requirements-dev.txt` but absent from the current dev image, so
+it has only ever been installed by hand into the running container. Both
+produce a "result" that says nothing about the knowledge base.
+
+## One question, traced to the bottom (2026-09-09)
+
+"Between the two busiest cameras, which one has the higher share of
+unidentified faces, and by how much?" Truth: WEZARET DEFA3 at 93.9% against
+MAD5AL AMEN (1) at 92.0%, a gap of 1.9 points. Three runs, each read in Opik.
+
+| run | outcome | time |
+|---|---|---|
+| before | "I could not build a query the database would accept", 3 attempts | 73 s |
+| after the repair-hint fixes | right camera, gap reported as 0.00% | 140 s |
+| after the schema note and the seed | correct, first attempt, seed at 0.95 | 38 s |
+
+**The repair aid was never reaching the model.** `_correction_hint` stored the
+rejected query truncated to 600 characters, and these queries run past 900. A
+query cut off mid-identifier does not parse, so `_sql_scope_facts` returned ""
+in silence - measurable directly: full SQL yields the CTE inventory, `sql[:600]`
+yields nothing. The facts are now computed from the whole query when the hint
+is ATTACHED and stored alongside it, and the rejected SQL is kept to 2000
+characters so the model can see what it wrote.
+
+**And the analyser was looking in the wrong scope.** It walked only the outer
+SELECT, while the error came from inside a CTE:
+`LAG(...) OVER (ORDER BY unidentified_share DESC)`, where that name is an
+output alias of the same SELECT. Every SELECT scope is walked now, CTE bodies
+included, and an alias used inside a window's ORDER BY or PARTITION BY is
+reported with the CTE it sits in.
+
+**The second run failed differently, and semantically.** The query put the
+unidentified test in `WHERE` and then counted `COUNT(*) AS unidentified_faces,
+COUNT(d.id) AS total_faces` over those same filtered rows - so both cameras
+returned 46 of 46, a share of 100% each and a difference of zero. A filter that
+defines the numerator cannot also bound the denominator. Two schema notes now
+carry the general rule (a share counts the part with `FILTER` over the SAME
+unfiltered rows, and `100.0` not `100`, or integer division returns 0; and an
+alias is invisible inside its own `OVER (...)`), plus a verified seed for the
+comparison itself, executed in the test account's scope and checked against the
+truth before it was accepted.
+
+The lesson worth keeping: a repair aid that degrades silently is worse than
+none, because every trace looks like a model failure. Both defects here were
+invisible in the answer and obvious in the span inputs.
+
+## Is a bigger model the answer? (reader benchmark, 2026-09-09)
+
+The reader decides intent, subject and answer shape, and its wrong calls are
+the ones the traces keep showing. Measured on the REAL interpreter prompt, the
+real enrolled and camera lists, and the cases that failed live:
+
+| model | fields correct | 5 readings |
+|---|---|---|
+| meta/llama-3.2-11b-vision-instruct (current) | 12/16 | 53 s |
+| nvidia/nemotron-3-super-120b-a12b | 6/16 (3 replies unparseable) | 72 s |
+| nvidia/nemotron-3.5-lightning-30b-a3b | 0/16 (all unparseable) | 79 s |
+| deepseek-ai/deepseek-v4-pro-0813 | 15/16 | 184 s |
+
+Only a subset of the catalogue answers on this key; several 404. The two
+nemotron models emit a reasoning preamble before the JSON, so the reading is
+unusable without a parser change. deepseek reads best and costs ~37 s per
+turn, which is most of a good turn's total.
+
+**The decisive finding was not the ranking.** Asked "Help me find a person" -
+which names nobody - the current reader returned TWELVE people: IRON MAN, JOEY
+and every `seed_person_*` in the ENROLLED block. That is not a reading, it is
+the block copied back, and it is exactly what put "Which one did you mean:
+seed_person_000, seed_person_004 ..." in front of the operator.
+
+So the fix went into Python rather than into the model bill. A subject must be
+grounded in the MESSAGE or in the CONVERSATION; the enrolled list is what the
+reader chooses FROM, never evidence in itself. One ungrounded name still
+survives - the operator may write a name in another script, and an Arabic
+message naming a Latin-spelled person must keep its subject - but SEVERAL
+ungrounded names are a dump and are dropped. Unknown names still reach the
+ask-the-user path unchanged.
+
+Live after the change: "Help me find a person" answers "Which person do you
+mean?", and "At which cameras?" after a question about IRON MAN still resolves
+to him.
+
 ## Historical implementation notes: retired phrase-router version
 
 The material in this section records the pre-2026-09-05 implementation and

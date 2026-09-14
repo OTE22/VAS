@@ -260,12 +260,12 @@ class IdentityIndexPgVector:
         threshold: float = None
     ) -> List[Tuple[str, float]]:
         """
-        Search for similar embeddings in KNOWN identities.
+        Search KNOWN people, using each person's highest embedding similarity.
 
         Args:
             embedding: Query embedding (will be L2-normalized)
             db: Database session
-            top_k: Number of results to return
+            top_k: Number of distinct people to return
             threshold: Minimum similarity (cosine). None resolves to
                 settings.SIMILARITY_THRESHOLD — a literal default here was a
                 second declaration of that setting, and it won for every caller
@@ -342,12 +342,15 @@ class IdentityIndexPgVector:
             logger.debug(f"[PGVECTOR] [SEARCH_KNOWN] Query parameters: identity_type={IdentityType.KNOWN.value}, identity_status={IdentityStatus.ACTIVE.value}, threshold={threshold}, top_k={top_k}")
             
             logger.info(f"[PGVECTOR] [SEARCH_KNOWN] Executing PostgreSQL query (this may take a moment)...")
+            # Deduplicate BEFORE limiting: a fixed embedding candidate pool can
+            # be filled entirely by one person's photos. This exact per-person
+            # ranking trades the ANN LIMIT fast path for complete candidates.
             result = await db.execute(
                 text(f"""
                     WITH query_vector AS (
                         SELECT '{embedding_array_str}'::vector AS vec
-                    )
-                    SELECT 
+                    ), best_per_person AS (
+                    SELECT DISTINCT ON (ie.identity_id)
                         ie.identity_id::text as identity_id,
                         1 - (ie.embedding <=> qv.vec) as similarity,
                         ie.quality,
@@ -360,7 +363,11 @@ class IdentityIndexPgVector:
                         AND i.type::text = UPPER(:identity_type)
                         AND i.status::text IN ('ACTIVE', 'PROMOTED')
                         AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
-                    ORDER BY ie.embedding <=> qv.vec
+                    ORDER BY ie.identity_id, ie.embedding <=> qv.vec, ie.id
+                    )
+                    SELECT identity_id, similarity, quality, display_name
+                    FROM best_per_person
+                    ORDER BY similarity DESC, identity_id
                     LIMIT :top_k
                 """),
                 {
@@ -1313,4 +1320,3 @@ _backend = settings.VECTOR_BACKEND.lower() if settings else 'faiss'
 if _backend == 'pgvector':
     identity_index_pgvector = IdentityIndexPgVector()
     logger.info("[PGVECTOR] ✅ pgvector backend initialized on module load")
-

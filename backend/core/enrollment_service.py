@@ -36,7 +36,7 @@ embedding, and never success=True for an enrollment that is not usable.
 Storage identity is the immutable UUID, never the display name: renaming a
 person must not move their folder, and two people may share a name.
 
-TWO-PHASE ENROLLMENT (name-based uploads only)
+TWO-PHASE ENROLLMENT
 ----------------------------------------------
 Name lookup is TEXTUAL. On its own that meant a novel spelling always minted a
 new UUID: a second photo of an already-enrolled person, uploaded as "Jon Smith"
@@ -58,7 +58,8 @@ While an upload is parked NOTHING durable exists for it — no identity, no
 image row, no embedding row, no gallery folder, no vector-index entry. The
 photo sits in PENDING_UPLOAD_DIR under a random name and the claim ticket is a
 `pending_enrollments` row; `enroll_image` runs only after an administrator
-confirms, and runs unchanged.
+confirms. Attachments to existing identities also require a confident target
+match or a reviewed approval bound to the photo, identity and administrator.
 
 This does NOT block anything. Every outcome remains reachable: add the photo to
 the matched person, create a new person anyway (a real lookalike or twin), or
@@ -71,6 +72,7 @@ is scoped to byte-identical uploads and nothing else.
 import hashlib
 import logging
 import os
+from pathlib import Path
 import re
 import secrets
 import shutil  # noqa: F401  (used by adopt_existing_file)
@@ -983,23 +985,25 @@ def consolidate_image_file(stored_relative_path: str, winner_identity_id) -> Tup
         return None, False
 
 
-async def sweep_expired_pending(db: AsyncSession) -> int:
-    """Delete expired claim tickets and their files. Never raises.
+async def sweep_expired_pending(db: AsyncSession, *, strict: bool = False) -> int:
+    """Delete expired claim tickets and files.
 
-    Called opportunistically at the top of each review endpoint rather than
-    from a background loop: the only thing that creates these rows is an
-    upload, so a system with no uploads has nothing to sweep, and this avoids
-    adding another supervised task to the lifespan for a 15-minute TTL.
+    Review requests use best-effort cleanup; the scheduled sweep uses strict
+    mode so failures reach job history and the supervisor. Row locking keeps
+    overlapping requests and the scheduled sweep from claiming the same row.
     """
     swept = 0
     try:
         rows = (await db.execute(
             select(PendingEnrollment)
             .where(PendingEnrollment.expires_at <= datetime.utcnow())
-            .limit(PENDING_SWEEP_BATCH))).scalars().all()
+            .limit(PENDING_SWEEP_BATCH).with_for_update(skip_locked=True))).scalars().all()
         if rows:
             for row in rows:
-                _safe_unlink_pending(row.storage_path)
+                if strict and row.storage_path:
+                    Path(pending_absolute_path(row.storage_path)).unlink(missing_ok=True)
+                else:
+                    _safe_unlink_pending(row.storage_path)
                 await db.delete(row)
             await db.commit()
             swept = len(rows)
@@ -1007,12 +1011,14 @@ async def sweep_expired_pending(db: AsyncSession) -> int:
     except Exception as exc:                                      # noqa: BLE001
         logger.warning("[ENROLL] pending sweep failed: %s", exc)
         await _rollback_quietly(db)
+        if strict:
+            raise
 
-    swept += await _sweep_orphan_pending_files(db)
+    swept += await _sweep_orphan_pending_files(db, strict=strict)
     return swept
 
 
-async def _sweep_orphan_pending_files(db: AsyncSession) -> int:
+async def _sweep_orphan_pending_files(db: AsyncSession, *, strict: bool = False) -> int:
     """Delete parked FILES that no longer have a row.
 
     Rows and files are written together but can be separated: a maintenance
@@ -1033,20 +1039,24 @@ async def _sweep_orphan_pending_files(db: AsyncSession) -> int:
             select(PendingEnrollment.storage_path))).scalars().all()}
     except Exception as exc:                                      # noqa: BLE001
         logger.warning("[ENROLL] could not list pending rows for orphan sweep: %s", exc)
+        if strict:
+            raise
         return 0
 
-    cutoff = datetime.utcnow().timestamp() - PENDING_ENROLLMENT_TTL_SECONDS
+    cutoff = __import__("time").time() - PENDING_ENROLLMENT_TTL_SECONDS
     removed = 0
     for name in os.listdir(directory)[:PENDING_SWEEP_BATCH]:
         if name in known:
             continue
         path = os.path.join(directory, name)
         try:
-            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+            if not os.path.islink(path) and os.path.isfile(path) and os.path.getmtime(path) < cutoff:
                 os.remove(path)
                 removed += 1
         except OSError as exc:
             logger.warning("[ENROLL] could not remove orphan %s: %s", name, exc)
+            if strict:
+                raise
     if removed:
         logger.info("[ENROLL] removed %d orphaned pending upload file(s)", removed)
     return removed
@@ -1217,6 +1227,37 @@ async def claim_pending_enrollment(db: AsyncSession, raw_token: str,
     return row
 
 
+@dataclass(frozen=True)
+class ReviewedEnrollment:
+    """Internal approval, issued only after consuming a verified review ticket."""
+    identity_id: str
+    checksum: str
+    actor_user_id: int
+
+
+async def require_target_match(db, identity, prepared, *, actor_user_id,
+                               reviewed=None):
+    """A selected name/id is not evidence that the uploaded face belongs to it."""
+    if reviewed is not None and (
+        reviewed.identity_id == str(identity.id)
+        and reviewed.checksum == prepared.checksum
+        and reviewed.actor_user_id == actor_user_id
+    ):
+        return
+    ranked = await find_similar_identities(db, prepared.embedding_normalized)
+    if (ranked and str(ranked[0][0]) == str(identity.id)
+            and classify_match(ranked[0][1]) == "strong"
+            and (len(ranked) == 1 or ranked[0][1] > ranked[1][1])):
+        return
+    raise EnrollmentError(
+        "identity_review_required",
+        "This photo could not be confidently matched to the selected person. "
+        "Review the photo and choose who it belongs to before saving.",
+        status_code=409,
+        extra={"target_identity_id": str(identity.id),
+               "display_name": identity.display_name})
+
+
 async def enroll_image(
     db: AsyncSession,
     *,
@@ -1230,6 +1271,8 @@ async def enroll_image(
     allow_create: bool = True,
     prepared: Optional[PreparedUpload] = None,
     allowed_statuses: Sequence[IdentityStatus] = (IdentityStatus.ACTIVE,),
+    reviewed: Optional[ReviewedEnrollment] = None,
+    require_new: bool = False,
 ) -> EnrollmentResult:
     """Enroll one photo, creating the identity only when asked and needed.
 
@@ -1299,6 +1342,12 @@ async def enroll_image(
                 text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
                 {"key": "enroll:" + name_lookup_key(display_name)})
             identity = await resolve_identity_by_name(db, display_name)
+            if identity is not None and require_new:
+                raise EnrollmentError(
+                    "name_already_exists",
+                    "A person with this name already exists. Choose a different "
+                    "name for a new person, or add to a reviewed existing person.",
+                    status_code=409)
             if identity is None:
                 if not allow_create:
                     raise EnrollmentError("identity_not_found", "Person not found.",
@@ -1354,6 +1403,13 @@ async def enroll_image(
                 source_type=existing_image.source_type,
                 storage_path=existing_image.storage_path,
             )
+
+        # Exact duplicates above are harmless. Every other attachment needs
+        # face evidence or approval bound to these bytes, actor and target.
+        if not identity_created:
+            await require_target_match(db, identity, prepared,
+                                       actor_user_id=actor_user_id,
+                                       reviewed=reviewed)
 
         # ---- decide placement + primary status ----------------------------
         folder = identity_folder(identity.id)
@@ -1575,7 +1631,8 @@ async def _rollback_quietly(db: AsyncSession) -> None:
 
 async def adopt_existing_file(db: AsyncSession, identity, source_path: str,
                              *, source_type: str = "promotion",
-                             actor_user_id: Optional[int] = None) -> Optional[IdentityImage]:
+                             actor_user_id: Optional[int] = None,
+                             copied_files: Optional[list] = None) -> Optional[IdentityImage]:
     """Copy a file that already exists on disk into an identity's UUID folder.
 
     Used by the unknown->known promotion path, which has a detection snapshot
@@ -1586,8 +1643,8 @@ async def adopt_existing_file(db: AsyncSession, identity, source_path: str,
 
     Returns the IdentityImage row (added to the session, NOT committed — the
     caller owns the transaction), or None when there is nothing to adopt.
-    Never raises: a promotion must not fail because an image could not be
-    copied.
+    With a copied_files journal, errors propagate so the transaction owner can
+    roll back and clean partial copies. Legacy callers retain best-effort adoption.
     """
     try:
         if not source_path or not os.path.isfile(source_path):
@@ -1632,6 +1689,8 @@ async def adopt_existing_file(db: AsyncSession, identity, source_path: str,
                 IdentityImage.is_primary.is_(True),
             ))).scalar() or 0
 
+        if copied_files is not None:
+            copied_files.append(final_path)
         shutil.copy2(source_path, final_path)
 
         image_row = IdentityImage(
@@ -1657,13 +1716,16 @@ async def adopt_existing_file(db: AsyncSession, identity, source_path: str,
     except Exception as exc:
         logger.warning("[ENROLL] adopt failed for identity %s: %s",
                        getattr(identity, "id", "?"), exc, exc_info=True)
+        if copied_files is not None:
+            raise
         return None
 
 
 async def set_primary_image(db: AsyncSession, identity_id: str, image_id: int,
                             actor_user_id: Optional[int] = None) -> Dict[str, Any]:
     """Promote one image to primary. Explicit, administrator-driven only."""
-    identity = await get_active_identity(db, identity_id)
+    identity = await get_active_identity(db, identity_id,
+        allowed_statuses=(IdentityStatus.ACTIVE, IdentityStatus.PROMOTED))
 
     image = (await db.execute(
         select(IdentityImage).where(

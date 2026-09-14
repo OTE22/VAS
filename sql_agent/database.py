@@ -93,6 +93,8 @@ class DatabaseManager:
             "ABSENCE ('never seen', 'no detections in the last N days', 'has not recorded') needs pipelines LEFT JOIN detections ... GROUP BY ... HAVING MAX(d.timestamp) IS NULL OR MAX(d.timestamp) < cutoff, or NOT EXISTS - an inner join can never return a camera with nothing",
             "DURATIONS in minutes: EXTRACT(EPOCH FROM (later_ts - earlier_ts)) / 60. Never divide an interval by an interval, and reference only the columns the CTE or subquery actually exposes",
             "MEDIAN: there is no MEDIAN() in Postgres; use PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) with no OVER clause. CONSECUTIVE-DAY STREAKS: day - ROW_NUMBER() OVER (ORDER BY day) groups a run of days. ",
+            "SHARES AND PERCENTAGES: count the part with a conditional aggregate over the SAME unfiltered rows - COUNT(*) FILTER (WHERE <condition>) - and divide by COUNT(*). Putting <condition> in WHERE removes the very rows the denominator needs, so every camera comes back at 100%. Multiply by 100.0 (never 100) or cast to numeric: integer division returns 0.",
+            "WINDOW FUNCTIONS: a column alias defined in a SELECT list is not visible inside that same SELECT's OVER (...) clause - repeat the expression there, or compute it in an earlier CTE.",
         ]
     }
 
@@ -334,7 +336,7 @@ class DatabaseManager:
                         "columns": [desc[0] for desc in cur.description] if cur.description else []
                     }
         except Exception as e:
-            logger.error(f"[DB] Query execution failed: {type(e).__name__}: {str(e)}", exc_info=True)
+            logger.error("[DB] Query execution failed (type=%s)", type(e).__name__)
             return {
                 "success": False,
                 "error": str(e),

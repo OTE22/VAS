@@ -640,6 +640,8 @@ class IdentityService:
     
     async def _update_identity_seen(self, identity: Identity, db: AsyncSession):
         """Update identity's last_seen_at timestamp"""
+        if identity.type == IdentityType.UNKNOWN:
+            return  # Unknown summaries advance only with committed sighting evidence.
         identity.last_seen_at = datetime.utcnow()
         await db.flush()
 
@@ -1264,7 +1266,11 @@ class IdentityService:
         identity_id: uuid.UUID,
         display_name: str,
         user_id: int,
-        db: AsyncSession
+        db: AsyncSession,
+        *,
+        confirm_create_new: bool = False,
+        copied_files: Optional[list] = None,
+        review_result: Optional[dict] = None
     ) -> Identity:
         """
         Promote an unknown identity to known.
@@ -1272,17 +1278,33 @@ class IdentityService:
         With FAISS: Moves embeddings from UNKNOWN to KNOWN index (complex).
         With pgvector: Just updates the database record (simple!).
         """
+        from backend.core.identity_merge_lock import lock_identity_mutation
+        from backend.core.promotion_review import PromotionError, review_promotion
+        await lock_identity_mutation(db, exclusive=True)
         # Get identity
         result = await db.execute(
-            select(Identity).where(Identity.id == identity_id)
+            select(Identity).where(Identity.id == identity_id).with_for_update()
+            .execution_options(populate_existing=True)
         )
         identity = result.scalar_one_or_none()
         
         if not identity:
-            raise ValueError(f"Identity {identity_id} not found")
+            raise PromotionError('IDENTITY_NOT_FOUND', f'Identity {identity_id} not found', 404)
+
+        if identity.status != IdentityStatus.ACTIVE or identity.merged_into_id is not None:
+            raise PromotionError('IDENTITY_NOT_ACTIVE', 'This identity is no longer an active unknown. Refresh and open the surviving person.')
         
         if identity.type != IdentityType.UNKNOWN:
-            raise ValueError(f"Identity {identity_id} is not unknown (type: {identity.type})")
+            raise PromotionError('IDENTITY_NOT_UNKNOWN', 'This person is already known. Refresh the page.')
+
+        if not display_name or not display_name.strip():
+            raise PromotionError('DISPLAY_NAME_REQUIRED', 'Display name is required.', 400)
+        review = await review_promotion(db, identity, display_name, self.embedding_model_version)
+        if review['candidates'] and not confirm_create_new:
+            raise PromotionError('PROMOTION_REVIEW_REQUIRED',
+                'An existing person may match this identity. Review before creating a separate known person.', review=review)
+        if review_result is not None:
+            review_result.update(review, confirmed_create_new=bool(review['candidates'] and confirm_create_new))
         
         backend_name = 'pgvector' if self.use_pgvector else 'faiss'
         logger.info(f"[IDENTITY_PROMOTE] ===== Starting promotion (backend={backend_name}): identity_id={identity_id}, display_name={display_name} =====")
@@ -1298,7 +1320,7 @@ class IdentityService:
         # lines that could lose a vector outright if the process died mid-move,
         # because the index was then the only copy.
         return await self._promote_identity_in_db(
-            identity, identity_id, display_name, user_id, db)
+            identity, identity_id, display_name.strip(), user_id, db, copied_files=copied_files)
 
     async def _promote_identity_in_db(
         self,
@@ -1306,7 +1328,8 @@ class IdentityService:
         identity_id: uuid.UUID,
         display_name: str,
         user_id: int,
-        db: AsyncSession
+        db: AsyncSession,
+        copied_files: Optional[list] = None
     ) -> Identity:
         """
         Promote unknown identity to known using pgvector backend.
@@ -1404,7 +1427,7 @@ class IdentityService:
             from backend.core.enrollment_service import adopt_existing_file
 
             adopted = await adopt_existing_file(
-                db, identity, best_image_path, source_type="promotion")
+                db, identity, best_image_path, source_type="promotion", copied_files=copied_files)
             if adopted is not None:
                 identity.best_snapshot_path = adopted.storage_path
                 logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   ✅ Adopted image -> {adopted.storage_path}")
@@ -1466,6 +1489,20 @@ class IdentityService:
         _count_identity_op("promote")
         return identity
     
+    async def measured_snapshot_quality(self, db, person):
+        from backend.core.enrollment_service import pending_absolute_path
+        from backend.utils.path_utils import normalize_storage_path
+        if not person.best_snapshot_path:
+            return None
+        try:
+            path = pending_absolute_path(normalize_storage_path(person.best_snapshot_path))
+            if not os.path.isfile(path):
+                return None
+            quality, _ = await self._snapshot_quality(db, path)
+            return quality
+        except (ValueError, OSError):
+            return None
+
     async def _snapshot_quality(self, db: AsyncSession, absolute_path: str):
         """(quality, source) for the EXACT file at absolute_path, or (None, reason).
 
@@ -1490,10 +1527,12 @@ class IdentityService:
         from db_models import IdentityImage
 
         relative = normalize_storage_path(absolute_path)
+        from backend.core.face_quality import QUALITY_SCORER_VERSION
         if relative:
             stored = (await db.execute(
                 select(IdentityImage.quality_score)
                 .where(IdentityImage.storage_path == relative,
+                       IdentityImage.quality_scorer_version == QUALITY_SCORER_VERSION,
                        IdentityImage.quality_score.isnot(None))
                 .limit(1))).scalar()
             if stored is not None:
@@ -1829,6 +1868,10 @@ class IdentityService:
         identities do not look like the same person, unless
         confirm_merge_risk explicitly overrides — see _gate_merge_compatibility.
         """
+        from backend.core.identity_merge_lock import lock_merge_members
+        if uuid.UUID(str(from_identity_id)) == uuid.UUID(str(to_identity_id)):
+            raise ValueError('Cannot merge identity with itself')
+        await lock_merge_members(db, [from_identity_id, to_identity_id])
         # Get identities
         result = await db.execute(
             select(Identity).where(Identity.id.in_([from_identity_id, to_identity_id]))
@@ -2018,6 +2061,8 @@ class IdentityService:
         """
         from db_models import IdentityAuditLog, IdentityMerge
 
+        from backend.core.identity_merge_lock import lock_identity_mutation
+        await lock_identity_mutation(db, exclusive=True)
         files_to_delete = files_to_delete if files_to_delete is not None else []
 
         # ==================================================================
@@ -2426,7 +2471,9 @@ class IdentityService:
             raise ValueError(f"Some identities not found. Expected {len(identity_ids)}, found {len(identities)}")
         
         # Filter out already merged identities
-        active_identities = [id for id in identities if id.status != IdentityStatus.MERGED]
+        active_identities = sorted(
+            [id for id in identities if id.status in (IdentityStatus.ACTIVE, IdentityStatus.PROMOTED)],
+            key=lambda person: str(person.id))
         if not active_identities:
             raise ValueError("All identities are already merged")
         
@@ -2503,7 +2550,10 @@ class IdentityService:
                 "pipeline_count": pipeline_info.get("count", 0)
             })
             
-            if score > best_score:
+            # Type is a hard priority, not a bonus that sightings can outweigh.
+            preferred = identity.type == IdentityType.KNOWN
+            best_preferred = best_identity is not None and best_identity.type == IdentityType.KNOWN
+            if best_identity is None or (preferred and not best_preferred) or (preferred == best_preferred and score > best_score):
                 best_score = score
                 best_identity = identity
         
@@ -2511,7 +2561,7 @@ class IdentityService:
             raise ValueError("No valid identity found")
         
         # Sort selection details by score descending
-        selection_details.sort(key=lambda x: x["score"], reverse=True)
+        selection_details.sort(key=lambda x: (x['type'] != IdentityType.KNOWN.value, -x['score'], x['id']))
         
         logger.info(f"[IDENTITY] Selected best identity {best_identity.id} "
                    f"(score: {best_score}, type: {best_identity.type.value}, "
@@ -2523,7 +2573,7 @@ class IdentityService:
             "selected_id": str(best_identity.id),
             "selected_score": best_score,
             "candidates": selection_details,
-            "reason": "highest_score"
+            "reason": "known_identity_first_then_score"
         }
     
     async def merge_multiple_identities(
@@ -2564,6 +2614,8 @@ class IdentityService:
         if not identity_ids or len(identity_ids) < 2:
             raise ValueError("At least 2 identities required for merge")
         
+        from backend.core.identity_merge_lock import lock_merge_members
+        await lock_merge_members(db, identity_ids)
         # Remove duplicates
         unique_ids = list(set(identity_ids))
         if len(unique_ids) < 2:
@@ -2647,41 +2699,19 @@ class IdentityService:
         best_snapshot_quality = 0.0
         snapshot_source = "target"
         
-        # Get target's embeddings to check quality
-        target_embeddings = await db.execute(
-            select(IdentityEmbedding)
-            .where(IdentityEmbedding.identity_id == target_id)
-            .order_by(IdentityEmbedding.quality.desc().nullslast())
-            .limit(1)
-        )
-        target_best_emb = target_embeddings.scalar_one_or_none()
-        if target_best_emb and target_best_emb.quality:
-            best_snapshot_quality = target_best_emb.quality
-        
-        # Check source identities for better snapshots
-        for source_id, source_identity in source_identities.items():
-            if source_identity.best_snapshot_path:
-                # Get best quality embedding for this identity
-                source_embeddings = await db.execute(
-                    select(IdentityEmbedding)
-                    .where(IdentityEmbedding.identity_id == source_id)
-                    .order_by(IdentityEmbedding.quality.desc().nullslast())
-                    .limit(1)
-                )
-                source_best_emb = source_embeddings.scalar_one_or_none()
-                source_quality = source_best_emb.quality if source_best_emb and source_best_emb.quality else 0.0
-                
-                if source_quality > best_snapshot_quality:
+        # Preserve a known person's chosen gallery primary. For unknowns,
+        # compare measurements of the actual files, never another embedding.
+        best_snapshot_quality = await self.measured_snapshot_quality(db, target_identity)
+        if target_identity.type == IdentityType.UNKNOWN:
+            for source_id, source_identity in sorted(source_identities.items(), key=lambda pair: str(pair[0])):
+                source_quality = await self.measured_snapshot_quality(db, source_identity)
+                if source_quality is not None and (
+                        best_snapshot_quality is None or source_quality > best_snapshot_quality):
                     best_snapshot_path = source_identity.best_snapshot_path
                     best_snapshot_quality = source_quality
                     snapshot_source = str(source_id)
-                    logger.info(f"[IDENTITY] [MERGE] Better snapshot found: {source_id} "
-                               f"(quality: {source_quality:.3f} > {best_snapshot_quality:.3f})")
-        
-        # Update target's best snapshot if a better one was found
-        if snapshot_source != "target" and best_snapshot_path:
-            target_identity.best_snapshot_path = best_snapshot_path
-            logger.info(f"[IDENTITY] [MERGE] Updated best snapshot from source {snapshot_source}")
+            if snapshot_source != "target":
+                target_identity.best_snapshot_path = best_snapshot_path
         
         # =====================================================
         # PRODUCTION FEATURE 3: Collect Pipeline Stats
@@ -2846,7 +2876,7 @@ class IdentityService:
         # PRODUCTION FEATURE 6: Handle Type Change
         # If target was promoted from UNKNOWN to KNOWN, update embeddings
         # =====================================================
-        if type_changed and original_type == IdentityType.UNKNOWN:
+        if target_identity.type != IdentityType.UNKNOWN:
             # One path for both backends: the type change is a database fact.
             # Search resolves KNOWN vs UNKNOWN from `identities.type`, so no
             # vector is reconstructed, re-keyed, or moved between indexes.
@@ -2959,4 +2989,3 @@ class IdentityService:
 
 # Global instance - will be set during startup in lifespan.py
 identity_service: Optional[IdentityService] = None
-

@@ -280,14 +280,33 @@ def validate(parsed: dict, *, names: List[str], cameras: List[str],
     raw_people = parsed.get("people")
     if isinstance(raw_people, str):
         raw_people = [raw_people]
-    for entry in (raw_people or [])[:4]:
+    # Where a subject may come from: the message itself, or what the
+    # conversation has been about. NOT the ENROLLED block - a reader that
+    # cannot find a subject sometimes hands that whole list back, and
+    # twelve "people" for "Help me find a person" became a clarifying
+    # question offering seed_person_000 (reader benchmark, 2026-09-09).
+    spoken = " ".join(str(user_text or "").split())
+    context_text = " ".join(str(t or "") for t in (recent_turns or []))
+    ungrounded = []
+    for entry in (raw_people or [])[:12]:
         stored = _match(entry, names)
         if stored and stored not in people:
             people.append(stored)
+            if not (_mentions_any(spoken, [stored])
+                    or _mentions_any(context_text, [stored])):
+                ungrounded.append(stored)
         elif not stored:
             text = " ".join(str(entry or "").split())
             if len(text) >= 2 and text not in unknown_people:
                 unknown_people.append(text)
+    # ONE name the message does not spell may still be the subject - the
+    # operator may have written it in another script, or the reading may
+    # have resolved a pronoun. SEVERAL ungrounded names are not a reading:
+    # that is the ENROLLED block handed back, which is how "Help me find a
+    # person" produced twelve people and offered seed_person_000 as a
+    # candidate (reader benchmark, 2026-09-09).
+    if len(ungrounded) > 1:
+        people = [p for p in people if p not in ungrounded]
 
     camera = _match(parsed.get("camera"), cameras)
     unknown_camera = None

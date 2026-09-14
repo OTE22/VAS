@@ -62,6 +62,8 @@ class ServiceHealth:
     consecutive_failures: int = 0
     restarts: int = 0                         # re-registrations of this name
     interval: float = 0.0                     # recorded for staleness math
+    first_success_deadline: Optional[float] = None
+    details: dict = field(default_factory=dict)
 
 
 _registry: Dict[str, ServiceHealth] = {}
@@ -79,6 +81,8 @@ def _register(name: str, interval: float) -> ServiceHealth:
             existing.status = STATUS_STARTING
             existing.started_at = time.time()
             existing.interval = interval
+            existing.last_success = None
+            existing.last_success_mono = None
             return existing
         health = ServiceHealth(name=name, started_at=time.time(), interval=interval)
         _registry[name] = health
@@ -99,17 +103,19 @@ def stale_services(factor: float = 3.0, grace: float = 120.0,
     cadences span 60 seconds to 24 hours — one global constant would either
     never fire for metrics or always fire for clustering. Monotonic time so
     container clock jumps cannot create false alarms. Services still in their
-    initial delay (status `starting`, no success yet) are exempt, otherwise
-    every boot would report the hour-delayed services as stale.
+    initial delay is allowed explicitly; a first-cycle deadline also detects
+    a worker that never finishes its first run.
     """
     now = _now()
     stale: List[str] = []
     with _registry_lock:
         for name, health in _registry.items():
-            if health.status not in (STATUS_RUNNING, STATUS_DEGRADED):
+            if health.status == STATUS_STOPPED:
                 continue
             if health.last_success_mono is None:
-                continue  # has not completed a first cycle; covered by status
+                if health.first_success_deadline is not None and now > health.first_success_deadline:
+                    stale.append(name)
+                continue
             allowance = health.interval * factor + grace
             if now - health.last_success_mono > allowance:
                 stale.append(name)
@@ -180,6 +186,7 @@ async def supervised_loop(
     work: Callable[[], Awaitable[None]],
     *,
     initial_delay: float = 0.0,
+    first_run_timeout: float = 900.0,
     error_backoff_base: float = 60.0,
     error_backoff_max: float = 1800.0,
     jitter: float = 0.1,
@@ -199,6 +206,8 @@ async def supervised_loop(
         return float(interval() if callable(interval) else interval)
 
     health = _register(name, _interval_now())
+    with _registry_lock:
+        health.first_success_deadline = now() + initial_delay + first_run_timeout
     _set_gauges(name, up=True)
 
     try:
@@ -207,7 +216,9 @@ async def supervised_loop(
 
         while True:
             try:
-                await work()
+                result = await work()
+                if isinstance(result, dict) and result.get("status") in ("failed", "partial_failure"):
+                    raise RuntimeError(str(result.get("failures") or result.get("error") or "Job failed")[:500])
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -216,9 +227,9 @@ async def supervised_loop(
                     health.last_error = f"{type(e).__name__}: {e}"[:500]
                     health.status = STATUS_DEGRADED
                     failures = health.consecutive_failures
-                _set_gauges(name, failed=True)
+                _set_gauges(name, up=False, failed=True)
                 backoff = min(error_backoff_max,
-                              error_backoff_base * (2 ** (failures - 1)))
+                              error_backoff_base * (2 ** min(failures - 1, 30)))
                 backoff *= 1 + random.uniform(0, jitter)
                 logger.error(
                     "service=%s cycle_failed consecutive_failures=%d backoff_s=%.0f",
@@ -235,6 +246,7 @@ async def supervised_loop(
                 health.last_success = time.time()
                 health.last_success_mono = now()
                 health.interval = interval_s  # keep staleness math honest for live-tuned cadences
+                health.details = result if isinstance(result, dict) else {}
             _set_gauges(name, up=True, last_success=health.last_success)
             await sleep(interval_s * (1 + random.uniform(-jitter, jitter)))
 

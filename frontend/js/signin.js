@@ -102,6 +102,7 @@
         } else {
             errorContainer.textContent = message;
         }
+        errorContainer.hidden = false;
         errorContainer.style.display = 'flex';
         // role="alert" + aria-live="assertive" on the container announce this
         // automatically; we do NOT steal focus, which would trap keyboard users.
@@ -110,6 +111,7 @@
     function clearError(elements) {
         const { errorContainer, errorText } = elements;
         if (!errorContainer) return;
+        errorContainer.hidden = true;
         errorContainer.style.display = 'none';
         if (errorText) errorText.textContent = '';
     }
@@ -296,11 +298,13 @@
         if (passwordInput && capsWarning) {
             const updateCaps = function (e) {
                 const on = typeof e.getModifierState === 'function' && e.getModifierState('CapsLock');
+                capsWarning.hidden = !on;
                 capsWarning.style.display = on ? 'flex' : 'none';
             };
             passwordInput.addEventListener('keydown', updateCaps);
             passwordInput.addEventListener('keyup', updateCaps);
             passwordInput.addEventListener('blur', function () {
+                capsWarning.hidden = true;
                 capsWarning.style.display = 'none';
             });
         }

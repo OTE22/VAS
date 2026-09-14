@@ -661,10 +661,9 @@ docker compose -f docker/docker-compose.prod.yml down         # stop everything 
 
 ## 10. Known limitations
 
-- **The GPU track is unverified on real hardware.** It was developed on a host
-  with no NVIDIA GPU (Radeon 520 / Intel UHD 620). The CUDA 12.4 + ORT 1.20.1
-  pairing is chosen for compatibility, and the policy is unit-tested with
-  session doubles, but §6.6 must be run on the real GPU host before trusting it.
+- **GPU verification is host-specific.** The September 14 production deployment
+  confirmed CUDA execution for SCRFD and ArcFace. Run §6.6 on each new GPU host;
+  that deployment does not establish compatibility for every driver or device.
 - **`WORKERS` must stay 1.** Runtime settings, the SQL-agent cancellation
   registry, the relationship/threshold/training single-flight guards, webhook
   dedup, FAISS autosave and the in-process revocation fallback are all
@@ -698,7 +697,7 @@ Crash safety: a worker dying between the identity/embedding commit and the detec
 `identity_appearances`, `identity_embeddings`, `detections` reference `pipelines` with **RESTRICT**. A camera with evidence is deactivated (`is_active = 0`), never hard-deleted; the rename flow moves every child first; wipe scripts pre-clear. There is no delete route.
 
 ### 11.3 Schema lifecycle
-Alembic is the only schema initializer (root `000_baseline`; head `f6a7b8c9d0e1`); `init_db` verifies the exact head fail-closed everywhere; `MIGRATIONS_FAIL_CLOSED` was **REMOVED**. Legacy dev/demo databases: `python scripts/repair_relationship_integrity.py` (dry-run → `--apply --yes-i-understand`) BEFORE `alembic upgrade head`; migrations refuse (never delete) when a precondition fails. Never run the repair on production.
+Alembic is the only schema initializer (root `000_baseline`; head `fdd4e5f6a7b8`); `init_db` verifies the exact head fail-closed everywhere; `MIGRATIONS_FAIL_CLOSED` was **REMOVED**. Legacy dev/demo databases: `python scripts/repair_relationship_integrity.py` (dry-run → `--apply --yes-i-understand`) BEFORE `alembic upgrade head`; migrations refuse (never delete) when a precondition fails. Never run the repair on production.
 
 ### 11.4 Full regression — isolated only
 `scripts/run_regression_isolated.sh [pytest args]`: unique scratch database on the dev PostgreSQL server, a dedicated `redis_regression`, a throwaway `face_recognition_regression` container (its own service name — the dev nginx upstream `face_recognition` never resolves to it, asserted), ephemeral volumes for storage / ML artifacts / database / logs / chroma; isolation assertions run inside the container BEFORE pytest (DB name, `current_database()`, Redis host + IP + sentinel key + pub/sub invisibility from the dev Redis, mount sources, `ENVIRONMENT`, DSN template) and abort on any failure; `trap teardown EXIT` drops the database and removes the stack on every exit path and prints whether the dev side is unchanged. The standing "wipe after regression" rule does not apply to isolated runs. Focused suites may still run in the dev container.
@@ -707,8 +706,15 @@ Alembic is the only schema initializer (root `000_baseline`; head `f6a7b8c9d0e1`
 | Variable | Status | Note |
 |---|---|---|
 | `MIGRATIONS_MODE` | ACTIVE | `run` (dev) / `verify` (prod) — the head check itself is unconditional |
-| `MIGRATIONS_EXPECTED_HEAD` | ACTIVE | operator-visible second pin; must equal the scripts' head (`f6a7b8c9d0e1`) |
+| `MIGRATIONS_EXPECTED_HEAD` | ACTIVE | operator-visible second pin; must equal the scripts' head (`fdd4e5f6a7b8`) |
 | `MIGRATIONS_FAIL_CLOSED` | REMOVED | no consumer controlled a distinct behaviour; schema mismatch is never permissive |
 | `DATABASE_URL`, `REDIS_URL`, `ENVIRONMENT`, storage paths, `ML_ARTIFACT_DIR` | ACTIVE | one central `config.py`; scripts import `settings` (the regression isolation checker is the one allowed raw-environment reader — it reports ON the environment) |
 | `REGRESSION_ISOLATION_ID` | ACTIVE (regression only) | run marker injected by the runner, asserted inside the container; not an application setting |
 | `STALE_CAMERA_EMBEDDING_GRACE` | code constant | 10 minutes; deliberately not an operator setting |
+
+
+## September 14 deployment update
+
+See [the deployment and feature update](59_SEPTEMBER_DEPLOYMENT_UPDATE.md) for
+known-face administration, appearance provenance, GPU/CPU runtime selection,
+static-IP recovery, and the separate chatbot deployment and saved-title fixes.

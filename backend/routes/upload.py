@@ -43,7 +43,7 @@ from backend.core.enrollment_service import (EnrollmentError, EnrollmentResult,
                                              validate_person_name)
 from config import settings
 from db_connection import get_db
-from db_models import IdentityImage, User
+from db_models import IdentityImage, IdentityStatus, User
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,8 @@ HTTP_DECISION_REQUIRED = 202
 
 
 async def _decision_payload(db, *, prepared, contents, display_name,
-                            is_face_image, photo, actor_id) -> dict:
+                            is_face_image, photo, actor_id,
+                            target_identity_id=None) -> dict:
     """Look for the person this upload might already be; park it if we find one.
 
     Returns None when nothing matched — the caller then enrolls immediately,
@@ -127,6 +128,14 @@ async def _decision_payload(db, *, prepared, contents, display_name,
     ranked = await find_similar_identities(db, prepared.embedding_normalized)
     top_similarity = ranked[0][1] if ranked else None
     band = classify_match(top_similarity)
+
+    if target_identity_id is not None:
+        # Keep the requested person selectable even when no face matched them.
+        # A zero score means no candidate evidence, not a confident match.
+        if not any(str(i) == str(target_identity_id) for i, _ in ranked):
+            ranked = list(ranked) + [(str(target_identity_id), 0.0)]
+        if band == "none":
+            band = "uncertain"
 
     if checksum_owner is not None and band == "none":
         # The identical file is already on file but the face did not clear the
@@ -142,6 +151,9 @@ async def _decision_payload(db, *, prepared, contents, display_name,
 
     candidates = await build_candidate_rows(db, ranked)
     if not candidates:
+        if target_identity_id is not None:
+            raise EnrollmentError("identity_not_found", "Person not found.",
+                                  status_code=404)
         # Every candidate vanished between the search and the hydrate. Nothing
         # to review, so do not park an upload the operator cannot resolve.
         return None
@@ -165,7 +177,9 @@ async def _decision_payload(db, *, prepared, contents, display_name,
     return {
         "success": False,
         "decision_required": True,
-        "recommended_action": "add_to_existing" if band == "strong" else "review",
+        "recommended_action": ("add_to_existing"
+                               if band == "strong" and target_identity_id is None
+                               else "review"),
         "match_confidence": band,
         "candidate_identities": candidates,
         "upload_token": raw_token,
@@ -173,8 +187,12 @@ async def _decision_payload(db, *, prepared, contents, display_name,
         "duplicate_of_identity_id": (str(checksum_owner)
                                      if checksum_owner is not None else None),
         "display_name": display_name,
+        "target_identity_id": target_identity_id,
         "error": None,
         "message": (
+            f"This photo could not be confidently matched to {display_name}. "
+            "Review the photo and choose who it belongs to before saving."
+            if target_identity_id is not None else
             f"This photo looks like {candidates[0]['display_name']}, who is "
             "already on file. Add it to that person, or create a new person if "
             "they are someone different."
@@ -210,6 +228,9 @@ async def add_identity_image(
     actor_id, actor_name = current_user.id, current_user.username
     try:
         contents = await _read_upload(photo)
+        prepared = prepare_upload(contents, original_filename=photo.filename,
+                                  content_type=photo.content_type,
+                                  is_face_image=is_face_image)
         result = await enroll_image(
             db,
             image_bytes=contents,
@@ -219,8 +240,14 @@ async def add_identity_image(
             identity_id=identity_id,
             actor_user_id=actor_id,
             allow_create=False,
+            prepared=prepared,
+            allowed_statuses=(IdentityStatus.ACTIVE, IdentityStatus.PROMOTED),
         )
     except EnrollmentError as exc:
+        if exc.code == "identity_review_required":
+            return await _target_review_response(
+                db, exc, prepared=prepared, contents=contents, photo=photo,
+                is_face_image=is_face_image, actor_id=actor_id)
         logger.warning("[UPLOAD] add-image refused (%s) for identity=%s by %s",
                        exc.code, identity_id, actor_name)
         return _error_response(exc)
@@ -343,10 +370,8 @@ async def upload_person(
                                   content_type=photo.content_type,
                                   is_face_image=is_face_image)
 
-        # Name resolution SECOND, and the gate only when it finds nobody. An
-        # existing name is already an unambiguous answer to "who is this?", so
-        # asking again would be noise — and an ambiguous one still raises 409
-        # ambiguous_identity here, before any similarity is computed.
+        # New names use the duplicate-person gate here. Existing names must
+        # pass the target-face check inside enroll_image before attachment.
         display_name = validate_person_name(person_name)
         existing = await resolve_identity_by_name(db, display_name)
         if existing is None:
@@ -375,6 +400,10 @@ async def upload_person(
             prepared=prepared,
         )
     except EnrollmentError as exc:
+        if exc.code == "identity_review_required":
+            return await _target_review_response(
+                db, exc, prepared=prepared, contents=contents, photo=photo,
+                is_face_image=is_face_image, actor_id=actor_id)
         logger.warning("[UPLOAD] refused (%s) for '%s' by %s",
                        exc.code, person_name, actor_name)
         return _error_response(exc)
@@ -405,6 +434,21 @@ async def upload_person(
         "backend": settings.VECTOR_BACKEND,
     })
     return JSONResponse(status_code=200, content=payload)
+
+
+async def _target_review_response(db, exc, *, prepared, contents, photo,
+                                  is_face_image, actor_id):
+    """The service refused before saving; park the upload for explicit review."""
+    try:
+        await sweep_expired_pending(db)
+        payload = await _decision_payload(
+            db, prepared=prepared, contents=contents,
+            display_name=exc.extra["display_name"],
+            target_identity_id=exc.extra["target_identity_id"],
+            is_face_image=is_face_image, photo=photo, actor_id=actor_id)
+        return JSONResponse(status_code=HTTP_DECISION_REQUIRED, content=payload)
+    except EnrollmentError as review_error:
+        return _error_response(review_error)
 
 
 async def _totals(db: AsyncSession):

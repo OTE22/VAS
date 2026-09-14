@@ -149,6 +149,8 @@ GET    /admin/security-intelligence                            admin_security_in
        Security Intelligence page - ADMIN ONLY
 GET    /admin/watchlists                                       admin_watchlists                           [read] deps=["require_strict_access(allowed_roles=['admin'], require_pipel"]
        Watchlist management page - ADMIN ONLY
+GET    /admin/known                                            admin_known_faces                          [read] deps=["require_strict_access(allowed_roles=['admin'], require_pipel"]
+       Known Faces directory; protected with the same policy as Management.
 GET    /admin/ml-ops                                           admin_ml_ops                               [read] deps=["require_strict_access(allowed_roles=['admin'], require_pipel"]
        ML Operations page — anomaly pipeline, shadow evaluation, drift, labels.
 GET    /admin/ml-model                                         admin_ml_model                             [read] deps=["require_strict_access(allowed_roles=['admin'], require_pipel", 'get_db']
@@ -222,7 +224,7 @@ GET    /admin/identity/{identity_id}                           get_identity_deta
 GET    /admin/unknown/{identity_id}/match-candidates           unknown_match_candidates                   [WRITE] deps=['get_db', 'get_current_user']
        Suggestions for the promote modal. Looking must never change anything.
 POST   /admin/unknown/{identity_id}/promote                    promote_unknown_to_known                   [WRITE audit] deps=['get_db', 'get_current_user']
-       Promote an unknown identity to known.
+       Promote in one transaction; existing-person review is enforced by the service.
 GET    /admin/identities                                       list_all_identities                        [WRITE] deps=['get_db', "require_role(['admin']"]
        List identities for the Intelligence Analysis dropdown.
 GET    /admin/identities/search                                search_identities                          [WRITE] deps=['get_db', 'get_current_user']
@@ -235,7 +237,7 @@ POST   /admin/identities/merge-preview                         preview_merge    
        Production-grade merge preview endpoint.
 POST   /admin/identities/merge-multiple                        merge_multiple_identities                  [WRITE] deps=['get_db', 'get_current_user']
        Merge multiple identities into one efficiently.
-POST   /search/by-image                                        search_by_image                            [WRITE audit] deps=['get_db', "require_role(['admin']"]
+POST   /search/by-image                                        search_by_image                            [read audit] deps=['get_db', "require_role(['admin']"]
        Search for identities by uploading an image (admin only).
 GET    /admin/merge-suggestions/pipeline/{pipeline_id}         get_merge_suggestions_for_pipeline         [WRITE] deps=['get_db', 'get_current_user']
        Get merge suggestions for a specific pipeline using DBSCAN clustering.
@@ -283,9 +285,7 @@ GET    /api/identities/{identity_id}/cross-camera              get_cross_camera_
 GET    /api/identities/{identity_id}/map-data                  get_tracking_map_data                      [read audit] deps=['get_db', 'require_admin(']
        Map data as GeoJSON for MapLibre.
 GET    /api/maps/availability                                  get_map_availability                       [read] deps=['get_current_user']
-       
 POST   /api/maps/verify                                        verify_map_datasets                        [read] deps=['require_admin(', 'require_intel_csrf']
-       
 GET    /api/identities/{identity_id}/timeline                  get_movement_timeline                      [read audit] deps=['get_db', 'require_admin(']
        Get movement timeline for an identity.
 GET    /api/identities/{identity_id}/analyze                   analyze_identity                           [read audit] deps=['get_db', 'require_admin(', "rate_limited('identity_analysis', heavy=True"]
@@ -316,6 +316,16 @@ GET    /api/intelligence/correlation/calculate                 calculate_activit
        Calculate activity association between two identities.
 ```
 
+### `backend/routes/known_faces.py`
+
+```
+GET    /api/admin/known-faces                                  list_known_faces                           [WRITE] deps=['get_db']
+POST   /api/admin/known-faces/{identity_id}/activation         activate_known_face                        [read] deps=["require_role(['admin']", 'require_upload_csrf', 'get_db']
+GET    /api/admin/known-faces/{identity_id}/deletion-preview   preview_known_face_deletion                [read] deps=['get_db']
+DELETE /api/admin/known-faces/{identity_id}                    delete_known_face                          [WRITE] deps=["require_role(['admin']", 'require_upload_csrf', 'get_db']
+PATCH  /api/admin/known-faces/{identity_id}                    rename_known_face                          [WRITE] deps=["require_role(['admin']", 'require_upload_csrf', 'get_db']
+```
+
 ### `backend/routes/live_alerts.py`
 
 ```
@@ -344,7 +354,6 @@ POST   /api/live-alerts/{alert_id}/triggers/acknowledge-all    acknowledge_all_t
 POST   /api/live-alerts/triggers/{trigger_id}/acknowledge      acknowledge_trigger                        [read audit] deps=['get_db', 'require_unknown_faces_access(']
        Acknowledge a trigger (owner of the parent alert or admin only).
 GET    /api/live-alerts/{alert_id}/health                      get_alert_health                           [WRITE] deps=['get_db', 'require_unknown_faces_access(']
-       
 POST   /api/live-alerts/{alert_id}/test                        test_alert_channels                        [read audit] deps=['get_db', 'require_admin(']
        Admin only: asynchronously test the alert's notification channels.
 ```
@@ -390,23 +399,14 @@ GET    /metrics                                                metrics          
 
 ```
 GET    /api/ml/capabilities                                    platform_capabilities                      [WRITE] deps=['ML_MANAGE']
-       
 GET    /api/ml/pipelines                                       list_pipeline_versions                     [WRITE] deps=['get_db', 'ML_MANAGE']
-       
 POST   /api/ml/pipelines                                       create_pipeline_version                    [WRITE audit] deps=['get_db', 'ML_MANAGE', 'require_mlops_csrf', "rate_limited('ml_ops'"]
-       
 GET    /api/ml/experiments                                     list_experiments                           [WRITE] deps=['get_db', 'ML_MANAGE']
-       
 GET    /api/ml/comparisons                                     compare_experiments                        [WRITE] deps=['get_db', 'ML_MANAGE']
-       
 POST   /api/ml/experiments/{job_id}/retry                      retry_tracking                             [WRITE audit] deps=['get_db', 'ML_MANAGE', 'require_mlops_csrf', "rate_limited('ml_ops', heavy=True"]
-       
 POST   /api/ml/models/{model_id}/promote                       promote_offline_model                      [read] deps=['get_db', 'ML_MANAGE', 'require_mlops_csrf', "rate_limited('ml_ops'"]
-       
 GET    /api/ml/models/{model_id}/explanations                  model_explanations                         [read] deps=['get_db', 'ML_MANAGE']
-       
 GET    /api/ml/models/{model_id}/explanations/download/{filename} download_explanation                       [read] deps=['get_db', 'ML_MANAGE']
-       
 GET    /api/ml/overview                                        ml_overview                                [WRITE] deps=['get_db', 'ML_MANAGE']
        One read-only payload for the ML Ops dashboard: mode availability with unmet gates, label stats, feature/predi
 PUT    /api/ml/config/mode                                     change_mode                                [read] deps=['get_db', 'ML_MANAGE', 'require_mlops_csrf', "rate_limited('ml_ops', heavy=False"]
@@ -416,7 +416,7 @@ POST   /api/ml/pause                                           pause_ml         
 POST   /api/ml/features/compute                                compute_features                           [WRITE audit] deps=['get_db', 'ML_MANAGE', 'require_mlops_csrf', "rate_limited('ml_ops', heavy=True"]
        Persist a feature-snapshot command for the independent ML worker.
 GET    /api/ml/features/definitions                            feature_definitions                        [WRITE] deps=['get_db', 'ML_MANAGE']
-       List every feature definition (active first): name, version, entity type, window, leakage class and readiness 
+       List every feature definition (active first): name, version, entity type, window, leakage class and readiness
 GET    /api/ml/labels/stats                                    label_stats                                [read] deps=['get_db', 'ML_MANAGE']
        Label counts by class and review status, the configured supervised-training minimums, and whether the supervis
 GET    /api/ml/labels                                          list_labels                                [read] deps=['get_db', 'ML_MANAGE']
@@ -474,7 +474,7 @@ POST   /api/ml/shadow/stop                                     stop_shadow      
 GET    /api/ml/predictions                                     list_predictions                           [WRITE] deps=['get_db', 'ML_MANAGE']
        Paginated prediction log, newest first: requested vs actual mode, fallback reason, score and band, calibration
 GET    /api/ml/shadow/summary                                  shadow_summary                             [read] deps=['get_db', 'ML_MANAGE']
-       Descriptive shadow-vs-rules aggregates over the last N days (1-90): disagreement counts, band distribution by 
+       Descriptive shadow-vs-rules aggregates over the last N days (1-90): disagreement counts, band distribution by
 GET    /api/ml/shadow/evidence                                 shadow_evidence                            [read] deps=['get_db', 'ML_MANAGE']
        Per model/band: predictions, reviewed manual outcomes and their split, rule-severity x band crosstab, disagree
 GET    /api/ml/drift/reports                                   drift_reports                              [WRITE] deps=['get_db', 'ML_MANAGE']
@@ -504,7 +504,6 @@ POST   /run                                                    retention_run    
 
 ```
 POST   /api/security/assessments                               create_assessment                          [read audit] deps=['get_db', 'require_admin(', 'require_intel_csrf', "rate_limited('assessment_recalc', heavy=True"]
-       
 GET    /api/security/assessments                               list_assessments                           [read audit] deps=['get_db', 'require_admin(']
        Paginated risk assessments filtered by person, pipeline, location, severity, status and creation-date range. I
 GET    /api/security/assessments/history/{subject_type}/{subject_id} assessment_history                         [read audit] deps=['get_db', 'require_admin(']
@@ -518,11 +517,9 @@ POST   /api/security/assessments/{assessment_id}/resolve       resolve_assessmen
 POST   /api/security/assessments/{assessment_id}/reopen        reopen_assessment                          [read] deps=['get_db', 'require_admin(', 'require_intel_csrf']
        Reopen a resolved assessment (anything not currently resolved is 409). Status returns to open with resolution_
 GET    /api/security/risk-model                                get_risk_model                             [WRITE] deps=['get_db', 'require_admin(']
-       
 GET    /api/security/learned-thresholds                        list_learned_thresholds                    [read] deps=['get_db', 'require_admin(']
        Learned decision thresholds (up to 200), filterable by signal and status, each with value, sample count, versi
 POST   /api/security/learned-thresholds/{threshold_id}/activate activate_learned_threshold                 [WRITE audit] deps=['get_db', 'require_admin(', 'require_intel_csrf']
-       
 ```
 
 ### `backend/routes/settings.py`
@@ -566,21 +563,15 @@ GET    /api/dashboard/pipelines                                get_dashboard_pip
 
 ```
 GET    /api/tasks/stats                                        get_task_stats                             [read] deps=['get_db', "require_role(['admin']"]
-       
 GET    /api/tasks/history                                      get_task_history                           [read] deps=['get_db', 'get_current_user']
-       
 GET    /api/tasks/alerts                                       get_task_alerts                            [read] deps=['get_db', 'get_current_user']
-       
 GET    /api/tasks/upcoming                                     get_upcoming_tasks                         [read] deps=['get_db', 'get_current_user']
        Scheduled tasks whose scheduled_time is in the future (excludes overdue).
 GET    /api/tasks/running                                      get_running_tasks                          [read] deps=['get_db', 'get_current_user']
        Currently running background tasks (up to 50), newest first, as a bare JSON array. Non-admin callers get error
 GET    /api/tasks/{task_id}                                    get_task_detail                            [read] deps=['get_db', 'get_current_user']
-       
 POST   /api/tasks/{task_id}/cancel                             cancel_task                                [read] deps=['get_db', "require_role(['admin']"]
-       
 POST   /api/tasks/{task_id}/retry                              retry_task                                 [read] deps=['get_db', "require_role(['admin']"]
-       
 ```
 
 ### `backend/routes/upload.py`
@@ -644,7 +635,6 @@ PUT    /api/watchlists/{watchlist_id}                          update_watchlist 
 PATCH  /api/watchlists/{watchlist_id}/status                   change_watchlist_status                    [read audit] deps=['get_db', 'require_admin(', 'require_watchlist_csrf']
        Explicit activation state change with reason + audit.
 GET    /api/watchlists/{watchlist_id}/deletion-impact          get_deletion_impact                        [read] deps=['get_db', 'require_admin(']
-       
 DELETE /api/watchlists/{watchlist_id}                          delete_watchlist                           [WRITE audit] deps=['get_db', 'require_admin(', 'require_watchlist_csrf']
        Soft delete (default) or explicitly confirmed hard delete.
 POST   /api/watchlists/{watchlist_id}/restore                  restore_watchlist                          [read audit] deps=['get_db', 'require_admin(', 'require_watchlist_csrf']

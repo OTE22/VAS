@@ -447,6 +447,7 @@ async def get_user_privileges(
                 NavbarLink(page="dashboard", href="/dashboard", label="LIVE FEEDS", icon="fas fa-video", visible=True),
                 # Management Dropdown items
                 NavbarLink(page="add-person", href="#", label="ADD PERSON", icon="fas fa-user-plus", visible=True, title="Add a person to track", parent_page="management"),
+                NavbarLink(page="known", href="/admin/known", label="KNOWN FACES", icon="fas fa-address-card", visible=True, title="Manage known people and enrollment photos", parent_page="management"),
                 NavbarLink(page="users", href="/admin/users", label="USERS", icon="fas fa-users", visible=True, parent_page="management"),
                 NavbarLink(page="pipelines", href="/admin/pipelines", label="PIPELINES", icon="fas fa-video", visible=True, parent_page="management"),
                 NavbarLink(page="audit", href="/admin/audit", label="AUDIT LOG", icon="fas fa-clipboard-list", visible=True, parent_page="management"),
@@ -797,4 +798,3 @@ async def change_password(
         "access_token": None if browser_client else access_token,
         "token_type": None if browser_client else "bearer",
     }
-

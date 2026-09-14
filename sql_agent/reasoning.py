@@ -170,26 +170,13 @@ _REQUIRES_RESULT = frozenset({"query_database", "modify_previous_query"})
 # ----------------------------------------------------------- observation
 
 def _sanitize(text: Any) -> Optional[str]:
-    """A BOUNDED reason string: one line, at most 200 characters.
+    """Preserve complete internal repair diagnostics, redacting credentials.
 
-    That is all it does, and the name oversells it. It flattens newlines and
-    clips — it does NOT remove table names, column names or SQL fragments,
-    because a driver error is exactly where an operator needs those to
-    diagnose anything.
-
-    So this is safe for a LOG and for the model's own context. It is NOT safe
-    for a user-visible reply: `column "cam" does not exist LINE 1: SELECT cam
-    FROM detections` survives it nearly whole. Anything shown to a user is
-    built from the error CATEGORY instead — see `_FAILURE_PHRASES` in
-    agent_tools — because an enum cannot leak.
-
-    An earlier docstring here claimed "never SQL, never rows". It was wrong,
-    and a user-facing message was written on the strength of it.
+    User replies are still built from error categories. The model and Opik
+    need PostgreSQL's LINE, caret, DETAIL and HINT to repair failed queries.
     """
-    if not text:
-        return None
-    flat = " ".join(str(text).split())
-    return flat[:_SANITIZED_DETAIL_CHARS] or None
+    from .diagnostics import redact_diagnostic
+    return redact_diagnostic(text) or None
 
 
 def classify_execution_error(error_text: Any) -> str:
@@ -369,6 +356,12 @@ def _expected_data(state: dict) -> bool:
     narrowing itself (a misspelled name, an unresolved reference) is the
     likelier culprit.
     """
+    # The executed query defines this result's scope. A remembered person
+    # must not turn an unrelated empty "detections today" query into a
+    # lookup and a statement about that old person (Opik 01a085ae-31f2).
+    sql = state.get("generated_sql") or state.get("validated_sql")
+    if sql:
+        return bool(filtered_names(sql) or filtered_cameras(sql))
     dialogue = (state.get("working_context") or {}).get("dialogue_state") or {}
     fields = dialogue.get("fields") or {}
     if any(fields.get(name, {}).get("value") for name in
@@ -763,7 +756,7 @@ def reasoning_trace(*, conversation_id, turn_id, mode: str,
         observation.get("action"), observation.get("success"),
         observation.get("row_count"), observation.get("error_type"),
         observation.get("artifact_id"),
-        decision.get("decision"), _sanitize(decision.get("reason")),
+        decision.get("decision"), observation.get("error_type") or "none",
         next_action)
 
 

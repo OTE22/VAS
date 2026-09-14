@@ -52,11 +52,13 @@ const SRC = {
     zones: 'ae-zones',
     patterns: 'ae-patterns',
     threats: 'ae-threats',
+    progress: 'ae-route-progress',
 };
 const LAYER_ORDER = [
     'ae-zones-fill', 'ae-zones-line',
     'ae-risk-heat',
-    'ae-route-line', 'ae-route-arrows',
+    'ae-route-casing', 'ae-route-glow', 'ae-route-line', 'ae-route-arrows',
+    'ae-route-progress-glow', 'ae-route-progress-line',
     'ae-patterns-line', 'ae-patterns-point',
     'ae-detections-clusters', 'ae-detections-cluster-count', 'ae-detections-point',
     'ae-threats-point',
@@ -89,8 +91,14 @@ export class IdentityMapController {
         this.data = null;               // last map-data payload
         this.flags = { popups: true, cluster: true, routes: true, security: false,
                        patterns: false, risk: false, timeline: false, avatar: false };
-        this._timeline = null;          // { el, range, label, playBtn, timer, idx }
+        this._timeline = null;          // playback HUD + current detection index
         this._avatarMarker = null;
+        this._playbackFrame = null;
+        this._playbackResolve = null;
+        this._autoPlayTimer = null;
+        this._playbackRun = 0;
+        this._overlayHandlers = [];
+        this._autoPlayedData = null;
         this.availability = null;
         this._popup = null;
         this._handlers = [];
@@ -143,6 +151,7 @@ export class IdentityMapController {
         this._destroyed = true;
         this._closePopup();
         this._teardownTimeline();
+        this._clearOverlayHandlers();
         for (const [target, evt, fn] of this._handlers) {
             try { target.off ? target.off(evt, fn) : target.removeEventListener(evt, fn); } catch (_) { /* gone */ }
         }
@@ -151,6 +160,12 @@ export class IdentityMapController {
         this.map = null;
         this.data = null;
         this.container.classList.remove('ae-map');
+    }
+
+    /** Recalculate the canvas after a hidden map view becomes visible. */
+    resize() {
+        if (!this.map) return;
+        this.map.resize();
     }
 
     _on(target, evt, fn) {
@@ -264,6 +279,7 @@ export class IdentityMapController {
             throw e;
         }
         this.data = await resp.json();
+        this._autoPlayedData = null;
         this._restoreOverlays();
         this.fitToData();
         return this.data;
@@ -293,6 +309,7 @@ export class IdentityMapController {
         // is parsed, i.e. exactly when `style.load` fires. Proven in headless
         // Chrome: light → terrain kept all 9 overlay layers only after this
         // gate was removed (it emptied them before).
+        this._clearOverlayHandlers();
         this._clearOverlays();
         const d = this.data;
         const f = this.flags;
@@ -322,13 +339,19 @@ export class IdentityMapController {
         // Route
         if (f.routes && d.route && d.route.features.length) {
             this.map.addSource(SRC.route, { type: 'geojson', data: d.route });
+            this.map.addLayer({ id: 'ae-route-casing', type: 'line', source: SRC.route,
+                layout: { 'line-join': 'round', 'line-cap': 'round' },
+                paint: { 'line-color': '#03151d', 'line-width': 9, 'line-opacity': 0.72 } });
+            this.map.addLayer({ id: 'ae-route-glow', type: 'line', source: SRC.route,
+                layout: { 'line-join': 'round', 'line-cap': 'round' },
+                paint: { 'line-color': '#00e5ff', 'line-width': 8, 'line-blur': 7, 'line-opacity': 0.32 } });
             this.map.addLayer({ id: 'ae-route-line', type: 'line', source: SRC.route,
                 layout: { 'line-join': 'round', 'line-cap': 'round' },
-                paint: { 'line-color': '#1e88e5', 'line-width': 3, 'line-opacity': 0.85 } });
+                paint: { 'line-color': '#25b8ff', 'line-width': 4, 'line-opacity': 0.82 } });
             // Direction: a chevron symbol along the line (built-in text glyph
             // would need a glyph source; a small circle-dash keeps it local).
             this.map.addLayer({ id: 'ae-route-arrows', type: 'line', source: SRC.route,
-                paint: { 'line-color': '#ffffff', 'line-width': 1.2, 'line-dasharray': [0.5, 2.5], 'line-opacity': 0.9 } });
+                paint: { 'line-color': '#d9fbff', 'line-width': 1.4, 'line-dasharray': [0.8, 2.8], 'line-opacity': 0.9 } });
         }
         // Patterns
         if (f.patterns && d.patterns && d.patterns.features.length) {
@@ -379,6 +402,12 @@ export class IdentityMapController {
         this._syncTimeline();
     }
 
+    _clearOverlayHandlers() {
+        for (const remove of this._overlayHandlers.splice(0)) {
+            try { remove(); } catch (_) { /* style or map already gone */ }
+        }
+    }
+
     _wireInteractions() {
         const map = this.map;
         const clickable = ['ae-detections-point', 'ae-cameras-point', 'ae-detections-clusters',
@@ -391,9 +420,9 @@ export class IdentityMapController {
             const leave = () => { map.getCanvas().style.cursor = ''; };
             const click = (e) => this._onFeatureClick(id, e);
             map.on('mouseenter', id, enter); map.on('mouseleave', id, leave); map.on('click', id, click);
-            this._handlers.push([{ off: (evt, fn) => map.off(evt, id, fn) }, 'mouseenter', enter],
-                                [{ off: (evt, fn) => map.off(evt, id, fn) }, 'mouseleave', leave],
-                                [{ off: (evt, fn) => map.off(evt, id, fn) }, 'click', click]);
+            this._overlayHandlers.push(() => map.off('mouseenter', id, enter),
+                                       () => map.off('mouseleave', id, leave),
+                                       () => map.off('click', id, click));
         }
     }
 
@@ -444,41 +473,88 @@ export class IdentityMapController {
         return box;
     }
 
-    // ---------------------------------------------------------------- timeline / avatar
-    //
-    // Replaces Folium's TimestampedGeoJson + the animated avatar. Purely
-    // client-side over the chronological `detections` the API already
-    // returns — no extra request, and the basemap style can change underneath
-    // it because the avatar is a DOM Marker, not a style layer.
+    // ---------------------------------------------------------------- movement playback
+    // Smooth, requestAnimationFrame-driven interpolation over the chronological
+    // detections already returned by the API. Playback time is deliberately
+    // compressed: real gaps can span hours, while every segment remains long
+    // enough to read and short enough to investigate interactively.
     _syncTimeline() {
         const want = (this.flags.timeline || this.flags.avatar) &&
                      this.data && this.data.detections.features.length > 1;
         if (!want) { this._teardownTimeline(); return; }
+        if (!this.flags.avatar && this._avatarMarker) {
+            try { this._avatarMarker.remove(); } catch (_) { /* already gone */ }
+            this._avatarMarker = null;
+        }
         if (!this._timeline) this._buildTimeline();
+        this._ensureProgressLayers();
         this._setTimelineIndex(this._timeline.idx, /*silent*/ true);
+
+        const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (!reduced && this._autoPlayedData !== this.data) {
+            this._autoPlayedData = this.data;
+            if (this._autoPlayTimer) window.clearTimeout(this._autoPlayTimer);
+            this._autoPlayTimer = window.setTimeout(() => {
+                this._autoPlayTimer = null;
+                if (this._timeline && !this._timeline.playing) this._startPlayback();
+            }, 650);
+        }
     }
 
     _buildTimeline() {
         const wrap = el('div', 'ae-timeline');
+        wrap.setAttribute('role', 'region');
+        wrap.setAttribute('aria-label', 'Movement playback');
+        const summary = el('div', 'ae-timeline-summary');
+        const status = el('div', 'ae-timeline-status', 'Ready');
+        status.setAttribute('aria-live', 'polite');
+        summary.append(el('span', 'ae-timeline-kicker', 'MOVEMENT REPLAY'), status);
+
+        const controls = el('div', 'ae-timeline-controls');
+        const prevBtn = el('button', 'ae-timeline-skip', '‹');
+        prevBtn.type = 'button'; prevBtn.title = 'Previous detection'; prevBtn.setAttribute('aria-label', 'Previous detection');
         const playBtn = el('button', 'ae-timeline-play', '▶');
-        playBtn.type = 'button'; playBtn.title = 'Play / pause';
+        playBtn.type = 'button'; playBtn.title = 'Play movement'; playBtn.setAttribute('aria-label', 'Play movement');
+        const nextBtn = el('button', 'ae-timeline-skip', '›');
+        nextBtn.type = 'button'; nextBtn.title = 'Next detection'; nextBtn.setAttribute('aria-label', 'Next detection');
         const range = el('input', 'ae-timeline-range');
-        range.type = 'range'; range.min = '0'; range.step = '1';
+        range.type = 'range'; range.min = '0'; range.step = '1'; range.setAttribute('aria-label', 'Detection timeline');
+        const speed = el('select', 'ae-timeline-speed');
+        speed.setAttribute('aria-label', 'Playback speed');
+        for (const value of ['0.5', '1', '2', '4']) {
+            const option = el('option', '', `${value}×`);
+            option.value = value;
+            if (value === '1') option.selected = true;
+            speed.appendChild(option);
+        }
+        const overviewBtn = el('button', 'ae-timeline-overview', 'Overview');
+        overviewBtn.type = 'button'; overviewBtn.title = 'Fit the complete route';
         const label = el('div', 'ae-timeline-label', '');
-        wrap.append(playBtn, range, label);
+        controls.append(prevBtn, playBtn, nextBtn, range, speed, overviewBtn);
+        wrap.append(summary, controls, label);
         this.container.appendChild(wrap);
 
-        const onInput = () => this._setTimelineIndex(parseInt(range.value, 10) || 0);
+        const onInput = () => {
+            this._cancelPlayback();
+            this._setTimelineIndex(parseInt(range.value, 10) || 0);
+        };
         const onPlay = () => this._toggleTimelinePlay();
+        const onPrev = () => { this._cancelPlayback(); this._setTimelineIndex(this._timeline.idx - 1); };
+        const onNext = () => { this._cancelPlayback(); this._setTimelineIndex(this._timeline.idx + 1); };
+        const onOverview = () => this.fitToData();
         range.addEventListener('input', onInput);
         playBtn.addEventListener('click', onPlay);
-        this._handlers.push([range, 'input', onInput], [playBtn, 'click', onPlay]);
-        this._timeline = { el: wrap, range, label, playBtn, timer: null, idx: 0 };
+        prevBtn.addEventListener('click', onPrev);
+        nextBtn.addEventListener('click', onNext);
+        overviewBtn.addEventListener('click', onOverview);
+        this._timeline = { el: wrap, range, label, status, playBtn, prevBtn, nextBtn,
+                           speed, overviewBtn, idx: 0, playing: false, follow: true };
     }
 
     _teardownTimeline() {
+        this._cancelPlayback();
+        if (this._autoPlayTimer) { window.clearTimeout(this._autoPlayTimer); this._autoPlayTimer = null; }
         if (this._timeline) {
-            if (this._timeline.timer) window.clearInterval(this._timeline.timer);
             this._timeline.el.remove();
             this._timeline = null;
         }
@@ -488,14 +564,139 @@ export class IdentityMapController {
     _toggleTimelinePlay() {
         const t = this._timeline;
         if (!t) return;
-        if (t.timer) { window.clearInterval(t.timer); t.timer = null; t.playBtn.textContent = '▶'; return; }
-        t.playBtn.textContent = '❚❚';
-        t.timer = window.setInterval(() => {
-            const n = this.data.detections.features.length;
-            const next = (t.idx + 1) % n;
-            this._setTimelineIndex(next);
-            if (next === n - 1) { window.clearInterval(t.timer); t.timer = null; t.playBtn.textContent = '▶'; }
-        }, 900);
+        if (t.playing) this._cancelPlayback(); else this._startPlayback();
+    }
+
+    _startPlayback() {
+        const t = this._timeline;
+        const feats = this.data && this.data.detections && this.data.detections.features;
+        if (!t || !feats || feats.length < 2) return;
+        this._cancelPlayback();
+        if (t.idx >= feats.length - 1) this._setTimelineIndex(0, true);
+        t.playing = true;
+        t.playBtn.textContent = 'Ⅱ';
+        t.playBtn.title = 'Pause movement';
+        t.playBtn.setAttribute('aria-label', 'Pause movement');
+        t.status.textContent = 'Playing';
+        const run = ++this._playbackRun;
+        const advance = async () => {
+            while (this._timeline === t && t.playing && run === this._playbackRun && t.idx < feats.length - 1) {
+                const completed = await this._animateSegment(t.idx, t.idx + 1, run);
+                if (!completed) return;
+            }
+            if (this._timeline === t && run === this._playbackRun) {
+                t.playing = false;
+                this._setPlayButtonIdle();
+                t.status.textContent = 'Replay complete';
+            }
+        };
+        advance();
+    }
+
+    _cancelPlayback() {
+        this._playbackRun += 1;
+        if (this._playbackFrame !== null) window.cancelAnimationFrame(this._playbackFrame);
+        this._playbackFrame = null;
+        if (this._playbackResolve) { this._playbackResolve(false); this._playbackResolve = null; }
+        if (this._timeline) {
+            this._timeline.playing = false;
+            this._setPlayButtonIdle();
+            this._timeline.status.textContent = 'Paused';
+        }
+    }
+
+    _setPlayButtonIdle() {
+        if (!this._timeline) return;
+        this._timeline.playBtn.textContent = '▶';
+        this._timeline.playBtn.title = this._timeline.idx >= Number(this._timeline.range.max) ? 'Replay movement' : 'Play movement';
+        this._timeline.playBtn.setAttribute('aria-label', this._timeline.playBtn.title);
+    }
+
+    _segmentDuration(from, to) {
+        const a = new Date(from.properties.timestamp).getTime();
+        const b = new Date(to.properties.timestamp).getTime();
+        const minutes = Number.isFinite(a) && Number.isFinite(b) ? Math.max(0, (b - a) / 60000) : 1;
+        const base = Math.min(3200, 1200 + Math.log2(minutes + 1) * 260);
+        const speed = this._timeline ? Number(this._timeline.speed.value) || 1 : 1;
+        return Math.max(320, base / speed);
+    }
+
+    _animateSegment(fromIdx, toIdx, run) {
+        const feats = this.data.detections.features;
+        const from = feats[fromIdx];
+        const to = feats[toIdx];
+        const a = from.geometry.coordinates;
+        const b = to.geometry.coordinates;
+        const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const duration = reduced ? 0 : this._segmentDuration(from, to);
+        if (this._timeline && this._timeline.follow && (a[0] !== b[0] || a[1] !== b[1])) {
+            this.map.easeTo({ center: b, duration, essential: false });
+        }
+        if (!duration) { this._setTimelineIndex(toIdx, true); return Promise.resolve(true); }
+        return new Promise((resolve) => {
+            this._playbackResolve = resolve;
+            const started = performance.now();
+            const frame = (now) => {
+                if (run !== this._playbackRun || !this._timeline || !this._timeline.playing) {
+                    this._playbackFrame = null;
+                    this._playbackResolve = null;
+                    resolve(false);
+                    return;
+                }
+                const raw = Math.min(1, (now - started) / duration);
+                const eased = raw < 0.5 ? 4 * raw * raw * raw : 1 - Math.pow(-2 * raw + 2, 3) / 2;
+                const coord = [a[0] + (b[0] - a[0]) * eased, a[1] + (b[1] - a[1]) * eased];
+                this._setAvatarPosition(coord, from, to, eased);
+                this._setProgressLine(fromIdx, coord);
+                if (raw < 1) {
+                    this._playbackFrame = window.requestAnimationFrame(frame);
+                } else {
+                    this._playbackFrame = null;
+                    this._playbackResolve = null;
+                    this._setTimelineIndex(toIdx, true);
+                    resolve(true);
+                }
+            };
+            this._playbackFrame = window.requestAnimationFrame(frame);
+        });
+    }
+
+    _ensureProgressLayers() {
+        if (!this.map || !this.data || this.map.getSource(SRC.progress)) return;
+        const first = this.data.detections.features[0].geometry.coordinates;
+        this.map.addSource(SRC.progress, { type: 'geojson', data: {
+            type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [first, first] }
+        } });
+        this.map.addLayer({ id: 'ae-route-progress-glow', type: 'line', source: SRC.progress,
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#00ff96', 'line-width': 12, 'line-blur': 9, 'line-opacity': 0.42 } });
+        this.map.addLayer({ id: 'ae-route-progress-line', type: 'line', source: SRC.progress,
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: { 'line-color': '#7dffc6', 'line-width': 4.5, 'line-opacity': 1 } });
+    }
+
+    _setProgressLine(idx, current) {
+        const source = this.map && this.map.getSource(SRC.progress);
+        if (!source || !this.data) return;
+        const coords = this.data.detections.features.slice(0, idx + 1).map((f) => f.geometry.coordinates);
+        coords.push(current);
+        if (coords.length === 1) coords.push(current);
+        source.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+    }
+
+    _setAvatarPosition(coord, from, to, progress) {
+        if (!this.flags.avatar) return;
+        if (!this._avatarMarker) {
+            const pin = el('div', 'ae-avatar');
+            pin.setAttribute('aria-label', 'Current tracked position');
+            pin.append(el('span', 'ae-avatar-ring'), el('span', 'ae-avatar-core'));
+            this._avatarMarker = new maplibregl.Marker({ element: pin, anchor: 'center' })
+                .setLngLat(coord).addTo(this.map);
+        } else {
+            this._avatarMarker.setLngLat(coord);
+        }
+        const name = progress < 0.55 ? from.properties.pipeline_name : to.properties.pipeline_name;
+        this._avatarMarker.getElement().title = `Tracking · ${name || 'camera'}`;
     }
 
     _setTimelineIndex(idx, silent) {
@@ -509,7 +710,17 @@ export class IdentityMapController {
         t.range.value = String(idx);
         const f = feats[idx];
         const p = f.properties;
-        t.label.textContent = `${idx + 1}/${n} · ${p.pipeline_name || ''} · ${fmtTs(p.timestamp)}`;
+        const cameraCount = this.data.metadata && this.data.metadata.counts ? this.data.metadata.counts.cameras : null;
+        const unique = new Set(feats.map((feat) => feat.geometry.coordinates.join(','))).size;
+        const mapped = Number.isFinite(Number(cameraCount)) ? Number(cameraCount) : unique;
+        const cameraWord = mapped === 1 ? 'camera' : 'cameras';
+        const activity = t.playing ? 'Playing · ' : '';
+        t.label.textContent = `${String(idx + 1).padStart(2, '0')} / ${String(n).padStart(2, '0')}  ·  ${p.pipeline_name || 'Unknown camera'}  ·  ${fmtTs(p.timestamp)}`;
+        t.status.textContent = unique < 2
+            ? `${activity}${n} detections · ${mapped} mapped ${cameraWord} · no geographic transition`
+            : `${activity}${n} detections · ${mapped} mapped ${cameraWord} · ${unique} locations`;
+        t.prevBtn.disabled = idx === 0;
+        t.nextBtn.disabled = idx === n - 1;
 
         // Timeline mode dims detections after the cursor via a filter on the
         // point layer (a style expression, so it survives nothing — but
@@ -520,18 +731,9 @@ export class IdentityMapController {
             this.map.setPaintProperty('ae-detections-point', 'circle-stroke-opacity',
                 ['case', ['<=', ['get', 'seq'], p.seq], 1, 0.15]);
         }
-        // Avatar: a DOM marker at the current position.
-        if (this.flags.avatar) {
-            if (!this._avatarMarker) {
-                const pin = el('div', 'ae-avatar');
-                pin.title = 'Current position';
-                this._avatarMarker = new maplibregl.Marker({ element: pin, anchor: 'center' })
-                    .setLngLat(f.geometry.coordinates).addTo(this.map);
-            } else {
-                this._avatarMarker.setLngLat(f.geometry.coordinates);
-            }
-            if (!silent) this.map.easeTo({ center: f.geometry.coordinates, duration: 500 });
-        }
+        this._setAvatarPosition(f.geometry.coordinates, f, f, 1);
+        this._setProgressLine(idx, f.geometry.coordinates);
+        if (!silent && this.flags.avatar) this.map.easeTo({ center: f.geometry.coordinates, duration: 650, essential: false });
     }
 
     _closePopup() {

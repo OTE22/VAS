@@ -649,6 +649,14 @@ async def admin_watchlists(
         return JSONResponse(content={"message": "Watchlists page not found"})
 
 
+@router.get("/admin/known")
+async def admin_known_faces(
+    current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False))
+):
+    """Known Faces directory; protected with the same policy as Management."""
+    return FileResponse("frontend/admin/known.html")
+
+
 @router.get("/admin/ml-ops")
 async def admin_ml_ops(
     current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False))
@@ -1648,4 +1656,3 @@ async def api_overview():
 def ping():
     """Constant {"status": "ok"} with no authentication and no I/O — the cheapest possible reachability probe."""
     return {"status": "ok"}
-

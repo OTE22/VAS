@@ -33,8 +33,11 @@ done
 
 while true; do
     if sh /scripts/backup.sh /backups; then
+        touch /backups/.last-success
+        rm -f /backups/.last-failure
         echo "[backup-loop] backup succeeded"
     else
+        touch /backups/.last-failure
         # Non-fatal: keep the loop alive so a transient failure does not stop
         # all future backups. The BackupFailed alert fires on the age of the
         # newest backup, so a persistent failure still pages.

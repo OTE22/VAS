@@ -401,7 +401,7 @@ class MCPToolset:
         except ValidationError as e:
             return self._finish(name, ctx, started, error=ToolError(
                 "INVALID_ARGUMENTS", "; ".join(f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
-                                               for err in e.errors()[:5])))
+                                               for err in e.errors())))
         future = self._pool.submit(spec.handler, arguments, ctx)
         try:
             raw = future.result(timeout=spec.timeout_seconds)
@@ -638,13 +638,14 @@ class MCPToolset:
         started = time.monotonic()
         result = self.db.execute_query(args.sql) or {}
         if not result.get("success"):
-            first_line = str(result.get("error") or "execution failed").splitlines()[0]
+            from ..diagnostics import redact_diagnostic
+            diagnostic = redact_diagnostic(result.get("error") or "execution failed")
             # The manager's own denial (its guard runs first) keeps its code:
             # the loop's enforcement distinguishes a parse error from DELETE.
             if result.get("error_code"):
-                raise ToolError("PERMISSION_DENIED", f"{result['error_code']}: {first_line[:200]}",
-                                detail={"error_code": result["error_code"], "error": first_line[:300]})
-            raise ToolError("DEPENDENCY_UNAVAILABLE", first_line[:200], detail={"error": first_line[:300]})
+                raise ToolError("PERMISSION_DENIED", f"{result['error_code']}: {diagnostic}",
+                                detail={"error_code": result["error_code"], "error": diagnostic})
+            raise ToolError("DEPENDENCY_UNAVAILABLE", diagnostic, detail={"error": diagnostic})
         rows = list(result.get("rows") or [])[:args.max_rows]
         return {"columns": list(result.get("columns") or (list(rows[0].keys()) if rows else [])),
                 "rows": rows, "row_count": int(result.get("row_count") or len(rows)),
@@ -652,6 +653,7 @@ class MCPToolset:
                 "duration_ms": int((time.monotonic() - started) * 1000)}
 
     def _explain_query(self, args: SqlIn, ctx):
+        from ..diagnostics import redact_diagnostic
         _, policy = self._policy(ctx)
         if not getattr(policy, "allow_explain", False):
             raise ToolError("PERMISSION_DENIED", "EXPLAIN is disabled by the SQL policy")
@@ -660,7 +662,7 @@ class MCPToolset:
             raise ToolError("PERMISSION_DENIED", f"{verdict.code}: {verdict.reason}")
         result = self.db.execute_query("EXPLAIN (FORMAT JSON) " + (verdict.sql or args.sql)) or {}
         if not result.get("success"):
-            raise ToolError("DEPENDENCY_UNAVAILABLE", str(result.get("error") or "explain failed")[:200])
+            raise ToolError("DEPENDENCY_UNAVAILABLE", redact_diagnostic(result.get("error") or "explain failed"))
         return {"plan": result.get("rows")}
 
     def _cancel(self, args: CancelIn, ctx):

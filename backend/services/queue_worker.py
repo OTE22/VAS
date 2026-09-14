@@ -9,6 +9,7 @@ import sys
 import asyncio
 import logging
 import time
+from datetime import datetime
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -81,6 +82,9 @@ async def _process_queued_item(item: dict, worker_id: int):
         send_realtime_updates=True,
         worker_id=worker_id,
         location_name=item.get("location_name"),
+        observed_at=datetime.fromisoformat(item['observed_at']) if item.get('observed_at') else
+                    datetime.utcfromtimestamp(item['timestamp']) if item.get('timestamp') else None,
+        timestamp_source=item.get('timestamp_source', 'server_received'),
     )
 
 
@@ -142,4 +146,3 @@ async def queue_worker(worker_id: int):
         except Exception as e:
             logger.error(f"[WORKER-{worker_id}] Fatal error: {e}", exc_info=True)
             await asyncio.sleep(1)
-
