@@ -35,7 +35,7 @@ for arg in "$@"; do
   esac
 done
 
-[ -f "$MANIFEST" ] || { echo "no scene manifest at $MANIFEST (see Docs/86_MAP_DATASET_ACQUISITION.md)" >&2; exit 1; }
+[ -f "$MANIFEST" ] || { echo "no scene manifest at $MANIFEST (see Docs/41_MAP_DATASET_ACQUISITION.md)" >&2; exit 1; }
 rm -f "$OUT"
 
 docker run --rm \

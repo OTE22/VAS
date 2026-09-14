@@ -160,8 +160,9 @@ def test_migration_head_and_seeds():
     # (quality scorer provenance) -> a3b4c5d6e7f8 -> f2a3b4c5d6e7 ->
     # e1f2a3b4c5d6 -> d0e1f2a3b4c5 -> b8c9d0e1f2a3 (this ML-pipeline
     # migration) — so asserting the newest head still proves the ML lineage
-    # is applied.
-    assert head == "fbb2c3d4e5f6"
+    # is applied. The newest head is now fcc3d4e5f6a7 (ML platform
+    # integrations), which revises fbb2c3d4e5f6 (relational ML features).
+    assert head == "fcc3d4e5f6a7"
     assert [p[0] for p in policies] == [
         "behavior_anomaly_model", "coappearance_anomaly_model",
         "social_graph_anomaly_model", "threat_ranking_model"]

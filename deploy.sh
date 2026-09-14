@@ -45,7 +45,7 @@
 #   or OFFLINE_MODE=false. The Opik container is never started by the
 #   production path; `./deploy.sh dev` starts it (stage D4b) only when
 #   SQL_AGENT_OPIK_ENABLED=true and a self-hosted Opik checkout exists at
-#   OPIK_HOME (default: $HOME/opik). See Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md.
+#   OPIK_HOME (default: $HOME/opik). See Docs/56_DATA_AGENT_CONFIGURATION.md.
 #
 # Running both on one host does not work: each wants ports 80/443.
 #
@@ -54,7 +54,7 @@
 # An orchestrator for machinery the repository already ships and tests:
 # scripts/setup/generate-secrets.sh, scripts/tls/make-internal-ca.sh,
 # db/roles.sql, the compose `migrate` job, scripts/backup/*, config_guard and
-# gpu_runtime. It re-implements none of them. Docs/61_DEPLOYMENT_RUNBOOK.md
+# gpu_runtime. It re-implements none of them. Docs/04_DEPLOYMENT_RUNBOOK.md
 # remains the reference for what each step means and the break-glass manual
 # path; every numbered section there maps to a stage here.
 #

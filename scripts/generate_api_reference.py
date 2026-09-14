@@ -1,4 +1,4 @@
-"""Generate Docs/75_API_REFERENCE.md from the LIVE OpenAPI document.
+"""Generate Docs/48_API_REFERENCE.md from the LIVE OpenAPI document.
 
 Generated, not written by hand, so it cannot drift from the code: every path,
 method, tag and auth requirement below came out of the running application.
@@ -8,7 +8,7 @@ import json
 import urllib.request
 
 SPEC_URL = "http://localhost:8000/openapi.json"
-OUT = "/app/Docs/75_API_REFERENCE.md"
+OUT = "/app/Docs/48_API_REFERENCE.md"
 VERBS = ("get", "post", "put", "patch", "delete")
 
 spec = json.load(urllib.request.urlopen(SPEC_URL, timeout=120))
@@ -144,7 +144,7 @@ w("Common codes: `INVALID_CREDENTIALS` (401), `RATE_LIMITED` (429, with "
   "`SESSION_CREATION_FAILED` (500), `AUTH_SERVICE_UNAVAILABLE` (500).")
 w("")
 w("Troubleshooting each of these: "
-  "[`73_TROUBLESHOOTING.md`](73_TROUBLESHOOTING.md).")
+  "[`13_TROUBLESHOOTING.md`](13_TROUBLESHOOTING.md).")
 w("")
 
 with open(OUT, "w", encoding="utf-8") as handle:

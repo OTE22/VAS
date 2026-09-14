@@ -101,7 +101,7 @@ WORKDIR /app
 # Copied under their real names. This used to be
 # `COPY requirements-gpu.txt requirements.txt`, i.e. a RENAME, which is why a
 # /app/requirements.txt appeared to exist at runtime while no such file exists
-# in the repository — and why Docs/01_QUICK_START.md's
+# in the repository — and why Docs/04_DEPLOYMENT_RUNBOOK.md's
 # `pip install -r requirements.txt` looked plausible but could never work.
 #
 # requirements-base.txt is REQUIRED: requirements-gpu.txt starts with

@@ -18,6 +18,7 @@ from backend.routes.management import router as management_router
 from backend.routes.auth import router as auth_router
 from backend.routes.users import router as users_router
 from backend.routes.audit import router as audit_router
+from backend.routes.sso import router as sso_router
 
 try:
     from backend.routes.identities import router as identities_router
@@ -54,6 +55,7 @@ __all__ = [
     'auth_router',
     'users_router',
     'audit_router',
+    'sso_router',
     'identities_router',
     'admin_tutorial_router',
     'settings_router',

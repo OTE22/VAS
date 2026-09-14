@@ -26,7 +26,7 @@ if [ "${I_KNOW_THIS_IS_DEPRECATED:-0}" != "1" ]; then
 start_production.sh is deprecated and does not configure the production stack.
 
   Use instead:  sudo ./deploy.sh --public-origin=https://<your-host>
-  Reference:    Docs/61_DEPLOYMENT_RUNBOOK.md
+  Reference:    Docs/04_DEPLOYMENT_RUNBOOK.md
 
 To run this script anyway (it will not produce a correct production
 deployment):  I_KNOW_THIS_IS_DEPRECATED=1 bash scripts/setup/start_production.sh

@@ -148,7 +148,7 @@ hdbscan
 pyarrow>=25.0.1,<26
 
 # ---------------------------------------------------------------------------
-# Maps. Offline by design — see Docs/56_OFFLINE_MAP_TILES_SETUP.md.
+# Maps. Offline by design — see Docs/41_MAP_DATASET_ACQUISITION.md.
 # ---------------------------------------------------------------------------
 tqdm>=4.66.0               # progress bars for the tile download script
 

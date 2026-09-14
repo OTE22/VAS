@@ -27,7 +27,7 @@ pytest==9.1.1
 PyYAML
 
 # Per-turn tracing of the SQL agent into a SELF-HOSTED Opik (see
-# sql_agent/tracing.py and Docs/90_AGENT_ARCHITECTURE.md, "Tracing a turn
+# sql_agent/tracing.py and Docs/57_AGENT_ARCHITECTURE.md, "Tracing a turn
 # with Opik"). Development only, and deliberately not a runtime package:
 #   * it pulls in litellm, openai, boto3 stubs, tiktoken and tree-sitter
 #     (~20 packages) for a feature production never runs;

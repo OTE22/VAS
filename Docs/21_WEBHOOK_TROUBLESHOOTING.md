@@ -245,3 +245,29 @@ The webhook endpoint is working perfectly - the issue is that requests from your
 
 
 
+
+---
+
+## Debugging a webhook that is refused or silently dropped
+
+*(Absorbed 2026-09-12 from the former 22_WEBHOOK_DEBUG.)*
+
+Work down this list; each step distinguishes two causes rather than guessing.
+
+1. **Is the request reaching the application at all?** `docker compose logs -f nginx`
+   while the camera posts. No line → the camera cannot reach the host (network, port,
+   TLS trust). A line with `413` → the frame is larger than the webhook body limit
+   (`WEBHOOK_MAX_BODY_MB`, which must equal nginx's `client_max_body_size` for that
+   location — a test asserts they agree).
+2. **Is it authenticated?** `401` means the credential is missing, revoked or sent in a
+   header the deployment does not accept. Issue a fresh one on **Admin → Ingest
+   credentials** and note that the token is shown once (`46_WEB_PAGES_REFERENCE.md` §21).
+3. **Is it being dropped as a duplicate?** Identical frames inside
+   `WEBHOOK_DEDUP_TTL_SECONDS` are dropped on purpose; the response is a success, not an
+   error. Change a pixel or wait out the window when testing.
+4. **Is the queue full?** A `503` is back-pressure (`MAX_QUEUE_SIZE`, `QUEUE_WORKERS`),
+   not a failure of the frame — the camera should retry. Sustained 503s mean the workers
+   cannot keep up: see `17_SCALABILITY.md`.
+5. **Accepted but nothing appears on the dashboard?** The frame reached the queue and no
+   face cleared detection/quality. `SAVE_WEBHOOK_IMAGES=true` (debugging only, unbounded
+   disk) keeps the received frames so you can look at what the camera actually sent.

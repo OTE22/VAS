@@ -38,7 +38,7 @@ All helper scripts live here, organized by purpose. The project root contains on
 
 ## 📁 map_data/ — Offline basemaps
 
-Full documentation: [`Docs/46_MAP_SERVICE_GUIDE.md`](../Docs/46_MAP_SERVICE_GUIDE.md).
+Full documentation: [`Docs/40_MAP_SERVICE.md`](../Docs/40_MAP_SERVICE.md).
 Builders run in preparation containers (GDAL, Planetiler); gates and probes run
 inside the api container, which has the decoders they need.
 
@@ -59,7 +59,7 @@ inside the api container, which has the decoders they need.
 > `download_lebanon_tiles.py` and `tiles_to_mbtiles.py` were **deleted and must
 > never be recreated**. They scraped `tile.openstreetmap.org` ~145,000 times
 > against its usage policy; OSM refused, and 145,718 refusals were saved as a
-> basemap. See [`Docs/89_OFFLINE_MAP_REMEDIATION.md`](../Docs/89_OFFLINE_MAP_REMEDIATION.md).
+> basemap. See [`Docs/40_MAP_SERVICE.md`](../Docs/40_MAP_SERVICE.md).
 
 ## 📁 debug/ — Diagnostics & Verification
 

@@ -27,7 +27,7 @@
 # lies: Martin 1.13.0 keeps an open handle to the replaced file and an
 # in-memory tile cache, so after an atomic swap it keeps serving the OLD data
 # while the catalog still lists the id. Its hot reload is PROVEN ABSENT
-# (Docs/86_MAP_DATASET_ACQUISITION.md), so `--restart-martin` restarts ONLY the
+# (Docs/41_MAP_DATASET_ACQUISITION.md), so `--restart-martin` restarts ONLY the
 # tile server; never the backend, frontend, database, Redis or workers. Without
 # the flag the script reports the stale state and exits 1.
 set -euo pipefail

@@ -29,6 +29,7 @@ from backend.auth.auth_service import (
     security,
 )
 from backend.auth import auth_security
+from config import settings
 from backend.auth.password import hash_password, verify_password
 from backend.security.config_guard import assess_admin_password
 from db_models import User
@@ -106,6 +107,12 @@ class ChangePasswordRequest(BaseModel):
     """
     current_password: str = Field(..., min_length=1, max_length=auth_security.MAX_PASSWORD_LENGTH)
     new_password: str = Field(..., min_length=1, max_length=auth_security.MAX_PASSWORD_LENGTH)
+
+
+def _tracking_href() -> str:
+    """Where TRACKING goes: the LAF-AI hand-off, or the legacy assistant page
+    when the hand-off is switched off (LAF_AI_SSO_ENABLED=false)."""
+    return "/api/sso/laf-ai/launch" if settings.LAF_AI_SSO_ENABLED else "/tracking-people"
 
 
 class NavbarLink(BaseModel):
@@ -447,7 +454,7 @@ async def get_user_privileges(
                 # the SQL assistant, and require_chatbot_access() rejects an
                 # admin whose flag is off. Showing a link that 403s is worse
                 # than not showing it.
-                *([NavbarLink(page="tracking", href="/tracking-people", label="TRACKING", icon="fas fa-user-friends", visible=True, parent_page="management")]
+                *([NavbarLink(page="tracking", href=_tracking_href(), label="TRACKING", icon="fas fa-user-friends", visible=True, parent_page="management")]
                   if current_user.can_use_chatbot else []),
                 NavbarLink(page="unknown", href="/admin/unknown", label="UNKNOWN FACES", icon="fas fa-user-secret", visible=True),
                 # Search & Intelligence Dropdown items
@@ -499,7 +506,7 @@ async def get_user_privileges(
             # renders from navbar_links and the link was never emitted.
             if current_user.can_use_chatbot:
                 navbar_links.append(
-                    NavbarLink(page="tracking", href="/tracking-people", label="TRACKING",
+                    NavbarLink(page="tracking", href=_tracking_href(), label="TRACKING",
                                icon="fas fa-user-friends", visible=True,
                                title="AI data assistant")
                 )
@@ -608,6 +615,14 @@ async def logout(
         if jti:
             ttl = max(1, int(expires_at - time.time())) if expires_at else 3600
             revoked = await auth_security.revoke_token(jti, ttl)
+            # A LAF-AI chatbot session opened from this session (the TRACKING
+            # hand-off) ends with it: revoke the token the gate holds and tell
+            # the gate now rather than at its next re-check.
+            from backend.auth import laf_ai_sso as sso
+            child_jti = await sso.pop_child_session(jti)
+            if child_jti:
+                await auth_security.revoke_token(child_jti, int(settings.ACCESS_TOKEN_EXPIRE_MINUTES) * 60)
+                await sso.notify_gate_revoked(child_jti=child_jti, parent_jti=jti)
 
     # Clear the cookie with the same attributes it was set with
     cookie = auth_security.cookie_settings()

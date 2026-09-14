@@ -8,7 +8,7 @@
 # This starts DEVELOPMENT only. Production is deliberately not automated here:
 # it needs secrets, TLS material and database roles in a specific order, and a
 # script that appears to do it in one step invites skipping them. See
-# Docs/61_DEPLOYMENT_RUNBOOK.md.
+# Docs/04_DEPLOYMENT_RUNBOOK.md.
 #
 # Replaces docker/start.sh, which was a second, less capable implementation of
 # this same job. Two launchers drifted apart; one is enough.
@@ -88,7 +88,7 @@ if [ "$HAS_GPU" = true ]; then
     echo "⚠️  GPU present ($GPU_NAME) but the NVIDIA container runtime is not."
     echo "   Install the NVIDIA Container Toolkit, then re-run:"
     echo "     bash docker/verify-nvidia-docker.sh"
-    echo "     Docs/04_SETUP_NVIDIA_DOCKER.md"
+    echo "     Docs/03_GPU_SETUP.md"
     echo "   Falling back to CPU."
 else
     echo "ℹ️  No NVIDIA GPU detected — starting the CPU stack."

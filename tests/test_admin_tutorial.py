@@ -132,7 +132,7 @@ def test_the_current_operating_guidance_is_present(tutorial):
                      "effective_value",          # DB overrides the environment
                      "/app/alembic",             # alembic working directory
                      "down -v",                  # destructive command warning
-                     "75_API_REFERENCE.md"):     # where the API reference is
+                     "48_API_REFERENCE.md"):     # where the API reference is
         assert expected in content, (
             f"the operating section no longer mentions {expected!r}")
 

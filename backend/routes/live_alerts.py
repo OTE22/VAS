@@ -17,6 +17,7 @@ Security model (applied consistently):
 
 import asyncio
 import logging
+import uuid
 import os
 import uuid as uuid_mod
 from datetime import datetime
@@ -115,8 +116,12 @@ class CreateLiveAlertRequest(BaseModel):
     min_similarity: float = Field(default=0.75, ge=0, le=1, description="Minimum similarity to trigger")
     pipeline_ids: Optional[List[str]] = Field(None, description="Specific cameras (null = all)")
     time_window_enabled: bool = Field(default=False, description="Enable time window filter")
-    time_window_start: Optional[str] = Field(None, description="Start time HH:MM")
-    time_window_end: Optional[str] = Field(None, description="End time HH:MM")
+    # "HH:MM" was only a description: "25:00" was accepted and produced a window
+    # that can never match (found by tests/test_e2e_api_sweep.py).
+    time_window_start: Optional[str] = Field(
+        None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="Start time HH:MM (24-hour)")
+    time_window_end: Optional[str] = Field(
+        None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="End time HH:MM (24-hour)")
     active_days: Optional[List[int]] = Field(None, description="Active days (0=Sun, 6=Sat)")
     cooldown_minutes: Optional[int] = Field(None, ge=0, description="Minutes between alerts")
     notify_dashboard: bool = Field(default=True)
@@ -125,7 +130,11 @@ class CreateLiveAlertRequest(BaseModel):
     notify_webhook: bool = Field(default=False)
     email_recipients: Optional[List[str]] = Field(None)
     sms_recipients: Optional[List[str]] = Field(None)
-    webhook_url: Optional[str] = Field(None)
+    # "not-a-url" was accepted and stored, so the alert could never deliver
+    # (found by tests/test_e2e_api_sweep.py).
+    webhook_url: Optional[str] = Field(
+        None, max_length=2048, pattern=r"^https?://[^\s]+$",
+        description="Absolute http(s) URL the trigger is POSTed to")
     sound_alert: bool = Field(default=True)
     auto_capture_snapshot: bool = Field(default=True)
     auto_record_clip: bool = Field(default=False)
@@ -289,6 +298,18 @@ async def create_live_alert(
 
     if not user_obj:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # An identity that does not exist is a client error, not a server one: the
+    # insert used to fail on the foreign key and surface as 500 "Failed to
+    # create alert" (found by tests/test_e2e_api_sweep.py).
+    from db_models import Identity as _Identity
+    try:
+        _identity_uuid = uuid.UUID(str(request.identity_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="identity_id is not a valid identifier")
+    exists = (await db.execute(select(_Identity.id).where(_Identity.id == _identity_uuid))).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Identity not found")
 
     has_access = await check_identity_access(request.identity_id, user_obj, db)
     if not has_access:

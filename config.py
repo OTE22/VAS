@@ -169,6 +169,16 @@ class Settings(BaseSettings):
     # --- Login CSRF / origin validation ---
     AUTH_ALLOWED_ORIGINS: str = Field(default="", description="Comma-separated hosts allowed to submit credentials (the request Host is always allowed)")
     AUTH_TRUST_PROXY_HEADERS: bool = Field(default=True, description="Trust X-Real-IP from the reverse proxy for client IP attribution")
+
+    # LAF-AI chatbot (armyeye-chatbot) single sign-on hand-off. TRACKING sends a
+    # signed-in user to the chatbot with a one-time ticket instead of a second
+    # password prompt; the chatbot's gate consumes the ticket server-to-server.
+    LAF_AI_SSO_ENABLED: bool = Field(default=True, description="TRACKING opens the LAF-AI chatbot through a one-time-ticket hand-off (false: TRACKING opens the legacy /tracking-people page)")
+    LAF_AI_CHATBOT_URL: str = Field(default="https://armyeye-chatbot", description="Public base URL of the LAF-AI chatbot; the ticket is delivered to <url>/auth/vas")
+    LAF_AI_GATE_URL: str = Field(default="http://vas-assistant-gate:3081", description="Internal URL of the LAF-AI login gate (docker network), used to propagate VAS logout")
+    LAF_AI_SSO_TICKET_TTL_SECONDS: int = Field(default=60, description="Lifetime of a hand-off ticket; single use regardless")
+    LAF_AI_SSO_SECRET: str = Field(default="", description="Optional shared secret the gate must present (X-LAF-AI-SSO-Secret) to consume tickets and write chatbot audit rows; empty = internal-network check only")
+    LAF_AI_SSO_SECRET_FILE: str = Field(default="", description="File holding LAF_AI_SSO_SECRET (docker secret), preferred over the inline value")
     AUTH_SAME_HOST_ORIGIN_TRUSTED: bool = Field(default=True, description="Treat the request Host as a valid credential-submission origin. Set False in production once AUTH_ALLOWED_ORIGINS lists every real hostname")
 
     # --- Brute-force / credential-stuffing protection ---
@@ -1584,7 +1594,7 @@ class Settings(BaseSettings):
     # production, every endpoint below must resolve to an internal host, the
     # ALLOW_* flags must be off, and the artifacts must exist locally -
     # otherwise the config guard aborts the boot (exit 78) and /health/ready
-    # never turns green. See Docs/96_LOCAL_DATA_AGENT_ARCHITECTURE.md.
+    # never turns green. See Docs/55_LOCAL_DATA_AGENT_ARCHITECTURE.md.
     OFFLINE_MODE: str = Field(
         default="",
         description="'' = follow ENVIRONMENT (production -> offline). "
@@ -1662,7 +1672,7 @@ class Settings(BaseSettings):
     # its full prompt and answer, every tool proposal, timings — into a
     # self-hosted Opik instance, and lets Claude Code read them back through
     # the Opik MCP server (.mcp.json). See sql_agent/tracing.py and
-    # Docs/90_AGENT_ARCHITECTURE.md "Tracing a turn with Opik".
+    # Docs/57_AGENT_ARCHITECTURE.md "Tracing a turn with Opik".
     #
     # DEVELOPMENT ONLY, fail-closed, the same three layers as LLM_DEV_PROVIDER:
     #   1. sql_agent/tracing.py attaches no tracer when settings.is_production,
@@ -1751,6 +1761,7 @@ class Settings(BaseSettings):
             ("DATABASE_URL", "DATABASE_URL_FILE"),
             ("LLM_API_KEY", "LLM_API_KEY_FILE"),
             ("REDIS_URL", "REDIS_URL_FILE"),
+            ("LAF_AI_SSO_SECRET", "LAF_AI_SSO_SECRET_FILE"),
             ("BOOTSTRAP_ADMIN_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD_FILE"),
             ("WEBHOOK_API_KEYS", "WEBHOOK_API_KEYS_FILE"),
             ("WEBHOOK_AUTH_TOKEN", "WEBHOOK_AUTH_TOKEN_FILE"),

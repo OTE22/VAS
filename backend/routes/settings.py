@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import select, func
 from pydantic import BaseModel, Field, validator
 from config import settings as config_settings
@@ -502,7 +503,7 @@ async def sync_settings_from_config(db: AsyncSession):
         # Deployment mode & the data agent's providers. The policy keys are
         # SECURITY_CRITICAL (read-only): they are shown so an operator can see
         # what the box enforces, and changed only through the container
-        # environment (Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md).
+        # environment (Docs/56_DATA_AGENT_CONFIGURATION.md).
         "deployment": ["ENVIRONMENT", "OFFLINE_MODE", "OFFLINE_ALLOWED_HOSTS",
                        "ALLOW_EXTERNAL_APIS", "ALLOW_MODEL_DOWNLOADS", "ALLOW_EXTERNAL_TELEMETRY",
                        "LLM_PROVIDER", "LLM_BASE_URL", "LLM_MODEL", "LLM_SQL_MODEL",
@@ -732,16 +733,30 @@ async def sync_settings_from_config(db: AsyncSession):
                 }
                 
                 if not setting:
-                    setting = Setting(
-                        key=key,
-                        value=value_str,
-                        value_type=get_value_type(key, value),
-                        category=category,
-                        description=custom_descriptions.get(key, _field_description(key)),
-                        is_sensitive=key in sensitive_keys,
-                        is_readonly=key in readonly_keys
+                    # Seed the row, idempotently. Two requests can reach this
+                    # point at the same moment for the same key — the Settings
+                    # page loads GET /api/settings and GET /api/settings/categories
+                    # together, and on a fresh deployment EVERY key needs seeding.
+                    # A plain INSERT then loses the race with a UniqueViolationError
+                    # and fails the whole request with a 500 (observed by
+                    # tests/test_e2e_api_sweep.py). ON CONFLICT DO NOTHING makes
+                    # the seed safe under concurrency; the winner's row is the
+                    # one that survives, and both requests read it back.
+                    await db.execute(
+                        pg_insert(Setting)
+                        .values(
+                            key=key,
+                            value=value_str,
+                            value_type=get_value_type(key, value),
+                            category=category,
+                            description=custom_descriptions.get(key, _field_description(key)),
+                            is_sensitive=key in sensitive_keys,
+                            is_readonly=key in readonly_keys,
+                            created_at=datetime.utcnow(),
+                            updated_at=datetime.utcnow(),
+                        )
+                        .on_conflict_do_nothing(index_elements=["key"])
                     )
-                    db.add(setting)
                 else:
                     # SEED-ONLY: NEVER overwrite the stored value. The previous
                     # code pushed config -> DB here on every settings-page load,
@@ -846,7 +861,7 @@ async def sync_settings_from_config(db: AsyncSession):
     **See Also:**
     - PUT /api/settings/{setting_key} - Update a setting
     - GET /api/settings/audit/log - View change history
-    - Documentation: `36_CONFIGURATION_GUIDE.md` for complete configuration guide
+    - Documentation: `06_CONFIGURATION_GUIDE.md` for complete configuration guide
     """,
     response_description="Settings data with categories and formatted values",
     responses={
@@ -1296,7 +1311,7 @@ async def get_setting(
     **See Also:**
     - GET /api/settings - List all available settings
     - GET /api/settings/audit/log - View change history
-    - Documentation: `36_CONFIGURATION_GUIDE.md` for complete configuration guide
+    - Documentation: `06_CONFIGURATION_GUIDE.md` for complete configuration guide
     """,
     response_description="Updated setting with success message",
     responses={

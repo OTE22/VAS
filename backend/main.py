@@ -428,7 +428,8 @@ from backend.routes import (
     webhook_router, detections_router, stats_router, upload_router,
     enrollment_review_router,
     health_router, metrics_router, websocket_router, dashboard_router,
-    cache_router, management_router, auth_router, users_router, audit_router
+    cache_router, management_router, auth_router, users_router, audit_router,
+    sso_router,
 )
 
 # Import identities router
@@ -566,6 +567,7 @@ except Exception as e:
 app.include_router(auth_router)  # Auth routes (login, logout, me)
 app.include_router(users_router)  # User management (admin only)
 app.include_router(audit_router)  # Audit logs (admin only)
+app.include_router(sso_router)  # LAF-AI chatbot single sign-on hand-off (TRACKING)
 
 # Conversation domain (/api/v1) — guarded import like the optional routers:
 # a failure here must not take down face recognition, but it is logged loudly

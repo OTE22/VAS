@@ -193,7 +193,7 @@ services:
       # REDIS_POOL_SIZE was removed: it is declared in config.py but NOTHING
       # reads it, so setting it here presented a tuning knob wired to nothing -
       # backend/routes/settings.py already hides it from the admin UI for that
-      # reason, and Docs/63_REDIS_CACHING_GUIDE.md says so outright.
+      # reason, and Docs/16_REDIS_CACHING.md says so outright.
       REDIS_MAX_CONNECTIONS: 50
       CACHE_TTL: 3600
       CACHE_LOCAL_SIZE: 20000

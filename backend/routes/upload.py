@@ -6,7 +6,7 @@ Person enrollment endpoints.
     POST /api/identities/{identity_id}/images       add a photo to a person
     PUT  /api/identities/{id}/images/{image_id}/primary
     GET  /api/identities/{identity_id}/images       list a person's photos
-    POST /api/upload-person                         DEPRECATED legacy wrapper
+    POST /api/upload-person                         create a person from a photo
 
 Every one of them delegates to backend.core.enrollment_service, which owns the
 whole workflow (validation -> real landmarks -> embedding -> transactional
@@ -284,11 +284,15 @@ async def make_image_primary(
 
 
 # ---------------------------------------------------------------------------
-# Legacy endpoint — kept working, routed through the same service
+# Create a person from a photo. Older than the two routes above and named after
+# the form that calls it, but NOT superseded by them: POST
+# /api/identities/{id}/images answers 404 for a person who does not exist yet,
+# so it can only add photos to somebody already on file. This is the only route
+# that can bring a person into existence, and the Add Person modal uses it.
 # ---------------------------------------------------------------------------
 
-@router.post("/api/upload-person", tags=["Identity Management"], deprecated=True,
-             summary="DEPRECATED — use POST /api/identities/{identity_id}/images")
+@router.post("/api/upload-person", tags=["Identity Management"],
+             summary="Create a person from a photo (the Add Person modal)")
 async def upload_person(
     request: Request,
     # Form("") rather than Form(...): a missing or blank name is a name

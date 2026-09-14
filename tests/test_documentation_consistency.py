@@ -122,6 +122,12 @@ def test_documentation_does_not_invent_an_api_health_endpoint():
         for number, line in enumerate(_text(path).splitlines(), 1):
             if "/api/health" not in line:
                 continue
+            # `/api/health/<something>` is a different, real route family
+            # (`/api/health/offline-policy` is declared in backend/routes/health.py).
+            # The contract this test enforces is about the BARE `/api/health`,
+            # which the application does not serve.
+            if re.search(r"/api/health/\w", line):
+                continue
             if re.search(r"\b(no|not|never|instead of|rather than)\b", line, re.I):
                 continue  # explicitly telling the reader it does NOT exist
             offenders.append(f"{path.name}:{number}: {line.strip()}")
@@ -169,13 +175,13 @@ def test_faiss_heavy_documents_carry_a_pointer_to_the_current_contract():
         # The contract document cannot be asked to point at itself. It discusses
         # FAISS precisely because it is the document that settles the question —
         # "why pgvector and not FAISS" belongs there and nowhere else.
-        if path.name == "70_VECTOR_INDEX_CONTRACT.md":
+        if path.name == "23_VECTOR_INDEX_CONTRACT.md":
             continue
         text = _text(path)
         if text.count("FAISS") <= FAISS_HEAVY:
             continue
         head = text[:2500]  # wide enough to cover a title + intro + the banner
-        if ("70_VECTOR_INDEX_CONTRACT" in head
+        if ("23_VECTOR_INDEX_CONTRACT" in head
                 or "SUPERSEDED" in head
                 or "pgvector" in head):
             continue
@@ -183,11 +189,11 @@ def test_faiss_heavy_documents_carry_a_pointer_to_the_current_contract():
     assert not missing, (
         "these documents present FAISS as the live index with no note that the "
         "system runs pgvector — add the vector-backend banner pointing at "
-        "70_VECTOR_INDEX_CONTRACT.md:\n  " + "\n  ".join(missing))
+        "23_VECTOR_INDEX_CONTRACT.md:\n  " + "\n  ".join(missing))
 
 
 def test_the_vector_index_contract_document_exists_and_names_postgres_as_authoritative():
-    contract = DOCS / "70_VECTOR_INDEX_CONTRACT.md"
+    contract = DOCS / "23_VECTOR_INDEX_CONTRACT.md"
     assert contract.is_file()
     text = _text(contract).lower()
     assert "postgres" in text and "authoritative" in text
@@ -208,11 +214,11 @@ def test_the_readme_does_not_promise_api_docs_in_production():
         "production — that is how an operator ends up exposing it")
 
 
-@pytest.mark.parametrize("path", ["Docs/61_DEPLOYMENT_RUNBOOK.md",
-                                  "Docs/60_BACKUP_AND_RESTORE.md",
-                                  "Docs/72_ADMIN_CHEAT_SHEET.md",
-                                  "Docs/73_TROUBLESHOOTING.md",
-                                  "Docs/74_SECURITY_CHECKLIST.md"])
+@pytest.mark.parametrize("path", ["Docs/04_DEPLOYMENT_RUNBOOK.md",
+                                  "Docs/11_BACKUP_AND_RESTORE.md",
+                                  "Docs/14_ADMIN_CHEAT_SHEET.md",
+                                  "Docs/13_TROUBLESHOOTING.md",
+                                  "Docs/10_SECURITY_CHECKLIST.md"])
 def test_the_operational_documents_exist(path):
     """These five are what a solo administrator actually needs. The README and
     the index both link to all of them."""
@@ -220,15 +226,15 @@ def test_the_operational_documents_exist(path):
 
 
 def test_the_generated_api_reference_matches_the_live_spec():
-    """75_API_REFERENCE.md is generated from /openapi.json. If a route is added
+    """48_API_REFERENCE.md is generated from /openapi.json. If a route is added
     or removed without regenerating, the reference silently lies — which is
     worse than not having one, because people trust a reference."""
     import json
     import urllib.request
 
-    reference = DOCS / "75_API_REFERENCE.md"
+    reference = DOCS / "48_API_REFERENCE.md"
     assert reference.is_file(), (
-        "75_API_REFERENCE.md is missing — regenerate it with "
+        "48_API_REFERENCE.md is missing — regenerate it with "
         "`python /app/scripts/generate_api_reference.py`")
     text = _text(reference)
 
@@ -243,7 +249,7 @@ def test_the_generated_api_reference_matches_the_live_spec():
     missing = live - documented
     stale = documented - live
     assert not missing and not stale, (
-        "75_API_REFERENCE.md is out of date — regenerate it with "
+        "48_API_REFERENCE.md is out of date — regenerate it with "
         "`python /app/scripts/generate_api_reference.py`.\n"
         f"  routes missing from the doc: {sorted(missing)[:10]}\n"
         f"  routes in the doc that no longer exist: {sorted(stale)[:10]}")
@@ -253,7 +259,7 @@ def test_the_api_reference_generator_is_committed():
     """The doc is only trustworthy if the thing that makes it ships with it."""
     generator = REPO / "scripts" / "generate_api_reference.py"
     assert generator.is_file(), (
-        "75_API_REFERENCE.md claims to be generated by "
+        "48_API_REFERENCE.md claims to be generated by "
         "scripts/generate_api_reference.py, which does not exist")
 
 
@@ -300,7 +306,7 @@ def test_no_document_claims_a_root_requirements_txt():
 def test_the_admin_cheat_sheet_warns_about_down_v():
     """`docker compose down -v` deletes the database, the stored faces and the
     logs. Every document that shows `down` must say so."""
-    for name in ("72_ADMIN_CHEAT_SHEET.md",):
+    for name in ("14_ADMIN_CHEAT_SHEET.md",):
         text = _text(DOCS / name)
         assert "down -v" in text
         window = text[text.index("down -v"):text.index("down -v") + 700]

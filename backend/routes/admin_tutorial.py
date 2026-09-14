@@ -250,7 +250,7 @@ to anyone who can reach the port. Startup refuses to proceed if
 5. All endpoints will now use your token automatically
 
 To explore the API against production, read the endpoint reference in
-`Docs/50_API_DOCUMENTATION.md` instead.
+`Docs/48_API_REFERENCE.md` instead.
 
 ## Token Expiration
 
@@ -780,7 +780,7 @@ curl -X POST "http://localhost/api/admin/identities/merge-multiple" \\
 ✅ **Add notes** - Explain why identities were merged
 ✅ **Check suggestions first** - System may have already found duplicates
 
-**See also:** [Multi-Identity Merge Guide](./Docs/28_MULTI_IDENTITY_MERGE_GUIDE.md) for complete documentation.
+**See also:** [Multi-Identity Merge Guide](./Docs/33_MULTI_IDENTITY_MERGE.md) for complete documentation.
 
 ## Merge Suggestions (Automatic)
 
@@ -1239,7 +1239,7 @@ keeps serving and nothing changes.
 ## Technical Documentation
 
 📖 For complete technical details on how Quick Search works internally (FAISS, embeddings, thresholds), see:
-**Docs/38_SEARCH_BY_IMAGE_GUIDE.md**
+**Docs/35_SEARCH_BY_IMAGE.md**
                 """,
                 "examples": [
                     {
@@ -1544,8 +1544,8 @@ Access via: **SEARCH & INTELLIGENCE** → **Intelligence Analysis**
 ## Technical Documentation
 
 📖 For complete technical details, see:
-- **Docs/39_ADVANCED_SEARCH_INTELLIGENCE_GUIDE.md** - Complete feature guide
-- **Docs/43_ADVANCED_SEARCH_IMPLEMENTATION_STATUS.md** - Implementation status
+- **Docs/36_ADVANCED_SEARCH.md** - Complete feature guide
+- **Docs/36_ADVANCED_SEARCH.md** - Implementation status
                 """,
                 "examples": [
                     {
@@ -1883,8 +1883,8 @@ curl -X POST "http://localhost:8000/api/watchlists/{watchlist_id}/entries" \\
 
 ## Related Documentation
 
-- **Live Alerts Guide**: `40_LIVE_ALERTS_GUIDE.md` - Complete guide to live alerts
-- **Unknown Faces Guide**: `07_UNKNOWN_FACES_CENTER_COMPLETE_GUIDE.md` - Unknown faces management
+- **Live Alerts Guide**: `37_LIVE_ALERTS.md` - Complete guide to live alerts
+- **Unknown Faces Guide**: `30_UNKNOWN_FACES_CENTER.md` - Unknown faces management
                 """,
                 "examples": [
                     {
@@ -2354,9 +2354,9 @@ All settings are organized into categories:
 
 ## Related Documentation
 
-- **Complete Configuration Guide**: `36_CONFIGURATION_GUIDE.md`
-- **Settings Management**: `24_SETTINGS_MANAGEMENT_GUIDE.md`
-- **FAISS Scaling**: `30_FAISS_PRODUCTION_SCALING.md`
+- **Complete Configuration Guide**: `06_CONFIGURATION_GUIDE.md`
+- **Settings Management**: `07_SETTINGS_MANAGEMENT.md`
+- **FAISS Scaling**: `23_VECTOR_INDEX_CONTRACT.md`
                 ''',
                 "examples": [
                     {
@@ -2514,7 +2514,7 @@ The system runs automatic tasks in the background:
 - You'll only see data from pipelines you have access to
 - If you try to access an identity from a different pipeline, you'll get an "Access denied" error
 
-**See Documentation:** Check **26_USER_PIPELINE_ACCESS_GUIDE.md** for complete details on user pipeline access.
+**See Documentation:** Check **42_USER_PIPELINE_ACCESS.md** for complete details on user pipeline access.
                 """,
                 "examples": [],
                 "api_endpoints": []
@@ -2633,7 +2633,7 @@ Settings available in **Settings** page (`/admin/settings`):
 4. **Use Time Windows**: Reduce false positives during off-hours
 5. **Set Expiration**: Use date/detections for temporary alerts
 
-**See Documentation:** Check **40_LIVE_ALERTS_GUIDE.md** for complete guide to live alerts.
+**See Documentation:** Check **37_LIVE_ALERTS.md** for complete guide to live alerts.
                 ''',
                 "examples": [
                     {
@@ -3085,11 +3085,11 @@ MULTI_CAMERA_MIN_CO_APPEARANCES=2
 ---
 
 **See Documentation:**
-- `Docs/57_MULTI_CAMERA_SOCIAL_NETWORK_ANALYSIS.md` - Multi-camera analysis guide
-- `Docs/59_ADVANCED_SNA_ENHANCEMENTS.md` - Detailed enhancement explanations
-- `Docs/60_ENHANCEMENTS_IMPLEMENTATION_SUMMARY.md` - Implementation summary
-- `Docs/61_API_ENHANCEMENTS_GUIDE.md` - API usage guide
-- `Docs/62_HOW_TO_USE_ENHANCEMENTS.md` - Step-by-step usage guide
+- `Docs/38_SECURITY_INTELLIGENCE.md` - Multi-camera analysis guide
+- `Docs/38_SECURITY_INTELLIGENCE.md` - Detailed enhancement explanations
+- `Docs/38_SECURITY_INTELLIGENCE.md` - Implementation summary
+- `Docs/38_SECURITY_INTELLIGENCE.md` - API usage guide
+- `Docs/38_SECURITY_INTELLIGENCE.md` - Step-by-step usage guide
                 """,
                 "examples": [
                     {
@@ -3259,8 +3259,8 @@ corresponds to a hole that was demonstrated, not theorised. Setting
 real deployment.
 
 Browsers must trust the internal CA before HTTPS works. See
-`Docs/61_DEPLOYMENT_RUNBOOK.md` for the per-platform commands, and
-`Docs/60_BACKUP_AND_RESTORE.md` for backup and restore.
+`Docs/04_DEPLOYMENT_RUNBOOK.md` for the per-platform commands, and
+`Docs/11_BACKUP_AND_RESTORE.md` for backup and restore.
 
 One operational constraint worth knowing: **`WORKERS` must stay 1.** Runtime
 settings, the SQL-agent cancellation registry, the single-flight job guards,
@@ -3700,22 +3700,22 @@ already caused outages here.
 
 | I want to... | Read |
 |---|---|
-| Deploy to production | `Docs/61_DEPLOYMENT_RUNBOOK.md` — **the authority**. Anything that contradicts it is wrong. |
-| Run it day to day | `Docs/72_ADMIN_CHEAT_SHEET.md` |
-| Fix something broken | `Docs/73_TROUBLESHOOTING.md` |
-| Harden before go-live | `Docs/74_SECURITY_CHECKLIST.md` |
-| Look up an endpoint | `Docs/75_API_REFERENCE.md` |
-| Back up / restore | `Docs/60_BACKUP_AND_RESTORE.md` |
+| Deploy to production | `Docs/04_DEPLOYMENT_RUNBOOK.md` — **the authority**. Anything that contradicts it is wrong. |
+| Run it day to day | `Docs/14_ADMIN_CHEAT_SHEET.md` |
+| Fix something broken | `Docs/13_TROUBLESHOOTING.md` |
+| Harden before go-live | `Docs/10_SECURITY_CHECKLIST.md` |
+| Look up an endpoint | `Docs/48_API_REFERENCE.md` |
+| Back up / restore | `Docs/11_BACKUP_AND_RESTORE.md` |
 
 `Docs/00_DOCUMENTATION_INDEX.md` lists all 110 files. Two corrections it
 records, because they mislead otherwise:
 
 * **Vector search is pgvector, not FAISS.** Around 46 documents still describe
   FAISS as the live index; they predate the migration. The binding contract is
-  `Docs/70_VECTOR_INDEX_CONTRACT.md` — PostgreSQL is authoritative, the index is
+  `Docs/23_VECTOR_INDEX_CONTRACT.md` — PostgreSQL is authoritative, the index is
   a disposable acceleration layer.
 * **`60_` and `61_` are used twice.** The production documents are
-  `60_BACKUP_AND_RESTORE.md` and `61_DEPLOYMENT_RUNBOOK.md`, *not* the
+  `11_BACKUP_AND_RESTORE.md` and `04_DEPLOYMENT_RUNBOOK.md`, *not* the
   similarly numbered enhancements guides.
 
 ---
@@ -3729,7 +3729,7 @@ is security-critical so the settings API refuses it).
 
 That does not leave you without a reference. Two supported options:
 
-1. **`Docs/75_API_REFERENCE.md`** — generated from the application's own OpenAPI
+1. **`Docs/48_API_REFERENCE.md`** — generated from the application's own OpenAPI
    document, committed to the repository, readable offline. All 254 operations
    with parameters, bodies and status codes. A test fails if it drifts from the
    code, so it cannot quietly go stale.
@@ -3839,7 +3839,7 @@ docker compose $COMPOSE_PROD exec -e PYTHONPATH=/app -w /app face_recognition \\
 faces and the logs**. There is no undo. It is never part of normal
 administration; `stop` and `down` both preserve data.
 
-`Docs/69_CLEAR_DATABASE_GUIDE.md` is **development only** and now says so at the
+`Docs/15_CLEARING_DATA.md` is **development only** and now says so at the
 top. Raw `DELETE FROM` / `TRUNCATE` recipes elsewhere carry backup warnings —
 prefer the retention system and the maintained wipe scripts, which also remove
 the stored image files that orphaned rows point at.
@@ -4133,7 +4133,7 @@ curl -fsS http://localhost/health/detailed''',
                         "quality": 0.85
                     }
                 },
-                "notes": "Production-grade merge with AI scoring (KNOWN=5000, appearances=1000, pipeline_diversity=200). See Docs/28_MULTI_IDENTITY_MERGE_GUIDE.md and Docs/37_ADVANCED_MERGE_FLOW_GUIDE.md for details."
+                "notes": "Production-grade merge with AI scoring (KNOWN=5000, appearances=1000, pipeline_diversity=200). See Docs/33_MULTI_IDENTITY_MERGE.md and Docs/33_MULTI_IDENTITY_MERGE.md for details."
             },
             {
                 "task": "Search by Image",
@@ -4162,7 +4162,7 @@ curl -fsS http://localhost/health/detailed''',
                         }
                     ]
                 },
-                "notes": "Complete technical guide: Docs/38_SEARCH_BY_IMAGE_GUIDE.md. Similarity thresholds: KNOWN=0.4, UNKNOWN=0.35."
+                "notes": "Complete technical guide: Docs/35_SEARCH_BY_IMAGE.md. Similarity thresholds: KNOWN=0.4, UNKNOWN=0.35."
             },
             {
                 "task": "Get Merge Suggestions",

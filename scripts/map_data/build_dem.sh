@@ -28,7 +28,7 @@ for arg in "$@"; do
   esac
 done
 
-[ -d "$SRC" ] || { echo "no source rasters at $SRC (see Docs/86_MAP_DATASET_ACQUISITION.md)" >&2; exit 1; }
+[ -d "$SRC" ] || { echo "no source rasters at $SRC (see Docs/41_MAP_DATASET_ACQUISITION.md)" >&2; exit 1; }
 rm -f "$OUT"
 
 docker run --rm \

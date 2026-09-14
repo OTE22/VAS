@@ -90,7 +90,7 @@ class Config:
         default_factory=lambda: settings.NVIDIA_NIM_INTERPRETER_MODEL)
     nim_timeout: int = field(default_factory=lambda: settings.NVIDIA_NIM_TIMEOUT)
     # Deployment mode: local OpenAI-compatible server (vLLM / local NIM),
-    # vector store and embedding provider. See Docs/96_LOCAL_DATA_AGENT_ARCHITECTURE.md.
+    # vector store and embedding provider. See Docs/55_LOCAL_DATA_AGENT_ARCHITECTURE.md.
     llm_provider: str = field(default_factory=lambda: settings.LLM_PROVIDER)
     llm_base_url: str = field(default_factory=lambda: settings.LLM_BASE_URL)
     llm_model: str = field(default_factory=lambda: settings.LLM_MODEL)

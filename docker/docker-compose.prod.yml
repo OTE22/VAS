@@ -141,7 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fcc3d4e5f6a7}
       DATABASE_URL_FILE: /run/secrets/database_url_migrator
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password_migrator
@@ -223,7 +223,7 @@ services:
       # REDIS_POOL_SIZE was removed: it is declared in config.py but NOTHING
       # reads it, so setting it here presented a tuning knob wired to nothing -
       # backend/routes/settings.py already hides it from the admin UI for that
-      # reason, and Docs/63_REDIS_CACHING_GUIDE.md says so outright.
+      # reason, and Docs/16_REDIS_CACHING.md says so outright.
       REDIS_MAX_CONNECTIONS: 50
       CACHE_TTL: 3600
 
@@ -416,7 +416,7 @@ services:
       # configuration and remains unreachable from the edge network.
       CONFIG_PREFLIGHT: "0"
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fbb2c3d4e5f6}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fcc3d4e5f6a7}
       DATABASE_URL_FILE: /run/secrets/database_url_app
       POSTGRES_USER: fr_app
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password_app

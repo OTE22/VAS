@@ -337,7 +337,7 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
         description="Days of backups kept by the backup service (scripts/backup/backup.sh)"),
     "BACKUP_INTERVAL_SECONDS": SettingMeta("integer", "sec", 3600, 2592000, None, "container_recreate",
         description="Seconds between automatic backup runs (scripts/backup/backup-loop.sh)"),
-    # ---- Deployment mode & data agent (Docs/97_DATA_AGENT_CONFIGURATION_GUIDE.md) ----
+    # ---- Deployment mode & data agent (Docs/56_DATA_AGENT_CONFIGURATION.md) ----
     # Read at boot by the config guard and the model registry; a change is a
     # new container environment, so container_recreate is the honest mode.
     # The policy keys themselves (OFFLINE_MODE, ALLOW_*, endpoints) are

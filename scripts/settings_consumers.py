@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate Docs/98_SETTINGS_CONSUMERS.md: every setting on the admin settings
+"""Regenerate Docs/09_SETTINGS_CONSUMERS.md: every setting on the admin settings
 page, its value in use, when a change applies, and who consumes it.
 
     python scripts/settings_consumers.py --token <admin JWT> [--base http://localhost]
@@ -115,7 +115,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--token", required=True, help="administrator JWT")
     parser.add_argument("--base", default="http://localhost")
-    parser.add_argument("--out", default=str(ROOT / "Docs/98_SETTINGS_CONSUMERS.md"))
+    parser.add_argument("--out", default=str(ROOT / "Docs/09_SETTINGS_CONSUMERS.md"))
     args = parser.parse_args(argv)
     data = fetch(args.base, args.token)
     rows = sorted([s for cat in data["settings_by_category"].values() for s in cat], key=lambda s: (s["category"], s["key"]))

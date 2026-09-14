@@ -4,8 +4,8 @@ How this system is deployed, where every value comes from, and how the
 certificates, IP addresses and names actually work.
 
 Written to be read start to finish once. For exact commands see
-[`Docs/61_DEPLOYMENT_RUNBOOK.md`](Docs/61_DEPLOYMENT_RUNBOOK.md) (the production
-authority) and [`Docs/93_PRODUCTION_RUNBOOK.md`](Docs/93_PRODUCTION_RUNBOOK.md)
+[`Docs/04_DEPLOYMENT_RUNBOOK.md`](Docs/04_DEPLOYMENT_RUNBOOK.md) (the production
+authority) and [`Docs/01_SYSTEM_OVERVIEW.md`](Docs/01_SYSTEM_OVERVIEW.md)
 (the orientation map).
 
 **Last updated: 2026-09-07** — sections 10–16 added (offline policy, rebuild
@@ -36,6 +36,8 @@ SQL bot, faces and enrolment); §2 counts corrected; §6b added.
 - [15. The SQL bot (chat agent): how it runs, and its variables](#15-the-sql-bot-chat-agent-how-it-runs-and-its-variables)
 - [16. Faces: how a person is stored, matched and added](#16-faces-how-a-person-is-stored-matched-and-added)
 - [17. Webhooks: how a frame gets in, and how the VMS gets a token](#17-webhooks-how-a-frame-gets-in-and-how-the-vms-gets-a-token)
+- [18. LAF-AI: the new chatbot — one VAS login, audit, deployment](#18-laf-ai-the-new-chatbot--one-vas-login-audit-deployment)
+- [19. The web pages: where every button is documented](#19-the-web-pages-where-every-button-is-documented)
 
 ---
 
@@ -60,7 +62,7 @@ Work completed:
 
 - **Deployed and verified** — `deploy.sh upgrade` passes all 14 stages;
   the acceptance battery passes **31/31 mandatory checks**.
-- **Database schema** at Alembic head `fbb2c3d4e5f6`, applied by the one-shot
+- **Database schema** at Alembic head `fcc3d4e5f6a7`, applied by the one-shot
   `migrate` job. Zero structural drift between the models and the live schema.
 - **GPU confirmed real** — both models report `running on CUDA` and pass an
   inference smoke test; metrics show `cuda_available=1 cpu_fallback_active=0`.
@@ -1137,7 +1139,7 @@ Start with `sudo ./deploy.sh doctor`. It is read-only, orders findings by
 dependency, and prints the command that fixes each one. **Read the first
 problem, not the last** — later ones are usually its consequence.
 
-Deeper trees: [`Docs/73_TROUBLESHOOTING.md`](Docs/73_TROUBLESHOOTING.md).
+Deeper trees: [`Docs/13_TROUBLESHOOTING.md`](Docs/13_TROUBLESHOOTING.md).
 
 ---
 
@@ -1957,8 +1959,8 @@ VMS / camera ──HTTPS──▶ nginx  ^/(api/)?webhook/   20 req/s per IP (bu
   ```
 
   A body with no images is answered `200 {"message": "No images"}` and nothing is
-  queued. Full schema and examples: `Docs/22_WEBHOOK_DEBUG.md` and
-  `Docs/71_IMAGE_INGESTION_WORKFLOW.md` §2; camera-side diagnosis:
+  queued. Full schema and examples: `Docs/21_WEBHOOK_TROUBLESHOOTING.md` and
+  `Docs/20_IMAGE_INGESTION_WORKFLOW.md` §2; camera-side diagnosis:
   `Docs/21_WEBHOOK_TROUBLESHOOTING.md`.
 - **Answers:** `202` queued · `401` no/invalid credential (byte-identical for
   missing, malformed and wrong, so it is not an oracle; `WWW-Authenticate:
@@ -2045,3 +2047,94 @@ restart.
 
 Code: `backend/routes/webhook.py` (endpoint, dedup, queueing), `backend/security/webhook_auth.py` (key matching, modes), `backend/security/webhook_credentials.py` and `backend/routes/webhook_credentials.py` (issued credentials), `backend/services/image_processing.py` (`ensure_pipeline_registered`, the processing pipeline), `nginx.prod.conf` (edge limits), `tests/test_webhook_auth.py` (the contract).
 
+## 18. LAF-AI: the new chatbot — one VAS login, audit, deployment
+
+Since 2026-09-12 the **TRACKING** menu item opens **LAF-AI**, a separate chatbot
+service at `https://armyeye-chatbot/`, instead of the SQL bot page of §15 (that
+page still exists at `/tracking-people`; nothing in it was changed). LAF-AI is
+built on the DeepSeek Harness (pinned commit), runs the local model
+`qwen3.5:9b-32k` on the same Ollama, answers questions over this deployment's
+PostgreSQL through a dedicated read-only role, and lives **outside** this
+repository in `~/vas-assistant/` — its own runbook is `~/vas-assistant/DEPLOYMENT.md`
+(source pin, image build, gate, nginx route, certificate, mDNS, static-IP move,
+tests, screenshots). This section is the VAS side of it.
+
+### 18.0 What a user experiences
+
+1. Sign in to VAS as always.
+2. Click **TRACKING** (Management menu, or the card on the home page).
+3. The chatbot opens **without a second password**. On the very first visit a
+   bilingual (English / العربية) responsible-use notice must be acknowledged:
+   every question is recorded; irrelevant, abusive or unauthorised queries may
+   be tracked and reported to ITDIRECT.
+4. Every question the user asks appears on **Admin → Audit Log** (user, question,
+   time, chatbot session) — the same page that already shows the SQL bot's log.
+5. Signing out of VAS ends the chatbot session too.
+6. Untick **Chatbot** on the user (Admin → Users), or deactivate the account, and
+   the person is out of the chatbot within ~10 seconds.
+
+### 18.1 How it works (the pieces in this repository)
+
+```
+VAS sign-in ─▶ TRACKING ─▶ GET /api/sso/laf-ai/launch ─▶ 303 https://armyeye-chatbot/auth/vas?ticket=…
+                                                             │ gate ─▶ POST /api/sso/laf-ai/consume (server-to-server, once)
+                                                             ▼
+                            chatbot session ─▶ every question ─▶ POST /api/audit/chatbot ─▶ chatbot_audit_log
+                            VAS logout ─▶ chatbot token revoked + POST vas-assistant-gate:3081/_gate/revoke
+```
+
+| Piece | File | Behaviour |
+|---|---|---|
+| TRACKING link | `frontend/components/admin-navbar.html`, `navbar.html`, `home.html`; `backend/routes/auth.py` (`navbar_links`) | `href="/api/sso/laf-ai/launch"`; shown only to accounts with `can_use_chatbot` |
+| One-time ticket | `backend/auth/laf_ai_sso.py` | 256-bit random, stored in Redis **only as a SHA-256 hash** for `LAF_AI_SSO_TICKET_TTL_SECONDS` (60 s), redeemed **exactly once** (atomic Lua GET+DEL), bound to the user and to the browser session's token id (`parent_jti`) |
+| Launch / ticket / consume | `backend/routes/sso.py` | `launch` needs the Chatbot permission and refuses cross-site navigations; `consume` is internal-only: refused when `X-Forwarded-For` is present (the public nginx always sets it), optionally also requires the shared secret `LAF_AI_SSO_SECRET`; it re-reads the account and mints a VAS token for the chatbot gate with the same claims as a password sign-in |
+| Question audit | `backend/routes/audit.py` — `POST /api/audit/chatbot` | internal-only; identity comes from the bearer token (a client cannot write rows for another user); writes `chatbot_audit_log` with `response = "[laf-ai] answered in the chatbot session"`. The SQL, results and answers stay in the chatbot's own session logs on purpose |
+| Shared logout | `backend/routes/auth.py::logout` | revokes the browser token, then the linked chatbot token (`auth:laf-ai:child:<jti>` in Redis) and notifies the gate |
+| Database access | `db/laf_ai_readonly.sql` (applied by hand, see `~/vas-assistant/CHATBOT-VAS.md`) | role `laf_ai_readonly`: SELECT on a whitelist of analytics tables, `default_transaction_read_only`, 30 s statement timeout, 5 connections; never `users`, credentials, settings, audit logs |
+| nginx | `nginx.prod.conf`, block between `# >>> LAF-AI chatbot route` and `# <<<` | `server_name armyeye-chatbot armyeye-chatbot.local`: port 80 → 308 https; 443 with its own certificate, `auth_request` to the gate, `/auth/vas`, the audited pass-through of `/api/session/{prompt,create}`. Installed and refreshed by `~/vas-assistant/tools/install-nginx-route.sh` (backup → `nginx -t` → graceful reload); `--remove` restores the file byte for byte |
+| Certificate | `certs/laf-ai-chatbot.{crt,key}` (git-ignored) | issued from `certs/internal-ca` by `~/vas-assistant/tools/make-chatbot-cert.sh`; SAN = `armyeye-chatbot`, `armyeye-chatbot.local`, the LAN IP |
+| Tests | `tests/test_laf_ai_sso.py` | 22 integration tests on the isolated regression stack (`scripts/run_regression_isolated.sh`): tickets, single use, expiry, internal-only, permission withdrawn between ticket and use, logout propagation, audit attribution and spoof-resistance |
+
+### 18.2 Variables (all in `config.py`, runtime-immutable, documented in `.env.example`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LAF_AI_SSO_ENABLED` | `true` | TRACKING opens LAF-AI; `false` sends it back to `/tracking-people` |
+| `LAF_AI_CHATBOT_URL` | `https://armyeye-chatbot` | where the ticket is delivered (`<url>/auth/vas`) |
+| `LAF_AI_GATE_URL` | `http://vas-assistant-gate:3081` | the gate on the docker `edge` network, for logout propagation |
+| `LAF_AI_SSO_TICKET_TTL_SECONDS` | `60` | ticket lifetime |
+| `LAF_AI_SSO_SECRET` / `_FILE` | empty | optional shared secret the gate must present (hardening; pair with `GATE_SSO_SECRET` on the gate) |
+
+### 18.3 Deploying a change to this integration
+
+The backend image bakes the source, so after touching any file above:
+`sudo ./deploy.sh upgrade` (backup → `:rollback` tags → build → rollout → health), then
+`cd ~/vas-assistant && ./tools/install-nginx-route.sh` (route refresh + gate restart), then
+`E2E_USER=<a user with Chatbot> E2E_PASS=… ./assistant.sh e2e --live` to prove the
+whole chain (sign-in, hand-off, audit row, logout). Rollback: `sudo ./deploy.sh rollback`
+and `./tools/install-nginx-route.sh --remove`.
+
+### 18.4 Limits to know
+
+One shared chatbot workspace (every permitted user sees every chat); every
+permitted user has the assistant's full tool set inside its container; one
+answer generated at a time (shared GPU). The per-user split ("data-only lane")
+is designed and deferred — see the LAF-AI runbook.
+
+## 19. The web pages: where every button is documented
+
+[`Docs/46_WEB_PAGES_REFERENCE.md`](Docs/46_WEB_PAGES_REFERENCE.md) walks through
+**every page** of the application — sign-in, change password, home, dashboard,
+the legacy assistant, and all 18 admin pages — and for each one lists every
+button, form and modal, what it triggers, the API call and payload, what the
+backend does (tables written, audit, side effects) and what the user sees.
+Section 0 explains the shared mechanics (page routing and access rules, session
+cookie and CSRF header, the navbar driven by `/api/auth/me/privileges`, the
+`data-action` dispatcher, the dashboard WebSocket events); section 25 covers the
+add-person enrollment modal; section 20 is the LAF-AI integration of §18.
+
+Its companion [`Docs/47_API_INDEX.md`](Docs/47_API_INDEX.md) is **generated** from
+the route files (`python3 scripts/generate_api_index.py > Docs/47_API_INDEX.md`):
+every route with handler, auth dependencies, whether it writes to the database
+and whether it audits. Regenerate it after any route change and re-read the
+affected page section.

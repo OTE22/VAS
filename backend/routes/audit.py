@@ -9,10 +9,10 @@ import sys
 import logging
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, Integer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -72,6 +72,54 @@ class AuditLogStats(BaseModel):
     unique_users: int
     avg_processing_time_ms: Optional[float]
     total_processing_time_ms: float
+
+
+class ChatbotAuditCreate(BaseModel):
+    """One question asked in the LAF-AI chatbot, reported by its gate."""
+    session_id: Optional[str] = Field(default=None, max_length=255)
+    question: str = Field(min_length=1, max_length=20000)
+    success: bool = True
+    error_message: Optional[str] = Field(default=None, max_length=2000)
+    processing_time_ms: Optional[float] = None
+    source: str = Field(default="laf-ai", max_length=40, pattern=r"^[a-z0-9._-]+$")
+
+
+@router.post("/api/audit/chatbot", status_code=status.HTTP_201_CREATED)
+async def record_chatbot_question(
+    body: ChatbotAuditCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Record a LAF-AI question in the same table the Audit Log page reads.
+
+    Identity comes from the bearer token the chatbot gate holds for the user
+    (the one minted at the SSO hand-off or the gate's password sign-in) — a
+    client cannot name another user. Internal-only like the SSO consume
+    endpoint: calls through the public proxy are refused, and the shared secret
+    is required when configured. The question is the whole record; the SQL,
+    results and answer stay in the chatbot's own session logs on purpose.
+    """
+    from backend.auth import laf_ai_sso as sso
+    if sso.came_through_public_proxy(request) or not sso.presented_secret_ok(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Chatbot audit writes are internal to the chatbot gate")
+    row = ChatbotAuditLog(
+        user_id=current_user.id,
+        username=current_user.username,
+        query=body.question,
+        response=f"[{body.source}] answered in the chatbot session",
+        success=body.success,
+        error_message=body.error_message,
+        processing_time_ms=body.processing_time_ms,
+        session_id=body.session_id,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    logger.info("[AUDIT] LAF-AI question recorded user_id=%s session=%s success=%s",
+                current_user.id, body.session_id, body.success)
+    return {"id": row.id, "created_at": iso_utc(row.created_at)}
 
 
 @router.get("/api/audit/chatbot", response_model=List[AuditLogResponse])

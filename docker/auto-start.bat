@@ -10,7 +10,7 @@ REM    docker\auto-start.bat -d --build   rebuild first
 REM
 REM  DEVELOPMENT only. Production needs secrets, TLS material and database
 REM  roles applied in a specific order; a one-click script invites skipping
-REM  them. See Docs\61_DEPLOYMENT_RUNBOOK.md.
+REM  them. See Docs\04_DEPLOYMENT_RUNBOOK.md.
 REM
 REM  Replaces docker\start.bat, a second implementation of the same job.
 REM ============================================================
@@ -96,7 +96,7 @@ popd & exit /b %errorlevel%
 echo [WARN] GPU present ^(!GPU_NAME!^) but the NVIDIA container runtime is not.
 echo        Install the NVIDIA Container Toolkit, then check with:
 echo          docker\verify-nvidia-docker.bat
-echo          Docs\04_SETUP_NVIDIA_DOCKER.md
+echo          Docs\03_GPU_SETUP.md
 echo        Falling back to CPU.
 echo.
 goto cpu_start

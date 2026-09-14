@@ -25,7 +25,7 @@
    "sha256": "87aba6cd657dc558140a581f8d26ed4c4bb6e1ede012feef1a39865a1510d36b",
    "license": "Copernicus DEM \u2014 free and open; attribution required",
    "attribution": "Copernicus DEM \u00a9 DLR e.V. 2010-2014 and \u00a9 Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA",
-   "integrity": "content-verified: dem archive, 1322 tiles inspected, 752 distinct. Presence and checksum alone are NOT sufficient \u2014 see Docs/89_OFFLINE_MAP_REMEDIATION.md.",
+   "integrity": "content-verified: dem archive, 1322 tiles inspected, 752 distinct. Presence and checksum alone are NOT sufficient \u2014 see Docs/40_MAP_SERVICE.md.",
    "credentials": "none (public bucket)",
    "martin_source_id": "lebanon-dem",
    "content_verified": true,
@@ -81,7 +81,7 @@
    "martin_source_id": "lebanon-streets-vector",
    "content_verified": true,
    "content_verified_at": 1786961552.509694,
-   "integrity": "content-verified: vector archive, 9606 tiles inspected, 5171 distinct. Presence and checksum alone are NOT sufficient \u2014 see Docs/89_OFFLINE_MAP_REMEDIATION.md."
+   "integrity": "content-verified: vector archive, 9606 tiles inspected, 5171 distinct. Presence and checksum alone are NOT sufficient \u2014 see Docs/40_MAP_SERVICE.md."
   }
  ]
 }

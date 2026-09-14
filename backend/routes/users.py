@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -133,10 +133,22 @@ router = APIRouter(tags=["Users"])
 
 
 class CreateUserRequest(BaseModel):
-    username: str
-    email: str
-    password: str
-    full_name: Optional[str] = None
+    """Field limits are part of the contract, not decoration.
+
+    Without them `POST /api/users` accepted `username: ""` and created a real,
+    unusable account (found by tests/test_e2e_api_sweep.py). LoginRequest has
+    carried limits for this reason for a long time; this model had none.
+    The password minimum is deliberately NOT set here: the deployment's own
+    policy owns that, and an administrator setting an initial password is a
+    different act from a user choosing one.
+    """
+    username: str = Field(..., min_length=3, max_length=100,
+                          pattern=r"^[A-Za-z0-9._@+-]+$",
+                          description="Letters, digits and . _ @ + - (3-100 characters)")
+    email: str = Field(..., min_length=3, max_length=255,
+                       pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(..., min_length=1, max_length=1024)
+    full_name: Optional[str] = Field(default=None, max_length=255)
     role: str = "user"
     can_use_chatbot: bool = False
     pipeline_ids: Optional[List[str]] = None

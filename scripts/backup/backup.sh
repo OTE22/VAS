@@ -8,7 +8,7 @@
 # SHA-256 checksum written alongside it, because a backup nobody has verified
 # is a guess, not a backup.
 #
-# Restore: scripts/backup/restore.sh — and see Docs/60_BACKUP_AND_RESTORE.md.
+# Restore: scripts/backup/restore.sh — and see Docs/11_BACKUP_AND_RESTORE.md.
 # Backups are NOT considered working until a restore has actually succeeded
 # into a clean environment.
 

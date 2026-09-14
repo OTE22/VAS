@@ -14,7 +14,7 @@ tell.
 
 The codebase already knew. backend/routes/settings.py hides these from the
 admin UI, saying "nothing in the codebase reads them, so rendering them here
-offered editable knobs wired to nothing", and Docs/63_REDIS_CACHING_GUIDE.md
+offered editable knobs wired to nothing", and Docs/16_REDIS_CACHING.md
 states it outright. Only compose disagreed - which is exactly the kind of
 disagreement no one notices, because the value is applied without complaint.
 
