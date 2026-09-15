@@ -479,7 +479,10 @@ async def update_live_alert(
     before = {k: getattr(existing, k, None) for k in updates
               if k not in ("email_recipients", "sms_recipients")}
 
-    alert = await live_alert_service.update_alert(db, alert_id, **updates)
+    try:
+        alert = await live_alert_service.update_alert(db, alert_id, **updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _audit(http_request, current_user, alert_id, "alert_updated",
                  {"changed_fields": sorted(updates.keys()), "before": {k: str(v) for k, v in before.items()}})
     return _format_alert(alert)

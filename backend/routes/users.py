@@ -838,6 +838,16 @@ async def rename_pipeline(
                 f"UPDATE {table} SET pipeline_id = :new_name WHERE pipeline_id = :old_name"
             ), {"new_name": new_name, "old_name": pipeline_id})
 
+        # Keep operational alert restrictions aligned with the renamed camera.
+        # Empty/NULL means all cameras and is intentionally left unchanged.
+        await db.execute(sa_text("""
+            UPDATE live_search_alerts a SET pipeline_ids=(
+                SELECT jsonb_agg(CASE WHEN value=to_jsonb(CAST(:old_name AS text))
+                                     THEN to_jsonb(CAST(:new_name AS text)) ELSE value END ORDER BY ord)
+                FROM jsonb_array_elements(a.pipeline_ids) WITH ORDINALITY AS member(value,ord)
+            ) WHERE a.pipeline_ids @> jsonb_build_array(CAST(:old_name AS text))
+        """), {"new_name": new_name, "old_name": pipeline_id})
+
         # 3. Remove the old pipelines row
         await db.execute(sa_text("DELETE FROM pipelines WHERE pipeline_id = :old_name"),
                          {"old_name": pipeline_id})

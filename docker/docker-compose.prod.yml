@@ -141,7 +141,7 @@ services:
     environment:
       ENVIRONMENT: production
       MIGRATIONS_MODE: run
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fdd4e5f6a7b8}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fee5f6a7b8c9}
       DATABASE_URL_FILE: /run/secrets/database_url_migrator
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password_migrator
@@ -246,7 +246,7 @@ services:
 
       # The migrate job already applied and verified; workers only re-check.
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fdd4e5f6a7b8}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fee5f6a7b8c9}
 
       DETECTION_MODEL: /app/weights/det_10g.onnx
       RECOGNITION_MODEL: /app/weights/w600k_r50.onnx
@@ -417,7 +417,7 @@ services:
       # configuration and remains unreachable from the edge network.
       CONFIG_PREFLIGHT: "0"
       MIGRATIONS_MODE: verify
-      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fdd4e5f6a7b8}
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-fee5f6a7b8c9}
       DATABASE_URL_FILE: /run/secrets/database_url_app
       POSTGRES_USER: fr_app
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password_app

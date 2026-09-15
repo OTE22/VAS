@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from db_models import (
     LiveSearchAlert, LiveAlertTrigger, LiveAlertStatus, LiveAlertExpirationType,
-    Identity
+    Identity, Pipeline
 )
 from config import settings
 
@@ -56,6 +56,25 @@ class LiveAlertService:
     - Security monitoring
     """
     
+    @staticmethod
+    async def validate_scope(db, pipeline_ids=None, active_days=None):
+        """Validate explicit restrictions; None/[] retain their existing all-values meaning."""
+        if active_days is not None:
+            if not isinstance(active_days, list) or any(
+                type(day) is not int or not 0 <= day <= 6 for day in active_days
+            ):
+                raise ValueError("Active days must be integers from 0 (Sunday) to 6 (Saturday)")
+        if pipeline_ids is not None:
+            if not isinstance(pipeline_ids, list) or any(
+                not isinstance(value, str) or not value for value in pipeline_ids
+            ):
+                raise ValueError("Camera IDs must be nonempty strings")
+            if pipeline_ids:
+                found = set((await db.execute(select(Pipeline.pipeline_id).where(
+                    Pipeline.pipeline_id.in_(pipeline_ids)))).scalars())
+                if set(pipeline_ids) - found:
+                    raise ValueError("One or more selected cameras no longer exist; refresh the camera list")
+
     async def create_alert(
         self,
         db: AsyncSession,
@@ -87,6 +106,7 @@ class LiveAlertService:
         """Create a new live search alert."""
         try:
             # Check user's alert limit
+            await self.validate_scope(db, pipeline_ids, active_days)
             user_alert_count = await self._get_user_alert_count(db, created_by)
             max_alerts = settings.LIVE_ALERT_MAX_PER_USER
             if user_alert_count >= max_alerts:
@@ -405,6 +425,8 @@ class LiveAlertService:
             if not alert:
                 return None
             
+            await self.validate_scope(db, updates.get('pipeline_ids'), updates.get('active_days'))
+
             # Update fields
             for key, value in updates.items():
                 if hasattr(alert, key):
