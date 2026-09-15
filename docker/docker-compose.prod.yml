@@ -6,7 +6,7 @@
 #   * secrets come from Docker secrets and ${VAR}, never literals
 #   * no whole-repo bind mount, so the image is immutable
 #   * Postgres, Redis and Ollama publish no host ports
-#   * TLS terminates in nginx; 80/443 and VMS HTTPS on 8443 are published
+#   * TLS terminates in nginx; only 80/443 are published
 #   * segmented networks: nginx cannot reach the database
 #   * a one-shot migrate job gates the API
 #   * the application connects as fr_app, not the postgres superuser
@@ -146,8 +146,8 @@ services:
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password_migrator
       REDIS_URL_FILE: /run/secrets/redis_url
-      CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal},${VAS_INTRANET_ORIGIN:-${PUBLIC_ORIGIN}}
-      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN},${VAS_INTRANET_ORIGIN:-${PUBLIC_ORIGIN}}
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal}
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
       AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
       AUTH_COOKIE_SECURE: "true"
       ENABLE_API_DOCS: "false"
@@ -231,10 +231,10 @@ services:
       AUTH_COOKIE_SECURE: "true"
       AUTH_COOKIE_SAMESITE: strict
       AUTH_COOKIE_HOST_PREFIX: "true"
-      # Keep hostname and direct intranet IP login under the same origin policy.
-      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN},${VAS_INTRANET_ORIGIN:-${PUBLIC_ORIGIN}}
+      # Browser identity follows the stable DNS name, independently of the server IP.
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
       AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
-      CORS_ORIGINS: ${PUBLIC_ORIGIN},${VAS_INTRANET_ORIGIN:-${PUBLIC_ORIGIN}}
+      CORS_ORIGINS: ${PUBLIC_ORIGIN}
       ENABLE_API_DOCS: "false"
 
       # LLM-generated SQL runs as a SELECT-only role, never as fr_app. The AST
@@ -555,7 +555,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "8443:8443"  # VMS HTTPS by intranet IP, independent of hostname discovery
     depends_on:
       face_recognition:
         condition: service_healthy

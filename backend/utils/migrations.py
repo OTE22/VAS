@@ -635,7 +635,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # be formatted, redacted and written to the same rotating file as
     # everything else rather than going out raw.
     from utils.logging import setup_logging
-    setup_logging(log_to_file=True)
+    setup_logging(log_to_file=True, filename="migrations.log")
 
     mode = "verify" if args.verify else "run"
     result = run_alembic_migrations_detailed(mode)

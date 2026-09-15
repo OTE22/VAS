@@ -962,7 +962,7 @@ if __name__ == "__main__":
     # would bypass the redaction filter and write nothing to the rotating file,
     # so a debugging run would leak what a served request never would.
     from utils.logging import setup_logging
-    setup_logging(log_to_file=True)
+    setup_logging(log_to_file=True, filename="image-processing.log")
     
     parser = argparse.ArgumentParser(description='Test image processing pipeline standalone')
     parser.add_argument('image_path', type=str, help='Path to image file to test')

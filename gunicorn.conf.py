@@ -176,7 +176,7 @@ def _log_configuration_summary():
     non-deterministic order and corrupted anything parsing it.
     """
     from utils.logging import setup_logging
-    setup_logging(log_to_file=True)
+    setup_logging(log_to_file=True, filename="server.log")
     _conf_log = logging.getLogger("gunicorn.conf")
     _conf_log.info("\n" + "=" * 70)
     _conf_log.info("📋 Gunicorn Configuration Loaded")

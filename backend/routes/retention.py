@@ -94,7 +94,11 @@ async def retention_status(
 
     interval_hours = retention_manager.cleanup_interval_hours
     next_run = None
-    if retention_manager.last_run_at:
+    from backend.core.service_supervisor import get_service_health
+    service = get_service_health().get('data_retention', {})
+    if service.get('next_run_at') is not None:
+        next_run = iso_utc(datetime.utcfromtimestamp(service['next_run_at']) + timedelta(seconds=60))
+    elif not service.get('cycle_active') and retention_manager.last_run_at:
         next_run = iso_utc(retention_manager.last_run_at + timedelta(hours=interval_hours))
 
     from backend.core.retention_job import retention_busy

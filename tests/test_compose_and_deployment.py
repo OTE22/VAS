@@ -68,11 +68,8 @@ def test_datastores_publish_no_host_port(compose, port):
 @pytest.mark.parametrize("compose", [PROD_COMPOSE])
 def test_only_web_ports_are_published(compose):
     for mapping in published_ports(read(compose)):
-        assert re.search(r":(80|443|8443|3000)\b", mapping), \
+        assert re.search(r":(80|443|3000)\b", mapping), \
             f"{compose} publishes an unexpected port: {mapping}"
-        if re.search(r":8443\b", mapping):
-            assert "listen 8443 ssl;" in read(NGINX_PROD), \
-                "The VMS intranet port must terminate TLS"
 
 
 def test_grafana_is_bound_to_loopback_only():

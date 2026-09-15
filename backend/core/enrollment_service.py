@@ -1001,7 +1001,7 @@ async def sweep_expired_pending(db: AsyncSession, *, strict: bool = False) -> in
         if rows:
             for row in rows:
                 if strict and row.storage_path:
-                    Path(pending_absolute_path(row.storage_path)).unlink(missing_ok=True)
+                    Path(_pending_cleanup_path(row.storage_path)).unlink(missing_ok=True)
                 else:
                     _safe_unlink_pending(row.storage_path)
                 await db.delete(row)
@@ -1045,7 +1045,9 @@ async def _sweep_orphan_pending_files(db: AsyncSession, *, strict: bool = False)
 
     cutoff = __import__("time").time() - PENDING_ENROLLMENT_TTL_SECONDS
     removed = 0
-    for name in os.listdir(directory)[:PENDING_SWEEP_BATCH]:
+    for name in os.listdir(directory):
+        if removed >= PENDING_SWEEP_BATCH:
+            break
         if name in known:
             continue
         path = os.path.join(directory, name)
@@ -1062,12 +1064,24 @@ async def _sweep_orphan_pending_files(db: AsyncSession, *, strict: bool = False)
     return removed
 
 
+def _pending_cleanup_path(relative_path: str) -> str:
+    """Cleanup may only touch parked uploads, never enrolled gallery images."""
+    target = pending_absolute_path(relative_path)
+    root = os.path.realpath(settings.PENDING_UPLOAD_DIR)
+    resolved = os.path.realpath(target)
+    if resolved == root or os.path.commonpath([root, resolved]) != root:
+        raise EnrollmentError("invalid_storage_path",
+                              "Refusing cleanup outside the pending upload directory.",
+                              status_code=500)
+    return target
+
+
 def _safe_unlink_pending(relative_path: Optional[str]) -> None:
     """Remove a parked upload's file, tolerating a path we refuse to resolve."""
     if not relative_path:
         return
     try:
-        _safe_unlink(pending_absolute_path(relative_path))
+        _safe_unlink(_pending_cleanup_path(relative_path))
     except EnrollmentError:
         logger.warning("[ENROLL] refused to resolve pending path for cleanup")
 

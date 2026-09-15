@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Issue VMS HTTPS certificates from the existing VAS CA.
-# Usage: sudo bash scripts/tls/make-vms-cert.sh <server-ipv4>
+# Usage: sudo bash scripts/tls/make-vms-cert.sh
 # Store the public chain and leaf/key in Ubuntu's Nginx directory, and the
 # leaf/key in the directory mounted by the current Docker Nginx deployment.
 set -euo pipefail
@@ -8,7 +8,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CERTS="$ROOT/certs"
 DEST=/etc/nginx/certs
 [ "$(id -u)" -eq 0 ] || { echo 'Run with sudo.' >&2; exit 1; }
-IP="$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv4Address(sys.argv[1]))' "${1:?Supply the assigned server IPv4 address}")"
 umask 077
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -16,7 +15,7 @@ cat > "$TMP/extensions.cnf" <<EXT
 basicConstraints = critical, CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:armyeye-vms.internal,DNS:armyeye-vms,DNS:armyeye-vms.local,IP:${IP}
+subjectAltName = DNS:armyeye-vms.internal,DNS:armyeye-vms,DNS:armyeye-vms.local
 EXT
 if [ -e "$CERTS/vms.crt" ] || [ -e "$CERTS/vms.key" ]; then
   echo 'VMS certificate already exists; refusing to replace it. Review renewal explicitly.' >&2

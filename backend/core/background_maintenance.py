@@ -2,9 +2,16 @@
 import asyncio
 import time
 
-from config import settings
 from db_connection import db_manager
 from backend.core.service_supervisor import supervised_loop, get_service_health
+
+
+EXPIRY_SWEEP_INTERVAL_SECONDS = 300
+EXPIRY_SWEEPS = {
+    'live_alert_cleanup': 'Marks date-expired active alerts as expired; preserves alert records.',
+    'watchlist_cleanup': 'Deactivates expired watchlist entries; preserves entries and identities.',
+    'pending_enrollment_cleanup': 'Deletes expired pending enrollment tickets and old orphaned pending uploads; preserves enrolled images.',
+}
 
 
 class BackgroundMaintenance:
@@ -33,9 +40,10 @@ class BackgroundMaintenance:
                     raise RuntimeError('Consumer task stopped or failed to start')
             self.tasks.append(asyncio.create_task(supervised_loop(
                 name + '_liveness', 15, probe, initial_delay=5, jitter=0)))
-        for name in ('live_alert_cleanup', 'watchlist_cleanup', 'pending_enrollment_cleanup'):
+        for name in EXPIRY_SWEEPS:
             self.tasks.append(asyncio.create_task(supervised_loop(
-                name, 300, lambda name=name: self.sweep(name), initial_delay=60,
+                name, EXPIRY_SWEEP_INTERVAL_SECONDS, lambda name=name: self.sweep(name), initial_delay=60,
+                jitter=0,
                 error_backoff_base=60), name=name))
 
     async def stop(self):
@@ -46,10 +54,11 @@ class BackgroundMaintenance:
 
     async def sweep(self, name):
         from backend.core.task_history import task_history_manager
+        description = EXPIRY_SWEEPS[name] + ' Checks every 5 minutes.'
         started = time.monotonic()
         title = name.replace('_', ' ').title()
         # Expiration is lifecycle maintenance, including while matching is disabled.
-        await task_history_manager.record_task_started(name, title)
+        await task_history_manager.record_task_started(name, title, description=description)
         try:
             async with db_manager.get_session() as db:
                 if name == 'live_alert_cleanup':
@@ -67,6 +76,7 @@ class BackgroundMaintenance:
             raise
         await task_history_manager.record_task_completed(name, title, True,
             duration_seconds=time.monotonic() - started, details={'processed': count})
+        return {'processed': count}
 
 
 background_maintenance = BackgroundMaintenance()

@@ -52,16 +52,16 @@ class LogCleanupManager:
         if self._cleanup_task and not self._cleanup_task.done():
             logger.warning("Log cleanup manager already running; ignoring duplicate start()")
             return
-        from backend.core.service_supervisor import supervised_loop
-        # Cadence preserved: first run after 10 minutes, then every 6 hours
-        # (minus the 60s notification lead inside the cycle); 1h backoff on
-        # error was the old flat retry and is now the backoff BASE.
+        from backend.core.service_supervisor import supervised_loop, durable_initial_delay
+        initial_delay = await durable_initial_delay(
+            "log_cleanup", 600, 6 * 3600, notification_lead_seconds=60)
         self._cleanup_task = asyncio.create_task(
             supervised_loop(
                 "log_cleanup",
                 (6 * 3600) - 60,
                 self._run_cycle,
-                initial_delay=600,
+                initial_delay=initial_delay,
+                jitter=0,
                 error_backoff_base=3600,
             ),
             name="log_cleanup",
@@ -121,13 +121,18 @@ class LogCleanupManager:
             raise error
 
     async def preview(self):
-        from backend.core.log_retention import clean
-        return await asyncio.to_thread(clean, self.log_dir, self.retention_hours, dry_run=True)
+        from backend.core.log_retention import clean_owned_log
+        return await asyncio.to_thread(clean_owned_log, self.log_dir, self.retention_hours, dry_run=True)
 
     async def cleanup_old_logs(self) -> Tuple[int, float]:
         """Keep the existing tuple API; expose full outcomes through last_result."""
-        from backend.core.log_retention import clean
-        self.last_result = await asyncio.to_thread(clean, self.log_dir, self.retention_hours)
+        from backend.core.log_retention import clean_owned_log
+        try:
+            self.last_result = await asyncio.to_thread(clean_owned_log, self.log_dir, self.retention_hours)
+        except Exception as exc:
+            self.last_result = {'failures': [str(exc)], 'deleted_records': 0,
+                                'deleted_files': 0, 'freed_space_mb': 0.0}
+            raise
         if self.last_result["failures"]:
             raise RuntimeError("; ".join(self.last_result["failures"][:3]))
         return self.last_result["deleted_files"], self.last_result["freed_space_mb"]

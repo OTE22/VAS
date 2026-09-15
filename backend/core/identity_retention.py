@@ -92,13 +92,14 @@ class IdentityRetentionManager:
             return
         from backend.core.service_supervisor import supervised_loop, durable_initial_delay
         initial_delay = await durable_initial_delay(
-            "identity_retention", 3600, self.cleanup_interval_hours * 3600)
+            "identity_retention", 3600, self.cleanup_interval_hours * 3600, notification_lead_seconds=60)
         self._cleanup_task = asyncio.create_task(
             supervised_loop(
                 "identity_retention",
-                (self.cleanup_interval_hours * 3600) - 60,
+                lambda: (self.cleanup_interval_hours * 3600) - 60,
                 self._run_cycle,
                 initial_delay=initial_delay,
+                jitter=0,
                 error_backoff_base=3600,
             ),
             name="identity_retention",

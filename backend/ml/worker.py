@@ -371,16 +371,12 @@ async def execute_job(job_id: str) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(
-        # No "INFO" fallback here: config.py already declares LOG_LEVEL with
-        # that default, and repeating it means two places to change.
-        level=getattr(logging, str(settings.LOG_LEVEL).upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute-job")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+    from utils.logging import setup_logging, ML_LOG_FILES
+    setup_logging(filename=ML_LOG_FILES["ml-job" if args.execute_job else "ml-worker"])
     if args.execute_job:
         return asyncio.run(execute_job(args.execute_job))
     asyncio.run(run_worker(once=args.once))

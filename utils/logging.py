@@ -26,6 +26,7 @@ import logging.handlers
 import os
 import re
 import sys
+from contextlib import contextmanager
 from contextvars import ContextVar
 from queue import Queue
 from typing import List, Optional
@@ -305,6 +306,45 @@ def rotated_log_paths(max_files: Optional[int] = None) -> List[str]:
     return paths
 
 
+# Separate writers for the single ML scheduler and its serialized child process.
+ML_LOG_FILES = {"ml-worker": "ml-worker.log", "ml-job": "ml-job.log"}
+LOG_SOURCE_FILES = {**ML_LOG_FILES, "server": "server.log", "migrations": "migrations.log",
+                    "image-processing": "image-processing.log"}
+
+
+def source_log_path(source="application"):
+    if source == "application":
+        return active_log_path()
+    directory, _, _ = _resolve_log_settings(None)
+    return os.path.join(directory, LOG_SOURCE_FILES[source])
+
+
+@contextmanager
+def active_log_writer_lock():
+    """Hold the actual sink lock; queued producers can continue during maintenance."""
+    handlers = getattr(_listener, 'handlers', ())
+    handler = next((h for h in handlers if isinstance(h, logging.handlers.RotatingFileHandler)
+                    and os.path.abspath(h.baseFilename) == os.path.abspath(active_log_path())), None)
+    if handler is None:
+        raise RuntimeError('Active log writer is not owned by this process')
+    handler.acquire()
+    try:
+        yield handler
+    finally:
+        handler.release()
+
+
+def source_log_paths(source="application", max_files=None):
+    if source == "application":
+        return rotated_log_paths(max_files=max_files)
+    active = source_log_path(source)
+    cfg = _settings()
+    count = int(getattr(cfg, "LOG_BACKUP_COUNT", 5))
+    paths = [p for p in [active, *[f"{active}.{i}" for i in range(1, count + 1)]]
+             if os.path.isfile(p)]
+    return paths if max_files is None else paths[:max_files]
+
+
 def setup_logging(
     log_to_file: bool = True,
     log_dir: Optional[str] = None,
@@ -442,7 +482,12 @@ def reinitialize_after_fork():
     #  * with UvicornWorker, sys.stdout is only the container's stdout at this
     #    point — configuring later (at app import) produces a console handler
     #    whose writes never reach `docker logs`, while the file keeps working.
-    _listener = None          # any inherited object's thread is gone
+    # The inherited listener thread is gone, but its file descriptors are not.
+    # Close the CHILD copies before opening its own file; the parent owns its
+    # separate server log. Otherwise old rotations remain held open forever.
+    for inherited in getattr(_listener, 'handlers', ()):
+        inherited.close()
+    _listener = None
     _log_queue = None
     _active_log_path = None
     for handler in logging.getLogger().handlers[:]:

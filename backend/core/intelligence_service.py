@@ -120,14 +120,11 @@ class IntelligenceService:
 
         target_uuid = uuid.UUID(identity_id)
 
-        # First check if we have cached relationships
-        cached = await self._get_cached_relationships(db, target_uuid, limit)
-        if cached:
-            return cached
-
-        # Calculate relationships from appearances
+        # Stored relationships have no filter/window provenance. Reusing them
+        # here would silently ignore the requested thresholds.
         relationships = await self._calculate_co_appearances(
-            db, target_uuid, time_window_minutes, min_co_appearances, limit
+            db, target_uuid, time_window_minutes, min_co_appearances, limit,
+            use_requested_filters=True,
         )
 
         return relationships
@@ -265,6 +262,7 @@ class IntelligenceService:
         min_co_appearances: int,
         limit: int,
         cutoff_date: Optional[datetime] = None,
+        use_requested_filters: bool = False,
     ) -> List[RelatedIdentityInfo]:
         """
         Calculate co-appearances from appearance data.
@@ -446,8 +444,8 @@ class IntelligenceService:
                     # Use larger time window for cross-camera (people may travel
                     # between cameras). Per-pipeline learned overrides win over
                     # the global value (precedence resolved above).
-                    pipeline_window = window_by_pipeline.get(
-                        target_pipeline_id, multi_camera_time_window)
+                    pipeline_window = (time_window_minutes if use_requested_filters else
+                                      window_by_pipeline.get(target_pipeline_id, multi_camera_time_window))
                     cross_camera_window_start = app_time - timedelta(minutes=pipeline_window)
                     cross_camera_window_end = app_time + timedelta(minutes=pipeline_window)
 
@@ -500,7 +498,8 @@ class IntelligenceService:
             total_meets_threshold = data['count'] >= min_co_appearances
 
             # Include if meets any threshold
-            if same_camera_meets_threshold or cross_camera_meets_threshold or total_meets_threshold:
+            if (total_meets_threshold if use_requested_filters else
+                    same_camera_meets_threshold or cross_camera_meets_threshold or total_meets_threshold):
                 filtered[other_id] = data
 
         if not filtered:

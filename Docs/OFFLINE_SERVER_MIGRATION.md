@@ -1,118 +1,61 @@
-# Moving VAS, VMS, and the chatbot to an offline server
+# Move this server to the offline intranet
 
-## Current evidence and remaining acceptance
+**The applications use stable hostnames. Changing the server IP is a network/DNS task.**
+Keep the same installed applications, databases, Docker volumes, models, secrets,
+and certificates. There is no reinstall or data transfer.
 
-The final static IP and target hardware have not yet been assigned. The current
-machine uses `192.168.1.111`; that is deployment data, not a permanent address.
-On September 15, 2026, the live VAS offline policy was enforced with no findings.
-VAS used local Ollama `qwen2.5:7b`; the standalone chatbot used local Ollama
-`qwen3.5:9b-32k`. Both models were present. VMS had a local YOLO weight file.
-The application containers used persistent mounts and `unless-stopped` restart
-policies, and the Docker service was enabled at boot.
+## 1. Before moving
 
-These checks do not prove camera reachability, migrated database integrity,
-GPU compatibility, or operation after a disconnected cold boot on new hardware.
-Those acceptance checks must run on the final server before handover.
+- [ ] Take a current backup and shut down Ubuntu normally before transport.
+- [ ] Obtain the intranet IP, network prefix, gateway, and internal DNS details.
 
-## What must move
+## 2. Connect to the intranet
 
-Copying the Git repositories alone is insufficient. Preserve:
+- [ ] Configure the server's network address in Ubuntu.
+- [ ] Ask the network administrator to point these internal DNS names to that address:
 
-- Built Docker images for all services, including the migration image. Export
-  with `docker save`, then import with `docker load` on the target. Preserve tags.
-- VAS and VMS PostgreSQL logical backups, roles, and their respective secrets.
-  Use application-consistent database backups; do not copy a live PostgreSQL
-  data directory. VAS provides `sudo ./deploy.sh backup`.
-- Every named volume and bind-mounted data directory in the runtime inventory:
-  model stores/caches, face and media storage, map data, ML artifacts, chatbot
-  state/workspace/gate state, VMS artifacts and configuration, and both projects'
-  secrets. Quiesce writers for the final consistent data snapshot.
-- All three repositories: VAS, VMS, and `vas-assistant`, including its `gate`.
-- The existing CA certificate and matching server private keys. Retain the CA
-  signing key securely for certificate issuance/renewal; do not distribute it to
-  client PCs. Reusing the same CA preserves existing workstation trust.
-- Offline Ubuntu/Docker/Compose/GPU driver/container-toolkit packages compatible
-  with the target hardware. Loading Docker images does not install host drivers.
+Use the [DNS commands and script](INTRANET_DNS.md) to preview the records and
+check `10.0.16.1`. Applying them requires the DNS administrator's access.
 
-Generate the current image/volume inventory without printing credentials:
+| Application | Stable link |
+| --- | --- |
+| VAS | https://face-detector.internal/ |
+| VMS | https://armyeye-vms.internal/ |
+| Chatbot | https://armyeye-chatbot/ |
+
+- [ ] Allow client access to TCP **443**; port **80** redirects to HTTPS.
+- [ ] Ensure clients trust the existing VAS root certificate (`certs/internal-ca.crt`).
+- [ ] Ensure the server can reach cameras and required internal services.
+
+**If the IP changes later, update DNS. Do not reissue certificates or change
+application settings just because the IP changed.** Certificates still need
+normal renewal before expiry. Internal DNS works without internet.
+
+## 3. Reboot offline and check
+
+From the VAS folder:
 
 ```bash
-sudo python3 scripts/deploy/offline-inventory.py > offline-inventory.json
+sudo bash scripts/prepare_offline_bundle.sh --same-server
 ```
 
-The inventory is a checklist, not a backup. Running containers may reference
-host paths tied to the current username. Recreate them from the restored Compose
-files/scripts at the target paths; do not reuse stale Docker bind paths.
+This read-only check verifies running services, VAS offline/origin policy,
+certificate hostnames, HTTPS pages, and health endpoints. It changes no settings.
+To test a particular address before DNS is ready, use:
 
-## Once the final static IPv4 address is assigned
+```bash
+sudo bash scripts/prepare_offline_bundle.sh --same-server --server-address 10.90.0.20
+```
 
-1. Configure the server's static address, prefix, gateway, and internal DNS on
-   the actual target interface. Do this at the server console. The certificate
-   tool below does not modify network interfaces or routes.
-2. On the restored deployment, stage new leaf certificates using the existing
-   CA and private keys. Replace the example address with the assigned address:
+Replace the example with the actual server address. It is used only for the
+connection test; hostnames and certificate verification remain in use.
 
-   ```bash
-   sudo python3 scripts/tls/prepare-static-ip.py \
-     --ip 10.90.0.20 --output /etc/nginx/staged-static-ip
-   ```
+From another intranet PC, open the stable links and test sign-in, camera
+playback, detection/webhook results, maps, and a chatbot question about stored
+data. Check the server's clock. A server-local check cannot prove remote DNS,
+routing, camera access, or an end-to-end workflow.
 
-   This creates three verified public certificates plus address settings. It
-   keeps DNS identities and loopback addresses, replaces old LAN IP SANs, uses
-   unique serials, and refuses to overwrite an existing output folder. It
-   neither changes live services nor copies private keys into the staging folder.
-3. Keep a protected backup of the current certificates and configuration. Install
-   the staged `server.crt`, `vms.crt`, and `laf-ai-chatbot.crt` into both `VAS/certs`
-   and Ubuntu `/etc/nginx/certs`, mode 0644. Keep their matching original `.key`
-   files mode 0600. Never replace the CA to change a server address.
-4. Update only `VAS_INTRANET_ORIGIN=https://<assigned-ip>` in `VAS/docker/.env`.
-   Do not replace the whole file with the staged `intranet.env`; the existing
-   file contains other required deployment settings and secrets. Update
-   `/etc/nginx/intranet.env` with `VAS_INTRANET_IP=<assigned-ip>` for optional
-   VMS mDNS publication. The file may be mode 0644; it contains no secrets.
-5. For the chatbot, update `ASSISTANT_LAN_IP` in `vas-assistant/assistant.env`.
-   Keep its configured hostname and set an **internal DNS A record** pointing
-   that hostname to the new address. Also resolve `face-detector.internal` on
-   workstation clients that use it, including chatbot links back to VAS.
-   Internal DNS works without internet. mDNS is an optional same-subnet
-   convenience and is insufficient across a routed intranet.
-6. Recreate the VAS API from the same CPU/GPU Compose file selection with
-   `up -d --no-deps --no-build --pull never face_recognition`. Recreate the chatbot
-   and gate using `assistant.sh start` from its restored repository, setting
-   `VAS_REPO` to the restored VAS path. Its local image must already be loaded.
-   Validate Nginx with `nginx -t` inside its container, then reload it. Restart
-   the mDNS services only if that optional feature is used.
+Local models and data are already installed. Cloud APIs, internet searches,
+and new downloads remain unavailable offline.
 
-VAS browser access becomes `https://<assigned-ip>/`; VMS becomes
-`https://<assigned-ip>:8443/`. Client PCs can have any source address allowed by
-the intranet routing/firewall. VMS-to-VAS webhooks keep using Docker's stable
-`face-detector.internal` network alias when both projects share the same host;
-do not replace internal service names with the current workstation IP.
-
-The existing chatbot static-IP script only migrates the chatbot/network profile;
-it does not update VAS/VMS certificates and origins. Do not treat it as the
-complete migration procedure for all three applications.
-
-## Required disconnected acceptance test
-
-With WAN access disconnected but intranet routing available:
-
-- Cold-boot the final server and confirm all required containers become healthy.
-- On a PC on another intranet subnet, trust the existing CA and open VAS, VMS,
-  and the chatbot; sign in and verify permissions and logout.
-- Confirm VAS and VMS URLs pass certificate verification (no bypass options),
-  IP browser-origin checks, and secure-cookie behavior.
-- Run a real camera stream, detection, and VMS-to-VAS webhook; inspect the result
-  in VAS. Check local maps/media and stored records.
-- Send a chatbot question and a database-backed question using the local model.
-- Restore a backup into an isolated test database and verify it is readable.
-- Verify the server and PCs have correct time, using internal time service or
-  maintained clocks. Certificates and sign-in tokens depend on accurate time.
-
-Internet searches, cloud APIs, new model downloads, package installation, and
-image pulls will not work offline. Required assets must be staged beforehand.
-Do not run an image build expecting internet package repositories to be present;
-use the prebuilt images and `--no-build --pull never` for the restored stack.
-
-The current VAS and VMS leaf certificates expire September 15, 2027. Certificate
-renewal using the retained CA can be performed offline before expiry.
+Technical reference: [hostname-based intranet setup](INTRANET_ACCESS.md).

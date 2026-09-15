@@ -1,306 +1,210 @@
-/**
- * System Logs Viewer - Frontend JavaScript
- * All logic is in the backend - this file only displays data
- * Supports all log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
- */
-
-// Global state.
-//
-// Nothing here is a hard-coded bound. Page sizes, the level vocabulary and the
-// ceiling all come from GET /api/logs/config, which reads them from settings —
-// so changing LOG_API_DEFAULT_PAGE_SIZE or LOG_API_MAX_PAGE_SIZE changes this
-// page with no JavaScript edit. `currentPageSize` stays null until the config
-// lands; the request then simply omits page_size and the server applies its own
-// default, which is the same value.
+/** Live admin monitoring. Every resource owns its request and freshness state. */
+'use strict';
 let currentPage = 1;
 let currentPageSize = null;
 let currentDateFrom = null;
 let currentDateTo = null;
 let currentLevel = 'all';
+let currentSource = 'application';
 let logConfig = null;
+let timer = null;
+let suspended = false;
+const requests = new Map();
+const updated = new Map();
+const $ = id => document.getElementById(id);
 
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', async () => {
-    checkAuth();
-    await loadConfig();      // before the first query, so bounds are known
-    loadStats();
-    loadLogs();
-    setupEventListeners();
-});
-
-/**
- * Pull viewer bounds and vocabulary from the backend.
- * Failure is not fatal: the server still applies its own defaults, and the
- * controls simply keep whatever the markup shipped with.
- */
-async function loadConfig() {
-    try {
-        const response = await fetch('/api/logs/config', { credentials: 'include' });
-        if (!response.ok) return;
-        logConfig = await response.json();
-
-        if (Number.isFinite(logConfig.default_page_size)) {
-            currentPageSize = logConfig.default_page_size;
-        }
-        if (logConfig.default_level) {
-            currentLevel = logConfig.default_level;
-        }
-
-        const sizeSelect = document.getElementById('page-size');
-        if (sizeSelect && Array.isArray(logConfig.page_size_options)) {
-            sizeSelect.innerHTML = '';
-            logConfig.page_size_options.forEach(size => {
-                const option = document.createElement('option');
-                option.value = String(size);
-                option.textContent = `${size} per page`;
-                if (size === currentPageSize) option.selected = true;
-                sizeSelect.appendChild(option);
-            });
-        }
-
-        const levelSelect = document.getElementById('level-filter');
-        if (levelSelect && Array.isArray(logConfig.levels)) {
-            levelSelect.innerHTML = '';
-            const all = document.createElement('option');
-            all.value = 'all';
-            all.textContent = 'All Levels';
-            levelSelect.appendChild(all);
-            logConfig.levels.forEach(level => {
-                const option = document.createElement('option');
-                option.value = level;
-                option.textContent = level;
-                levelSelect.appendChild(option);
-            });
-            levelSelect.value = currentLevel;
-        }
-    } catch (err) {
-        console.warn('[LOGS] Viewer config unavailable, using server defaults:', err);
-    }
-}
-
-/**
- * Load user info for UI - BACKEND HANDLES ALL AUTHENTICATION
- */
-async function checkAuth() {
-    // Backend already authenticated user before serving this page
-    // Just fetch user info for UI customization
-    try {
-        const response = await fetch('/api/auth/me', {
-            credentials: 'include' // Include HttpOnly cookies
-        });
-        if (!response.ok) {
-            // Backend will handle redirect via exception handler
-            return;
-        }
-    } catch (error) {
-        // Non-fatal - backend already authenticated
-        console.warn('Error loading user info:', error);
-    }
-}
-
-/**
- * Load statistics from backend
- */
-async function loadStats() {
-    try {
-        const response = await fetch('/api/logs/stats', {
-            credentials: 'include' // Include HttpOnly cookies
-        });
-
-        if (!response.ok) {
-            console.error('Failed to load stats');
-            return;
-        }
-
-        const stats = await response.json();
-        
-        // Display stats for all log levels (backend sends formatted data)
-        document.getElementById('stat-total-debug').textContent = stats.total_debug || 0;
-        document.getElementById('stat-total-info').textContent = stats.total_info || 0;
-        document.getElementById('stat-total-warning').textContent = stats.total_warning || 0;
-        document.getElementById('stat-total-errors').textContent = stats.total_errors || 0;
-        document.getElementById('stat-total-critical').textContent = stats.total_critical || 0;
-        document.getElementById('stat-file-size').textContent = stats.file_size_mb ? `${stats.file_size_mb} MB` : '-';
-    } catch (error) {
-        console.error('Error loading stats:', error);
-    }
-}
-
-/**
- * Load error logs from backend
- */
-async function loadLogs() {
-    const container = document.getElementById('logs-container');
-    container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i> Loading system logs...</div>';
-
-    try {
-        // Build query string (backend handles all filtering)
-        const params = new URLSearchParams({ page: currentPage.toString() });
-        // Omit page_size when the config has not loaded: the server then uses
-        // LOG_API_DEFAULT_PAGE_SIZE rather than a number invented here.
-        if (currentPageSize) {
-            params.append('page_size', currentPageSize.toString());
-        }
-
-        if (currentDateFrom) {
-            params.append('date_from', currentDateFrom);
-        }
-        if (currentDateTo) {
-            params.append('date_to', currentDateTo);
-        }
-        if (currentLevel && currentLevel !== 'all') {
-            params.append('level', currentLevel);
-        }
-
-        const response = await fetch(`/api/logs?${params.toString()}`, {
-            credentials: 'include' // Include HttpOnly cookies
-        });
-
-        if (!response.ok) {
-            container.innerHTML = `<div class="error"><i class="fas fa-exclamation-circle"></i> Failed to load system logs</div>`;
-            return;
-        }
-
-        const data = await response.json();
-
-        // Backend sends all processed data - just display it
-            if (data.logs.length === 0) {
-            container.innerHTML = `
-                <div class="empty-state">
-                    <i class="fas fa-check-circle"></i>
-                    <h3>No Logs Found</h3>
-                    <p>No logs match your current filters.</p>
-                </div>
-            `;
-            document.getElementById('pagination-section').style.display = 'none';
-            return;
-        }
-
-        // Render logs (backend sends formatted data)
-        container.innerHTML = data.logs.map(log => renderLogEntry(log)).join('');
-
-        // Update pagination (backend sends pagination info)
-        updatePagination(data);
-
-    } catch (error) {
-        console.error('Error loading logs:', error);
-        container.innerHTML = `<div class="error"><i class="fas fa-exclamation-circle"></i> Error loading system logs: ${error.message}</div>`;
-    }
-}
-
-/**
- * Render a single log entry (backend sends structured data)
- */
-function renderLogEntry(log) {
-    const levelClass = log.level.toLowerCase();
-    const isCritical = log.level === 'CRITICAL';
-    const isError = log.level === 'ERROR';
-    const isWarning = log.level === 'WARNING';
-    const isInfo = log.level === 'INFO';
-    const isDebug = log.level === 'DEBUG';
-    
-    // Determine entry class based on level
-    let entryClass = '';
-    if (isCritical) entryClass = 'critical';
-    else if (isError) entryClass = 'error';
-    else if (isWarning) entryClass = 'warning';
-    else if (isInfo) entryClass = 'info';
-    else if (isDebug) entryClass = 'debug';
-    
-    return `
-        <div class="log-entry ${entryClass}">
-            <div class="log-header">
-                <span class="log-timestamp">${escapeHtml(log.timestamp)}</span>
-                <span class="log-level ${levelClass}">${escapeHtml(log.level)}</span>
-                ${log.process_id ? `<span class="log-process">PID: ${escapeHtml(log.process_id)}</span>` : ''}
-                ${log.logger_name ? `<span class="log-logger">${escapeHtml(log.logger_name)}</span>` : ''}
-                ${log.line_number ? `<span class="log-line-number">Line ${log.line_number}</span>` : ''}
-            </div>
-            <div class="log-message">${escapeHtml(log.message)}</div>
-        </div>
-    `;
-}
-
-/**
- * Update pagination controls (backend sends pagination data)
- */
-function updatePagination(data) {
-    const paginationSection = document.getElementById('pagination-section');
-    const paginationInfo = document.getElementById('pagination-info');
-    const prevBtn = document.getElementById('prev-page-btn');
-    const nextBtn = document.getElementById('next-page-btn');
-
-    if (data.total_pages === 0) {
-        paginationSection.style.display = 'none';
-        return;
-    }
-
-    paginationSection.style.display = 'flex';
-    paginationInfo.textContent = `Page ${data.page} of ${data.total_pages} (${data.total_count} total logs${data.level_filter && data.level_filter !== 'all' ? ` - ${data.level_filter}` : ''})`;
-    
-    prevBtn.disabled = !data.has_previous;
-    nextBtn.disabled = !data.has_next;
-}
-
-/**
- * Setup event listeners
- */
-function setupEventListeners() {
-    // Apply filters button
-    document.getElementById('apply-filters-btn').addEventListener('click', () => {
-        currentDateFrom = document.getElementById('date-from').value || null;
-        currentDateTo = document.getElementById('date-to').value || null;
-        currentLevel = document.getElementById('level-filter').value || 'all';
-        currentPageSize = parseInt(document.getElementById('page-size').value);
-        currentPage = 1;
-        loadLogs();
-    });
-
-    // Clear filters button
-    document.getElementById('clear-filters-btn').addEventListener('click', () => {
-        document.getElementById('date-from').value = '';
-        document.getElementById('date-to').value = '';
-        // Reset to the SERVER's defaults, not to numbers written here.
-        const defaultLevel = (logConfig && logConfig.default_level) || 'all';
-        const defaultSize = logConfig && logConfig.default_page_size;
-        document.getElementById('level-filter').value = defaultLevel;
-        if (defaultSize) {
-            document.getElementById('page-size').value = String(defaultSize);
-        }
-        currentDateFrom = null;
-        currentDateTo = null;
-        currentLevel = defaultLevel;
-        currentPageSize = defaultSize || null;
-        currentPage = 1;
-        loadLogs();
-    });
-
-    // Refresh button
-    document.getElementById('refresh-logs-btn').addEventListener('click', () => {
-        loadStats();
-        loadLogs();
-    });
-
-    // Pagination buttons
-    document.getElementById('prev-page-btn').addEventListener('click', () => {
-        if (currentPage > 1) {
-            currentPage--;
-            loadLogs();
-        }
-    });
-
-    document.getElementById('next-page-btn').addEventListener('click', () => {
-        currentPage++;
-        loadLogs();
-    });
-}
-
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
+function escapeHtml(value) {
     const div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = value == null ? '' : String(value);
     return div.innerHTML;
 }
-
+function stamp(value) {
+    if (!value) return 'Not recorded';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString();
+}
+function freshness(key, error, note = '') {
+    const target = $(key + '-freshness');
+    if (!target) return;
+    if (!error) updated.set(key, new Date().toISOString());
+    target.classList.toggle('monitor-error', Boolean(error));
+    target.textContent = `${error ? 'Refresh failed: ' + error + '. ' : ''}Last updated: ${stamp(updated.get(key))}. ${note}`;
+}
+async function request(key, url, render) {
+    if (suspended) return;
+    requests.get(key)?.abort();
+    const controller = new AbortController();
+    requests.set(key, controller);
+    const deadline = setTimeout(() => controller.abort(), 12000);
+    try {
+        const response = await fetch(url, {credentials: 'include', cache: 'no-store',
+            headers: {Accept: 'application/json'}, signal: controller.signal});
+        if (!response.ok) {
+            let detail = `HTTP ${response.status}`;
+            if ((response.headers.get('content-type') || '').includes('application/json')) {
+                const body = await response.json();
+                if (typeof body.detail === 'string') detail = body.detail;
+            }
+            throw new Error(detail);
+        }
+        if (!(response.headers.get('content-type') || '').includes('application/json')) {
+            throw new Error('Expected JSON; sign in again if your session expired');
+        }
+        const data = await response.json();
+        if (requests.get(key) !== controller || suspended) return;
+        render(data);
+    } catch (error) {
+        if (requests.get(key) !== controller || suspended) return;
+        freshness(key, error.name === 'AbortError' ? 'Request timed out' : error.message);
+    } finally {
+        clearTimeout(deadline);
+        if (requests.get(key) === controller) requests.delete(key);
+    }
+}
+async function loadConfig() {
+    await request('config', '/api/logs/config', config => {
+        logConfig = config;
+        currentPageSize = config.default_page_size;
+        currentLevel = config.default_level || 'all';
+        $('page-size').replaceChildren(...config.page_size_options.map(size => new Option(`${size} per page`, String(size))));
+        $('page-size').value = String(currentPageSize);
+        $('level-filter').replaceChildren(new Option('All Levels', 'all'), ...config.levels.map(level => new Option(level, level)));
+        $('level-filter').value = currentLevel;
+        $('log-source').replaceChildren(...Object.entries(config.sources || {application: 'Application'}).map(([key, label]) => new Option(label, key)));
+    });
+}
+function loadStats() {
+    return request('stats', `/api/logs/stats?source=${encodeURIComponent(currentSource)}`, stats => {
+        for (const name of ['debug', 'info', 'warning', 'errors', 'critical']) {
+            $('stat-total-' + name).textContent = stats.source_available === false && !stats.log_files?.length ? '-' : (stats['total_' + name] ?? 0);
+        }
+        $('stat-file-size').textContent = stats.source_available === false && !stats.log_files?.length ? '-' : `${stats.file_size_mb ?? 0} MB`;
+        freshness('stats', null, stats.source_available === false ? 'Active source file not available.' : stats.truncated ? 'Counts cover only the scanned portion of this source.' : 'Counts cover this log source.');
+    });
+}
+function loadLogs() {
+    const params = new URLSearchParams({page: String(currentPage), source: currentSource});
+    if (currentPageSize) params.set('page_size', String(currentPageSize));
+    if (currentDateFrom) params.set('date_from', currentDateFrom);
+    if (currentDateTo) params.set('date_to', currentDateTo);
+    if (currentLevel !== 'all') params.set('level', currentLevel);
+    return request('logs', `/api/logs?${params}`, data => {
+        $('logs-container').innerHTML = data.logs.length ? data.logs.map(renderLogEntry).join('') : data.source_available === false
+            ? `<div class="empty-state"><h3>No logs available yet</h3><p>${escapeHtml(data.source_message)}</p><p>Automatic refresh will show records when they become available.</p></div>`
+            : '<div class="empty-state"><h3>No logs found</h3><p>No records match these filters in the scanned portion.</p></div>';
+        $('scan-notice').textContent = data.source_available === false && data.logs.length ? `${data.source_message} Showing retained rotated logs.` : data.truncated ? `Partial history: scanned ${data.scanned_files} files and ${data.scanned_bytes} bytes. Counts are not the full log total. Narrow the date or level filter if needed.` : '';
+        updatePagination(data);
+        freshness('logs', null, currentPage > 1 ? 'Older page: automatic log refresh paused.' : '');
+    });
+}
+function renderLogEntry(log) {
+    const level = ['DEBUG','INFO','WARNING','ERROR','CRITICAL'].includes(log.level) ? log.level.toLowerCase() : 'info';
+    return `<div class="log-entry ${level}"><div class="log-header">
+        <span class="log-timestamp">${escapeHtml(log.timestamp)}</span>
+        <span class="log-level ${level}">${escapeHtml(log.level)}</span>
+        <span class="log-process">PID: ${escapeHtml(log.process_id)}</span>
+        <span class="log-logger">${escapeHtml(log.logger_name)}</span>
+        <span>${escapeHtml(log.source_file)}</span></div>
+        <div class="log-message">${escapeHtml(log.message)}</div></div>`;
+}
+function updatePagination(data) {
+    $('pagination-section').style.display = data.logs.length || data.has_previous ? 'flex' : 'none';
+    $('pagination-info').textContent = data.truncated ? `Page ${data.page} ? ${data.total_count} matching records in partial scan` : `Page ${data.page} of ${data.total_pages} (${data.total_count} matching records)`;
+    $('prev-page-btn').disabled = !data.has_previous;
+    $('next-page-btn').disabled = !data.has_next;
+}
+function stateLabel(state) {
+    const allowed = ['healthy','waiting','starting','running','idle','stale','degraded','stopped','offline','unavailable'];
+    const safe = allowed.includes(state) ? state : 'unavailable';
+    return `<span class="job-state" data-state="${safe}">${safe}</span>`;
+}
+function loadJobs() {
+    return request('jobs', '/api/logs/background-status', data => {
+        $('jobs-body').innerHTML = data.services.map(service => `<tr>
+            <td><a href="/admin/background-tasks?task_type=${encodeURIComponent(service.name)}">${escapeHtml(service.name.replaceAll('_', ' '))}</a></td>
+            <td>${stateLabel(service.state)}</td><td>${escapeHtml(stamp(service.last_success_at))}</td>
+            <td>${data.history_available ? escapeHtml(stamp(service.last_completed_at)) : 'Unavailable'}</td>
+            <td>${escapeHtml(stamp(service.next_run_at))}</td>
+            <td>${escapeHtml(service.failures)} consecutive failures. ${escapeHtml(service.last_error || service.activity)}</td></tr>`).join('');
+        const cleanup = data.last_log_cleanup;
+        if (cleanup) {
+            const result = cleanup.result;
+            const removed = Number.isFinite(result.deleted_records) ? `${result.deleted_records} expired records removed` : 'Record removals were not counted by this older run';
+            $('cleanup-result').textContent = `Last log cleanup: ${cleanup.status} at ${stamp(cleanup.completed_at)}. ${removed}; ${result.deleted_files ?? 0} files deleted; ${Number(result.freed_space_mb || 0).toFixed(2)} MB freed. Retained records remain visible.`;
+        } else {
+            $('cleanup-result').textContent = data.history_available ? 'No completed log cleanup recorded.' : 'Cleanup results unavailable.';
+        }
+        if (data.log_inventory) {
+            $('log-directory').textContent = `${data.log_inventory.directory}: ${data.log_inventory.files.length} log files, ${(data.log_inventory.total_bytes / 1048576).toFixed(2)} MB. Application rotations use the log retention policy; diagnostic logs use diagnostic retention.`;
+            $('log-inventory').innerHTML = data.log_inventory.files.map(file => `<li>${escapeHtml(file.name)} (${(file.bytes / 1048576).toFixed(2)} MB)</li>`).join('');
+        }
+        const worker = data.ml_worker;
+        const state = worker.status === 'healthy' ? worker.worker_state : worker.status;
+        $('ml-worker-status').innerHTML = `ML worker: ${stateLabel(state)} ? Last heartbeat: ${escapeHtml(stamp(worker.heartbeat_at))}${worker.current_job_id ? ' ? Job: ' + escapeHtml(worker.current_job_id) : ''}`;
+        const problems = data.services.filter(s => ['stale','degraded','stopped'].includes(s.state)).length;
+        const mlProblem = ['stale','offline','unavailable','stopped'].includes(state);
+        freshness('jobs', data.errors.length ? data.errors.join(' ') : null,
+            `${data.services.length} service registrations; ${problems} need attention.${mlProblem ? ' ML worker needs attention.' : ''} ${!data.services.length ? 'No service registry reported.' : ''}`);
+    });
+}
+async function refresh(automatic = false) {
+    clearTimeout(timer);
+    if (suspended || document.hidden) return;
+    await Promise.all([loadJobs(), loadStats(), automatic && currentPage > 1 ? Promise.resolve() : loadLogs()]);
+    schedule();
+}
+function schedule() {
+    clearTimeout(timer);
+    if (!suspended && !document.hidden && $('auto-refresh').checked) timer = setTimeout(() => refresh(true), 15000);
+}
+function suspend() {
+    suspended = true;
+    clearTimeout(timer);
+    for (const controller of requests.values()) controller.abort();
+    requests.clear();
+}
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadConfig();
+    $('apply-filters-btn').addEventListener('click', () => {
+        currentDateFrom = $('date-from').value || null;
+        currentDateTo = $('date-to').value || null;
+        currentLevel = $('level-filter').value || 'all';
+        currentPageSize = Number($('page-size').value) || null;
+        currentSource = $('log-source').value;
+        currentPage = 1;
+        refresh();
+    });
+    $('log-source').addEventListener('change', () => {
+        currentSource = $('log-source').value;
+        currentPage = 1;
+        $('logs-container').textContent = 'Loading selected log source?';
+        $('pagination-section').style.display = 'none';
+        $('scan-notice').textContent = '';
+        updated.delete('logs');
+        updated.delete('stats');
+        for (const name of ['debug','info','warning','errors','critical']) $('stat-total-' + name).textContent = '?';
+        $('stat-file-size').textContent = '?';
+        refresh();
+    });
+    $('clear-filters-btn').addEventListener('click', () => {
+        $('date-from').value = $('date-to').value = '';
+        currentDateFrom = currentDateTo = null;
+        currentLevel = logConfig?.default_level || 'all';
+        currentPageSize = logConfig?.default_page_size || null;
+        $('level-filter').value = currentLevel;
+        if (currentPageSize) $('page-size').value = String(currentPageSize);
+        currentPage = 1;
+        refresh();
+    });
+    $('refresh-logs-btn').addEventListener('click', () => refresh());
+    $('prev-page-btn').addEventListener('click', () => { if (currentPage > 1) { currentPage--; loadLogs(); } });
+    $('next-page-btn').addEventListener('click', () => { currentPage++; loadLogs(); });
+    $('auto-refresh').addEventListener('change', schedule);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) suspend();
+        else { suspended = false; refresh(true); }
+    });
+    window.addEventListener('pagehide', suspend);
+    window.addEventListener('pageshow', event => { if (event.persisted) { suspended = false; refresh(true); } });
+    refresh();
+});

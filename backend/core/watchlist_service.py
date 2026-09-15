@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text, select, and_, or_, func, delete
+from sqlalchemy import text, select, and_, or_, func, delete, update
 from sqlalchemy.orm import selectinload
 
 from db_models import (
@@ -833,21 +833,13 @@ class WatchlistService:
     ) -> int:
         """Deactivate expired watchlist entries."""
         try:
-            query = select(WatchlistEntry).where(
-                and_(
-                    WatchlistEntry.is_active == True,
-                    WatchlistEntry.expires_at != None,
-                    WatchlistEntry.expires_at <= datetime.utcnow()
-                )
-            )
-            result = await db.execute(query)
-            entries = result.scalars().all()
-            
-            count = 0
-            for entry in entries:
-                entry.is_active = False
-                count += 1
-            
+            result = await db.execute(update(WatchlistEntry).where(
+                WatchlistEntry.is_active == True,
+                WatchlistEntry.expires_at.isnot(None),
+                WatchlistEntry.expires_at <= datetime.utcnow(),
+            ).values(is_active=False))
+            count = result.rowcount
+
             await db.commit()
             
             if count > 0:

@@ -234,7 +234,8 @@ def cmd_start(bind: str, port: int, foreground: bool) -> int:
     if not foreground:
         # Detach so the shell stays usable. Errors go to a log rather than
         # /dev/null: a tunnel that dies silently is impossible to diagnose.
-        log = STATE.with_suffix(".log")
+        log = Path(__file__).resolve().parents[2] / "logs" / "diagnostics" / "db_tunnel.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "w") as handle:
             child = subprocess.Popen(
                 [sys.executable, os.path.abspath(__file__), "--start",

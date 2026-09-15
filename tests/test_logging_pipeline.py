@@ -559,11 +559,11 @@ def test_log_cleanup_never_rewrites_the_active_file():
     """It used to read app.log, filter the lines and rewrite it with open('w')
     while the RotatingFileHandler held the same file open at its own offset."""
     import inspect
-    from backend.core.log_cleanup import LogCleanupManager
+    from backend.core.log_retention import clean
 
     from tests._repo_scan import strip_comments_and_docstrings
     source = strip_comments_and_docstrings(
-        inspect.getsource(LogCleanupManager.cleanup_old_logs))
+        inspect.getsource(clean))
     assert "'w'" not in source and '"w"' not in source, (
         "log cleanup still opens a log file for writing")
     assert "active_log_path" in source, (

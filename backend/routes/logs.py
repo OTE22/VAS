@@ -6,6 +6,7 @@ rotating file `utils/logging.py` writes, and nothing else.
 
     all backend components -> central logger -> stdout + one rotating file
                                                        -> /api/logs -> admin-logs.js
+    ML scheduler / serialized child -> separate rotating files -> same viewer
 
 What this module deliberately does NOT do:
 
@@ -52,7 +53,7 @@ import re
 import sys
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
@@ -64,7 +65,7 @@ if parent_dir not in sys.path:
 from config import settings
 from backend.auth.auth_service import require_role
 from db_models import User
-from utils.logging import active_log_path, rotated_log_paths
+from utils.logging import active_log_path, rotated_log_paths, source_log_path, source_log_paths
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,19 @@ router = APIRouter(tags=["Logs"])
 
 # Log content must never be served stale by a browser or proxy.
 NO_STORE = "no-store, no-cache, must-revalidate"
+
+
+@router.get("/api/logs/background-status", summary="Live background job monitoring")
+async def background_status(
+    response: Response,
+    current_user: User = Depends(require_role(["admin"])),
+):
+    from backend.core.job_monitoring import snapshot
+    response.headers["Cache-Control"] = NO_STORE
+    try:
+        return await asyncio.wait_for(snapshot(), timeout=10)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="Background monitoring timed out")
 
 LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
@@ -131,6 +145,8 @@ class LogsResponse(BaseModel):
     scanned_files: int = 0
     scanned_bytes: int = 0
     truncated: bool = False
+    source_available: bool = True
+    source_message: Optional[str] = None
 
 
 def _parse_ts(raw: str) -> Optional[datetime]:
@@ -192,7 +208,7 @@ def _entries_from_text(text: str, source: str) -> List[LogEntry]:
 
 
 def _collect(level: Optional[str], date_from: Optional[datetime],
-             date_to: Optional[datetime], needed: int) -> Dict[str, Any]:
+             date_to: Optional[datetime], needed: int, source: str = "application") -> Dict[str, Any]:
     """Gather matching entries newest-first across the configured log set.
 
     Blocking by design — the caller runs it in a thread. Stops at the first of:
@@ -203,11 +219,13 @@ def _collect(level: Optional[str], date_from: Optional[datetime],
     max_bytes = int(settings.LOG_API_MAX_SCAN_BYTES)
     deadline = time.monotonic() + float(settings.LOG_API_TIMEOUT_SECONDS)
 
-    paths = rotated_log_paths(max_files=max_files)
+    paths = (rotated_log_paths() if source == "application" else source_log_paths(source))
+    files_omitted = len(paths) > max_files
+    paths = paths[:max_files]
     collected: List[LogEntry] = []
     scanned_files = 0
     scanned_bytes = 0
-    truncated = False
+    truncated = files_omitted
 
     for index, path in enumerate(paths):        # already newest-first
         if scanned_bytes >= max_bytes or time.monotonic() > deadline:
@@ -254,14 +272,21 @@ def _collect(level: Optional[str], date_from: Optional[datetime],
     }
 
 
-def _require_log_source() -> str:
-    """The active log path, or a 503 explaining exactly what is wrong.
+OPTIONAL_LOG_SOURCES = {
+    "ml-job": "No ML job log file is available yet. This file is created when an ML job process starts; older jobs may predate file logging.",
+    "migrations": "No migration log file is available yet. This file is created when the migration command runs.",
+    "image-processing": "No image-processing CLI log file is available yet. This file is created when the standalone command runs.",
+}
 
-    A missing directory or file means logging is misconfigured or the volume is
-    not mounted. Answering 200 with an empty list would present that as a quiet
-    system, which is the opposite of the truth.
+
+def _require_log_source(source="application") -> Optional[str]:
+    """Require the log directory and readable files; optional producers may be absent.
+
+    None explicitly means an on-demand producer has no active file available.
+    It is exposed as source_available=False, never presented as healthy logging.
+    Required producers and inaccessible paths still raise 503.
     """
-    path = active_log_path()
+    path = active_log_path() if source == "application" else source_log_path(source)
     directory = os.path.dirname(path)
     if not os.path.isdir(directory):
         raise HTTPException(
@@ -270,15 +295,19 @@ def _require_log_source() -> str:
                     "Check that the log volume is mounted and writable."),
         )
     if not os.path.isfile(path):
+        if source in OPTIONAL_LOG_SOURCES and not os.path.lexists(path):
+            if not os.access(directory, os.R_OK | os.X_OK):
+                raise HTTPException(status_code=503, detail="Log directory is not readable")
+            return None
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(f"Active log file {settings.LOG_FILE_NAME} does not exist in "
+            detail=(f"Active log file {os.path.basename(path)} does not exist in "
                     f"LOG_DIR={settings.LOG_DIR}. Logging may not be configured."),
         )
     if not os.access(path, os.R_OK):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(f"Active log file {settings.LOG_FILE_NAME} is not readable "
+            detail=(f"Active log file {os.path.basename(path)} is not readable "
                     "by the API process."),
         )
     return path
@@ -306,6 +335,7 @@ async def get_logs_config(
         "page_size_options": options,
         "levels": list(LEVELS),
         "default_level": "all",
+        "sources": {"application": "Application", "ml-worker": "ML scheduler", "ml-job": "ML job process", "server": "Server", "migrations": "Migrations", "image-processing": "Image processing CLI"},
         "max_scan_files": int(settings.LOG_API_MAX_SCAN_FILES),
         "max_scan_bytes": int(settings.LOG_API_MAX_SCAN_BYTES),
         "timeout_seconds": float(settings.LOG_API_TIMEOUT_SECONDS),
@@ -322,11 +352,12 @@ async def get_logs(
     date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
     date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
     level: Optional[str] = Query(None, description="DEBUG|INFO|WARNING|ERROR|CRITICAL|all"),
+    source: Literal["application", "ml-worker", "ml-job", "server", "migrations", "image-processing"] = "application",
     current_user: User = Depends(require_role(["admin"])),
 ):
     """Read the application log from the rotated files on disk, newest first, filtered by level and date. The scan is bounded by file count, byte budget and a timeout; truncated scans still report has_next. 503 when the log directory is unreadable."""
     response.headers["Cache-Control"] = NO_STORE
-    _require_log_source()
+    source_available = _require_log_source(source) is not None
 
     max_size = int(settings.LOG_API_MAX_PAGE_SIZE)
     if page_size is None:
@@ -354,14 +385,14 @@ async def get_logs(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Invalid date '{raw}'. Use YYYY-MM-DD.",
             )
-        return day.replace(hour=23, minute=59, second=59) if end_of_day else day
+        return day.replace(hour=23, minute=59, second=59, microsecond=999999) if end_of_day else day
 
     start = _parse_day(date_from, False)
     end = _parse_day(date_to, True)
     needed = page * page_size
 
     result = await asyncio.get_running_loop().run_in_executor(
-        None, _collect, wanted_level, start, end, needed)
+        None, _collect, wanted_level, start, end, needed, source)
 
     entries = result["entries"]
     total = len(entries)
@@ -386,12 +417,15 @@ async def get_logs(
         scanned_files=result["scanned_files"],
         scanned_bytes=result["scanned_bytes"],
         truncated=result["truncated"],
+        source_available=source_available,
+        source_message=None if source_available else OPTIONAL_LOG_SOURCES[source],
     )
 
 
 @router.get("/api/logs/stats", summary="Application log statistics")
 async def get_log_stats(
     response: Response,
+    source: Literal["application", "ml-worker", "ml-job", "server", "migrations", "image-processing"] = "application",
     current_user: User = Depends(require_role(["admin"])),
 ):
     """Counts by level over the configured log set, within the same bounds.
@@ -402,7 +436,7 @@ async def get_log_stats(
     a level name was counted as one.
     """
     response.headers["Cache-Control"] = NO_STORE
-    _require_log_source()
+    source_available = _require_log_source(source) is not None
 
     def _scan() -> Dict[str, Any]:
         max_files = int(settings.LOG_API_MAX_SCAN_FILES)
@@ -412,10 +446,11 @@ async def get_log_stats(
         counts = {name: 0 for name in LEVELS}
         files: List[Dict[str, Any]] = []
         scanned_bytes = 0
-        truncated = False
+        paths = rotated_log_paths() if source == "application" else source_log_paths(source)
+        truncated = len(paths) > max_files
         newest = None
 
-        for path in rotated_log_paths(max_files=max_files):
+        for path in paths[:max_files]:
             try:
                 size = os.path.getsize(path)
                 modified = datetime.fromtimestamp(os.path.getmtime(path))
@@ -452,6 +487,8 @@ async def get_log_stats(
     scan = await asyncio.get_running_loop().run_in_executor(None, _scan)
     counts = scan["counts"]
     return {
+        "source_available": source_available,
+        "source_message": None if source_available else OPTIONAL_LOG_SOURCES[source],
         "total_debug": counts["DEBUG"],
         "total_info": counts["INFO"],
         "total_warning": counts["WARNING"],
@@ -468,34 +505,41 @@ async def get_log_stats(
     }
 
 
-@router.post("/api/logs/cleanup", summary="Delete log entries past retention")
+@router.get("/api/logs/cleanup-preview", summary="Preview log retention without deleting")
+async def preview_log_cleanup(
+    response: Response,
+    current_user: User = Depends(require_role(["admin"])),
+):
+    from backend.core.log_cleanup import log_cleanup_manager
+    response.headers["Cache-Control"] = NO_STORE
+    return await log_cleanup_manager.preview()
+
+
+@router.post("/api/logs/cleanup", summary="Delete expired log records and diagnostic files")
 async def manual_log_cleanup(
     response: Response,
     current_user: User = Depends(require_role(["admin"])),
 ):
-    """Apply `LOGS_LIFE_TIME_HOURS` to the configured log set.
-
-    Delegates to `backend/core/log_cleanup.py`, which deletes whole ROTATED
-    files rather than rewriting the active one: the active file is held open by
-    a RotatingFileHandler with its own write offset, and truncating it
-    underneath the handler corrupts the next write and fights the handler's own
-    maxBytes rotation.
-    """
+    """Writer-owned rotation, closed-record retention and durable outcome counts."""
+    import uuid
+    from backend.core.log_cleanup import log_cleanup_manager
+    from backend.core.task_history import task_history_manager
     response.headers["Cache-Control"] = NO_STORE
     _require_log_source()
+    job_id = 'log-cleanup-' + uuid.uuid4().hex
+    task_id = await task_history_manager.create_job(
+        job_id, 'log_cleanup', 'Log Cleanup', created_by_user_id=current_user.id)
+    if task_id < 0:
+        raise HTTPException(status_code=503, detail="Cannot record cleanup history")
+    await task_history_manager.mark_running(job_id)
     try:
-        from backend.core.log_cleanup import log_cleanup_manager
-        if not log_cleanup_manager:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Log cleanup manager is not initialized.",
-            )
-        return await log_cleanup_manager.cleanup_old_logs()
-    except HTTPException:
-        raise
-    except Exception as exc:                                   # noqa: BLE001
+        await log_cleanup_manager.cleanup_old_logs()
+        result = dict(log_cleanup_manager.last_result)
+        await task_history_manager.finish_job(job_id, success=True, result=result)
+        return {**result, 'status': 'completed', 'job_id': job_id}
+    except Exception as exc:
+        result = dict(getattr(log_cleanup_manager, 'last_result', {}))
+        await task_history_manager.finish_job(job_id, success=False, result=result,
+            error_code='LOG_CLEANUP_FAILED', error_message=str(exc)[:500])
         logger.error("[LOGS] Cleanup failed: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Log cleanup failed; see server logs for details.",
-        )
+        raise HTTPException(status_code=500, detail="Log cleanup failed; see task history")

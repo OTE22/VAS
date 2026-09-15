@@ -960,6 +960,9 @@
 
     async function loadRelatedIdentities() {
         if (!state.selectedIdentityId) return;
+        for (const input of [elements.minCoApp, elements.timeWindow]) {
+            if (input && !input.reportValidity()) return;
+        }
         const identityId = state.selectedIdentityId;
         const req = beginRequest('related');
         renderLoading(elements.relatedContainer, 'Loading related identities...');
@@ -1558,7 +1561,7 @@
 
     async function calculateAllRelationships() {
         if (calcAllInFlight) return;
-        if (!window.confirm('Calculate relationships for ALL identities?\n\nThis runs as a background job (typically 5-30 minutes). Progress appears in the Background Tasks page. Continue?')) {
+        if (!window.confirm('Calculate relationships for ALL identities?\n\nThis rebuilds stored relationships for all active identities using server defaults, not the filters on this page. It does not merge identities or delete detections. Progress appears in Background Tasks. Continue?')) {
             return;
         }
         calcAllInFlight = true;
@@ -1615,9 +1618,10 @@
 
     function attachOnce(id, evt, fn) {
         const node = document.getElementById(id);
-        if (node && !node.dataset.listenerAttached) {
+        const key = 'listenerAttached' + evt;
+        if (node && !node.dataset[key]) {
             node.addEventListener(evt, fn);
-            node.dataset.listenerAttached = 'true';
+            node.dataset[key] = 'true';
         }
     }
 
@@ -1639,6 +1643,12 @@
 
         attachOnce('analyze-security-btn', 'click', analyzeInSecurityIntelligence);
         attachOnce('refresh-related-btn', 'click', loadRelatedIdentities);
+        for (const id of ['min-co-app', 'time-window']) {
+            attachOnce(id, 'change', loadRelatedIdentities);
+            attachOnce(id, 'keydown', function (event) {
+                if (event.key === 'Enter') { event.preventDefault(); loadRelatedIdentities(); }
+            });
+        }
         attachOnce('calc-all-relationships-btn', 'click', calculateAllRelationships);
         attachOnce('refresh-temporal-btn', 'click', loadTemporalPatterns);
         attachOnce('refresh-tracking-btn', 'click', loadCrossCameraTrack);

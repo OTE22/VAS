@@ -1,4 +1,18 @@
 weights/*.onnx
+# Downloaded model weights belong in the offline runtime bundle, not Git.
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.engine
+# Generated geographic datasets, wherever an import places them.
+*.mbtiles
+*.osm.pbf
+*.tif
+*.tiff
+*.sqlite.zip
+*.shp.zip
 app.log
 output_video.mp4
 database/face_database

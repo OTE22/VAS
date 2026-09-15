@@ -113,8 +113,8 @@
                              always transmitted them, so the server-side settings
                              were unreachable. Hydrated from the server on load;
                              left blank the request omits them and the setting wins. -->
-                        <label>Min Co-appearances: <input type="number" id="min-co-app" min="1" placeholder="server default"></label>
-                        <label>Time Window: <input type="number" id="time-window" min="1" max="60" placeholder="server default"> minutes</label>
+                        <label>Min Co-appearances: <input type="number" id="min-co-app" min="1" step="1" placeholder="server default"></label>
+                        <label>Time Window: <input type="number" id="time-window" min="1" max="60" step="1" placeholder="server default"> minutes</label>
                         <button class="btn-primary" id="refresh-related-btn" type="button">
                             <i class="fas fa-sync"></i> Refresh
                         </button>
@@ -123,6 +123,7 @@
                         </button>
                     </div>
                 </div>
+                <p class="text-muted">Filters update when changed or when you press Enter. Min Co-appearances is the minimum shared appearance count. Time Window is the allowed gap for matching appearances, not how far back to search. Calculate All Relationships rebuilds stored relationships for all active identities using server defaults.</p>
                 <div class="relationship-strength-groups" id="related-identities-container">
                     <div class="loading-state">
                         <i class="fas fa-spinner fa-spin"></i>
@@ -275,7 +276,7 @@
          bridges onto window.IdentityMap; the classic page script awaits
          window.IdentityMap.ready before drawing. -->
     <script type="module" src="/frontend/js/identity-map.js?v=playback-1"></script>
-    <script src="/frontend/js/admin-intelligence.js?v=intel-6-playback-1"></script>
+    <script src="/frontend/js/admin-intelligence.js?v=intel-7-related-filters"></script>
 </body>
 </html>
 

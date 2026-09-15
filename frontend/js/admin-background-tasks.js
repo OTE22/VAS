@@ -979,6 +979,15 @@
         updateAlertsButton();
 
         await checkUserRole();
+        const linkedType = new URLSearchParams(location.search).get('task_type');
+        if (linkedType && /^[a-z0-9_]{1,50}$/.test(linkedType)) {
+            state.taskTypeFilter = linkedType;
+            const select = document.getElementById('task-type-filter');
+            if (![...select.options].some(option => option.value === linkedType)) {
+                select.add(new Option(linkedType.replaceAll('_', ' '), linkedType));
+            }
+            select.value = linkedType;
+        }
 
         // Stats+history poll together (30s); alerts have their OWN single
         // poller (15s); retention status refreshes every 60s (admin only).

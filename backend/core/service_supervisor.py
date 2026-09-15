@@ -64,6 +64,8 @@ class ServiceHealth:
     interval: float = 0.0                     # recorded for staleness math
     first_success_deadline: Optional[float] = None
     details: dict = field(default_factory=dict)
+    next_run_at: Optional[float] = None
+    cycle_active: bool = False
 
 
 _registry: Dict[str, ServiceHealth] = {}
@@ -144,40 +146,44 @@ def _set_gauges(name: str, up: Optional[bool] = None,
         pass
 
 
+async def last_successful_completion(task_type: str):
+    """Read the last real successful execution, excluding previews and skips."""
+    from db_connection import db_manager
+    from sqlalchemy import text
+    async with db_manager.get_session() as db:
+        return (await db.execute(text("""
+            SELECT completed_at FROM background_task_history
+            WHERE task_type = :task_type AND status = 'completed'
+              AND completed_at IS NOT NULL
+              AND COALESCE(result->>'dry_run', details->>'dry_run', 'false') <> 'true'
+              AND COALESCE(result->>'status', details->>'status', 'completed') = 'completed'
+            ORDER BY completed_at DESC LIMIT 1
+        """), {"task_type": task_type})).scalar_one_or_none()
+
+
 async def durable_initial_delay(task_type: str, default_seconds: float,
-                                interval_seconds: float, *, floor_seconds: float = 60.0) -> float:
-    """The first-run delay for a periodic job, derived from its LAST COMPLETED run.
+                                interval_seconds: float, *, floor_seconds: float = 60.0,
+                                notification_lead_seconds: float = 0.0) -> float:
+    """Resume the remaining interval across restarts, preserving the due time.
 
-    `initial_delay` was a fixed number restarted from zero on every boot, so a
-    job with a 7-hour startup delay never ran on a day with several deploys:
-    each restart re-armed the full delay (identity clustering's last run fell a
-    day behind for exactly this reason). The durable ML drift job never had the
-    problem because it asks the database "when did I last complete?" - this
-    gives the in-process loops the same answer.
-
-    Returns min(default, max(floor, next_due - now)) when a completed run exists,
-    so a boot never delays a job past its original schedule but also never runs
-    it sooner than `floor_seconds` after boot (the reason the delay exists is
-    to stay off a fresh boot's load). With no history, or on any error, it
-    returns `default_seconds` unchanged - identical to the old behaviour.
+    First installations use the startup grace. Unavailable history waits a full
+    interval to avoid turning a database failure into an early destructive run.
+    Notification lead time belongs inside the cycle and is subtracted here.
     """
     try:
-        from datetime import datetime
-        from backend.core.task_history import task_history_manager
-        rows = await task_history_manager.get_task_history(
-            task_type=task_type, status="completed", limit=1)
-        stamp = (rows[0].get("completed_at") or rows[0].get("started_at")) if rows else None
-        if not stamp:
+        from datetime import datetime, timezone
+        stamp = await last_successful_completion(task_type)
+        if stamp is None:
             return default_seconds
         if isinstance(stamp, str):
             stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        if stamp.tzinfo is not None:
-            stamp = stamp.replace(tzinfo=None)
-        remaining = (stamp - datetime.utcnow()).total_seconds() + interval_seconds
-        return float(min(default_seconds, max(floor_seconds, remaining)))
-    except Exception as e:  # never let scheduling logic stop a service from starting
-        logger.debug("[SUPERVISOR] durable_initial_delay(%s) fell back to default: %s", task_type, e)
-        return default_seconds
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        remaining = (stamp - datetime.now(timezone.utc)).total_seconds() + interval_seconds
+        return float(max(floor_seconds, remaining - notification_lead_seconds))
+    except Exception:
+        logger.exception("[SUPERVISOR] Cannot restore %s schedule; waiting one interval", task_type)
+        return float(max(floor_seconds, interval_seconds - notification_lead_seconds))
 
 
 async def supervised_loop(
@@ -208,6 +214,8 @@ async def supervised_loop(
     health = _register(name, _interval_now())
     with _registry_lock:
         health.first_success_deadline = now() + initial_delay + first_run_timeout
+        health.next_run_at = time.time() + initial_delay
+        health.cycle_active = False
     _set_gauges(name, up=True)
 
     try:
@@ -215,6 +223,9 @@ async def supervised_loop(
             await sleep(initial_delay)
 
         while True:
+            with _registry_lock:
+                health.cycle_active = True
+                health.next_run_at = None
             try:
                 result = await work()
                 if isinstance(result, dict) and result.get("status") in ("failed", "partial_failure"):
@@ -235,6 +246,9 @@ async def supervised_loop(
                     "service=%s cycle_failed consecutive_failures=%d backoff_s=%.0f",
                     name, failures, backoff, exc_info=True,
                 )
+                with _registry_lock:
+                    health.cycle_active = False
+                    health.next_run_at = time.time() + backoff
                 await sleep(backoff)
                 continue
 
@@ -248,10 +262,16 @@ async def supervised_loop(
                 health.interval = interval_s  # keep staleness math honest for live-tuned cadences
                 health.details = result if isinstance(result, dict) else {}
             _set_gauges(name, up=True, last_success=health.last_success)
-            await sleep(interval_s * (1 + random.uniform(-jitter, jitter)))
+            delay = interval_s * (1 + random.uniform(-jitter, jitter))
+            with _registry_lock:
+                health.cycle_active = False
+                health.next_run_at = time.time() + delay
+            await sleep(delay)
 
     except asyncio.CancelledError:
         with _registry_lock:
             health.status = STATUS_STOPPED
+            health.cycle_active = False
+            health.next_run_at = None
         _set_gauges(name, up=False)
         raise

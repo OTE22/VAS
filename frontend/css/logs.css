@@ -535,3 +535,18 @@ body.logs-page {
     }
 }
 
+
+/* Background monitoring: bounded table on small screens. */
+.jobs-panel, .monitor-controls { padding: 1rem; margin-bottom: 1rem; border: 1px solid #426176; border-radius: 8px; background: #101d2b; color: #e2edf5; }
+.jobs-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+.jobs-panel a { color: #80ceff; text-decoration: underline; }
+.jobs-panel p, .monitor-controls p { margin: .5rem 0; }
+.jobs-panel summary { cursor: pointer; padding: .8rem 0; }
+.jobs-table-scroll { overflow-x: auto; }
+.jobs-table { width: 100%; border-collapse: collapse; font-size: .85rem; text-align: left; }
+.jobs-table th, .jobs-table td { padding: .65rem; border-bottom: 1px solid #426176; vertical-align: top; min-width: 110px; }
+.jobs-table td:last-child { overflow-wrap: anywhere; max-width: 320px; }
+.monitor-error { color: #ffb4aa; }
+.job-state { font-weight: bold; }
+.job-state[data-state="healthy"], .job-state[data-state="idle"] { color: #8fe4b0; }
+.job-state[data-state="stale"], .job-state[data-state="degraded"], .job-state[data-state="offline"], .job-state[data-state="stopped"] { color: #ffb4aa; }

@@ -25,7 +25,7 @@
 <!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-3">
-    <link rel="stylesheet" href="/frontend/css/logs.css">
+    <link rel="stylesheet" href="/frontend/css/logs.css?v=jobs-2">
     <link rel="stylesheet" href="/frontend/css/footer.css">
 </head>
 <body data-page-class="logs-page">
@@ -54,6 +54,29 @@
                 </div>
             </header>
 
+            <section class="jobs-panel" aria-labelledby="jobs-heading">
+                <div class="jobs-heading"><h2 id="jobs-heading">Background Jobs</h2>
+                    <a href="/admin/background-tasks">View execution history</a></div>
+                <p>Service heartbeats confirm recent activity. Completed runs show recorded job results.</p>
+                <p id="jobs-freshness" role="status">Loading worker status?</p>
+                <p id="cleanup-result" role="status">Loading cleanup results...</p>
+                <details><summary>All files in the central log directory</summary><p id="log-directory"></p><ul id="log-inventory"></ul></details>
+                <div id="ml-worker-status">Loading ML worker?</div>
+                <details><summary>Service status and last completed runs</summary>
+                    <div class="jobs-table-scroll"><table class="jobs-table">
+                        <thead><tr><th scope="col">Service</th><th scope="col">State</th><th scope="col">Last cycle success</th><th scope="col">Last completed job</th><th scope="col">Next cycle</th><th scope="col">Failures / details</th></tr></thead>
+                        <tbody id="jobs-body"></tbody>
+                    </table></div>
+                </details>
+            </section>
+            <div class="monitor-controls">
+                <label><input type="checkbox" id="auto-refresh" checked> Refresh every 15 seconds while visible</label>
+                <p>Older log pages stay still while you read. Refresh reloads the selected page.</p>
+                <p id="config-freshness" role="status"></p>
+                <p id="logs-freshness" role="status">Loading logs?</p>
+                <p id="stats-freshness" role="status">Loading counts?</p>
+                <p id="scan-notice" role="status"></p>
+            </div>
             <!-- Statistics Bar -->
             <section class="stats-section" id="stats-section" aria-labelledby="stats-heading">
                 <div class="stats-container">
@@ -117,6 +140,9 @@
             <!-- Filters -->
             <section class="filter-section" aria-labelledby="filter-heading">
                 <div class="filter-controls">
+                    <div class="filter-group"><label for="log-source" class="filter-label">Log source</label>
+                        <select id="log-source" class="filter-select"><option value="application">Application</option></select>
+                    </div>
                     <div class="filter-group">
                         <label for="date-from" class="filter-label">
                             <i class="fas fa-calendar-alt"></i>
@@ -210,7 +236,7 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-logs.js"></script>
+    <script src="/frontend/js/admin-logs.js?v=jobs-3"></script>
     <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>

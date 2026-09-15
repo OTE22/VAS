@@ -77,6 +77,14 @@ def _stat_files_sync(paths):
     return existing, missing, size_total
 
 
+def retention_startup_delay(last_completed, interval_hours, now=None):
+    """Resume the daily schedule; the 60-second notification is inside the cycle."""
+    if last_completed is None:
+        return 60.0
+    now = now or datetime.utcnow()
+    return max(60.0, (last_completed - now).total_seconds() + interval_hours * 3600 - 60)
+
+
 class DataRetentionManager:
     """Manages automatic cleanup of old data.
 
@@ -100,12 +108,30 @@ class DataRetentionManager:
     def cleanup_interval_hours(self) -> int:
         return int(settings.CLEANUP_INTERVAL_HOURS)
 
+    async def _last_successful_cleanup(self):
+        async with db_manager.get_session() as db:
+            return (await db.execute(sa_text("""
+                SELECT completed_at FROM background_task_history
+                WHERE task_type = 'data_retention' AND status = 'completed'
+                  AND completed_at IS NOT NULL
+                  AND COALESCE(result->>'dry_run', details->>'dry_run', 'false') <> 'true'
+                  AND COALESCE(result->>'status', details->>'status', 'completed') = 'completed'
+                ORDER BY completed_at DESC LIMIT 1
+            """))).scalar_one_or_none()
+
     async def start(self):
         """Start periodic cleanup"""
         if self._cleanup_task and not self._cleanup_task.done():
             logger.warning("Data retention manager already running; ignoring duplicate start()")
             return
         from backend.core.service_supervisor import supervised_loop
+        try:
+            self.last_run_at = await self._last_successful_cleanup()
+            initial_delay = retention_startup_delay(self.last_run_at, self.cleanup_interval_hours)
+        except Exception:
+            # Never turn unavailable history into an extra destructive startup run.
+            logger.exception("[RETENTION] Cannot restore schedule; waiting one cleanup interval")
+            initial_delay = max(60.0, self.cleanup_interval_hours * 3600 - 60)
         # Interval passed as a CALLABLE so admin changes to
         # CLEANUP_INTERVAL_HOURS still apply on the next cycle (live-reread
         # semantics the old loop had).
@@ -114,7 +140,8 @@ class DataRetentionManager:
                 "data_retention",
                 lambda: (self.cleanup_interval_hours * 3600) - 60,
                 self._run_cycle,
-                initial_delay=60,
+                initial_delay=initial_delay,
+                jitter=0,
                 error_backoff_base=3600,
             ),
             name="data_retention",
@@ -139,7 +166,7 @@ class DataRetentionManager:
             await background_task_notifier.notify_task_starting(
                 task_type=TaskType.DATA_RETENTION,
                 task_name="Data Retention Cleanup",
-                description=f"Removing old detections and face images older than {self.retention_days} days. This affects all users as it deletes detection records and images.",
+                description=f"Deletes detections and face images older than {self.retention_days} days. Scheduled every {self.cleanup_interval_hours} hours; affects all users.",
                 estimated_duration="5-15 minutes",
                 scheduled_time=next_run_time,
                 notify_all_users=True

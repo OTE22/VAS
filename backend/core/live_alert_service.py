@@ -945,23 +945,16 @@ class LiveAlertService:
         try:
             now = datetime.utcnow()
             
-            # Find date-based expired alerts
-            query = select(LiveSearchAlert).where(
-                and_(
-                    LiveSearchAlert.status == LiveAlertStatus.ACTIVE,
-                    LiveSearchAlert.expiration_type == LiveAlertExpirationType.DATE,
-                    LiveSearchAlert.expiration_date != None,
-                    LiveSearchAlert.expiration_date <= now
-                )
-            )
-            result = await db.execute(query)
-            alerts = result.scalars().all()
-            
-            count = 0
-            for alert in alerts:
-                alert.status = LiveAlertStatus.EXPIRED
-                count += 1
-            
+            # Evaluate expiration and update atomically, so a concurrent renewal
+            # cannot be overwritten using a stale ORM object.
+            result = await db.execute(update(LiveSearchAlert).where(
+                LiveSearchAlert.status == LiveAlertStatus.ACTIVE,
+                LiveSearchAlert.expiration_type == LiveAlertExpirationType.DATE,
+                LiveSearchAlert.expiration_date.isnot(None),
+                LiveSearchAlert.expiration_date <= now,
+            ).values(status=LiveAlertStatus.EXPIRED))
+            count = result.rowcount
+
             await db.commit()
             
             if count > 0:

@@ -772,3 +772,9 @@
 .test-note { color: rgba(255,255,255,0.55); font-size: 0.75rem; margin-top: 0.6rem; }
 .create-steps { margin: 0.5rem 0 0.5rem 1.2rem; color: #e2e8f0; }
 .create-steps li { margin-bottom: 0.3rem; }
+
+/* Scope modal colors against shared admin modal styles. */
+#la-modal .modal-header { background: #122333; color: #f1f5f9; border-bottom: 1px solid #284354; }
+#la-modal .modal-header h2, #la-modal .modal-close { color: #f1f5f9; }
+#la-modal button:disabled { background: #263746; color: #a7b4c2; border-color: #415364; box-shadow: none; opacity: 0.65; cursor: not-allowed; transform: none; }
+#la-modal .trigger-help { color: #c1cbd5; font-size: 0.85rem; line-height: 1.5; margin: 0.8rem 0; }

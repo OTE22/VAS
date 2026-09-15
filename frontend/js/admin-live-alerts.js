@@ -253,6 +253,7 @@
         } finally {
             locks.delete(key);
             if (btn) btn.disabled = false;
+            if (key === 'bulk-ack') updateTriggerActions();
         }
     }
 
@@ -558,6 +559,7 @@
             state.modalShell.opener.focus();
         }
         state.modalShell = null;
+        state.triggerModal = null;
     }
 
     // ------------------------------------------------------------------
@@ -566,8 +568,8 @@
     async function viewTriggers(alertId, opener) {
         const alert = findAlert(alertId);
         if (!alert) { showNotification('Alert not found in current list — refreshing.', 'error'); loadAlerts(); return; }
-        state.triggerModal = { alertId: String(alertId), page: 1, filter: 'all', selected: new Set() };
         const shell = openModalShell(`Trigger History: ${alert.name}`, opener);
+        state.triggerModal = { alertId: String(alertId), page: 1, filter: 'all', selected: new Set(), requestId: 0, loading: true, unacknowledgedTotal: 0 };
         buildTriggersToolbar(shell, alert);
         await loadTriggersPage();
     }
@@ -594,6 +596,8 @@
         shell.body.appendChild(bar);
         shell.body.appendChild(el('div', 'triggers-content'));
 
+        shell.body.appendChild(el('p', 'trigger-help', 'This is the history of this alert firing. Acknowledge marks an event as reviewed; it does not stop the alert. Acknowledge All includes events on every page.'));
+
         // Footer: bulk actions + pagination
         const ackSelectedBtn = el('button', 'btn-primary');
         ackSelectedBtn.type = 'button';
@@ -606,6 +610,7 @@
         const ackAllBtn = el('button', 'btn-primary');
         ackAllBtn.type = 'button';
         ackAllBtn.id = 'ack-all-btn';
+        ackAllBtn.disabled = true;
         ackAllBtn.appendChild(icon('fa-check-double'));
         ackAllBtn.appendChild(el('span', null, ' Acknowledge All'));
         ackAllBtn.addEventListener('click', () => bulkAcknowledge(null, ackAllBtn));
@@ -619,34 +624,45 @@
         shell.footer.appendChild(ackAllBtn);
     }
 
+    function updateTriggerActions() {
+        const modal = state.triggerModal;
+        const blocked = !modal || modal.loading || locks.has('bulk-ack');
+        const selected = document.getElementById('ack-selected-btn');
+        const all = document.getElementById('ack-all-btn');
+        if (selected) selected.disabled = blocked || modal.selected.size === 0;
+        if (all) all.disabled = blocked || modal.unacknowledgedTotal === 0;
+    }
+
     async function loadTriggersPage() {
         const modal = state.triggerModal;
         const shell = state.modalShell;
         if (!modal || !shell) return;
         const content = shell.body.querySelector('.triggers-content');
         if (!content) return;
-
+        const requestId = ++modal.requestId;
+        const current = () => state.triggerModal === modal && state.modalShell === shell && modal.requestId === requestId;
+        modal.loading = true;
+        updateTriggerActions();
         content.replaceChildren(el('div', 'triggers-loading', 'Loading triggers…'));
-
-        await withLock('load-triggers', null, async () => {
+        try {
             const params = new URLSearchParams({ page: String(modal.page), page_size: '20' });
             if (modal.filter === 'unack') params.set('acknowledged', 'false');
             if (modal.filter === 'ack') params.set('acknowledged', 'true');
             const result = await api(`/api/live-alerts/${encodeURIComponent(modal.alertId)}/triggers?${params}`);
-
-            if (!result.ok) {
-                content.replaceChildren();
-                const err = el('div', 'triggers-error');
-                err.appendChild(el('p', null, `Failed to load triggers: ${errorDetail(result)}`));
-                const retry = el('button', 'btn-secondary', 'Retry');
-                retry.type = 'button';
-                retry.addEventListener('click', () => loadTriggersPage());
-                err.appendChild(retry);
-                content.replaceChildren(err);
-                return;
-            }
+            if (!current()) return;
+            if (!result.ok) throw new Error(errorDetail(result));
+            modal.loading = false;
             renderTriggersPage(content, result.payload || { items: [], total: 0, page: 1, total_pages: 1, unacknowledged_total: 0 });
-        });
+        } catch (error) {
+            if (!current()) return;
+            const err = el('div', 'triggers-error');
+            err.appendChild(el('p', null, 'Failed to load triggers. Please retry.'));
+            const retry = el('button', 'btn-secondary', 'Retry');
+            retry.type = 'button';
+            retry.addEventListener('click', loadTriggersPage);
+            err.appendChild(retry);
+            content.replaceChildren(err);
+        }
     }
 
     function renderTriggersPage(content, pageData) {
@@ -669,7 +685,10 @@
         if (items.length === 0) {
             const empty = el('div', 'no-triggers');
             empty.appendChild(icon('fa-bell-slash'));
-            empty.appendChild(el('p', null, 'No triggers match this filter.'));
+            const emptyText = modal.filter === 'ack' ? 'No acknowledged triggers. Choose All triggers to see any recorded events.'
+                : modal.filter === 'unack' ? 'No unacknowledged triggers.'
+                : 'This alert has not fired yet. New matching detections will appear here.';
+            empty.appendChild(el('p', null, emptyText));
             content.appendChild(empty);
         } else {
             const wrap = el('div', 'triggers-list');
@@ -775,10 +794,9 @@
         pager.appendChild(next);
         content.appendChild(pager);
 
-        const ackAllBtn = document.getElementById('ack-all-btn');
-        if (ackAllBtn) ackAllBtn.disabled = (pageData.unacknowledged_total || 0) === 0;
-        const ackSelBtn = document.getElementById('ack-selected-btn');
-        if (ackSelBtn) ackSelBtn.disabled = modal.selected.size === 0;
+        modal.unacknowledgedTotal = pageData.unacknowledged_total || 0;
+        if (modal.unacknowledgedTotal === 0) modal.selected.clear();
+        updateTriggerActions();
     }
 
     async function acknowledgeTrigger(triggerId, btn) {
