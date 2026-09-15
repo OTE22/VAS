@@ -1,0 +1,17 @@
+[Unit]
+Description=Publish the VMS HTTPS hostname on the local network
+After=avahi-daemon.service network-online.target
+Requires=avahi-daemon.service
+
+[Service]
+EnvironmentFile=/etc/nginx/intranet.env
+ExecStart=/usr/bin/avahi-publish-address -a -R armyeye-vms.local ${VAS_INTRANET_IP}
+Restart=always
+RestartSec=5
+User=nobody
+Group=nogroup
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

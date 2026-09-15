@@ -1,0 +1,660 @@
+{
+  "captured_utc": "2026-09-15T05:08:19.289883+00:00",
+  "containers": [
+    {
+      "name": "VMS",
+      "image": "armyeye-vms",
+      "image_id": "sha256:489cf7c615ae5228587946da35117615c25d2ba4c7a6a8837d32f396799f5bd3",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/InferenceNode/data",
+          "Destination": "/app/InferenceNode/data",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/InferenceNode/logs",
+          "Destination": "/app/InferenceNode/logs",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/InferenceNode/media",
+          "Destination": "/app/InferenceNode/media",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/InferenceNode/model_repository",
+          "Destination": "/app/InferenceNode/model_repository",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/InferenceNode/pipelines",
+          "Destination": "/app/InferenceNode/pipelines",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/secrets/armyeye_config_key",
+          "Destination": "/run/secrets/armyeye_config_key",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VMS/secrets/face-internal-ca.crt",
+          "Destination": "/run/secrets/face_internal_ca",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "armyeye_armyeye",
+        "webhook_integration"
+      ]
+    },
+    {
+      "name": "VMS-db",
+      "image": "postgres:16-alpine",
+      "image_id": "sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "armyeye_armeye_pgdata",
+          "Source": "/var/lib/docker/volumes/armyeye_armeye_pgdata/_data",
+          "Destination": "/var/lib/postgresql/data",
+          "RW": true
+        }
+      ],
+      "networks": [
+        "armyeye_armyeye"
+      ]
+    },
+    {
+      "name": "face_detector_prod-backup-1",
+      "image": "postgres:15-alpine",
+      "image_id": "sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/scripts/backup",
+          "Destination": "/scripts",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "a1147db77d205a5f63c62ce9670191b5e10a0f2fe413be272db2858023bdf080",
+          "Source": "/var/lib/docker/volumes/a1147db77d205a5f63c62ce9670191b5e10a0f2fe413be272db2858023bdf080/_data",
+          "Destination": "/var/lib/postgresql/data",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_backup_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_backup_data/_data",
+          "Destination": "/backups",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_face_database_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_face_database_data/_data",
+          "Destination": "/data/database",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_ml_artifacts_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_ml_artifacts_data/_data",
+          "Destination": "/data/ml",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_storage_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_storage_data/_data",
+          "Destination": "/data/storage",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/backup_db_password",
+          "Destination": "/run/secrets/backup_db_password",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_data"
+      ]
+    },
+    {
+      "name": "face_detector_prod-face_recognition-1",
+      "image": "face_detector_prod-face_recognition",
+      "image_id": "sha256:5710d4fc92aa6a482d53d6a3226f4fb68981283ebd0f626be4d644b1b8398b54",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_face_database_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_face_database_data/_data",
+          "Destination": "/app/database",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/bootstrap_admin_password",
+          "Destination": "/run/secrets/bootstrap_admin_password",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/jwt_secret",
+          "Destination": "/run/secrets/jwt_secret",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_backup_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_backup_data/_data",
+          "Destination": "/backups",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_ml_artifacts_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_ml_artifacts_data/_data",
+          "Destination": "/app/models/ml",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_hf_cache_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_hf_cache_data/_data",
+          "Destination": "/home/appuser/.cache/huggingface",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/database_url_app",
+          "Destination": "/run/secrets/database_url_app",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/postgres_password_app",
+          "Destination": "/run/secrets/postgres_password_app",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_storage_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_storage_data/_data",
+          "Destination": "/app/storage",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/weights",
+          "Destination": "/app/weights",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_logs_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_logs_data/_data",
+          "Destination": "/var/log/face-recognition",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/webhook_api_keys",
+          "Destination": "/run/secrets/webhook_api_keys",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_chromadb_cache",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_chromadb_cache/_data",
+          "Destination": "/home/appuser/.cache/chroma",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/certs",
+          "Destination": "/etc/nginx/certs",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/redis_url",
+          "Destination": "/run/secrets/redis_url",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/sql_agent_db_password",
+          "Destination": "/run/secrets/sql_agent_db_password",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/map-data",
+          "Destination": "/app/map-data",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_ai",
+        "face_detector_prod_data",
+        "face_detector_prod_edge",
+        "face_detector_prod_monitoring"
+      ]
+    },
+    {
+      "name": "face_detector_prod-grafana-1",
+      "image": "grafana/grafana:13.2.0",
+      "image_id": "sha256:3fd54ae1214669f8355f065ec9f6445d5279a3d77095ab048ca045685272429b",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/monitoring/grafana/provisioning",
+          "Destination": "/etc/grafana/provisioning",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_grafana_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_grafana_data/_data",
+          "Destination": "/var/lib/grafana",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/monitoring/grafana/dashboards",
+          "Destination": "/var/lib/grafana/dashboards",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_monitoring"
+      ]
+    },
+    {
+      "name": "face_detector_prod-martin-1",
+      "image": "ghcr.io/maplibre/martin:1.13.0",
+      "image_id": "sha256:aa59636f47e31f9a57065bd31fba214bd29f767d3804585f286ee29119745e08",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/config/martin.yaml",
+          "Destination": "/config/martin.yaml",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/map-data",
+          "Destination": "/map-data",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_edge"
+      ]
+    },
+    {
+      "name": "face_detector_prod-migrate-1",
+      "image": "face_detector_prod-migrate",
+      "image_id": "sha256:c35d1e0c86a42d1786e1e8b83234480173a39355a7b7951fee43c2662534bc75",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "exited",
+      "restart_policy": "no",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/database_url_migrator",
+          "Destination": "/run/secrets/database_url_migrator",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/jwt_secret",
+          "Destination": "/run/secrets/jwt_secret",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/postgres_password_migrator",
+          "Destination": "/run/secrets/postgres_password_migrator",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/redis_url",
+          "Destination": "/run/secrets/redis_url",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/sql_agent_db_password",
+          "Destination": "/run/secrets/sql_agent_db_password",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/webhook_api_keys",
+          "Destination": "/run/secrets/webhook_api_keys",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_data"
+      ]
+    },
+    {
+      "name": "face_detector_prod-ml_worker-1",
+      "image": "face_detector_prod-ml_worker",
+      "image_id": "sha256:0dafb89f1c540d7ae2240b5215b2853193d795709e08edf949c0df24c9249fa1",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/postgres_password_app",
+          "Destination": "/run/secrets/postgres_password_app",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_logs_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_logs_data/_data",
+          "Destination": "/var/log/face-recognition",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_ml_artifacts_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_ml_artifacts_data/_data",
+          "Destination": "/app/models/ml",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_hf_cache_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_hf_cache_data/_data",
+          "Destination": "/home/appuser/.cache/huggingface",
+          "RW": true
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/secrets/database_url_app",
+          "Destination": "/run/secrets/database_url_app",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_data"
+      ]
+    },
+    {
+      "name": "face_detector_prod-nginx-1",
+      "image": "nginx:alpine",
+      "image_id": "sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/icons",
+          "Destination": "/usr/share/nginx/html/icons",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/certs",
+          "Destination": "/etc/nginx/certs",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/nginx.prod.conf",
+          "Destination": "/etc/nginx/nginx.conf",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/frontend",
+          "Destination": "/usr/share/nginx/html/frontend",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_edge",
+        "webhook_integration"
+      ]
+    },
+    {
+      "name": "face_detector_prod-ollama-1",
+      "image": "ollama/ollama:latest",
+      "image_id": "sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_ollama_models",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_ollama_models/_data",
+          "Destination": "/root/.ollama",
+          "RW": true
+        }
+      ],
+      "networks": [
+        "face_detector_prod_ai"
+      ]
+    },
+    {
+      "name": "face_detector_prod-postgres-1",
+      "image": "pgvector/pgvector:pg15",
+      "image_id": "sha256:a947c45cdc5906a1bc951f20a8709e321256343ee0f251e4ae00b5e7def4e6da",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/db",
+          "Destination": "/db",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/init-db.sql",
+          "Destination": "/docker-entrypoint-initdb.d/init-db.sql",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_postgres_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_postgres_data/_data",
+          "Destination": "/var/lib/postgresql/data",
+          "RW": true
+        }
+      ],
+      "networks": [
+        "face_detector_prod_data"
+      ]
+    },
+    {
+      "name": "face_detector_prod-prometheus-1",
+      "image": "prom/prometheus:v3.14.0",
+      "image_id": "sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/monitoring/alerts",
+          "Destination": "/etc/prometheus/alerts",
+          "RW": false
+        },
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/monitoring/prometheus.yml",
+          "Destination": "/etc/prometheus/prometheus.yml",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_prometheus_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_prometheus_data/_data",
+          "Destination": "/prometheus",
+          "RW": true
+        }
+      ],
+      "networks": [
+        "face_detector_prod_monitoring"
+      ]
+    },
+    {
+      "name": "face_detector_prod-redis-1",
+      "image": "redis:7-alpine",
+      "image_id": "sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/Desktop/VAS/docker/redis/users.acl",
+          "Destination": "/etc/redis/users.acl",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "face_detector_prod_redis_data",
+          "Source": "/var/lib/docker/volumes/face_detector_prod_redis_data/_data",
+          "Destination": "/data",
+          "RW": true
+        }
+      ],
+      "networks": [
+        "face_detector_prod_data"
+      ]
+    },
+    {
+      "name": "vas-assistant",
+      "image": "vas-assistant:local",
+      "image_id": "sha256:776a649630dd988673331c464f20a3843cce3dc87a0b6e82c5982476e6c20df4",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "volume",
+          "Name": "vas_assistant_state",
+          "Source": "/var/lib/docker/volumes/vas_assistant_state/_data",
+          "Destination": "/home/node/.dsh",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "vas_assistant_workspace",
+          "Source": "/var/lib/docker/volumes/vas_assistant_workspace/_data",
+          "Destination": "/workspace",
+          "RW": true
+        }
+      ],
+      "networks": [
+        "bridge",
+        "face_detector_prod_ai",
+        "face_detector_prod_data",
+        "face_detector_prod_edge"
+      ]
+    },
+    {
+      "name": "vas-assistant-gate",
+      "image": "vas-assistant:local",
+      "image_id": "sha256:776a649630dd988673331c464f20a3843cce3dc87a0b6e82c5982476e6c20df4",
+      "architecture": "amd64",
+      "os": "linux",
+      "state": "running",
+      "restart_policy": "unless-stopped",
+      "mounts": [
+        {
+          "Type": "bind",
+          "Source": "/home/itdirect-ai/vas-assistant/gate",
+          "Destination": "/gate",
+          "RW": false
+        },
+        {
+          "Type": "volume",
+          "Name": "vas_assistant_gate_state",
+          "Source": "/var/lib/docker/volumes/vas_assistant_gate_state/_data",
+          "Destination": "/gate-state",
+          "RW": true
+        },
+        {
+          "Type": "volume",
+          "Name": "vas_assistant_state",
+          "Source": "/var/lib/docker/volumes/vas_assistant_state/_data",
+          "Destination": "/home/node/.dsh",
+          "RW": false
+        }
+      ],
+      "networks": [
+        "face_detector_prod_edge"
+      ]
+    }
+  ],
+  "images_to_export": [
+    "armyeye-vms",
+    "face_detector_prod-face_recognition",
+    "face_detector_prod-migrate",
+    "face_detector_prod-ml_worker",
+    "ghcr.io/maplibre/martin:1.13.0",
+    "grafana/grafana:13.2.0",
+    "nginx:alpine",
+    "ollama/ollama:latest",
+    "pgvector/pgvector:pg15",
+    "postgres:15-alpine",
+    "postgres:16-alpine",
+    "prom/prometheus:v3.14.0",
+    "redis:7-alpine",
+    "vas-assistant:local"
+  ]
+}
