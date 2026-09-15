@@ -1,6 +1,6 @@
-# Operational integrity fixes — tested, not deployed
+# Operational integrity fixes — deployed and verified
 
-Date: 2026-09-15. Implemented in `/tmp/vas-integrity-fix` on branch `fix/alert-integrity-validation`, tested against an isolated copy of production schema, then copied into the main working tree. No production schema/data/container changes were made in this fix task.
+Date: 2026-09-15. Implemented in `/tmp/vas-integrity-fix` on branch `fix/alert-integrity-validation`, tested against an isolated copy of production schema, then copied into the main working tree. After explicit deployment approval, the production migration and VAS API/ML container update completed on 2026-09-15. VMS and chatbot containers were unchanged.
 
 ## Result
 
@@ -38,12 +38,25 @@ Requires the local development/PostgreSQL images and deployed VAS PostgreSQL con
 
 Final isolated evidence directory: `/tmp/vas-normalization.Flsgtz` (root-owned). Tests are in `tests/test_normalization_integrity.py`; the runner also selects existing background-job, expiry, intelligence and fresh-migration tests.
 
-## Production rollout still pending
+## Production rollout completed
 
-The live database remains on `fdd4e5f6a7b8`. These source changes introduce a newer required revision; do not restart a newly built API image against the old revision. Use the established production migration gate.
+Deployed on 2026-09-15. Live database revision is **`fee5f6a7b8c9`**. Updated the three production Compose revision defaults and the explicit `docker/.env` pin to match. Built API, ML worker and migration images; stopped VAS API/ML writers, captured a cutover backup, applied the established migration job successfully, restarted the updated writers and reloaded Nginx.
 
-For a controlled rollout: retain rollback images, take/verify a database backup, rebuild API/ML worker/migration images using the active GPU Compose overrides, stop application writers for the migration window, run the migration job, then start the updated writers and verify readiness, alerts and tasks. The migration-only image remains CPU-based. Keep databases, persistent volumes, VMS and chatbot containers intact.
+Verification:
 
-If migration fails, PostgreSQL rolls its transaction back; restore the old application images. If reversing a successful rollout, stop writers, downgrade to `fdd4e5f6a7b8`, then restore the old images. Recheck the live revision before any subsequent deployment.
+- API, ML worker and Nginx healthy; persisted ML heartbeat healthy.
+- Trusted HTTPS `/health/live` and `/health/ready` returned 200, as did intelligence, alert and log JavaScript assets.
+- Protected admin pages returned 302 and the protected monitoring API returned 401 without credentials, as expected. Production password login was not tested.
+- Both derived tables are accessible to the actual application database role; the weekday constraint is validated and all seven new triggers are enabled.
+- Image/embedding ownership mismatch count is zero. The actual API database role successfully read the new revision and evaluated the weekday guard.
+- VMS, VMS-db, vas-assistant and vas-assistant-gate container IDs and images matched their pre-deployment snapshots.
 
-No production deployment or Git commit/push was performed in this fix task.
+Backups and protected evidence: `/var/backups/vas-integrity-20260915/`. The full pre-deployment `database.dump` was successfully restored in a disposable, network-isolated PostgreSQL container, which was then removed. `database-at-cutover.dump` captures the state after stopping writers; its archive contents were verified. Build, migration, start and verification logs are retained alongside the backups.
+
+Rollback image tags: `face_detector_prod-face_recognition:before-integrity-20260915`, `face_detector_prod-ml_worker:before-integrity-20260915`, and `face_detector_prod-migrate:before-integrity-20260915`.
+
+If reversing this successful rollout, stop VAS writers, use the new migration image to downgrade to `fdd4e5f6a7b8`, restore the old images and revision pins, then restart and verify readiness. Do not restore an older database dump over newer production writes without reviewing the data-loss implications.
+
+Nginx configuration validation succeeded but reported that `worker_connections=8192` exceeds the process open-file limit of 1024. This deployment did not change Nginx resource limits; capacity tuning remains separate from the database fixes.
+
+No Git commit or push was performed.
