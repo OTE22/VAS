@@ -363,6 +363,9 @@ services:
       # /health/detailed map block read them. Without this mount the runbook's
       # own verification step has nothing to measure.
       - ../map-data:/app/map-data:ro
+      # Verification atomically updates its ledger here. Archive bytes remain
+      # read-only; only metadata needs to be writable by the API (UID 1000).
+      - ../map-data/metadata:/app/map-data/metadata:rw
       # sentence-transformers MiniLM cache (HF_HOME): without a volume the
       # ~90 MB model re-downloads on every container recreate - and never
       # arrives at all on an offline host.

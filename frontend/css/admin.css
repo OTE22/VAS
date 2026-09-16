@@ -1438,8 +1438,8 @@ body::before {
     letter-spacing: -0.01em;
 }
 
-.form-group input,
-.form-group select {
+/* Low-specificity defaults let each form's theme own its field colors. */
+:where(.form-group input, .form-group select) {
     width: 100%;
     padding: 1rem 1.25rem;
     border: 2px solid #e2e8f0;
@@ -1451,17 +1451,15 @@ body::before {
     background: rgba(255, 255, 255, 0.8);
 }
 
-.form-group input:focus,
-.form-group select:focus {
+:where(.form-group input, .form-group select):focus {
     outline: none;
     border-color: #667eea;
-    background: rgba(255, 255, 255, 1);
+    /* Keep the field's background so dark forms retain readable text. */
     box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
     transform: translateY(-2px);
 }
 
-.form-group input:hover:not(:focus),
-.form-group select:hover:not(:focus) {
+:where(.form-group input, .form-group select):hover:not(:focus) {
     border-color: #cbd5e0;
 }
 

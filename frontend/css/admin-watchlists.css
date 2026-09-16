@@ -194,6 +194,11 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: 1.5rem;
+    gap: 1rem;
+    padding: 0 0 1rem;
+    background: transparent;
+    border-bottom: 1px solid rgba(0, 255, 150, 0.2);
+    border-radius: 0;
 }
 
 .modal-header h2 {
@@ -202,15 +207,26 @@
 }
 
 .modal-close {
-    background: none;
-    border: none;
-    color: rgba(255, 255, 255, 0.5);
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #fff;
     font-size: 1.5rem;
     cursor: pointer;
 }
 
 .modal-close:hover {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: #fff;
     color: #fff;
+    transform: none;
+}
+
+.modal-close:focus-visible {
+    outline: 2px solid #00ff96;
+    outline-offset: 3px;
 }
 
 /* Form */
@@ -225,7 +241,8 @@
     margin-bottom: 0.5rem;
 }
 
-.watchlist-form .form-control {
+/* Includes toolbar, deletion dialog and entry drawer controls. */
+.form-control {
     width: 100%;
     padding: 0.75rem;
     background: rgba(0, 0, 0, 0.4);
@@ -233,11 +250,28 @@
     border-radius: 6px;
     color: #fff;
     font-size: 0.9rem;
+    color-scheme: dark;
 }
 
-.watchlist-form .form-control:focus {
+.form-control:focus {
     outline: none;
     border-color: rgba(0, 255, 150, 0.5);
+    box-shadow: 0 0 0 3px rgba(0, 255, 150, 0.15);
+}
+
+.form-control::placeholder {
+    color: #a6b6c4;
+    opacity: 1;
+}
+
+.form-control option {
+    background: #0a1929;
+    color: #fff;
+}
+
+#watchlist-toolbar .form-control {
+    width: auto;
+    max-width: 100%;
 }
 
 /* Color Picker */
@@ -283,4 +317,3 @@
 .submit-btn:hover {
     background: linear-gradient(135deg, rgba(0, 255, 150, 0.3), rgba(0, 200, 100, 0.4));
 }
-

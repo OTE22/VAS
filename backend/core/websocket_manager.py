@@ -221,6 +221,31 @@ class WebSocketManager:
             self._redis_initialized = True
             return False
     
+    async def close_redis(self):
+        """Release pub/sub locally, even when Redis has already stopped."""
+        self._redis_enabled = False
+        self._redis_initialized = False
+        task, self._redis_listener_task = self._redis_listener_task, None
+        pubsub, self.redis_pubsub = self.redis_pubsub, None
+        client, self.redis_client = self.redis_client, None
+        try:
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            try:
+                if pubsub is not None:
+                    # Closing the subscription socket releases subscriptions.
+                    # UNSUBSCRIBE would reconnect to an already stopped Redis.
+                    await pubsub.aclose()
+            finally:
+                if client is not None:
+                    await client.aclose()
+
     async def _redis_listener(self):
         """Receive cross-worker events; report connection failures to health."""
         from backend.core.service_supervisor import supervised_loop

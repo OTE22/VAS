@@ -391,6 +391,7 @@ def verify_installed(*, only_unverified: bool = False,
     dataset rather than a full re-hash.
     """
     entries = load()
+    changed = False
     results = {}
     for source_id, path in installed_archives(production_dir).items():
         if only_unverified:
@@ -412,6 +413,7 @@ def verify_installed(*, only_unverified: bool = False,
                      "measured": {}, "verified_at": time.time(), "verifier": verifier}
             entry.update(identity)
         entries[source_id] = entry
+        changed = True
         results[source_id] = {"pass": entry["pass"], "code": entry["code"],
                               "message": entry["message"], "kind": entry["kind"]}
         if entry["pass"]:
@@ -428,8 +430,13 @@ def verify_installed(*, only_unverified: bool = False,
     for stale in [k for k in entries if k not in live]:
         logger.info("[MAP_LEDGER] dropping the verdict for %s; it is not installed", stale)
         entries.pop(stale, None)
+        changed = True
 
-    save(entries)
+    # A verified, unchanged installation needs no write (and may be read-only).
+    # Actual verification/removal still must persist successfully; never hide a
+    # storage failure or authorize a verdict that was not saved.
+    if changed:
+        save(entries)
     return results
 
 

@@ -1116,6 +1116,9 @@ async def lifespan(app: FastAPI):
 
         # Stop components in REVERSE order of initialization
         components_to_stop = [
+            # Stop the listener before slower cleanup so it cannot reconnect
+            # while the rest of the stack is shutting down.
+            ("websocket_redis", "Stopping WebSocket Redis pub/sub", lambda: ws_manager if 'websocket_redis' in initialized_components else None),
             ("background_maintenance", "Stopping expiration and liveness checks", lambda: background_maintenance if 'background_maintenance' in initialized_components else None),
             ("workers", "Stopping worker pool", lambda: worker_tasks),
             ("cache_metrics", "Stopping cache metrics", lambda: cache_metrics_task if 'cache_metrics' in initialized_components else None),
@@ -1135,7 +1138,6 @@ async def lifespan(app: FastAPI):
             ("batch_writer", "Stopping batch writer", lambda: batch_writer if 'batch_writer' in initialized_components else None),
             ("face_tracker", "Stopping face tracker", lambda: face_tracker if 'face_tracker' in initialized_components else None),
             ("production_cache", "Stopping production cache", lambda: production_cache_manager if 'production_cache' in initialized_components else None),
-            ("websocket_redis", "Stopping WebSocket Redis pub/sub", lambda: ws_manager if 'websocket_redis' in initialized_components else None),
             ("redis_cache_service", "Closing Redis cache service", lambda: redis_cache_service if 'redis_cache_service' in initialized_components else None),
             ("redis_cache", "Closing Redis cache", lambda: cache_manager if 'redis_cache' in initialized_components else None),
             ("models", "Cleaning up models", lambda: model_manager if 'models' in initialized_components else None),
@@ -1219,16 +1221,10 @@ async def lifespan(app: FastAPI):
                 
                 elif component_name == "websocket_redis":
                     from backend.core.websocket_manager import ws_manager
-                    if ws_manager._redis_listener_task and not ws_manager._redis_listener_task.done():
-                        ws_manager._redis_listener_task.cancel()
-                        try:
-                            await ws_manager._redis_listener_task
-                        except asyncio.CancelledError:
-                            pass
-                    if ws_manager.redis_pubsub:
-                        await ws_manager.redis_pubsub.unsubscribe()
-                    if ws_manager.redis_client:
-                        await ws_manager.redis_client.close()
+                    result = await _bounded_stop(component_name, ws_manager.close_redis())
+                    if result != "success":
+                        shutdown_results[component_name] = result
+                        continue
                     logger.info(f"    ✅ WebSocket Redis pub/sub stopped")
                     shutdown_results[component_name] = "stopped"
                     continue
