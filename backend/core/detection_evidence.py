@@ -293,7 +293,7 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
                     live_rows = [{
                         "trigger_id": t.trigger_id, "alert_id": t.alert_id, "alert_name": t.alert_name,
                         "identity_name": t.identity_name, "similarity": t.similarity,
-                        "sound_alert": t.sound_alert, "should_notify_dashboard": t.should_notify_dashboard,
+                        "alert_level": t.alert_level, "sound_alert": t.sound_alert, "should_notify_dashboard": t.should_notify_dashboard,
                         "detection_id": detection_id,
                     } for t in triggers]
             except Exception:

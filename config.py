@@ -1463,6 +1463,9 @@ class Settings(BaseSettings):
                     "path could not exceed 0.5. A no-redeploy rollback if the new "
                     "scorer ever misjudges a deployment's imagery."
     )
+    DASHBOARD_ALERT_GROUP_GAP_SECONDS: int = Field(
+        default=300, ge=30, le=3600,
+        description="Gap between sightings that starts a new dashboard detection alert (seconds)")
     WATCHLIST_ENABLED: bool = Field(
         default=True,
         description="Enable watchlist functionality. Default: True"

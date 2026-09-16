@@ -157,6 +157,7 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
 
     # --- Feature flags read per call ---
     "WATCHLIST_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "DASHBOARD_ALERT_GROUP_GAP_SECONDS": SettingMeta("integer", "seconds", 30, 3600, None, _DYN),
     "SHOW_UNKNOWN_FACES_ON_DASHBOARD": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     # These six were declared with descriptions asserting they enable/disable a
     # feature, rendered as editable switches, and read by nothing. Each now

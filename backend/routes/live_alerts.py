@@ -21,7 +21,7 @@ import uuid
 import os
 import uuid as uuid_mod
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, Response, status
 from pydantic import BaseModel, Field
@@ -111,6 +111,7 @@ async def _audit(request: Request, current_user: dict, alert_id: Optional[str],
 # =====================================================
 
 class CreateLiveAlertRequest(BaseModel):
+    alert_level: Literal["info", "warning", "critical"] = "warning"
     name: str = Field(..., min_length=1, max_length=200, description="Alert name")
     identity_id: str = Field(..., description="UUID of the identity to track")
     min_similarity: float = Field(default=0.75, ge=0, le=1, description="Minimum similarity to trigger")
@@ -145,6 +146,7 @@ class CreateLiveAlertRequest(BaseModel):
 
 
 class UpdateLiveAlertRequest(BaseModel):
+    alert_level: Literal["info", "warning", "critical"] = "warning"
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     min_similarity: Optional[float] = Field(None, ge=0, le=1)
     pipeline_ids: Optional[List[str]] = None
@@ -164,6 +166,7 @@ class UpdateLiveAlertRequest(BaseModel):
 
 
 class LiveAlertResponse(BaseModel):
+    alert_level: str = "warning"
     id: str
     name: str
     identity_id: str
@@ -341,6 +344,7 @@ async def create_live_alert(
             active_days=request.active_days,
             cooldown_minutes=request.cooldown_minutes,
             notify_dashboard=request.notify_dashboard,
+            alert_level=request.alert_level,
             notify_email=request.notify_email,
             notify_sms=request.notify_sms,
             notify_webhook=request.notify_webhook,
@@ -931,6 +935,7 @@ def _format_alert(alert) -> dict:
         "sms_recipients": alert.sms_recipients,
         "webhook_url": alert.webhook_url,
         "sound_alert": alert.sound_alert,
+        "alert_level": alert.alert_level,
         "expiration_type": alert.expiration_type.value,
         "expiration_date": iso_utc(alert.expiration_date),
         "expiration_detections": alert.expiration_detections,

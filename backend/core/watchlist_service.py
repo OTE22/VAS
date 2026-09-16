@@ -591,6 +591,7 @@ class WatchlistService:
     ) -> List[WatchlistAlert]:
         """Get watchlist alerts."""
         query = select(WatchlistAlert).options(
+            selectinload(WatchlistAlert.acknowledged_by_user),
             selectinload(WatchlistAlert.entry).selectinload(WatchlistEntry.watchlist),
             selectinload(WatchlistAlert.entry).selectinload(WatchlistEntry.identity)
         )
@@ -855,5 +856,4 @@ class WatchlistService:
 
 # Global instance
 watchlist_service = WatchlistService()
-
 

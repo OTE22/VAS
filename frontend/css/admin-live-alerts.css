@@ -778,3 +778,10 @@
 #la-modal .modal-header h2, #la-modal .modal-close { color: #f1f5f9; }
 #la-modal button:disabled { background: #263746; color: #a7b4c2; border-color: #415364; box-shadow: none; opacity: 0.65; cursor: not-allowed; transform: none; }
 #la-modal .trigger-help { color: #c1cbd5; font-size: 0.85rem; line-height: 1.5; margin: 0.8rem 0; }
+
+/* Severity controls stay legible in the dark admin theme. */
+.live-alert-config select.value { background: #14263a; color: #fff; border: 1px solid #8092a7; border-radius: 5px; padding: 6px 10px; }
+.live-alert-config select.value:focus-visible { outline: 2px solid #9bd0ff; outline-offset: 2px; }
+.alert-trigger-popup.severity-info { border-color: #68b8ff; }
+.alert-trigger-popup.severity-warning { border-color: #eab54d; }
+.alert-trigger-popup.severity-critical { border-color: #ff6b75; }

@@ -3491,6 +3491,7 @@ async function openCreateLiveAlertModal(identityId, identityName) {
             identityIdElement.textContent = identityId;
             identityIdElement.setAttribute('data-identity-id', identityId);
         }
+        document.getElementById('live-alert-severity').value = 'warning';
         document.getElementById('live-alert-name').value = defaults.default_name;
         document.getElementById('live-alert-min-similarity').value = defaults.default_min_similarity;
         document.getElementById('live-alert-similarity-value').textContent = `${Math.round(defaults.default_min_similarity * 100)}%`;
@@ -3573,6 +3574,7 @@ async function createLiveAlert() {
             body: JSON.stringify({
                 name: name,
                 identity_id: currentLiveAlertIdentityId,
+                alert_level: document.getElementById('live-alert-severity').value,
                 min_similarity: minSimilarity,
                 notify_dashboard: notifyDashboard,
                 sound_alert: soundAlert,

@@ -91,6 +91,7 @@
         loaded: false,
         fallbackMode: false,
     };
+    let watchlistInbox = null;
 
     function applyConfigPayload(config, source) {
         if (!config || typeof config !== 'object') return false;
@@ -272,7 +273,14 @@
             if (role === 'admin') {
                 access.mode = 'all';
                 access.pipelineIds = [];
+                const inboxHost = document.getElementById('watchlist-alert-inbox');
+                if (!watchlistInbox && inboxHost && window.DetectionAlertInbox) {
+                    watchlistInbox = new window.DetectionAlertInbox(inboxHost, playWatchlistSound);
+                }
             } else {
+                if (watchlistInbox) {
+                    watchlistInbox.stop(); watchlistInbox.host.hidden = true; watchlistInbox = null;
+                }
                 access.mode = 'restricted';
                 access.pipelineIds = (privileges && privileges.pipelines) || [];
             }
@@ -821,7 +829,7 @@
 
     const VALID_MESSAGE_TYPES = new Set([
         'config_changed', 'initial_data', 'new_detection', 'unknown_activity',
-        'detection_alerts',
+        'detection_alerts', 'watchlist_changed',
         'ping', 'pong', 'background_task_notification', 'background_task_completed',
         'live_alert_test',
     ]);
@@ -831,6 +839,9 @@
             return; // rejected safely (never log raw events — they may carry images)
         }
         switch (message.type) {
+            case 'watchlist_changed':
+                if (watchlistInbox) watchlistInbox.refresh();
+                break;
             case 'config_changed':
                 // Same typed validation as the API path — zero stays valid
                 if (message.config && typeof message.config === 'object') {
@@ -969,8 +980,10 @@
         const watchlistAlerts = Array.isArray(data.watchlist_alerts) ? data.watchlist_alerts.filter(a => a && typeof a === 'object') : [];
         if (!liveAlerts.length && !watchlistAlerts.length) return;
 
-        const wantSound = liveAlerts.some(a => a.sound_alert === true)
-            || watchlistAlerts.some(a => a.notify_dashboard !== false);
+        const handledWatchlist = Boolean(watchlistInbox);
+        if (handledWatchlist) watchlistInbox.refresh();
+        const wantSound = !handledWatchlist && (liveAlerts.some(a => a.sound_alert === true)
+            || watchlistAlerts.some(a => a.notify_dashboard !== false));
         if (wantSound) playAlertSound();
 
         const name = typeof data.identity_name === 'string' && data.identity_name ? data.identity_name : 'Unknown person';
@@ -1259,10 +1272,14 @@
         gain.connect(ctx.destination);
         osc.frequency.value = 880;
         osc.type = 'sine';
-        gain.gain.setValueAtTime(0.3, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+        // Sustain a stronger detection tone instead of fading immediately.
+        gain.gain.setValueAtTime(0.001, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.7, ctx.currentTime + 0.015);
+        gain.gain.setValueAtTime(0.7, ctx.currentTime + 0.3);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.75);
+        osc.onended = () => { osc.disconnect(); gain.disconnect(); };
         osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.5);
+        osc.stop(ctx.currentTime + 0.77);
     }
 
     function playAlertSound() {
@@ -1270,6 +1287,28 @@
         const ctx = ensureAudioContext();
         if (!ctx || ctx.state !== 'running') { updateSoundButton(); return; } // honestly blocked
         try { playTone(ctx); } catch (e) { /* never claim delivery */ }
+    }
+
+    function playWatchlistSound(level) {
+        if (!soundEnabled) return;
+        const ctx = ensureAudioContext();
+        if (!ctx || ctx.state !== 'running') { updateSoundButton(); return; }
+        const tones = level === 'critical' ? [880, 1175, 880] : level === 'warning' ? [660, 880] : [523];
+        try {
+            tones.forEach((frequency, index) => {
+                const start = ctx.currentTime + index * 0.45;
+                const osc = ctx.createOscillator(), gain = ctx.createGain();
+                osc.connect(gain); gain.connect(ctx.destination);
+                osc.type = 'sine'; osc.frequency.value = frequency;
+                const volume = level === 'critical' ? 0.9 : level === 'warning' ? 0.8 : 0.65;
+                gain.gain.setValueAtTime(0.001, start);
+                gain.gain.linearRampToValueAtTime(volume, start + 0.015);
+                gain.gain.setValueAtTime(volume, start + 0.18);
+                gain.gain.exponentialRampToValueAtTime(0.001, start + 0.4);
+                osc.onended = () => { osc.disconnect(); gain.disconnect(); };
+                osc.start(start); osc.stop(start + 0.42);
+            });
+        } catch (e) { /* Audio failure must not affect the visible inbox. */ }
     }
 
     // ==================================================================
@@ -1506,6 +1545,7 @@
     function destroy() {
         if (destroyed) return;
         destroyed = true;
+        if (watchlistInbox) watchlistInbox.stop();
         intentionalWebSocketClose = true;      // never reconnect after page shutdown
         if (ws) { try { ws.close(1000); } catch (e) { /* ignore */ } ws = null; }
         for (const id of timers) { clearTimeout(id); clearInterval(id); }

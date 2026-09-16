@@ -187,6 +187,14 @@
                                placeholder="e.g., Track John Doe - Investigation #123">
                     </div>
                     <div class="form-group">
+                        <label for="live-alert-severity">Alert severity</label>
+                        <select id="live-alert-severity" class="intelligence-input">
+                            <option value="info">Info — routine notification</option>
+                            <option value="warning" selected>Warning — operator attention</option>
+                            <option value="critical">Critical — immediate attention</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
                         <label for="live-alert-min-similarity">Minimum Similarity</label>
                         <input type="range" id="live-alert-min-similarity" min="0.5" max="1" step="0.05" value="0.75"
                                class="intelligence-input">
@@ -222,6 +230,6 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-identity.js?v=identity-1"></script>
+    <script src="/frontend/js/admin-identity.js?v=identity-2"></script>
 </body>
 </html>

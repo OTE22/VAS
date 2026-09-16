@@ -41,6 +41,7 @@ class AlertTriggerInfo:
     sms_recipients: List[str]
     webhook_url: Optional[str]
     sound_alert: bool
+    alert_level: str = "warning"
     trigger_id: Optional[str] = None  # id of the created LiveAlertTrigger row
     detection_id: Optional[int] = None  # the detection that fired it
 
@@ -101,7 +102,8 @@ class LiveAlertService:
         clip_duration_seconds: int = None,
         expiration_type: str = "never",
         expiration_date: datetime = None,
-        expiration_detections: int = None
+        expiration_detections: int = None,
+        alert_level: str = "warning"
     ) -> LiveSearchAlert:
         """Create a new live search alert."""
         try:
@@ -127,7 +129,10 @@ class LiveAlertService:
             if cooldown_minutes is None:
                 cooldown_minutes = settings.LIVE_ALERT_DEFAULT_COOLDOWN_MINUTES
             
+            if alert_level not in {"info", "warning", "critical"}:
+                raise ValueError("Invalid alert severity")
             alert = LiveSearchAlert(
+                alert_level=alert_level,
                 name=name,
                 identity_id=uuid.UUID(identity_id),
                 created_by=created_by,
@@ -427,6 +432,9 @@ class LiveAlertService:
             
             await self.validate_scope(db, updates.get('pipeline_ids'), updates.get('active_days'))
 
+            if 'alert_level' in updates and updates['alert_level'] not in {'info', 'warning', 'critical'}:
+                raise ValueError('Invalid alert severity')
+
             # Update fields
             for key, value in updates.items():
                 if hasattr(alert, key):
@@ -589,6 +597,7 @@ class LiveAlertService:
                         sms_recipients=alert.sms_recipients or [],
                         webhook_url=alert.webhook_url,
                         sound_alert=alert.sound_alert,
+                        alert_level=alert.alert_level,
                         detection_id=detection_id,
                     ))
 

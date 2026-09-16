@@ -1336,6 +1336,8 @@ class LiveSearchAlert(Base):
     historical_created_by = Column(Integer, nullable=True,
                                    comment="users.id at deletion time; survives account deletion")
     
+    alert_level = Column(String(16), nullable=False, default="warning", server_default="warning")
+
     # Trigger conditions
     min_similarity = Column(Float, default=0.75, nullable=False)
     pipeline_ids = Column(JSONB, nullable=True)  # null = all pipelines
@@ -1379,6 +1381,7 @@ class LiveSearchAlert(Base):
     triggers = relationship("LiveAlertTrigger", back_populates="alert", cascade="all, delete-orphan")
 
     __table_args__ = (
+        CheckConstraint("alert_level IN ('info', 'warning', 'critical')", name="ck_live_alert_severity"),
         Index('idx_live_alert_identity', 'identity_id'),
         Index('idx_live_alert_status', 'status'),
         Index('idx_live_alert_creator', 'created_by'),

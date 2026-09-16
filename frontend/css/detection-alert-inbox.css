@@ -1,0 +1,19 @@
+.watchlist-inbox { margin: 0 0 24px; padding: 20px; border: 1px solid #536377; border-radius: 10px; background: #101b28; color: #f2f5f9; }
+.watchlist-inbox[hidden] { display: none; }
+.watchlist-inbox h2 { font-size: 1.2rem; margin-bottom: 10px; }
+.watchlist-inbox p { line-height: 1.5; margin: 8px 0; overflow-wrap: anywhere; }
+.watchlist-inbox-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; max-height: 60vh; overflow-y: auto; margin: 16px 0; }
+.watchlist-inbox-card { border: 1px solid #4b83b8; border-left: 5px solid #68b8ff; border-radius: 8px; padding: 16px; background: #14263a; min-width: 0; }
+.watchlist-inbox-card.warning { border-color: #eab54d; background: #30291a; }
+.watchlist-inbox-card.critical { border-color: #ff6b75; background: #361e28; }
+.watchlist-inbox-card h3 { font-size: 1rem; color: #9bd0ff; }
+.watchlist-inbox-card.warning h3 { color: #ffda84; }
+.watchlist-inbox-card.critical h3 { color: #ffb0b6; }
+.watchlist-inbox-card img { width: 90px; height: 90px; object-fit: cover; border-radius: 6px; float: right; margin: 0 0 8px 12px; }
+.watchlist-inbox-instructions { font-weight: 600; }
+.watchlist-inbox-controls { display: flex; flex-wrap: wrap; gap: 10px; clear: both; }
+.watchlist-inbox-controls button, .watchlist-inbox-controls a { font: inherit; font-size: .85rem; padding: 10px 14px; border: 1px solid #8092a7; border-radius: 6px; background: #1c3045; color: #fff; text-decoration: none; cursor: pointer; }
+.watchlist-inbox-controls button:hover:not(:disabled), .watchlist-inbox-controls a:hover { background: #304860; }
+.watchlist-inbox-controls :focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.watchlist-inbox-controls button:disabled { opacity: .55; cursor: default; }
+.watchlist-inbox-error { color: #ffbd83; }

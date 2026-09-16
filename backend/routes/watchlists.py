@@ -24,7 +24,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, status as http_status
 from pydantic import BaseModel, Field, field_validator
@@ -38,6 +38,13 @@ from backend.core.watchlist_service import (
 )
 from db_models import WatchlistAlertLevel, WatchlistEntryPriority
 from backend.utils.time_utils import iso_utc
+from backend.core import detection_alert_inbox
+from fastapi import Response
+from fastapi.responses import FileResponse
+from pathlib import Path
+from sqlalchemy import select
+from config import settings
+from db_models import WatchlistAlert, LiveAlertTrigger
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Watchlists"])
@@ -853,6 +860,60 @@ async def get_add_to_watchlist_defaults(
 # =====================================================
 # Alerts
 # =====================================================
+
+class AcknowledgeEpisodeRequest(BaseModel):
+    source: Literal["watchlist", "live"]
+    latest_id: uuid.UUID
+
+
+@router.get("/api/detection-alerts/inbox")
+async def watchlist_alert_inbox(
+    response: Response,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    sounds_since: Optional[datetime] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin()),
+):
+    response.headers['Cache-Control'] = 'no-store'
+    return await detection_alert_inbox.list_inbox(db, limit=limit, offset=offset, sounds_since=sounds_since)
+
+
+@router.post("/api/detection-alerts/inbox/{first_id}/acknowledge")
+async def acknowledge_watchlist_episode(
+    first_id: uuid.UUID,
+    request: AcknowledgeEpisodeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_watchlist_csrf),
+):
+    count = await detection_alert_inbox.acknowledge_episode(
+        db, request.source, first_id, request.latest_id, current_user['id'])
+    if not count:
+        raise HTTPException(409, 'This alert changed or was already acknowledged. Refresh the inbox.')
+    _audit('episode_acknowledge', current_user, alert_id=str(first_id), records=count)
+    await _broadcast_change('alerts_acknowledged', '', {'alert_id': str(first_id)})
+    return {'success': True, 'acknowledged_records': count}
+
+
+@router.get("/api/detection-alerts/{source}/{alert_id}/snapshot")
+async def watchlist_alert_snapshot(
+    source: Literal["watchlist", "live"], alert_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin()),
+):
+    model = WatchlistAlert if source == "watchlist" else LiveAlertTrigger
+    stored = (await db.execute(select(model.snapshot_path).where(
+        model.id == alert_id))).scalar_one_or_none()
+    if not stored:
+        raise HTTPException(404, 'Snapshot unavailable')
+    root = Path(settings.STORAGE_DIR).resolve()
+    path = Path(stored)
+    if not path.is_absolute():
+        path = root / str(stored).removeprefix('storage/')
+    path = path.resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(404, 'Snapshot unavailable')
+    return FileResponse(path, headers={'Cache-Control': 'private, no-store'})
 
 @router.get(
     "/api/watchlist-alerts",

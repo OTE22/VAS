@@ -341,6 +341,31 @@
             row.appendChild(el('span', 'value', value));
             config.appendChild(row);
         };
+        const severityRow = el('label', 'config-row');
+        severityRow.appendChild(el('span', 'label', 'Severity'));
+        const severitySelect = el('select', 'value');
+        severitySelect.setAttribute('aria-label', `Severity for ${alert.name || 'live alert'}`);
+        for (const level of ['info', 'warning', 'critical']) {
+            const option = el('option', null, level[0].toUpperCase() + level.slice(1));
+            option.value = level; severitySelect.appendChild(option);
+        }
+        severitySelect.value = alert.alert_level || 'warning';
+        severitySelect.addEventListener('change', async () => {
+            severitySelect.disabled = true;
+            const previous = alert.alert_level || 'warning';
+            try {
+                const result = await api(`/api/live-alerts/${encodeURIComponent(alert.id)}`, {
+                    method: 'PUT', body: {alert_level: severitySelect.value}
+                });
+                if (!result.ok) throw new Error('Could not save alert severity.');
+                alert.alert_level = severitySelect.value;
+                showNotification('Alert severity saved.', 'success');
+            } catch (error) {
+                severitySelect.value = previous;
+                showNotification(error.message, 'error');
+            } finally { severitySelect.disabled = false; }
+        });
+        severityRow.appendChild(severitySelect); config.appendChild(severityRow);
         addRow('Min Similarity', similarityLabel(alert.min_similarity));
         addRow('Cooldown', `${Number.isFinite(Number(alert.cooldown_minutes)) ? alert.cooldown_minutes : '—'} min`);
         // Empty/null pipeline list means ALL cameras — never display "0"
@@ -1031,12 +1056,14 @@
         }
 
         // One popup per triggered alert (stacked/queued), ONE sound per event
-        let playSound = false;
+        const ranks = {info: 0, warning: 1, critical: 2};
+        let soundLevel = null;
         event.alerts.forEach(alertInfo => {
             enqueuePopup(alertInfo, event);
-            if (alertInfo.sound_alert) playSound = true;
+            const level = Object.hasOwn(ranks, alertInfo.alert_level) ? alertInfo.alert_level : 'warning';
+            if (alertInfo.sound_alert && (soundLevel === null || ranks[level] > ranks[soundLevel])) soundLevel = level;
         });
-        if (playSound) playAlertSound();
+        if (soundLevel !== null) playAlertSound(soundLevel);
 
         // ONE debounced refresh for the whole burst — never one per alert
         if (!event.test) scheduleAlertsRefresh();
@@ -1082,7 +1109,8 @@
 
     function showPopup(alertInfo, event) {
         state.visiblePopups += 1;
-        const popup = el('div', 'alert-trigger-popup');
+        const level = ['info', 'warning', 'critical'].includes(alertInfo.alert_level) ? alertInfo.alert_level : 'warning';
+        const popup = el('div', `alert-trigger-popup severity-${level}`);
 
         const content = el('div', 'alert-trigger-content');
         const iconWrap = el('div', 'alert-trigger-icon');
@@ -1090,7 +1118,7 @@
         content.appendChild(iconWrap);
 
         const info = el('div', 'alert-trigger-info');
-        info.appendChild(el('div', 'alert-trigger-title', event.test ? 'TEST ALERT' : 'LIVE ALERT TRIGGERED'));
+        info.appendChild(el('div', 'alert-trigger-title', event.test ? 'TEST ALERT' : `${level.toUpperCase()} · LIVE ALERT TRIGGERED`));
         info.appendChild(el('div', 'alert-trigger-name', alertInfo.alert_name));
         const details = el('div', 'alert-trigger-details');
         const detail = (iconCls, text) => {
@@ -1201,22 +1229,24 @@
         updateSoundButton(false);
     }
 
-    function playTone(ctx) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.frequency.setValueAtTime(880, ctx.currentTime);
-        osc.frequency.setValueAtTime(1046.5, ctx.currentTime + 0.15);
-        osc.frequency.setValueAtTime(880, ctx.currentTime + 0.3);
-        osc.type = 'sine';
-        gain.gain.setValueAtTime(0.4, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.5);
+    function playTone(ctx, level = 'warning') {
+        const tones = {info: [523], warning: [660, 880], critical: [880, 1175, 880]}[level] || [660, 880];
+        tones.forEach((frequency, index) => {
+            const start = ctx.currentTime + index * 0.45;
+            const osc = ctx.createOscillator(); const gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination); osc.type = 'sine';
+            osc.frequency.setValueAtTime(frequency, start);
+            const volume = level === 'critical' ? 0.9 : level === 'warning' ? 0.8 : 0.65;
+            gain.gain.setValueAtTime(0.001, start);
+            gain.gain.linearRampToValueAtTime(volume, start + 0.015);
+            gain.gain.setValueAtTime(volume, start + 0.18);
+            gain.gain.exponentialRampToValueAtTime(0.001, start + 0.4);
+            osc.onended = () => { osc.disconnect(); gain.disconnect(); };
+            osc.start(start); osc.stop(start + 0.42);
+        });
     }
 
-    function playAlertSound() {
+    function playAlertSound(level = 'warning') {
         if (!state.soundEnabled) return;
         const ctx = ensureAudioCtx();
         if (!ctx) return;
@@ -1225,7 +1255,7 @@
             updateSoundButton(true);
             return;
         }
-        try { playTone(ctx); } catch (e) { console.warn('[LIVE_ALERTS] sound failed:', e); }
+        try { playTone(ctx, level); } catch (e) { console.warn('[LIVE_ALERTS] sound failed:', e); }
     }
 
     // ------------------------------------------------------------------
