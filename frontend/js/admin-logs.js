@@ -9,6 +9,7 @@ let currentSource = 'application';
 let logConfig = null;
 let timer = null;
 let suspended = false;
+let lastCleanupCompletedAt;
 const requests = new Map();
 const updated = new Map();
 const $ = id => document.getElementById(id);
@@ -52,7 +53,7 @@ async function request(key, url, render) {
         }
         const data = await response.json();
         if (requests.get(key) !== controller || suspended) return;
-        render(data);
+        return await render(data);
     } catch (error) {
         if (requests.get(key) !== controller || suspended) return;
         freshness(key, error.name === 'AbortError' ? 'Request timed out' : error.message);
@@ -89,6 +90,10 @@ function loadLogs() {
     if (currentDateTo) params.set('date_to', currentDateTo);
     if (currentLevel !== 'all') params.set('level', currentLevel);
     return request('logs', `/api/logs?${params}`, data => {
+        if (!data.truncated && !data.logs.length && currentPage > 1) {
+            currentPage = Math.max(1, data.total_pages || 0);
+            return loadLogs();
+        }
         $('logs-container').innerHTML = data.logs.length ? data.logs.map(renderLogEntry).join('') : data.source_available === false
             ? `<div class="empty-state"><h3>No logs available yet</h3><p>${escapeHtml(data.source_message)}</p><p>Automatic refresh will show records when they become available.</p></div>`
             : '<div class="empty-state"><h3>No logs found</h3><p>No records match these filters in the scanned portion.</p></div>';
@@ -118,6 +123,23 @@ function stateLabel(state) {
     const safe = allowed.includes(state) ? state : 'unavailable';
     return `<span class="job-state" data-state="${safe}">${safe}</span>`;
 }
+function invalidateLogView() {
+    // An in-flight response may still contain records deleted by cleanup.
+    for (const key of ['logs', 'stats']) {
+        requests.get(key)?.abort();
+        requests.delete(key);
+        updated.delete(key);
+    }
+    currentPage = 1;
+    $('logs-container').textContent = 'Cleanup finished. Refreshing retained logs…';
+    $('pagination-section').style.display = 'none';
+    $('pagination-info').textContent = '';
+    $('scan-notice').textContent = '';
+    for (const name of ['debug', 'info', 'warning', 'errors', 'critical']) {
+        $('stat-total-' + name).textContent = '—';
+    }
+    $('stat-file-size').textContent = '—';
+}
 function loadJobs() {
     return request('jobs', '/api/logs/background-status', data => {
         $('jobs-body').innerHTML = data.services.map(service => `<tr>
@@ -145,6 +167,18 @@ function loadJobs() {
         const mlProblem = ['stale','offline','unavailable','stopped'].includes(state);
         freshness('jobs', data.errors.length ? data.errors.join(' ') : null,
             `${data.services.length} service registrations; ${problems} need attention.${mlProblem ? ' ML worker needs attention.' : ''} ${!data.services.length ? 'No service registry reported.' : ''}`);
+        if (data.history_available) {
+            const completedAt = cleanup?.completed_at || null;
+            const cleanupChanged = lastCleanupCompletedAt !== undefined &&
+                completedAt !== null && completedAt !== lastCleanupCompletedAt;
+            lastCleanupCompletedAt = completedAt;
+            if (cleanupChanged) {
+                // Includes partially failed cleanups: they may have deleted
+                // records before reporting a failure. Keep all user filters.
+                invalidateLogView();
+                return Promise.all([loadLogs(), loadStats()]);
+            }
+        }
     });
 }
 async function refresh(automatic = false) {
