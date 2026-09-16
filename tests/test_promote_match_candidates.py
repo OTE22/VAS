@@ -647,7 +647,7 @@ def test_the_new_ui_is_csp_safe_and_registered():
     assert "mergeIntoKnownCandidate: (el) =>" in source, "action not registered"
     assert "data-action', 'mergeIntoKnownCandidate'" in source.replace('"', "'")
 
-    start = source.index("function buildCandidateRow")
+    start = source.index("function buildPromoteCandidateRow")
     end = source.index("async function mergeIntoKnownCandidate")
     block = source[start:end]
     assert "onclick" not in block, "inline onclick is CSP-blocked on this page"

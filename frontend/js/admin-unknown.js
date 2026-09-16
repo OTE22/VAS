@@ -1942,7 +1942,7 @@ async function loadPromoteCandidates(identityId) {
         return;
     }
 
-    candidates.forEach((candidate) => list.appendChild(buildCandidateRow(candidate)));
+    candidates.forEach((candidate) => list.appendChild(buildPromoteCandidateRow(candidate)));
     setNoneOfTheseVisible(true);
 }
 
@@ -1967,9 +1967,10 @@ function chooseNoneOfThese() {
     if (name) name.focus();
 }
 
-/** One candidate card. Reuses the merge-search-result markup so a suggestion
- *  looks like every other person card on this page. */
-function buildCandidateRow(candidate) {
+/** Promotion-specific builder: upload-modal.js shares this page's global scope.
+ *  Keep this distinct from its enrollment builder so candidates dispatch the
+ *  identity merge action, never an upload action with no pending upload. */
+function buildPromoteCandidateRow(candidate) {
     const row = document.createElement('div');
     row.className = 'merge-search-result promote-candidate';
 
@@ -2114,7 +2115,7 @@ async function promoteIdentity() {
             if (response.status === 409 && result.code === 'PROMOTION_REVIEW_REQUIRED' && attempt === 0) {
                 const candidates = result.review?.candidates || [];
                 const list = document.getElementById('promote-candidates');
-                if (list) list.replaceChildren(...candidates.map(buildCandidateRow));
+                if (list) list.replaceChildren(...candidates.map(buildPromoteCandidateRow));
                 const section = document.getElementById('promote-candidates-section');
                 if (section) section.style.display = '';
                 const proceed = await AppConfirm.confirm({

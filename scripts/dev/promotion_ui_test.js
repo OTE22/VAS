@@ -15,7 +15,7 @@ async function scenario(proceed) {
     };
     const context = {
         document: {getElementById: node, querySelector: node},
-        buildCandidateRow: candidate => candidate,
+        buildPromoteCandidateRow: candidate => candidate,
         AppConfirm: {confirm: () => new Promise(resolve => { releaseReview = resolve; })},
         ModalStack: {close() {}},
         showNotification: text => notices.push(text),
