@@ -110,12 +110,13 @@ function updatePipelineGroupTitle(pipelineId) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', async () => {
+    // Dismissal controls must work even while initial API requests are pending.
+    setupEventListeners();
     await loadUserInfo();
     await displayUserPrivileges();
     await checkUserRoleForLiveAlerts(); // Check and show "YOUR LIVE ALERTS" button for regular users
     await loadPipelines(); // Load pipelines for dropdown filter
     await loadUnknownFaces();
-    setupEventListeners();
     connectWebSocket(); // Connect to WebSocket for real-time updates
 
     // ?view= deep link (from search results, intelligence, the dashboard).
@@ -367,10 +368,8 @@ async function displayUserPrivileges() {
 
 // Setup event listeners
 function setupEventListeners() {
-    // Logout
-    document.getElementById('logout-btn').addEventListener('click', () => {
-        // Backend handles logout
-    });
+    // Logout is owned by navbar-loader.js. The former logout-btn is absent
+    // from this page; binding it here aborted all modal-control registration.
 
     // Filters
     document.getElementById('apply-filters-btn').addEventListener('click', () => {
