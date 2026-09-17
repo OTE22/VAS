@@ -154,10 +154,10 @@ reload_extra_files = []
 # =====================================================
 # Server Performance
 # =====================================================
-# Preload application before forking workers
-# This saves memory and speeds up worker spawning
-# For GPU scenarios, preloading helps share GPU resources efficiently
-preload_app = True if USE_GPU else False
+# Import the application in the worker. Preloading ML libraries and background
+# threads in the master can leave inherited locks stuck after fork (observed
+# during GPU startup). Models are initialized by the worker's lifespan anyway.
+preload_app = False
 
 # Reuse port for better performance (Linux 3.9+)
 reuse_port = True if hasattr(os, 'SO_REUSEPORT') else False

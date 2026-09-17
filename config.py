@@ -1499,6 +1499,15 @@ class Settings(BaseSettings):
         description="Enable negative search (exclude specific identities). Default: True"
     )
     
+    # Admission on the final camera recognition input, independent of the
+    # weighted/legacy scorer. Existing records and manual enrollment are untouched.
+    CAMERA_FACE_ACCEPTANCE_ENABLED: bool = Field(default=True,
+        description="Keep unusable camera faces as unassigned evidence instead of creating identities or embeddings")
+    CAMERA_FACE_MIN_SOURCE_COVERAGE: float = Field(default=0.90, ge=0.5, le=1.0,
+        description="Minimum fraction of the aligned facial region covered by original source pixels")
+    CAMERA_FACE_MIN_ALIGNED_SHARPNESS: float = Field(default=5.0, ge=0.0, le=1000.0,
+        description="Minimum smoothed Laplacian variance inside the aligned 112px face; camera admission only")
+
     # Face Quality Thresholds (for quality scoring)
     FACE_QUALITY_THRESHOLD_BLUR: float = Field(
         default=0.5,

@@ -126,18 +126,33 @@ async def camera_photo_fallbacks(db, pairs):
 
 
 async def save_camera_crop(image, *, pipeline_id, capture_id, face_id, captured_at,
-                           identity_id, name, session_factory, already_saved=0, executor=None):
+                           identity_id, name, session_factory, already_saved=0, executor=None,
+                           similarity=None):
     """Apply existing save settings before writing a crop in the new layout."""
     is_unknown = name.lower() == 'unknown'
     if not settings.SAVE_IMAGES or (is_unknown and not settings.SAVE_UNKNOWN_FACES):
         return None
     if not is_unknown:
         maximum = settings.MAX_PHOTOS_PER_PERSON
-        if maximum <= already_saved:
-            return None
         async with session_factory() as db:
-            count = len(await stored_camera_photos(db, identity_id, pipeline_id, name))
-        if count + already_saved >= maximum:
-            return None
+            count = (len(await stored_camera_photos(db, identity_id, pipeline_id, name))
+                     if maximum > already_saved else 0)
+            if count + already_saved >= maximum:
+                # A gallery photo limit must not discard a new alert's evidence.
+                # Reuse alert eligibility (camera, score, cooldown and schedule)
+                # so ordinary sightings still obey the existing photo cap.
+                capture_alert = False
+                if settings.LIVE_ALERTS_ENABLED and identity_id and similarity is not None:
+                    from backend.core.live_alert_service import live_alert_service
+                    alerts = await live_alert_service.get_active_alerts_for_identity(db, identity_id)
+                    now = datetime.utcnow()
+                    for alert in alerts:
+                        if alert.auto_capture_snapshot and await live_alert_service._should_alert_trigger(
+                            alert, similarity, pipeline_id, now.time(), now.weekday(), now
+                        ):
+                            capture_alert = True
+                            break
+                if not capture_alert:
+                    return None
     return await asyncio.get_running_loop().run_in_executor(
         executor, write_crop, image, pipeline_id, capture_id, face_id, captured_at)

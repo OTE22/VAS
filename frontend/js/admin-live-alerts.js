@@ -105,6 +105,7 @@
         }
         if (path.startsWith('//')) return FALLBACK_AVATAR;
         if (!path.startsWith('/')) path = '/' + path;
+        if (/^\/api\/live-alerts\/triggers\/[0-9a-f-]{36}\/snapshot$/.test(path)) return path;
         if (/^\/(storage|frontend\/images)\//.test(path) && !path.includes('..')) return path;
         return FALLBACK_AVATAR;
     }
@@ -753,10 +754,15 @@
                     const img = el('img', 'trigger-snapshot');
                     img.alt = 'Trigger snapshot';
                     img.src = safeImageUrl(t.snapshot_path);
-                    img.addEventListener('error', () => { img.src = FALLBACK_AVATAR; }, { once: true });
+                    img.addEventListener('error', () => {
+                        img.replaceWith(el('span', 'no-snapshot', 'Unavailable / expired'));
+                    }, { once: true });
+                    img.style.cursor = 'pointer';
+                    img.title = 'Open trigger snapshot';
+                    img.addEventListener('click', () => window.open(safeImageUrl(t.snapshot_path), '_blank', 'noopener'));
                     snapTd.appendChild(img);
                 } else {
-                    snapTd.appendChild(el('span', 'no-snapshot', '—'));
+                    snapTd.appendChild(el('span', 'no-snapshot', 'Not saved'));
                 }
                 tr.appendChild(snapTd);
 

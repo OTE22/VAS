@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -605,7 +606,7 @@ async def get_alert_triggers(
             "alert_id": str(t.alert_id),
             "pipeline_id": t.pipeline_id,
             "similarity_score": t.similarity_score,
-            "snapshot_path": t.snapshot_path,
+            "snapshot_path": f"/api/live-alerts/triggers/{t.id}/snapshot" if t.snapshot_path else None,
             "acknowledged": t.acknowledged,
             "acknowledged_by": t.acknowledged_by_user.username if t.acknowledged_by_user else None,
             "acknowledged_at": iso_utc(t.acknowledged_at),
@@ -614,6 +615,27 @@ async def get_alert_triggers(
         for t in page_data["items"]
     ]
     return page_data
+
+
+@router.get("/api/live-alerts/triggers/{trigger_id}/snapshot")
+async def trigger_snapshot(
+    trigger_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_unknown_faces_access()),
+):
+    """Serve the actual trigger image with the same ownership checks as history."""
+    trigger = await live_alert_service.get_trigger_with_alert(db, str(trigger_id))
+    if not trigger or not trigger.alert:
+        raise HTTPException(404, "Trigger not found")
+    if trigger.alert.created_by != current_user['id'] and current_user.get('role') != 'admin':
+        raise HTTPException(403, "Not authorized")
+    from backend.core.detection_storage import local_path
+    try:
+        path = local_path(trigger.snapshot_path) if trigger.snapshot_path else None
+        if path is None or not path.is_file():
+            raise HTTPException(404, "Snapshot was not saved or has expired")
+    except (ValueError, OSError):
+        raise HTTPException(404, "Snapshot unavailable")
+    return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
 
 @router.post(

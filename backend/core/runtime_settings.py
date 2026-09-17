@@ -180,6 +180,9 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
 
     # --- Face quality gates (properties on the module-level scorer) ---
     "FACE_QUALITY_THRESHOLD_BLUR": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
+    "CAMERA_FACE_ACCEPTANCE_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "CAMERA_FACE_MIN_SOURCE_COVERAGE": SettingMeta("float", "fraction", 0.5, 1.0, None, _DYN),
+    "CAMERA_FACE_MIN_ALIGNED_SHARPNESS": SettingMeta("float", "variance", 0.0, 1000.0, None, _DYN),
     "FACE_QUALITY_THRESHOLD_LIGHTING": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN),
     "FACE_QUALITY_THRESHOLD_SIZE": SettingMeta("integer", "px", 1, 4096, None, _DYN),
     "FACE_QUALITY_THRESHOLD_ANGLE": SettingMeta("float", "degrees", 1.0, 90.0, None, _DYN),

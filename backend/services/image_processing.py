@@ -72,7 +72,7 @@ def _decode_frame_sync(image_bytes: bytes):
 
 
 def _process_crop_sync(crop: np.ndarray) -> dict:
-    """Full per-crop CPU sequence in ONE executor hop: detect -> align -> embed.
+    """Full per-crop CPU sequence: detect -> align -> admission -> embed.
 
     Returns a dict describing the outcome so the async caller does only cheap
     branching/logging on the loop. Never raises.
@@ -81,7 +81,7 @@ def _process_crop_sync(crop: np.ndarray) -> dict:
               "aligned_face": None, "embedding": None, "error": None,
               "face_bbox": None, "det_score": None,
               "quality": None, "quality_details": None,
-              "quality_scorer": None}
+              "quality_scorer": None, "acceptance": None}
     try:
         result["stage"] = "detect"
         bboxes, kpss = model_manager.detector.detect(crop, max_num=1)
@@ -100,8 +100,15 @@ def _process_crop_sync(crop: np.ndarray) -> dict:
             result["det_score"] = float(bboxes[0][4])
 
         result["stage"] = "align"
-        aligned_face, _m_inv = face_alignment(crop, landmarks, image_size=112)
+        aligned_face, inverse_matrix = face_alignment(crop, landmarks, image_size=112)
         result["aligned_face"] = aligned_face
+
+        result["stage"] = "acceptance"
+        from backend.core.aligned_face_quality import assess_aligned_face
+        result["acceptance"] = assess_aligned_face(
+            aligned_face, crop.shape, inverse_matrix, landmarks, face_bbox)
+        if not result["acceptance"]["accepted"]:
+            return result  # Retain evidence; never call recognition/identity writes.
 
         result["stage"] = "embed"
         # Raw BGR crop + real landmarks - identical to the enrollment paths
@@ -128,6 +135,32 @@ def _process_crop_sync(crop: np.ndarray) -> dict:
         return result
 
 logger = logging.getLogger(__name__)
+
+
+async def _retain_rejected_face(crop_result, *, pipeline_id, capture_id, captured_at, bbox):
+    """Unassigned detection evidence; not an Unknown identity or thumbnail.
+
+    Uses the normal camera-image save flags and detection retention. No new table,
+    recognition call, index write, alert, or identity update is involved.
+    """
+    event_id = uuid.uuid4().hex
+    path = None
+    try:
+        from backend.core.detection_storage import save_camera_crop
+        path = await save_camera_crop(
+            crop_result['aligned_face'], pipeline_id=pipeline_id,
+            capture_id=capture_id, face_id=event_id, captured_at=captured_at,
+            identity_id=None, name='Unknown', session_factory=db_manager.get_session,
+            executor=INFERENCE_POOL)
+    except Exception:
+        logger.exception('[FACE_QUALITY] Could not save rejected crop evidence event=%s', event_id)
+    decision = crop_result['acceptance']
+    logger.info('[FACE_QUALITY] Unassigned evidence event=%s pipeline=%s reason=%s coverage=%s sharpness=%s',
+                event_id, pipeline_id, decision['reason'],
+                decision.get('source_coverage'), decision.get('sharpness'))
+    return {'name': 'Unknown', 'similarity': 0.0, 'identity_id': None,
+            'label_state': LabelState.AUTO_UNKNOWN, 'face_image_path': path,
+            'bbox': [float(v) for v in bbox], '_event_id': event_id}
 
 
 def _save_cropped_image(crop: np.ndarray, pipeline_id: str, pred_idx: int):
@@ -282,6 +315,7 @@ async def process_image_async(
 
     H, W = frame.shape[:2]
     detected_faces = []
+    rejected_faces = []
     new_faces_count = 0
 
     # Track embeddings for intra-batch deduplication
@@ -428,6 +462,11 @@ async def process_image_async(
             continue
 
         faces_detected += 1
+        if crop_result.get('acceptance') and not crop_result['acceptance']['accepted']:
+            rejected_faces.append(await _retain_rejected_face(
+                crop_result, pipeline_id=pipeline_id, capture_id=capture_id,
+                captured_at=captured_at, bbox=(x1, y1, x2, y2)))
+            continue
         landmarks = kpss[0]
         aligned_face = crop_result["aligned_face"]
         embedding = crop_result["embedding"]
@@ -678,6 +717,7 @@ async def process_image_async(
                 aligned_face, pipeline_id=pipeline_id, capture_id=capture_id,
                 face_id=face_event_id, captured_at=captured_at,
                 identity_id=identity.id if identity else None, name=name,
+                similarity=similarity,
                 session_factory=db_manager.get_session, executor=INFERENCE_POOL,
                 already_saved=sum(1 for f in detected_faces
                     if f.get("identity_id") == (identity.id if identity else None)
@@ -831,7 +871,7 @@ async def process_image_async(
     
     # Ensure pipeline exists in database even if no faces detected
     # This allows pipelines to be registered and assigned to users
-    if not detected_faces:
+    if not detected_faces and not rejected_faces:
         logger.debug(f"[PROCESS] No new faces detected (all were tracked or no faces found)")
         logger.debug(f"[PROCESS] Summary: {valid_predictions} valid predictions processed, {skipped_predictions} skipped (wrong class)")
         logger.debug(f"[PROCESS] Face Detection Stats: {faces_detected} faces detected, {no_face_in_crop} crops with no face")
@@ -891,7 +931,7 @@ async def process_image_async(
                 "_event_id": f.get("_event_id"),
                 "_is_known": f.get("_is_known"),
             }
-            for f in detected_faces
+            for f in [*detected_faces, *rejected_faces]
         ]
     }
 
@@ -901,7 +941,7 @@ async def process_image_async(
     if use_batch_write:
         try:
             await batch_writer.add_detection(detection_data)
-            logger.debug(f"[PROCESS] Added {len(detected_faces)} faces to batch writer")
+            logger.debug(f"[PROCESS] Added {len(detection_data['faces'])} face evidence rows to batch writer")
         except Exception as e:
             logger.error(f"[PROCESS] Batch writer error: {e}")
             use_batch_write = False
@@ -916,7 +956,7 @@ async def process_image_async(
             async with db_manager.get_session() as db:
                 await ensure_pipeline_registered(db, pipeline_id)
                 outcome = await persist_detection(db, detection_data=detection_data)
-            logger.info(f"✅ Saved {new_faces_count} faces to DB for pipeline {pipeline_id}")
+            logger.info(f"✅ Saved {len(detection_data['faces'])} face evidence rows to DB for pipeline {pipeline_id}")
         except Exception as e:
             from backend.core.metrics import metrics_db_operation_failures
             if metrics_db_operation_failures:
@@ -937,6 +977,7 @@ async def process_image_async(
         "processing_time_ms": processing_time,
         "faces": detected_faces,
         "new_faces_count": new_faces_count,
+        "quality_rejected_faces": len(rejected_faces),
         "total_faces_processed": len(batch_face_embeddings),
     }
 
