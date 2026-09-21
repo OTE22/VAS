@@ -144,7 +144,7 @@ async def save_camera_crop(image, *, pipeline_id, capture_id, face_id, captured_
                 capture_alert = False
                 if settings.LIVE_ALERTS_ENABLED and identity_id and similarity is not None:
                     from backend.core.live_alert_service import live_alert_service
-                    alerts = await live_alert_service.get_active_alerts_for_identity(db, identity_id)
+                    alerts = await live_alert_service.get_active_alerts_for_identity(db, str(identity_id))
                     now = datetime.utcnow()
                     for alert in alerts:
                         if alert.auto_capture_snapshot and await live_alert_service._should_alert_trigger(

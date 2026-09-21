@@ -576,6 +576,7 @@
                 defaults.identity_name || 'Unknown';
             document.getElementById('live-alert-severity').value = 'warning';
             document.getElementById('live-alert-name').value = defaults.default_name || '';
+            document.getElementById('live-alert-name').dataset.generatedName = defaults.default_name || '';
             document.getElementById('live-alert-min-similarity').value =
                 defaults.default_min_similarity;
             document.getElementById('live-alert-similarity-value').textContent =
@@ -640,6 +641,7 @@
                 credentials: 'include',
                 body: JSON.stringify({
                     name: name,
+                    auto_name: name === document.getElementById('live-alert-name').dataset.generatedName,
                     identity_id: state.identityId,
                     alert_level: document.getElementById('live-alert-severity').value,
                     min_similarity:

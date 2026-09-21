@@ -64,6 +64,19 @@
     text-transform: uppercase;
 }
 
+.identity-type-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    margin: 3px 0;
+    border: 1px solid #64748b;
+    border-radius: 4px;
+    color: #e2e8f0;
+    font-size: 0.7rem;
+}
+.identity-type-badge.known { color: #6ee7b7; border-color: #059669; }
+.identity-type-badge.unknown { color: #fde68a; border-color: #b45309; }
+.live-alert-info .alert-created-date { margin-top: 3px; color: #94a3b8; }
+
 .status-badge.active {
     background: rgba(0, 255, 150, 0.2);
     color: #00ff96;

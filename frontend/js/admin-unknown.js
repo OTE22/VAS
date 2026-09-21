@@ -3493,6 +3493,7 @@ async function openCreateLiveAlertModal(identityId, identityName) {
         }
         document.getElementById('live-alert-severity').value = 'warning';
         document.getElementById('live-alert-name').value = defaults.default_name;
+        document.getElementById('live-alert-name').dataset.generatedName = defaults.default_name;
         document.getElementById('live-alert-min-similarity').value = defaults.default_min_similarity;
         document.getElementById('live-alert-similarity-value').textContent = `${Math.round(defaults.default_min_similarity * 100)}%`;
         document.getElementById('live-alert-notify-dashboard').checked = defaults.default_notify_dashboard;
@@ -3573,6 +3574,7 @@ async function createLiveAlert() {
             credentials: 'include', // Include HttpOnly cookies
             body: JSON.stringify({
                 name: name,
+                auto_name: name === document.getElementById('live-alert-name').dataset.generatedName,
                 identity_id: currentLiveAlertIdentityId,
                 alert_level: document.getElementById('live-alert-severity').value,
                 min_similarity: minSimilarity,

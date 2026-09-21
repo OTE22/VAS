@@ -31,9 +31,10 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from db_connection import get_db, db_manager
-from db_models import User, LiveSearchAlert, LiveAlertAuditLog, LiveAlertStatus, LiveAlertExpirationType
+from db_models import User, LiveSearchAlert, LiveAlertAuditLog, LiveAlertStatus, LiveAlertExpirationType, Pipeline
 from backend.auth.auth_service import get_current_user, require_admin, require_unknown_faces_access
 from backend.core.live_alert_service import live_alert_service
+from backend.core.live_alert_presentation import alert_display_name, alert_identity_type
 from backend.utils.time_utils import iso_utc, utc_now
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ async def _audit(request: Request, current_user: dict, alert_id: Optional[str],
 # =====================================================
 
 class CreateLiveAlertRequest(BaseModel):
+    auto_name: bool = False
     alert_level: Literal["info", "warning", "critical"] = "warning"
     name: str = Field(..., min_length=1, max_length=200, description="Alert name")
     identity_id: str = Field(..., description="UUID of the identity to track")
@@ -167,6 +169,9 @@ class UpdateLiveAlertRequest(BaseModel):
 
 
 class LiveAlertResponse(BaseModel):
+    auto_name: bool = False
+    stored_name: Optional[str] = None
+    identity_type: Optional[str] = None
     alert_level: str = "warning"
     id: str
     name: str
@@ -202,6 +207,7 @@ class LiveAlertTriggerResponse(BaseModel):
     id: str
     alert_id: str
     pipeline_id: Optional[str]
+    camera_name: Optional[str] = None
     similarity_score: Optional[float]
     snapshot_path: Optional[str]
     acknowledged: bool
@@ -335,6 +341,7 @@ async def create_live_alert(
         alert = await live_alert_service.create_alert(
             db=db,
             name=request.name,
+            auto_name=request.auto_name,
             identity_id=request.identity_id,
             created_by=current_user['id'],
             min_similarity=request.min_similarity,
@@ -369,7 +376,7 @@ async def create_live_alert(
 
         await _audit(http_request, current_user, str(alert.id), "alert_created",
                      {"name": request.name, "identity_id": request.identity_id,
-                      "min_similarity": request.min_similarity})
+                      "min_similarity": request.min_similarity, "auto_name": request.auto_name})
 
         return _format_alert(alert_with_identity)
 
@@ -600,11 +607,18 @@ async def get_alert_triggers(
         sort_order=sort_order,
     )
 
+    camera_ids = {t.pipeline_id for t in page_data["items"] if t.pipeline_id}
+    camera_names = dict((await db.execute(
+        select(Pipeline.pipeline_id, Pipeline.location_name)
+        .where(Pipeline.pipeline_id.in_(camera_ids))
+    )).all()) if camera_ids else {}
+
     page_data["items"] = [
         {
             "id": str(t.id),
             "alert_id": str(t.alert_id),
             "pipeline_id": t.pipeline_id,
+            "camera_name": camera_names.get(t.pipeline_id) or "Unnamed camera",
             "similarity_score": t.similarity_score,
             "snapshot_path": f"/api/live-alerts/triggers/{t.id}/snapshot" if t.snapshot_path else None,
             "acknowledged": t.acknowledged,
@@ -882,7 +896,7 @@ async def test_alert_channels(
     job_id = f"alerttest-{uuid_mod.uuid4().hex[:8]}"
     task_id = await task_history_manager.create_job(
         job_id=job_id, task_type="alert_channel_test",
-        task_name=f"Channel test: {alert.name[:80]}",
+        task_name=f"Channel test: {alert_display_name(alert)[:80]}",
         description=f"Test channels {channels} (clearly labeled test — no unconfirmed real sends)",
         created_by_user_id=current_user['id'],
         request_id=getattr(getattr(http_request, "state", None), "request_id", None),
@@ -892,7 +906,7 @@ async def test_alert_channels(
 
     alert_flags = {"notify_email": alert.notify_email, "notify_sms": alert.notify_sms}
     asyncio.create_task(_run_channel_test(
-        job_id, str(alert.id), alert.name, alert_flags, channels,
+        job_id, str(alert.id), alert_display_name(alert), alert_flags, channels,
         bool(body.confirm_real_send) if body else False))
 
     await _audit(http_request, current_user, alert_id, "channel_test",
@@ -937,7 +951,10 @@ def _format_alert(alert) -> dict:
 
     return {
         "id": str(alert.id),
-        "name": alert.name,
+        "name": alert_display_name(alert),
+        "stored_name": alert.name,
+        "auto_name": alert.auto_name,
+        "identity_type": alert_identity_type(alert),
         "identity_id": str(alert.identity_id),
         "identity_name": alert.identity.display_name if alert.identity else None,
         "identity_snapshot_path": identity_snapshot_path,  # None => frontend uses its safe fallback

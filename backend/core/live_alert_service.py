@@ -19,6 +19,7 @@ from db_models import (
     Identity, Pipeline
 )
 from config import settings
+from backend.core.live_alert_presentation import alert_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,8 @@ class LiveAlertService:
         expiration_type: str = "never",
         expiration_date: datetime = None,
         expiration_detections: int = None,
-        alert_level: str = "warning"
+        alert_level: str = "warning",
+        auto_name: bool = False,
     ) -> LiveSearchAlert:
         """Create a new live search alert."""
         try:
@@ -134,6 +136,7 @@ class LiveAlertService:
             alert = LiveSearchAlert(
                 alert_level=alert_level,
                 name=name,
+                auto_name=auto_name,
                 identity_id=uuid.UUID(identity_id),
                 created_by=created_by,
                 min_similarity=min_similarity,
@@ -436,6 +439,9 @@ class LiveAlertService:
                 raise ValueError('Invalid alert severity')
 
             # Update fields
+            if 'name' in updates:
+                # Explicit renames become custom titles and remain stable.
+                updates['auto_name'] = False
             for key, value in updates.items():
                 if hasattr(alert, key):
                     if key == 'expiration_type':
@@ -583,7 +589,7 @@ class LiveAlertService:
                     triggers.append(AlertTriggerInfo(
                         trigger_id=str(trigger.id),
                         alert_id=str(alert.id),
-                        alert_name=alert.name,
+                        alert_name=alert_display_name(alert),
                         identity_id=identity_id,
                         identity_name=identity_name,
                         similarity=similarity,
@@ -1001,5 +1007,3 @@ class LiveAlertService:
 
 # Global instance
 live_alert_service = LiveAlertService()
-
-

@@ -330,6 +330,15 @@
         const info = el('div', 'live-alert-info');
         info.appendChild(el('h3', null, alert.name || '(unnamed alert)'));
         info.appendChild(el('p', null, alert.identity_name || 'Unknown identity'));
+        const identityKind = ['known', 'unknown'].includes(alert.identity_type) ? alert.identity_type : 'unavailable';
+        const identityBadge = el('span', `identity-type-badge ${identityKind}`,
+            identityKind === 'unavailable' ? 'Identity unavailable' : identityKind === 'known' ? 'Known' : 'Unknown');
+        info.appendChild(identityBadge);
+        const created = new Date(alert.created_at);
+        if (!Number.isNaN(created.getTime())) {
+            const dateText = created.toLocaleDateString('en-GB', {day: 'numeric', month: 'short', year: 'numeric'});
+            info.appendChild(el('p', 'alert-created-date', `Created: ${dateText}`));
+        }
         header.appendChild(info);
         header.appendChild(el('span', `status-badge ${status}`, status));
         card.appendChild(header);
@@ -771,7 +780,7 @@
                 tr.appendChild(timeTd);
 
                 const camTd = el('td');
-                camTd.appendChild(el('span', 'trigger-camera', t.pipeline_id || 'Unknown'));
+                camTd.appendChild(el('span', 'trigger-camera', t.camera_name || 'Unnamed camera'));
                 tr.appendChild(camTd);
 
                 const simTd = el('td');

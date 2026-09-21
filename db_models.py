@@ -1329,6 +1329,7 @@ class LiveSearchAlert(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     name = Column(String(200), nullable=False)
+    auto_name = Column(Boolean, nullable=False, default=False, server_default='false')
     identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id', ondelete='CASCADE'), nullable=False, index=True)
     # SET NULL: the alert is operational configuration, not personal data — it
     # keeps firing after its creator's account is deleted.
