@@ -864,7 +864,7 @@ async def list_unknown_identities(
             filters=filters
         )
 
-        cache_key += ":camera-events-v1"
+        cache_key += ":camera-events-v2"
         # Try to get from cache
         cached_result = await redis_cache_service.get(cache_key)
         if cached_result:
@@ -879,6 +879,7 @@ async def list_unknown_identities(
             # three round trips to prove an empty set is empty.
             empty_result = {
                 "identities": [],
+                "pipeline_totals": {},
                 "total": 0,
                 "page": page,
                 "page_size": page_size,
@@ -919,7 +920,7 @@ async def list_unknown_identities(
             event_conditions.append(IdentityAppearance.start_time >= window_cutoff)
         if date_to:
             event_conditions.append(IdentityAppearance.start_time < _parse_filter_bound(date_to, end=True))
-        conditions.append(select(IdentityAppearance.id).where(*event_conditions).exists())
+        conditions.append(select(IdentityAppearance.id).where(*event_conditions).correlate(Identity).exists())
 
         if min_appearances:
             conditions.append(Identity.appearances_count >= min_appearances)
@@ -941,6 +942,16 @@ async def list_unknown_identities(
         active_cameras = (await db.execute(
             select(func.count(func.distinct(cameras_relation.c.pipeline_id)))
         )).scalar() or 0
+
+        # Count matching cameras before pagination so each gets its own page.
+        pipeline_counts = await db.execute(
+            select(IdentityAppearance.pipeline_id, func.count(func.distinct(Identity.id)))
+            .select_from(IdentityAppearance)
+            .join(Identity, Identity.id == IdentityAppearance.identity_id)
+            .where(*conditions, *event_conditions)
+            .group_by(IdentityAppearance.pipeline_id)
+        )
+        pipeline_totals = {pid: count for pid, count in pipeline_counts.all() if pid}
 
         # ORDER BY carries a tiebreak: last_seen_at ties are ordinary (bulk
         # ingest, one transaction touching many rows), and without the PK an
@@ -1099,6 +1110,7 @@ async def list_unknown_identities(
         # and made page 2 the last page whatever the data said.
         result = {
             "identities": identity_list,
+            "pipeline_totals": pipeline_totals,
             "total": total,
             "page": page,
             "page_size": page_size,

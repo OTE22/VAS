@@ -16,6 +16,7 @@ let currentPage = 1;
 let pageSize = 20;
 let totalPages = 1;
 let currentFilters = {};
+const pipelinePages = new Map();
 // UNKNOWN_FACE_DISPLAY_HOURS display window: false = default recent-only view,
 // true = Show-all (older unknowns stay STORED either way — display-only window)
 let showAllUnknowns = false;
@@ -39,9 +40,8 @@ function invalidateMergePreview() {
     if (button) button.disabled = true;
 }
 
-// (pipelineGroupsPerPage removed: it drove a SECOND pagination layer over the
-// server's, sharing currentPage with it. Paging is the server's alone.)
-let allPipelineGroups = []; // Pipeline groups built from the current server page
+// Each group uses its own server page; the selected-camera view uses currentPage.
+let allPipelineGroups = [];
 let pageClampRetried = false; // bounds the re-fetch when the result set shrinks
 
 let imageVisibilityQueued = false;
@@ -607,6 +607,42 @@ function updateShowAllToggle(data) {
     }
 }
 
+// Load a bounded page per camera, with at most four requests in flight.
+async function loadPipelinePages(data, params, isCurrent) {
+    if (!data.pipeline_totals) throw new Error('Pipeline counts unavailable. Please refresh after the server update.');
+    const ids = Object.keys(data.pipeline_totals).sort();
+    const groups = new Array(ids.length);
+    let next = 0;
+    await Promise.all(Array.from({length: Math.min(4, ids.length)}, async () => {
+        while (next < ids.length && isCurrent()) {
+            const index = next++;
+            const id = ids[index];
+            const query = new URLSearchParams(params);
+            query.set('pipeline_id', id);
+            query.set('page', pipelinePages.get(id) || 1);
+            const request = async () => {
+                const response = await fetch(`/api/admin/unknown?${query}`, {credentials: 'include'});
+                if (!response.ok) throw new Error(`Failed to load pipeline ${id}`);
+                return response.json();
+            };
+            let result = await request();
+            const lastPage = Math.max(1, result.total_pages || 1);
+            if (Number(query.get('page')) > lastPage) {
+                query.set('page', lastPage);
+                result = await request();
+            }
+            groups[index] = {id, page: Number(query.get('page')),
+                total: result.total, totalPages: Math.max(1, result.total_pages || 1),
+                identities: (result.identities || []).map(identity => ({
+                    ...identity, pipeline_ids: [id]
+                }))};
+        }
+    }));
+    if (!isCurrent()) return;
+    data.identities = groups.flatMap(group => group.identities);
+    data.pipeline_pages = groups;
+}
+
 let unknownLoadSequence = 0;
 async function loadUnknownFaces() {
     const loadSequence = ++unknownLoadSequence;
@@ -615,6 +651,7 @@ async function loadUnknownFaces() {
     const noResults = document.getElementById('no-results');
 
     grid.innerHTML = '';
+    document.querySelector('.pagination-section').style.display = currentFilters.pipeline_id ? '' : 'none';
     loading.style.display = 'flex';
     noResults.style.display = 'none';
     noResults.querySelector('p').textContent = 'No unknown faces found';
@@ -637,7 +674,10 @@ async function loadUnknownFaces() {
         }
 
         const data = await response.json();
-
+        if (loadSequence !== unknownLoadSequence) return;
+        if (!currentFilters.pipeline_id) {
+            await loadPipelinePages(data, params, () => loadSequence === unknownLoadSequence);
+        }
         if (loadSequence !== unknownLoadSequence) return;
         // A current API response can restore an identity after an admin unmerge.
         for (const identity of data.identities || []) {
@@ -761,7 +801,8 @@ async function loadUnknownFaces() {
         const sortedPipelines = Object.keys(groupedByPipeline).sort();
         allPipelineGroups = sortedPipelines.map(pipelineId => ({
             id: pipelineId,
-            identities: groupedByPipeline[pipelineId]
+            identities: groupedByPipeline[pipelineId],
+            pagination: data.pipeline_pages?.find(group => group.id === pipelineId)
         }));
         
         // Render pipeline groups with pagination
@@ -1151,10 +1192,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 // Render current page of pipeline groups
-// Renders the groups built from the page the SERVER returned. Grouping by
-// pipeline is presentation only: it must never become a second pagination
-// layer, which is what it had quietly turned into — the backend paged
-// identities, this paged groups, and both drove off the same `currentPage`.
+// Camera groups have independent server pages in the all-pipelines view.
 function renderPipelineGroupsPage() {
     const grid = document.getElementById('unknown-grid');
     grid.innerHTML = ''; // Clear existing content
@@ -1170,6 +1208,33 @@ function renderPipelineGroupsPage() {
 
     allPipelineGroups.forEach(group => {
         const groupSection = createPipelineGroup(group.id, group.identities);
+        if (group.pagination) {
+            const {page, total, totalPages: pages} = group.pagination;
+            pipelinePages.set(group.id, page);
+            groupSection.querySelector('[data-visible-identity-count]').textContent =
+                `${group.identities.length} shown of ${total} identities`;
+            const controls = document.createElement('div');
+            controls.className = 'pagination-controls';
+            for (const [label, target, disabled] of [
+                ['Previous', page - 1, page <= 1], ['Next', page + 1, page >= pages]
+            ]) {
+                const button = document.createElement('button');
+                button.className = 'intelligence-admin-btn';
+                button.textContent = label;
+                button.disabled = disabled;
+                button.addEventListener('click', () => {
+                    pipelinePages.set(group.id, target);
+                    loadUnknownFaces();
+                });
+                if (label === 'Next') {
+                    const info = document.createElement('span');
+                    info.textContent = `Page ${page} of ${pages}`;
+                    controls.appendChild(info);
+                }
+                controls.appendChild(button);
+            }
+            groupSection.appendChild(controls);
+        }
         grid.appendChild(groupSection);
     });
 }
@@ -1410,6 +1475,7 @@ function clearFilters() {
 // Any change to WHAT is being listed returns to page 1. Staying on page 5 of a
 // result set that no longer exists is how a filtered view looks empty.
 function resetPagination() {
+    pipelinePages.clear();
     currentPage = 1;
     allPipelineGroups = [];
 }
