@@ -75,9 +75,9 @@
                 }
                 
                 // Load JavaScript if not already loaded
-                if (!document.querySelector('script[src="/frontend/js/upload-modal.js"]')) {
+                if (!document.querySelector('script[src^="/frontend/js/upload-modal.js"]')) {
                     const script = document.createElement('script');
-                    script.src = '/frontend/js/upload-modal.js';
+                    script.src = '/frontend/js/upload-modal.js?v=known-2';
                     document.body.appendChild(script);
                 }
             }

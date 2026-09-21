@@ -301,29 +301,11 @@ class SecurityIntelligenceService:
 
         cutoff_date = datetime.utcnow() - timedelta(days=days_back)
 
-        # Get all relationships in the time window
-        query = select(IdentityRelationship).where(
-            IdentityRelationship.last_co_appearance >= cutoff_date
+        # The relationship cache contains lifetime aggregates, not windowed
+        # counts. Use the bounded appearance query for every requested range.
+        relationships = await self._calculate_relationships_from_appearances(
+            db, identity_ids, cutoff_date
         )
-
-        if identity_ids:
-            identity_uuids = [uuid.UUID(id) for id in identity_ids]
-            query = query.where(
-                or_(
-                    IdentityRelationship.identity_id_1.in_(identity_uuids),
-                    IdentityRelationship.identity_id_2.in_(identity_uuids)
-                )
-            )
-
-        result = await db.execute(query)
-        relationships = result.scalars().all()
-
-        # If cache is empty, calculate relationships on-the-fly from appearances
-        if not relationships:
-            logger.info("[SECURITY_INTEL] No cached relationships found, calculating on-the-fly from appearances...")
-            relationships = await self._calculate_relationships_from_appearances(
-                db, identity_ids, cutoff_date
-            )
 
         # Build nodes and edges
         nodes_dict: Dict[str, NetworkNode] = {}
@@ -381,7 +363,8 @@ class SecurityIntelligenceService:
                     func.count(IdentityAppearance.id)
                 )
                 .where(IdentityAppearance.identity_id.in_(
-                    [uuid.UUID(id) for id in identity_ids_set]))
+                    [uuid.UUID(id) for id in identity_ids_set]),
+                    IdentityAppearance.start_time >= cutoff_date)
                 .group_by(IdentityAppearance.identity_id)
             )
             real_counts = {str(row[0]): int(row[1]) for row in counts_result}
@@ -1223,12 +1206,14 @@ class SecurityIntelligenceService:
             identities_query = select(Identity).where(
                 and_(
                     Identity.id.in_(identity_uuids),
-                    Identity.last_seen_at >= cutoff_date
+                    Identity.id.in_(select(IdentityAppearance.identity_id).where(
+                        IdentityAppearance.start_time >= cutoff_date))
                 )
             ).order_by(Identity.last_seen_at.desc()).limit(max_identities)
         else:
             identities_query = select(Identity).where(
-                Identity.last_seen_at >= cutoff_date
+                Identity.id.in_(select(IdentityAppearance.identity_id).where(
+                        IdentityAppearance.start_time >= cutoff_date))
             ).order_by(Identity.last_seen_at.desc()).limit(max_identities)
 
         identities_result = await db.execute(identities_query)
@@ -1262,6 +1247,16 @@ class SecurityIntelligenceService:
                         id1, id2 = id2, id1
 
                     key = (id1, id2)
+                    if key in all_relationships:
+                        continue
+                    if identity.id != id1:
+                        canonical = await intelligence_service._calculate_co_appearances(
+                            db, id1, time_window, min_co_appearances, 1,
+                            cutoff_date=cutoff_date, related_identity_id=id2,
+                        )
+                        if not canonical:
+                            continue
+                        rel_info = canonical[0]
 
                     # Use the relationship with higher co-appearance count
                     if key not in all_relationships or rel_info.co_appearance_count > all_relationships[key].co_appearance_count:

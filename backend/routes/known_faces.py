@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth.auth_service import require_role
@@ -42,7 +42,7 @@ async def list_known_faces(
     total = (await db.execute(select(func.count()).select_from(Identity).where(*filters))).scalar() or 0
     order = {"name": Identity.display_name.asc().nulls_last(),
              "newest": Identity.created_at.desc(),
-             "last_seen": Identity.last_seen_at.desc()}[sort]
+             "last_seen": case((Identity.appearances_count > 0, Identity.last_seen_at)).desc().nulls_last()}[sort]
     identities = (await db.execute(select(Identity).where(*filters)
         .order_by(order, Identity.id).offset((page - 1) * page_size).limit(page_size))).scalars().all()
     ids = [i.id for i in identities]

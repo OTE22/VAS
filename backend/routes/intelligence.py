@@ -751,6 +751,8 @@ async def get_tracking_map_data(
     current_user: dict = Depends(require_admin())
 ):
     """Map data as GeoJSON for MapLibre."""
+    if not settings.CROSS_CAMERA_TRACKING_ENABLED:
+        raise _feature_disabled("CROSS_CAMERA_TRACKING_ENABLED", "Cross-camera tracking")
     started = time.monotonic()
     await _get_identity_or_404(db, identity_id)
     try:
@@ -985,78 +987,87 @@ async def analyze_identity(
     result: Dict = {"identity_id": identity_id, "analyzed_at": _iso_z(datetime.utcnow())}
     sections: Dict = {}
 
-    try:
-        related = await intelligence_service.get_related_identities(db, identity_id)
-        result["related_identities"] = [
-            {
-                "identity_id": r.identity_id,
-                "display_name": r.display_name,
-                "type": r.identity_type,
-                "co_appearances": r.co_appearance_count,
-                "percentage": r.co_appearance_percentage,
-                "strength": r.relationship_strength,
-                "common_locations": r.common_pipelines,
-            }
-            for r in related
-        ]
-        sections["related"] = {"status": "ready", "count": len(related)}
-    except Exception as e:
-        logger.error("[INTELLIGENCE] analyze/related failed: %s", e, exc_info=True)
-        sections["related"] = {"status": "error", "reason_code": "ANALYSIS_FAILED"}
+    if not settings.RELATED_IDENTITIES_ENABLED:
+        sections["related"] = {"status": "disabled", "reason_code": "FEATURE_DISABLED"}
+    else:
+        try:
+            related = await intelligence_service.get_related_identities(db, identity_id)
+            result["related_identities"] = [
+                {
+                    "identity_id": r.identity_id,
+                    "display_name": r.display_name,
+                    "type": r.identity_type,
+                    "co_appearances": r.co_appearance_count,
+                    "percentage": r.co_appearance_percentage,
+                    "strength": r.relationship_strength,
+                    "common_locations": r.common_pipelines,
+                }
+                for r in related
+            ]
+            sections["related"] = {"status": "ready", "count": len(related)}
+        except Exception as e:
+            logger.error("[INTELLIGENCE] analyze/related failed: %s", e, exc_info=True)
+            sections["related"] = {"status": "error", "reason_code": "ANALYSIS_FAILED"}
 
-    try:
-        patterns = await intelligence_service.get_temporal_patterns(db, identity_id)
-        result["temporal_patterns"] = {
-            "hourly_distribution": patterns.hourly_distribution,
-            "daily_distribution": patterns.daily_distribution,
-            "peak_hours": patterns.peak_hours,
-            "peak_days": patterns.peak_days,
-            "most_common_pipelines": patterns.most_common_pipelines,
-            "total_appearances": patterns.total_appearances,
-            "average_appearances_per_day": patterns.average_appearances_per_day,
-        }
-        sections["temporal"] = {
-            "status": "ready",
-            "total_appearances": patterns.total_appearances,
-            "peak_hours": patterns.peak_hours,
-        }
-    except Exception as e:
-        logger.error("[INTELLIGENCE] analyze/temporal failed: %s", e, exc_info=True)
-        sections["temporal"] = {"status": "error", "reason_code": "ANALYSIS_FAILED"}
-
-    try:
-        tracks = await intelligence_service.get_cross_camera_track(db, identity_id, days_back=7)
-        movement_count = sum(len(t.movements) for t in tracks)
-        has_coordinates = any(
-            m.coordinates for t in tracks for m in t.movements
-        )
-        result["cross_camera_tracks"] = [
-            {
-                "date": t.date,
-                "cameras_visited": t.total_cameras,
-                "first_seen": _iso_z(t.first_seen),
-                "last_seen": _iso_z(t.last_seen),
-                "duration_minutes": t.total_duration_minutes,
+    if not settings.TEMPORAL_PATTERNS_ENABLED:
+        sections["temporal"] = {"status": "disabled", "reason_code": "FEATURE_DISABLED"}
+    else:
+        try:
+            patterns = await intelligence_service.get_temporal_patterns(db, identity_id)
+            result["temporal_patterns"] = {
+                "hourly_distribution": patterns.hourly_distribution,
+                "daily_distribution": patterns.daily_distribution,
+                "peak_hours": patterns.peak_hours,
+                "peak_days": patterns.peak_days,
+                "most_common_pipelines": patterns.most_common_pipelines,
+                "total_appearances": patterns.total_appearances,
+                "average_appearances_per_day": patterns.average_appearances_per_day,
             }
-            for t in tracks
-        ]
-        if movement_count == 0:
-            sections["tracking"] = {"status": "unavailable", "reason_code": "NO_MOVEMENT_DATA"}
-        elif not has_coordinates:
-            sections["tracking"] = {
-                "status": "partial", "reason_code": "NO_COORDINATES",
-                "movement_count": movement_count,
-                "days_with_activity": len(tracks),
-            }
-        else:
-            sections["tracking"] = {
+            sections["temporal"] = {
                 "status": "ready",
-                "movement_count": movement_count,
-                "days_with_activity": len(tracks),
+                "total_appearances": patterns.total_appearances,
+                "peak_hours": patterns.peak_hours,
             }
-    except Exception as e:
-        logger.error("[INTELLIGENCE] analyze/tracking failed: %s", e, exc_info=True)
-        sections["tracking"] = {"status": "error", "reason_code": "ANALYSIS_FAILED"}
+        except Exception as e:
+            logger.error("[INTELLIGENCE] analyze/temporal failed: %s", e, exc_info=True)
+            sections["temporal"] = {"status": "error", "reason_code": "ANALYSIS_FAILED"}
+
+    if not settings.CROSS_CAMERA_TRACKING_ENABLED:
+        sections["tracking"] = {"status": "disabled", "reason_code": "FEATURE_DISABLED"}
+    else:
+        try:
+            tracks = await intelligence_service.get_cross_camera_track(db, identity_id, days_back=7)
+            movement_count = sum(len(t.movements) for t in tracks)
+            has_coordinates = any(
+                m.coordinates for t in tracks for m in t.movements
+            )
+            result["cross_camera_tracks"] = [
+                {
+                    "date": t.date,
+                    "cameras_visited": t.total_cameras,
+                    "first_seen": _iso_z(t.first_seen),
+                    "last_seen": _iso_z(t.last_seen),
+                    "duration_minutes": t.total_duration_minutes,
+                }
+                for t in tracks
+            ]
+            if movement_count == 0:
+                sections["tracking"] = {"status": "unavailable", "reason_code": "NO_MOVEMENT_DATA"}
+            elif not has_coordinates:
+                sections["tracking"] = {
+                    "status": "partial", "reason_code": "NO_COORDINATES",
+                    "movement_count": movement_count,
+                    "days_with_activity": len(tracks),
+                }
+            else:
+                sections["tracking"] = {
+                    "status": "ready",
+                    "movement_count": movement_count,
+                    "days_with_activity": len(tracks),
+                }
+        except Exception as e:
+            logger.error("[INTELLIGENCE] analyze/tracking failed: %s", e, exc_info=True)
+            sections["tracking"] = {"status": "error", "reason_code": "ANALYSIS_FAILED"}
 
     result["sections"] = sections
     _audit("complete_analysis", current_user, identity_id,
@@ -1507,6 +1518,29 @@ async def get_threat_assessment(
         else:
             payload.update({"score_type": "heuristic", "is_probability": False,
                             "calibration_status": "uncalibrated", "limitations": []})
+        if deduplicated:
+            # The card and its outcome must describe the same persisted row.
+            # Historical rows do not retain the full transient engine payload
+            # or recommendations, so do not attach today's values to them.
+            payload.update({
+                "overall_risk_score": stored["total_risk_score"],
+                "threat_level": stored["severity"],
+                "severity": stored["severity"],
+                "confidence": stored["confidence"],
+                "risk_factors": [{"factor": signal.get("name"),
+                                  "score": signal.get("score"),
+                                  "description": signal.get("explanation")}
+                                 for signal in stored["signals"]],
+                "last_assessed": stored["source_timestamp"] or stored["created_at"],
+                "algorithm_version": stored["model_version"],
+                "recommendations": [],
+                "engine": None,
+                "decision": None,
+                "score_type": stored["score_type"],
+                "is_probability": stored["is_probability"],
+                "calibration_status": stored["calibration_status"],
+                "limitations": stored["limitations"],
+            })
         return payload
 
     except ValueError:

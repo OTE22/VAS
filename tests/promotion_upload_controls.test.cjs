@@ -116,3 +116,70 @@ test('promotion candidate confirms and sends the unknown into the selected known
     assert.equal(refreshed, 1);
     assert.equal(h.run('mergeSubmitInFlight'), false);
 });
+
+for (const flow of ['upload', 'review']) {
+    test(`late ${flow} save refreshes data without changing a reopened dialog`, async () => {
+        const h = harness(['upload-modal.js']);
+        for (const id of ['globalPersonName', 'globalFileInput', 'globalUploadSubmitBtn', 'uploadSuccessMessage', 'uploadSuccessText']) h.nodes.set(id, h.element());
+        h.nodes.get('globalPersonName').value = 'Person A';
+        h.nodes.get('globalFileInput').files = [{name: 'photo.jpg'}];
+        h.context.FormData = class { append() {} };
+        h.context.CustomEvent = class { constructor(type) { this.type = type; } };
+        const events = [], timers = [];
+        h.context.dispatchEvent = event => events.push(event.type);
+        h.context.setTimeout = cb => { timers.push(cb); return timers.length; };
+        let respond;
+        h.context.fetch = () => new Promise(resolve => { respond = resolve; });
+        if (flow === 'upload') h.context.handleGlobalUpload({preventDefault() {}});
+        else h.context.submitDecision({upload_token: 'old-ticket'});
+        h.context.closeUploadModal();
+        h.nodes.get('globalPersonName').value = 'Person B';
+        h.nodes.get('globalUploadSubmitBtn').disabled = true;
+        respond({ok: true, status: 200, json: async () => ({success: true, image_created: true, message: 'Saved A'})});
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(events, ['enrollment:saved']);
+        assert.equal(h.nodes.get('globalPersonName').value, 'Person B');
+        assert.equal(h.nodes.get('uploadSuccessText').textContent, '');
+        assert.equal(h.nodes.get('globalUploadSubmitBtn').disabled, true);
+        assert.equal(timers.length, 0);
+    });
+}
+
+test('late review prompt releases its pending file after the dialog closes', async () => {
+    const h = harness(['upload-modal.js']);
+    for (const id of ['globalPersonName', 'globalFileInput']) h.nodes.set(id, h.element());
+    h.nodes.get('globalPersonName').value = 'Person A';
+    h.nodes.get('globalFileInput').files = [{name: 'photo.jpg'}];
+    h.context.FormData = class { append() {} };
+    let respond, cancelled;
+    h.context.fetch = () => new Promise(resolve => { respond = resolve; });
+    h.context.cancelPendingUpload = token => { cancelled = token; };
+    h.context.handleGlobalUpload({preventDefault() {}});
+    h.context.closeUploadModal();
+    respond({ok: true, status: 202, json: async () => ({decision_required: true, upload_token: 'old-ticket'})});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(cancelled, 'old-ticket');
+});
+
+for (const flow of ['upload', 'review']) {
+    test(`${flow} displays pending-index warning and keeps the saved dialog open`, async () => {
+        const h = harness(['upload-modal.js']);
+        for (const id of ['globalPersonName', 'globalFileInput', 'uploadSuccessMessage', 'uploadSuccessText']) h.nodes.set(id, h.element());
+        h.nodes.get('globalPersonName').value = 'Person A';
+        h.nodes.get('globalFileInput').files = [{name: 'photo.jpg'}];
+        h.context.FormData = class { append() {} };
+        h.context.CustomEvent = class {};
+        h.context.dispatchEvent = () => {};
+        h.context.hideEnrollmentDecision = () => {};
+        const alerts = [], timers = [];
+        h.context.showUploadAlert = (...args) => alerts.push(args);
+        h.context.setTimeout = cb => { timers.push(cb); return timers.length; };
+        h.context.fetch = async () => ({ok: true, status: 200, json: async () => ({success: true, image_created: true, message: 'Saved', warnings: ['vector_index_sync_pending']})});
+        if (flow === 'upload') h.context.handleGlobalUpload({preventDefault() {}});
+        else await h.context.submitDecision({upload_token: 'ticket'});
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(alerts.length, 1);
+        assert.match(alerts[0][1], /photo is saved.*indexing is pending/i);
+        assert.equal(timers.length, 0);
+    });
+}

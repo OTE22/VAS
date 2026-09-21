@@ -11,6 +11,7 @@
 // or close it outright.
 let uploadTimers = [];
 let uploadTarget = null;
+let uploadGeneration = 0;
 
 function scheduleUploadTimer(callback, delayMs) {
     const id = setTimeout(callback, delayMs);
@@ -87,6 +88,8 @@ function describeUploadFailure(status, data) {
 }
 
 function openUploadModal(target = null) {
+    const generation = ++uploadGeneration;
+    clearUploadTimers();
     // Backend handles authentication - just check if user is admin
     fetch('/api/auth/me', {
         credentials: 'include' // Include HttpOnly cookies
@@ -96,6 +99,7 @@ function openUploadModal(target = null) {
         return response.json();
     })
     .then(user => {
+        if (generation !== uploadGeneration) return;
         if (user.role !== 'admin') {
             alert('Access denied. Only administrators can add persons to track.');
             return;
@@ -141,6 +145,7 @@ function openUploadModal(target = null) {
         }
     })
     .catch(error => {
+        if (generation !== uploadGeneration) return;
         console.error('Error checking admin status:', error);
         alert('Error verifying permissions. Please try again.');
     });
@@ -267,6 +272,8 @@ function showUploadAlert(title, message, type = 'error') {
 }
 
 function closeUploadModal() {
+    uploadGeneration++;
+    clearUploadTimers();
     const modal = document.getElementById('uploadModal');
     if (modal) {
         if (window.ModalStack && window.ModalStack.isOpen(modal)) {
@@ -410,6 +417,7 @@ function handleGlobalFileSelect(event) {
 }
 
 function handleGlobalUpload(event) {
+    const generation = uploadGeneration;
     event.preventDefault();
     
     const personNameInput = document.getElementById('globalPersonName');
@@ -474,6 +482,14 @@ function handleGlobalUpload(event) {
         // which showed the user a raw JSON parse error instead of what went
         // wrong.
         const data = await response.json().catch(() => ({}));
+        // A committed save still refreshes the directory after its dialog closes.
+        if (response.ok && data.success) {
+            window.dispatchEvent(new CustomEvent('enrollment:saved', { detail: data }));
+        }
+        if (generation !== uploadGeneration) {
+            if (data.decision_required) cancelPendingUpload(data.upload_token);
+            return;
+        }
 
         if (response.status === 401) {
             showUploadAlert(
@@ -542,7 +558,6 @@ function handleGlobalUpload(event) {
         
         // Success
         if (data.success) {
-            window.dispatchEvent(new CustomEvent('enrollment:saved', { detail: data }));
             // Same rule as the review flow: a duplicate is a successful no-op.
             // The server stored nothing, so this must not look like an add.
             if (data.duplicate === true || data.image_created === false) {
@@ -562,6 +577,8 @@ function handleGlobalUpload(event) {
                 successMsg.style.display = 'block';
             }
 
+            if (showIndexWarning(data)) return;
+
             // Reset form after short delay
             scheduleUploadTimer(() => {
                 if (personNameInput) personNameInput.value = '';
@@ -576,10 +593,12 @@ function handleGlobalUpload(event) {
         }
     })
     .catch(error => {
+        if (generation !== uploadGeneration) return;
         console.error('Upload error:', error);
         alert(error.message || 'Failed to upload person. Please try again.');
     })
     .finally(() => {
+        if (generation !== uploadGeneration) return;
         // Re-enable submit button
         if (submitBtn) {
             submitBtn.disabled = false;
@@ -907,6 +926,7 @@ function setDecisionBusy(busy) {
 }
 
 function submitDecision(payload) {
+    const generation = uploadGeneration;
     setDecisionBusy(true);
     return fetch('/api/enrollment/confirm', {
         method: 'POST',
@@ -922,6 +942,14 @@ function submitDecision(payload) {
         // Same guard as the upload path: a decision can also fail with a
         // non-JSON body (expired session, gateway error).
         const data = await response.json().catch(() => ({}));
+        // A committed save still refreshes the directory after its dialog closes.
+        if (response.ok && data.success) {
+            window.dispatchEvent(new CustomEvent('enrollment:saved', { detail: data }));
+        }
+        if (generation !== uploadGeneration) {
+            if (data.decision_required) cancelPendingUpload(data.upload_token);
+            return;
+        }
 
         // A strong match needs the "different person" answer twice. The second
         // press carries confirm_create_new, so this asks once and only once.
@@ -953,7 +981,6 @@ function submitDecision(payload) {
         // image_002.jpg that, correctly, was never written. `image_created`
         // is the authoritative flag; `duplicate` is the reason.
         const nothingStored = data.duplicate === true || data.image_created === false;
-        window.dispatchEvent(new CustomEvent('enrollment:saved', { detail: data }));
         hideEnrollmentDecision();
 
         if (nothingStored) {
@@ -973,14 +1000,24 @@ function submitDecision(payload) {
             successText.textContent = `✅ ${data.message}`;
             successMsg.style.display = 'block';
         }
+        if (showIndexWarning(data)) return;
         scheduleUploadTimer(closeUploadModal, 1500);
     })
     .catch(error => {
+        if (generation !== uploadGeneration) return;
         console.error('Enrollment decision error:', error);
         setDecisionBusy(false);
         showUploadAlert('Could Not Save',
             'The decision could not be applied. Please try again.', 'error');
     });
+}
+
+function showIndexWarning(data) {
+    if (data.warning !== 'vector_index_sync_pending' &&
+        !data.warnings?.includes('vector_index_sync_pending')) return false;
+    showUploadAlert('Photo saved — recognition pending',
+        'The photo is saved. Recognition indexing is pending and will be retried automatically.', 'info');
+    return true;
 }
 
 function cancelPendingUpload(token) {

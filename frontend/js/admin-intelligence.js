@@ -239,10 +239,14 @@
         }
 
         const timeoutCtl = new AbortController();
-        const timer = window.setTimeout(function () { timeoutCtl.abort(); }, options.timeout || API_TIMEOUT_MS);
-        const signals = [timeoutCtl.signal];
-        if (options.signal) signals.push(options.signal);
-        const signal = (typeof AbortSignal.any === 'function') ? AbortSignal.any(signals) : (options.signal || timeoutCtl.signal);
+        let timedOut = false;
+        const timer = window.setTimeout(function () { timedOut = true; timeoutCtl.abort(); }, options.timeout || API_TIMEOUT_MS);
+        const cancel = function () { timeoutCtl.abort(); };
+        if (options.signal) {
+            if (options.signal.aborted) cancel();
+            else options.signal.addEventListener('abort', cancel, { once: true });
+        }
+        const signal = timeoutCtl.signal;
 
         const headers = { 'Accept': options.expect === 'html' ? 'text/html' : 'application/json' };
         if (method !== 'GET' && method !== 'HEAD') {
@@ -267,10 +271,15 @@
             });
         } catch (err) {
             window.clearTimeout(timer);
+            if (options.signal) options.signal.removeEventListener('abort', cancel);
+            if (timedOut && !(options.signal && options.signal.aborted)) {
+                throw ApiError('The request timed out. Please retry.', { code: 'TIMEOUT' });
+            }
             if (err && err.name === 'AbortError') throw ApiError('Request cancelled', { aborted: true });
             throw ApiError('Network error — backend unreachable', { status: 0 });
         }
         window.clearTimeout(timer);
+        if (options.signal) options.signal.removeEventListener('abort', cancel);
 
         if (response.status === 401) {
             window.location.href = '/login';
@@ -994,7 +1003,7 @@
             prependEngineBadge(document.getElementById('related-identities-container'), data && data.engine);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            renderError(elements.relatedContainer, 'Failed to load related identities', err.referenceId);
+            renderError(elements.relatedContainer, err.code === 'TIMEOUT' ? err.message : 'Failed to load related identities', err.referenceId);
         }
     }
 
@@ -1084,7 +1093,7 @@
             prependEngineBadge(document.getElementById('temporal-container'), patterns && patterns.engine);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            renderError(elements.temporalContainer, 'Failed to load temporal patterns', err.referenceId);
+            renderError(elements.temporalContainer, err.code === 'TIMEOUT' ? err.message : 'Failed to load temporal patterns', err.referenceId);
         }
     }
 
@@ -1110,8 +1119,8 @@
             return distributionValue(patterns.hourly_distribution, hour);
         });
         const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-        const dailyValues = dayNames.map(function (day) {
-            return distributionValue(patterns.daily_distribution, day.toLowerCase());
+        const dailyValues = dayNames.map(function (_, day) {
+            return distributionValue(patterns.daily_distribution, day);
         });
         const locationsRaw = Array.isArray(patterns.most_common_pipelines) ? patterns.most_common_pipelines : [];
         const locations = locationsRaw
@@ -1240,7 +1249,7 @@
             renderCrossCameraTrack(Array.isArray(tracks) ? tracks : []);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            renderError(elements.trackingContainer, 'Failed to load movement tracking', err.referenceId);
+            renderError(elements.trackingContainer, err.code === 'TIMEOUT' ? err.message : 'Failed to load movement tracking', err.referenceId);
         }
     }
 
@@ -1484,7 +1493,7 @@
             renderCompleteAnalysis(analysis || {});
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            renderError(elements.completeContainer, 'Failed to load complete analysis', err.referenceId);
+            renderError(elements.completeContainer, err.code === 'TIMEOUT' ? err.message : 'Failed to load complete analysis', err.referenceId);
         }
     }
 
@@ -1493,20 +1502,25 @@
 
         function sectionCard(title, lines, tabName) {
             const btn = el('button', { className: 'btn-primary', text: 'View Details', attrs: { type: 'button' } });
+            btn.disabled = !!(sections[tabName] && sections[tabName].status === 'disabled');
             btn.addEventListener('click', function () { switchTab(tabName); });
             return el('div', { className: 'analysis-section' },
                 [el('h3', { text: title })].concat(lines.map(function (line) { return el('p', { text: line }); }), [btn]));
         }
 
         const relatedSection = sections.related || {};
-        const relatedLines = relatedSection.status === 'error'
+        const relatedLines = relatedSection.status === 'disabled'
+            ? ['Disabled in settings']
+            : relatedSection.status === 'error'
             ? ['Analysis failed for this section']
             : ['Found ' + toNonNegativeInteger(relatedSection.count,
                 Array.isArray(analysis.related_identities) ? analysis.related_identities.length : 0) + ' related identities'];
 
         const temporalSection = sections.temporal || {};
         let temporalLines;
-        if (temporalSection.status === 'error') {
+        if (temporalSection.status === 'disabled') {
+            temporalLines = ['Disabled in settings'];
+        } else if (temporalSection.status === 'error') {
             temporalLines = ['Analysis failed for this section'];
         } else {
             const tp = analysis.temporal_patterns || {};
@@ -1525,6 +1539,9 @@
         const trackingSection = sections.tracking || {};
         let trackingLines;
         switch (trackingSection.status) {
+            case 'disabled':
+                trackingLines = ['Disabled in settings'];
+                break;
             case 'ready':
                 trackingLines = [toNonNegativeInteger(trackingSection.movement_count, 0) + ' movements across ' +
                     toNonNegativeInteger(trackingSection.days_with_activity, 0) + ' day(s)'];

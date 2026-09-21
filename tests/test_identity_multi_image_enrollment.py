@@ -222,7 +222,8 @@ def _upload_legacy(token, name, image_path, is_face_image=False, filename=None,
     if status == 202 and body.get("decision_required"):
         return _http("POST", "/api/enrollment/confirm", token=token,
                      headers={"X-Requested-With": "XMLHttpRequest"},
-                     body={"action": on_decision,
+                     body={"action": "add_to_existing" if body.get("target_identity_id") else on_decision,
+                           "identity_id": body.get("target_identity_id"),
                            "display_name": name,
                            "upload_token": body["upload_token"],
                            # The prompt exists because this looks like somebody
@@ -234,9 +235,15 @@ def _upload_legacy(token, name, image_path, is_face_image=False, filename=None,
 
 def _add_image(token, identity_id, image_path, headers=None):
     payload = _read(image_path)
-    return _http("POST", f"/api/identities/{identity_id}/images", token=token,
+    status, body = _http("POST", f"/api/identities/{identity_id}/images", token=token,
                  headers=headers or {"X-Requested-With": "XMLHttpRequest"},
                  files={"photo": (os.path.basename(image_path), payload, "image/jpeg")})
+    if status == 202 and body.get("decision_required"):
+        return _http("POST", "/api/enrollment/confirm", token=token,
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            body={"action": "add_to_existing", "identity_id": identity_id,
+                  "upload_token": body["upload_token"]})
+    return status, body
 
 
 def _db_counts(identity_id):
@@ -457,7 +464,7 @@ def test_second_image_extends_the_same_identity(token):
     identity_id = first["identity_id"]
 
     status, second = _add_image(token, identity_id, FACE_B)
-    assert status == 201, second
+    assert status in (200, 201), second
     assert second["success"] is True
     assert second["identity_created"] is False, "must not create a second person"
     assert second["image_created"] is True
@@ -591,7 +598,7 @@ def test_only_one_primary_image_and_admin_can_change_it(token):
     assert status == 200 and first["success"], first
     identity_id = first["identity_id"]
     status, second = _add_image(token, identity_id, FACE_B)
-    assert status == 201, second
+    assert status in (200, 201), second
 
     # The database itself forbids a second primary.
     from sqlalchemy import text
@@ -727,7 +734,7 @@ def test_cropped_face_records_its_source_type(token):
 
     # A normal (non-cropped) upload is recorded distinctly.
     status, second = _add_image(token, identity_id, FACE_A)
-    assert status == 201, second
+    assert status in (200, 201), second
     status, listing = _http("GET", f"/api/identities/{identity_id}/images", token=token)
     kinds = {img["image_id"]: img["source_type"] for img in listing["images"]}
     assert kinds[second["image_id"]] == "upload", kinds

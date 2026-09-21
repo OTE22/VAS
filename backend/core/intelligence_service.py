@@ -263,6 +263,7 @@ class IntelligenceService:
         limit: int,
         cutoff_date: Optional[datetime] = None,
         use_requested_filters: bool = False,
+        related_identity_id: Optional[uuid.UUID] = None,
     ) -> List[RelatedIdentityInfo]:
         """
         Calculate co-appearances from appearance data.
@@ -379,6 +380,8 @@ class IntelligenceService:
             query = select(IdentityAppearance).where(
                 and_(
                     IdentityAppearance.identity_id != identity_id,
+                    (IdentityAppearance.identity_id == related_identity_id
+                     if related_identity_id is not None else True),
                     IdentityAppearance.pipeline_id == pipeline_id,
                     IdentityAppearance.start_time <= window_end,
                     func.coalesce(
@@ -455,6 +458,8 @@ class IntelligenceService:
                         query = select(IdentityAppearance).where(
                             and_(
                                 IdentityAppearance.identity_id != identity_id,
+                                (IdentityAppearance.identity_id == related_identity_id
+                                 if related_identity_id is not None else True),
                                 IdentityAppearance.pipeline_id.in_(nearby_pipelines),
                                 IdentityAppearance.start_time <= cross_camera_window_end,
                                 func.coalesce(
@@ -631,6 +636,14 @@ class IntelligenceService:
                 id1, id2 = target_uuid, other_uuid
             else:
                 id1, id2 = other_uuid, target_uuid
+                # Stored percentages and strengths always describe identity_id_1.
+                canonical = await self._calculate_co_appearances(
+                    db, id1, time_window_minutes, min_co_appearances, 1,
+                    related_identity_id=id2,
+                )
+                if not canonical:
+                    continue
+                rel = canonical[0]
 
             new_rel = IdentityRelationship(
                 identity_id_1=id1,
@@ -785,8 +798,8 @@ class IntelligenceService:
             try:
                 target_date = datetime.strptime(date, "%Y-%m-%d")
                 start_date = target_date.replace(hour=0, minute=0, second=0)
-                end_date = target_date.replace(hour=23, minute=59, second=59)
-            except ValueError:
+                end_date = start_date + timedelta(days=1)
+            except (ValueError, OverflowError):
                 raise ValueError("Invalid date format. Use YYYY-MM-DD")
         else:
             end_date = datetime.utcnow()
@@ -797,7 +810,7 @@ class IntelligenceService:
             and_(
                 IdentityAppearance.identity_id == target_uuid,
                 IdentityAppearance.start_time >= start_date,
-                IdentityAppearance.start_time <= end_date
+                IdentityAppearance.start_time < end_date
             )
         ).order_by(IdentityAppearance.start_time)
 

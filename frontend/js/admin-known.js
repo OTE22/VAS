@@ -131,7 +131,7 @@
                 const item = el('article', 'known-photo' + (image.is_primary ? ' primary-photo' : ''));
                 item.append(photo(image.url, `Enrollment photo of ${person.display_name}`, ''));
                 const body = el('div');
-                body.append(el('p', '', `${image.source_type === 'promotion' ? 'Promoted photo' : 'Uploaded photo'} · ${date(image.created_at)}`));
+                body.append(el('p', '', `${({ upload: 'Uploaded photo', cropped_face: 'Uploaded face crop', promotion: 'Promoted photo', merge: 'Merged photo' })[image.source_type] || 'Enrollment photo'} · ${date(image.created_at)}`));
                 if (image.is_primary) body.append(el('span', 'known-photo-primary', '✓ Primary photo'));
                 else {
                     const button = el('button', 'known-button', 'Set as primary'); button.type = 'button';

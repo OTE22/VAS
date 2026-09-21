@@ -325,24 +325,9 @@ def test_migration_applied_and_indexed():
                 "SELECT count(*) FROM risk_model_versions WHERE status='active'"))).scalar()
             return version, tables, indexes, tz_col, seeds
     version, tables, indexes, tz_col, seeds = run_async(_run())
-    # Head pin: the risk-platform migration must be in the applied lineage.
-    # Chain: a7b8c9d0e1f2 (risk platform) -> b8c9d0e1f2a3 (ML pipeline)
-    #        -> d0e1f2a3b4c5 (multi-image enrollment)
-    #        -> e1f2a3b4c5d6 (image source_type)
-    #        -> f2a3b4c5d6e7 (vector-index sync state)
-    #        -> a3b4c5d6e7f8 (system audit principal)
-    #        -> b4c5d6e7f8a9 (quality scorer provenance)
-    #        -> c5d6e7f8a9b0 (drop dead faiss_id + saved_searches)
-    #        -> d6e7f8a9b0c1 (pending enrollment decisions)
-    #        -> e7f8a9b0c1d2 (webhook ingest credentials)
-    #        -> f8a9b0c1d2e3 (merge provenance)
-    #        -> a9b0c1d2e3f4 (identity person_code)
-    #        -> b0c1d2e3f4a5 -> c2d3e4f5a6b7 -> d4e5f6a7b8c9 -> f6a7b8c9d0e1
-    #        -> 7d3f91a2c4e6 (JSON null literals -> SQL NULL)
-    #        -> d5f9b2c7e3a1 (identity_audit_log survives deletion)
-    #        -> fbb2c3d4e5f6 (relational ML features)
-    #        -> fcc3d4e5f6a7 (current head: ML platform integrations).
-    assert version == "fcc3d4e5f6a7"
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    assert version == ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
     for t in ("threat_assessments", "risk_signal_results", "risk_model_versions", "learned_thresholds"):
         assert t in tables, f"missing table {t}"
     for idx in ("uq_assessment_idempotency", "idx_assessment_person_created",

@@ -491,6 +491,7 @@ async def get_active_identity(
     identity_id: str,
     *,
     allowed_statuses: Sequence[IdentityStatus] = (IdentityStatus.ACTIVE,),
+    lock: bool = False,
 ) -> Identity:
     """Load an explicitly addressed identity, or refuse with 404.
 
@@ -511,8 +512,11 @@ async def get_active_identity(
         raise EnrollmentError("invalid_identity_id", "Invalid person identifier.",
                               status_code=400)
 
-    identity = (await db.execute(
-        select(Identity).where(Identity.id == parsed))).scalar_one_or_none()
+    query = select(Identity).where(Identity.id == parsed)
+    if lock:
+        # Serialize photo changes and refresh any identity loaded before the lock.
+        query = query.with_for_update().execution_options(populate_existing=True)
+    identity = (await db.execute(query)).scalar_one_or_none()
     if identity is None:
         raise EnrollmentError("identity_not_found", "Person not found.", status_code=404)
     if identity.status not in tuple(allowed_statuses):
@@ -1337,7 +1341,7 @@ async def enroll_image(
         # ---- resolve or create the identity -------------------------------
         if identity_id:
             identity = await get_active_identity(db, identity_id,
-                                                 allowed_statuses=allowed_statuses)
+                                                 allowed_statuses=allowed_statuses, lock=True)
         else:
             display_name = validate_person_name(person_name)
             # Serialize everyone enrolling THIS name for the rest of the
@@ -1362,6 +1366,9 @@ async def enroll_image(
                     "A person with this name already exists. Choose a different "
                     "name for a new person, or add to a reviewed existing person.",
                     status_code=409)
+            if identity is not None:
+                identity = await get_active_identity(db, str(identity.id),
+                    allowed_statuses=allowed_statuses, lock=True)
             if identity is None:
                 if not allow_create:
                     raise EnrollmentError("identity_not_found", "Person not found.",
@@ -1739,7 +1746,7 @@ async def set_primary_image(db: AsyncSession, identity_id: str, image_id: int,
                             actor_user_id: Optional[int] = None) -> Dict[str, Any]:
     """Promote one image to primary. Explicit, administrator-driven only."""
     identity = await get_active_identity(db, identity_id,
-        allowed_statuses=(IdentityStatus.ACTIVE, IdentityStatus.PROMOTED))
+        allowed_statuses=(IdentityStatus.ACTIVE, IdentityStatus.PROMOTED), lock=True)
 
     image = (await db.execute(
         select(IdentityImage).where(

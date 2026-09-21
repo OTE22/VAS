@@ -275,10 +275,14 @@
         }
 
         const timeoutCtl = new AbortController();
-        const timer = window.setTimeout(function () { timeoutCtl.abort(); }, options.timeout || API_TIMEOUT_MS);
-        const signals = [timeoutCtl.signal];
-        if (options.signal) signals.push(options.signal);
-        const signal = (typeof AbortSignal.any === 'function') ? AbortSignal.any(signals) : (options.signal || timeoutCtl.signal);
+        let timedOut = false;
+        const timer = window.setTimeout(function () { timedOut = true; timeoutCtl.abort(); }, options.timeout || API_TIMEOUT_MS);
+        const cancel = function () { timeoutCtl.abort(); };
+        if (options.signal) {
+            if (options.signal.aborted) cancel();
+            else options.signal.addEventListener('abort', cancel, { once: true });
+        }
+        const signal = timeoutCtl.signal;
 
         const headers = { 'Accept': options.expect === 'html' ? 'text/html' : 'application/json' };
         if (method !== 'GET' && method !== 'HEAD') {
@@ -303,10 +307,15 @@
             });
         } catch (err) {
             window.clearTimeout(timer);
+            if (options.signal) options.signal.removeEventListener('abort', cancel);
+            if (timedOut && !(options.signal && options.signal.aborted)) {
+                throw ApiError('The request timed out. Please retry.', { code: 'TIMEOUT' });
+            }
             if (err && err.name === 'AbortError') throw ApiError('Request cancelled', { aborted: true });
             throw ApiError('Network error — backend unreachable', { status: 0 });
         }
         window.clearTimeout(timer);
+        if (options.signal) options.signal.removeEventListener('abort', cancel);
 
         if (response.status === 401) {
             window.location.href = '/login';
@@ -2032,10 +2041,10 @@
                 body: { resolution_status: outcome === 'positive' ? 'confirmed_threat' : 'not_a_threat',
                         notes: notes && notes.trim() ? notes.trim() : null,
                         outcome: outcome,
-                        ml_observation_revealed: state.mlObservationRevealed === true }
+                        ml_observation_revealed: observationWasRevealed(assessment.assessment_id) }
             });
             const label = result && result.outcome_label ? result.outcome_label : null;
-            status.textContent = 'Outcome recorded (' + outcome + ', ' + (state.mlObservationRevealed ? 'ML observation revealed' : 'blind') +
+            status.textContent = 'Outcome recorded (' + outcome + ', ' + (observationWasRevealed(assessment.assessment_id) ? 'ML observation revealed' : 'blind') +
                 '). Label ' + safeText(label && label.id, '?') + ' is UNREVIEWED until confirmed in ML-Ops.';
             status.className = 'outcome-status ok';
             loadThreatHistory(assessment.identity_id);
@@ -2054,6 +2063,15 @@
         document.querySelectorAll('.history-ml[data-band-text]').forEach(function (node) {
             node.textContent = revealed ? node.dataset.bandText : 'ML observation recorded (hidden — blind review guard)';
         });
+    }
+
+    const revealedAssessments = new Set();
+    function observationWasRevealed(id) {
+        if (!id) return false;
+        try {
+            if (window.sessionStorage.getItem('security-ml-revealed:' + id) === '1') return true;
+        } catch (_) { /* Keep the in-memory guard when storage is unavailable. */ }
+        return revealedAssessments.has(id);
     }
 
     function renderThreatAssessment(assessment) {
@@ -2093,7 +2111,7 @@
         // analyst recording an outcome is not primed by the band. It is still
         // one click away for the administrator.
         const observation = buildObservationPanel(assessment.ml_observation);
-        state.mlObservationRevealed = false;
+        state.mlObservationRevealed = observationWasRevealed(assessment.assessment_id);
         if (observation) {
             observation.hidden = true;
             const reveal = el('button', { className: 'btn-secondary ml-observation-reveal',
@@ -2104,7 +2122,14 @@
                 observation.hidden = !observation.hidden;
                 // Once revealed, the outcome recorded for this assessment is
                 // marked REVEALED for good (hiding it again does not un-see it).
-                if (!observation.hidden) state.mlObservationRevealed = true;
+                if (!observation.hidden) {
+                    state.mlObservationRevealed = true;
+                    if (assessment.assessment_id) {
+                        revealedAssessments.add(assessment.assessment_id);
+                        try { window.sessionStorage.setItem('security-ml-revealed:' + assessment.assessment_id, '1'); }
+                        catch (_) { /* In-memory state remains available. */ }
+                    }
+                }
                 reveal.textContent = observation.hidden ? 'Show ML shadow observation (blind review guard)'
                                                         : 'Hide ML shadow observation';
                 applyHistoryBandGuard();
