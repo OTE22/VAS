@@ -864,7 +864,7 @@ async def list_unknown_identities(
             filters=filters
         )
 
-        cache_key += ":camera-events-v2"
+        cache_key += ":camera-events-v3"
         # Try to get from cache
         cached_result = await redis_cache_service.get(cache_key)
         if cached_result:
@@ -914,13 +914,21 @@ async def list_unknown_identities(
             event_conditions.append(IdentityAppearance.pipeline_id == pipeline_id)
         if user_pipelines is not None:
             event_conditions.append(IdentityAppearance.pipeline_id.in_(user_pipelines))
-        if date_from:
-            event_conditions.append(IdentityAppearance.start_time >= _parse_filter_bound(date_from))
-        elif window_cutoff is not None:
-            event_conditions.append(IdentityAppearance.start_time >= window_cutoff)
-        if date_to:
-            event_conditions.append(IdentityAppearance.start_time < _parse_filter_bound(date_to, end=True))
-        conditions.append(select(IdentityAppearance.id).where(*event_conditions).correlate(Identity).exists())
+        lower_bound = _parse_filter_bound(date_from) if date_from else window_cutoff
+        upper_bound = _parse_filter_bound(date_to, end=True) if date_to else None
+        no_appearances = ~select(IdentityAppearance.id).where(
+            IdentityAppearance.identity_id == Identity.id).correlate(Identity).exists()
+        fallback_conditions = [no_appearances]
+        if lower_bound is not None:
+            event_conditions.append(IdentityAppearance.start_time >= lower_bound)
+            fallback_conditions.append(Identity.last_seen_at >= lower_bound)
+        if upper_bound is not None:
+            event_conditions.append(IdentityAppearance.start_time < upper_bound)
+            fallback_conditions.append(Identity.last_seen_at < upper_bound)
+        conditions.append(or_(
+            select(IdentityAppearance.id).where(*event_conditions).correlate(Identity).exists(),
+            and_(*fallback_conditions),
+        ))
 
         if min_appearances:
             conditions.append(Identity.appearances_count >= min_appearances)
@@ -953,6 +961,19 @@ async def list_unknown_identities(
         )
         pipeline_totals = {pid: count for pid, count in pipeline_counts.all() if pid}
 
+        # Embedding/detection-only identities still belong to their effective cameras.
+        fallback_camera_conditions = [cameras_relation.c.identity_id.in_(
+            select(Identity.id).where(no_appearances))]
+        if pipeline_id:
+            fallback_camera_conditions.append(cameras_relation.c.pipeline_id == pipeline_id)
+        if user_pipelines is not None:
+            fallback_camera_conditions.append(cameras_relation.c.pipeline_id.in_(user_pipelines))
+        fallback_counts = await db.execute(select(cameras_relation.c.pipeline_id, func.count())
+            .where(*fallback_camera_conditions).group_by(cameras_relation.c.pipeline_id))
+        for pid, count in fallback_counts.all():
+            if pid:
+                pipeline_totals[pid] = pipeline_totals.get(pid, 0) + count
+
         # ORDER BY carries a tiebreak: last_seen_at ties are ordinary (bulk
         # ingest, one transaction touching many rows), and without the PK an
         # identity can appear on two pages or on none.
@@ -971,7 +992,8 @@ async def list_unknown_identities(
             db, [identity.id for identity in identities])
 
         from backend.core.appearance_events import latest_camera_events
-        camera_events = await latest_camera_events(db, [i.id for i in identities], user_pipelines)
+        camera_events = await latest_camera_events(db, [i.id for i in identities], user_pipelines,
+                                                  date_from=lower_bound, date_to=upper_bound)
         # Get camera counts and pipeline IDs for each identity
         identity_list = []
 
@@ -985,7 +1007,8 @@ async def list_unknown_identities(
                 logger.warning(f"[SECURITY] Filtered out KNOWN identity {identity.id} from unknown list (type: {identity.type})")
                 continue
 
-            pipeline_ids = sorted(pipelines_by_identity.get(identity.id, ()))
+            pipeline_ids = sorted(pid for pid in pipelines_by_identity.get(identity.id, ())
+                                  if user_pipelines is None or pid in user_pipelines)
 
             # Verify best_snapshot_path exists on disk and convert to relative path for serving
             best_snapshot_path = identity.best_snapshot_path
@@ -1100,6 +1123,7 @@ async def list_unknown_identities(
                 "best_snapshot_path": best_snapshot_path,  # Keep original path for reference
                 "snapshot_url": snapshot_url,  # Backend provides ready-to-use URL
                 "pipeline_ids": pipeline_ids,  # List of pipeline IDs where this identity was seen
+                "pipeline_evidence_only": not bool(camera_events.get(str(identity.id))),
                 "camera_events": camera_events.get(str(identity.id), {})
             })
         

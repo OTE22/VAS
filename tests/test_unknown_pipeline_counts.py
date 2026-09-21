@@ -20,7 +20,7 @@ class PipelineCountsTest(unittest.TestCase):
         metadata.create_all(engine)
         source = Path('backend/routes/identities.py').read_text()
         start = source.index('        pipeline_counts = await db.execute(')
-        end = source.index('\n        # ORDER BY', start)
+        end = source.index('\n        # Embedding/detection-only', start)
         query_code = textwrap.dedent(source[start:end]).replace('.select_from(IdentityAppearance)', '.select_from(appearances)').replace('.join(Identity,', '.join(identities,')
         with engine.begin() as connection:
             connection.execute(identities.insert(), [{'id': i, 'type': 'unknown' if i < 24 else 'known'} for i in range(1, 25)])

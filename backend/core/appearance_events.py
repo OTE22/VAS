@@ -22,12 +22,17 @@ def event_payload(appearance):
     }
 
 
-async def latest_camera_events(db, identity_ids, allowed_pipelines=None):
+async def latest_camera_events(db, identity_ids, allowed_pipelines=None, *, date_from=None, date_to=None):
     if not identity_ids:
         return {}
-    query = select(IdentityAppearance).where(IdentityAppearance.identity_id.in_(identity_ids))
+    conditions = [IdentityAppearance.identity_id.in_(identity_ids)]
     if allowed_pipelines is not None:
-        query = query.where(IdentityAppearance.pipeline_id.in_(allowed_pipelines))
+        conditions.append(IdentityAppearance.pipeline_id.in_(allowed_pipelines))
+    if date_from is not None:
+        conditions.append(IdentityAppearance.start_time >= date_from)
+    if date_to is not None:
+        conditions.append(IdentityAppearance.start_time < date_to)
+    query = select(IdentityAppearance).where(*conditions)
     query = query.distinct(IdentityAppearance.identity_id, IdentityAppearance.pipeline_id).order_by(
         IdentityAppearance.identity_id, IdentityAppearance.pipeline_id,
         IdentityAppearance.start_time.desc(), IdentityAppearance.id.desc())
@@ -35,9 +40,7 @@ async def latest_camera_events(db, identity_ids, allowed_pipelines=None):
     for appearance in (await db.execute(query)).scalars():
         result.setdefault(str(appearance.identity_id), {})[appearance.pipeline_id] = event_payload(appearance)
     counts = select(IdentityAppearance.identity_id, IdentityAppearance.pipeline_id, func.count()).where(
-        IdentityAppearance.identity_id.in_(identity_ids)).group_by(IdentityAppearance.identity_id, IdentityAppearance.pipeline_id)
-    if allowed_pipelines is not None:
-        counts = counts.where(IdentityAppearance.pipeline_id.in_(allowed_pipelines))
+        *conditions).group_by(IdentityAppearance.identity_id, IdentityAppearance.pipeline_id)
     for iid, pid, count in (await db.execute(counts)).all():
         if pid in result.get(str(iid), {}):
             result[str(iid)][pid]['appearances_count'] = count

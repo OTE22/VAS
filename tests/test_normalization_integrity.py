@@ -456,7 +456,8 @@ def test_migration_roundtrip_preserves_populated_rows_and_refuses_corruption():
             c.execute(text('DELETE FROM identity_embeddings WHERE id=:id'),{'id':corrupt_id})
         migration('upgrade','fee5f6a7b8c9')
         with Session(engine) as db:
-            assert db.get(m.LiveSearchAlert,alert_id).pipeline_ids == [pipeline_id]
+            assert db.execute(text('SELECT pipeline_ids FROM live_search_alerts WHERE id=:id'),
+                              {'id': alert_id}).scalar_one() == [pipeline_id]
             assert db.get(m.MergeSuggestion,suggestion_id).identity_ids == [str(aid),str(bid)]
             assert db.execute(text('SELECT count(*) FROM live_alert_pipeline_links WHERE alert_id=:id'),{'id':alert_id}).scalar_one() == 1
             assert db.execute(text('SELECT count(*) FROM pending_merge_members WHERE suggestion_id=:id'),{'id':suggestion_id}).scalar_one() == 2
@@ -466,6 +467,7 @@ def test_migration_roundtrip_preserves_populated_rows_and_refuses_corruption():
             c.execute(text('DELETE FROM merge_suggestions WHERE id=:id'),{'id':suggestion_id})
             c.execute(text('DELETE FROM identities WHERE id IN (:a,:b)'),{'a':aid,'b':bid})
             c.execute(text('DELETE FROM pipelines WHERE id=:id'),{'id':cam_id})
+        migration('upgrade', 'head')
         engine.dispose()
 
 

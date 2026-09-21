@@ -792,6 +792,9 @@ async function loadUnknownFaces() {
                         last_seen_at: event.timestamp, best_snapshot_path: event.snapshot_path,
                         snapshot_url: event.snapshot_url
                     });
+                    else if (identity.pipeline_evidence_only) groupedByPipeline[pipelineId].push({
+                        ...identity, pipeline_id: pipelineId, appearances_count: 0
+                    });
                 });
             }
             // Identities with no pipeline IDs are completely skipped
@@ -1386,7 +1389,7 @@ function createIdentityCard(identity) {
     card.setAttribute('data-identity-id', identity.id);
     card.setAttribute('data-pipeline-id', identity.pipeline_id || '');
 
-    const sightings = identity.appearances_count || 1;
+    const sightings = identity.appearances_count ?? 1;
     const lastSeen = new Date(identity.last_seen_at || identity.first_seen_at);
 
     card.innerHTML = `
@@ -1395,7 +1398,7 @@ function createIdentityCard(identity) {
             <div class="face-placeholder">No image available</div>
         </div>
         <div class="identity-meta">
-            <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${lastSeen.toLocaleString()}</span>
+            <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${identity.pipeline_evidence_only ? 'No recorded sighting' : lastSeen.toLocaleString()}</span>
             <div class="identity-badge" data-appearances-count="${sightings}" title="${sightings} sighting${sightings === 1 ? '' : 's'}">
                 <i class="fas fa-eye"></i>${sightings}
             </div>

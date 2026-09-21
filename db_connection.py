@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
 )
 from sqlalchemy.exc import InterfaceError, DisconnectionError
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from fastapi.exceptions import RequestValidationError
 
 from db_models import Base
@@ -129,29 +129,8 @@ class DatabaseManager:
                 logger.debug(f"[DB] ✅ Database session created successfully")
                 try:
                     yield session
-                    # Attempt to commit - handle closed connections gracefully
-                    try:
-                        await session.commit()
-                    except (InterfaceError, DisconnectionError) as conn_error:
-                        # Connection was closed (timeout, network issue, or server restart)
-                        # This can happen if the connection pool recycled the connection
-                        # or if the database server closed it. Log warning but don't fail.
-                        error_str = str(conn_error)
-                        if "connection is closed" in error_str.lower() or \
-                           "underlying connection is closed" in error_str.lower():
-                            logger.warning(
-                                f"⚠️  Database connection closed during commit - "
-                                f"this may occur due to connection pool recycling or database timeout. "
-                                f"Error: {type(conn_error).__name__}"
-                            )
-                            # Don't raise - connection closure during commit is often recoverable
-                            # The transaction may have already completed on the server side
-                        else:
-                            # Re-raise other connection errors
-                            raise
-                    except Exception as commit_error:
-                        # Re-raise other exceptions (not connection-related)
-                        raise
+                    # A lost connection leaves the commit outcome unknown; report failure.
+                    await session.commit()
 
                 except asyncio.CancelledError:
                     # 🚨 MUST propagate cancellation
@@ -176,7 +155,6 @@ class DatabaseManager:
                     raise
 
                 except Exception as e:
-                    self._stats["failed_sessions"] += 1
                     # Attempt rollback, but handle closed connections gracefully
                     try:
                         await session.rollback()
@@ -198,7 +176,6 @@ class DatabaseManager:
                     raise
 
                 finally:
-                    self._stats["active_sessions"] -= 1
                     try:
                         await session.close()
                     except Exception as close_error:
@@ -209,16 +186,13 @@ class DatabaseManager:
         except HTTPException:
             # 🚨 HTTPException should propagate normally (not a DB error)
             # This can happen if HTTPException is raised during session creation
-            self._stats["active_sessions"] -= 1
             raise  # Re-raise to let FastAPI handle it
         except TimeoutError as e:
             self._stats["failed_sessions"] += 1
-            self._stats["active_sessions"] -= 1
             logger.error(f"DB connection timeout - database may be overloaded. Active sessions: {self._stats['active_sessions']}")
             raise
         except asyncio.TimeoutError as e:
             self._stats["failed_sessions"] += 1
-            self._stats["active_sessions"] -= 1
             logger.error(f"DB connection timeout - database may be overloaded. Active sessions: {self._stats['active_sessions']}")
             raise
         except (HTTPException, RequestValidationError):
@@ -226,13 +200,14 @@ class DatabaseManager:
             # the inner handler already rolled back; re-logging them here as
             # "DB session creation failed" is what made every 422 look like a
             # database outage in production logs.
-            self._stats["active_sessions"] -= 1
             raise
         except Exception as e:
             self._stats["failed_sessions"] += 1
-            self._stats["active_sessions"] -= 1
             logger.error(f"DB session creation failed: {e}")
             raise
+
+        finally:
+            self._stats["active_sessions"] -= 1
 
     # =====================================================
     # Health Check (NO ORM, NO TX)
@@ -341,6 +316,13 @@ db_manager = DatabaseManager()
 # =====================================================
 # FastAPI dependency
 # =====================================================
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
+async def _get_db_session() -> AsyncGenerator[AsyncSession, None]:
     async with db_manager.get_session() as session:
         yield session
+
+
+async def get_db(
+    session: AsyncSession = Depends(_get_db_session, scope="function"),
+) -> AsyncSession:
+    """Finish the transaction before FastAPI sends a successful response."""
+    return session

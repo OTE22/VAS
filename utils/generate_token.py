@@ -25,7 +25,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from backend.auth.auth_service import AuthService
-from db_connection import get_db
+from db_connection import db_manager
 
 
 async def generate_token(username: str, password: str):
@@ -43,7 +43,8 @@ async def generate_token(username: str, password: str):
         SystemExit: If authentication fails or user is inactive
     """
     try:
-        async for db in get_db():
+        await db_manager.init_db()
+        async with db_manager.get_session() as db:
             # Authenticate user
             user = await AuthService.authenticate_user(username, password, db)
             if not user:

@@ -62,3 +62,23 @@ test('missing count metadata reports an error instead of displaying an empty lis
     const load = harness(async () => { throw new Error('unexpected request'); });
     await assert.rejects(load({identities: [{id: 'existing'}]}, new URLSearchParams(), () => true), /Pipeline counts unavailable/);
 });
+test('embedding-only identities render without inventing a camera sighting', () => {
+    const start = source.indexOf('        const groupedByPipeline = {};');
+    const end = source.indexOf('        // Store all pipeline groups', start);
+    const context = vm.createContext({
+        currentFilters: {pipeline_id: 'camera'},
+        unknownIdentities: [
+            {id: 'legacy', pipeline_ids: ['camera'], pipeline_evidence_only: true, camera_events: {}},
+            {id: 'seen', pipeline_ids: ['camera'], camera_events: {camera: {
+                timestamp: '2026-01-01T12:00:00Z', appearances_count: 1
+            }}}
+        ]
+    });
+    vm.runInContext(source.slice(start, end) + '\nthis.groups = groupedByPipeline;', context);
+    assert.equal(context.groups.camera.length, 2);
+    const fallback = context.groups.camera[0];
+    assert.equal(fallback.pipeline_evidence_only, true);
+    assert.equal(fallback.appearances_count, 0);
+    assert.equal(fallback.pipeline_id, 'camera');
+    assert.equal(context.groups.camera[1].last_seen_at, '2026-01-01T12:00:00Z');
+});
