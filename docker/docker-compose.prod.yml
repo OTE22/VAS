@@ -311,16 +311,9 @@ services:
       # in a container they only shred the logs.
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
       OLLAMA_BASE_URL: http://ollama:11434
-      # qwen2.5:7b, not 1.5b. Measured on this host with the 11-tool payload:
-      # 1.5b returned NATIVE tool_calls for only 3 of 6 real prompts, left 2
-      # unparseable, and picked the wrong tool once ("people at the north gate"
-      # -> list_my_documents). 7b was 6/6 native and correct every time.
-      #
-      # It costs nothing: once ollama actually uses the GPU, warm latency is
-      # 0.1s for BOTH models. The 7b was only "slower" while ollama was
-      # silently running on CPU - see docker/gpu-allocation.generated.yml.
-      OLLAMA_MODEL: qwen2.5:7b
-      OLLAMA_SQL_MODEL: hf.co/mradermacher/Arctic-Text2SQL-R1-7B-GGUF:Q4_K_M
+      # Use the downloaded GPT-OSS model for chat, interpretation, and SQL.
+      OLLAMA_MODEL: gpt-oss:20b
+      OLLAMA_SQL_MODEL: gpt-oss:20b
       CHROMADB_PATH: /app/database/chromadb
     secrets:
       - jwt_secret
@@ -483,6 +476,9 @@ services:
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_MODELS=/root/.ollama/models
       - OLLAMA_KEEP_ALIVE=-1
+      # Keep downloaded language models on CPU, including with the GPU overlay.
+      - CUDA_VISIBLE_DEVICES=-1
+      - OLLAMA_VULKAN=0
     volumes:
       - ollama_models:/root/.ollama
     expose:
@@ -497,7 +493,7 @@ services:
       resources:
         limits:
           cpus: '4.0'
-          memory: 8G
+          memory: 24G
     logging:
       driver: json-file
       options: { max-size: "50m", max-file: "3" }
