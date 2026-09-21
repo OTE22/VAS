@@ -405,7 +405,7 @@ def test_js_no_inline_handlers_and_safe_values():
 def test_js_real_alerts_today():
     src = _read(JS_PATH)
     assert "alertsToday" in src and "alerts_today" in src
-    assert "'Alerts Today'" in src
+    assert "'Today · UTC'" in src
     assert '<div class="value">0</div>' not in src, "the fake hard-coded zero must be gone"
 
 
@@ -451,6 +451,6 @@ def test_html_contract():
     src = _read(HTML_PATH)
     for banned in ("onclick=", "onerror=", "onmouseover="):
         assert banned not in src
-    assert "admin-watchlists.js?v=wl-2" in src
+    assert "admin-watchlists.js?v=wl-3" in src
     assert 'id="watchlist-toolbar"' in src
     assert 'maxlength="1000"' in src

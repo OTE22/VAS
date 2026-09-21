@@ -327,7 +327,9 @@ def test_migration_applied_and_indexed():
     version, tables, indexes, tz_col, seeds = run_async(_run())
     from alembic.config import Config
     from alembic.script import ScriptDirectory
-    assert version == ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+    cfg = Config("alembic/alembic.ini")
+    cfg.set_main_option("script_location", "alembic")
+    assert version == ScriptDirectory.from_config(cfg).get_current_head()
     for t in ("threat_assessments", "risk_signal_results", "risk_model_versions", "learned_thresholds"):
         assert t in tables, f"missing table {t}"
     for idx in ("uq_assessment_idempotency", "idx_assessment_person_created",

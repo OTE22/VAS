@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-watchlists.css?v=fields-1">
+    <link rel="stylesheet" href="/frontend/css/admin-watchlists.css?v=wl-3">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -31,7 +31,7 @@
                     </div>
                     <div class="header-text">
                         <h1 class="page-title">Watchlist Management</h1>
-                        <p class="page-description">Create and manage VIP, Threat, and POI watchlists</p>
+                        <p class="page-description">Monitor identities, understand alert activity, and manage who belongs on each list.</p>
                     </div>
                 </div>
                 <div class="header-actions">
@@ -44,6 +44,8 @@
                 </div>
             </header>
 
+            <section id="watchlist-summary" class="wl-summary" aria-label="Watchlist overview"></section>
+            <p class="wl-page-guide">Active lists match eligible identities. Paused lists stop matching and retain their history. Alert level indicates urgency; it is not a threat assessment.</p>
             <!-- Search / filters / sorting / pagination built by admin-watchlists.js -->
             <div id="watchlist-toolbar"></div>
 
@@ -118,6 +120,6 @@
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/admin-navbar.js"></script>
-    <script src="/frontend/js/admin-watchlists.js?v=wl-2"></script>
+    <script src="/frontend/js/admin-watchlists.js?v=wl-3"></script>
 </body>
 </html>

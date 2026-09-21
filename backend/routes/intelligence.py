@@ -1480,8 +1480,8 @@ async def get_threat_assessment(
 
         _audit("threat_assessment", current_user, identity_id,
                duration_ms=int((time.monotonic() - started) * 1000),
-               threat_level=assessment.threat_level,
-               risk_score=assessment.overall_risk_score,
+               threat_level=stored["severity"] if deduplicated else assessment.threat_level,
+               risk_score=stored["total_risk_score"] if deduplicated else assessment.overall_risk_score,
                assessment_id=assessment_id)
         payload = {
             "identity_id": assessment.identity_id,
@@ -1521,7 +1521,7 @@ async def get_threat_assessment(
         if deduplicated:
             # The card and its outcome must describe the same persisted row.
             # Historical rows do not retain the full transient engine payload
-            # or recommendations, so do not attach today's values to them.
+            # or recommendations; reconstruct only fields saved with the row.
             payload.update({
                 "overall_risk_score": stored["total_risk_score"],
                 "threat_level": stored["severity"],
@@ -1534,7 +1534,23 @@ async def get_threat_assessment(
                 "last_assessed": stored["source_timestamp"] or stored["created_at"],
                 "algorithm_version": stored["model_version"],
                 "recommendations": [],
-                "engine": None,
+                "engine": {
+                    "profile": "identity_threat",
+                    "total_score": stored["total_risk_score"],
+                    "severity": stored["severity"],
+                    "confidence": stored["confidence"],
+                    "model_version": stored["model_version"],
+                    "threshold_version": stored["threshold_version"],
+                    "signals": stored["signals"],
+                    "signal_scores": {s["name"]: s.get("score") for s in stored["signals"]},
+                    "weights": {s["name"]: s.get("weight") for s in stored["signals"]},
+                    "explanation": stored["explanation"],
+                    "limitations": stored["limitations"],
+                    "score_type": stored["score_type"],
+                    "is_probability": stored["is_probability"],
+                    "calibration_status": stored["calibration_status"],
+                    "computed_at": stored["source_timestamp"],
+                },
                 "decision": None,
                 "score_type": stored["score_type"],
                 "is_probability": stored["is_probability"],

@@ -1,6 +1,6 @@
 # Security Intelligence audit — 2026-09-21
 
-Scope: `/admin/security-intelligence`, its frontend requests, backend analysis and assessment persistence. Audit only; no application fixes or deployment in this pass. Existing changes from previous page fixes were preserved.
+Scope: `/admin/security-intelligence`, its frontend requests, backend analysis and assessment persistence. The initial audit was followed by the fixes below. Existing changes from previous page fixes were preserved. No deployment was performed for these fixes.
 
 ## Confirmed findings
 
@@ -34,3 +34,19 @@ Scope: `/admin/security-intelligence`, its frontend requests, backend analysis a
 - No full browser interaction, large-scale load test, or external security penetration test was performed. Passing existing tests does not establish that every page flow is correct.
 
 Evidence: `logs/security-intelligence-audit-20260921/test_probes.py`, `ui-probe.cjs`; regression logs `logs/regression/regression_413378_ced0c147.log` and `regression_428514_494be9c0.log`. Logs/probes under `logs/` are local ignored artifacts.
+
+## Fixes completed
+
+- Deduplicated threat responses and audit log scores now use the persisted assessment. Engine signal details are reconstructed from stored signals; transient recommendations are omitted rather than mixing a new calculation with the old assessment ID.
+- Network analysis uses the existing bounded, cutoff-aware appearance calculation consistently. Node counts respect the date range. Candidate identities come from actual recent appearances instead of relying on the denormalized last-seen value. Reversed identity pairs recalculate the canonical percentage denominator.
+- Frontend timeouts produce visible errors and work alongside caller cancellation without requiring `AbortSignal.any`.
+- ML reveal state is keyed by assessment ID with an in-memory fallback and sessionStorage persistence across same-tab reloads. It is not a cross-browser or cross-device server-side reveal ledger.
+- Updated the frontend cache version and matching test; the migration check resolves the current Alembic head instead of hard-coding an old version.
+
+Validation after fixes: **63 Python tests passed**, **4 JavaScript tests passed**, and `git diff --check` passed. The Python suite includes cached versus uncached window counts, asymmetric canonical percentages, and changing scores within the dedup window. JavaScript checks cover reveal/rerender/reload, independent assessment state, timeouts with and without a caller signal, and intentional cancellation. Regression log: `logs/regression/regression_448405_2f752682.log`.
+
+Operational tradeoff: accurate network ranges now calculate relationships from appearances instead of using lifetime cache aggregates; existing identity/appearance bounds remain in place. Large-dataset latency was not load-tested. No database migration is required.
+
+## Deployment — 2026-09-21
+
+Security Intelligence fixes deployed to the production API and ML worker. Both containers healthy; all four changed application files matched local SHA-256 hashes. Environment variables, bind mounts and GPU device requests matched their prior container configurations. Public health and authenticated Security Intelligence page/capabilities checks succeeded. Rollback images retain the `before-security-fixes-20260921` tag. API image: `e63ec2927af1`; worker: `434c38eb97b0`. No database migration or relationship rebuild required.

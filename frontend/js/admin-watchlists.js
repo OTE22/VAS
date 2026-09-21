@@ -168,10 +168,14 @@
         }
 
         const timeoutCtl = new AbortController();
-        const timer = window.setTimeout(function () { timeoutCtl.abort(); }, options.timeout || API_TIMEOUT_MS);
-        const signals = [timeoutCtl.signal];
-        if (options.signal) signals.push(options.signal);
-        const signal = (typeof AbortSignal.any === 'function') ? AbortSignal.any(signals) : (options.signal || timeoutCtl.signal);
+        let timedOut = false;
+        const timer = window.setTimeout(function () { timedOut = true; timeoutCtl.abort(); }, options.timeout || API_TIMEOUT_MS);
+        const cancel = function () { timeoutCtl.abort(); };
+        if (options.signal) {
+            if (options.signal.aborted) cancel();
+            else options.signal.addEventListener('abort', cancel, { once: true });
+        }
+        const signal = timeoutCtl.signal;
 
         const headers = { 'Accept': 'application/json' };
         if (method !== 'GET' && method !== 'HEAD') {
@@ -191,10 +195,13 @@
             });
         } catch (err) {
             window.clearTimeout(timer);
+            if (options.signal) options.signal.removeEventListener('abort', cancel);
+            if (timedOut && !(options.signal && options.signal.aborted)) throw ApiError('Request timed out. Please retry.', { code: 'TIMEOUT' });
             if (err && err.name === 'AbortError') throw ApiError('Request cancelled', { aborted: true });
             throw ApiError('Network error — backend unreachable', { status: 0 });
         }
         window.clearTimeout(timer);
+        if (options.signal) options.signal.removeEventListener('abort', cancel);
 
         if (response.status === 401) {
             window.location.href = '/login';
@@ -287,7 +294,7 @@
         const colors = { info: '#3498db', success: '#2ecc71', error: '#e74c3c', warning: '#f39c12' };
         const notification = el('div', { className: 'notification ' + type });
         notification.style.cssText = 'position:fixed;top:20px;right:20px;padding:14px 20px;background:' + colors[type] +
-            ';color:#fff;border-radius:6px;z-index:10010;box-shadow:0 4px 6px rgba(0,0,0,0.3);font-weight:600;';
+            ';color:#fff;border-radius:6px;z-index:var(--z-toast,10050);box-shadow:0 4px 6px rgba(0,0,0,0.3);font-weight:600;';
         notification.textContent = message;
         notification.setAttribute('role', type === 'error' ? 'alert' : 'status');
         document.body.appendChild(notification);
@@ -302,10 +309,12 @@
 
     function closeDialog() {
         if (!activeDialog) return;
-        document.removeEventListener('keydown', activeDialog.keyHandler);
-        activeDialog.node.remove();
-        if (activeDialog.previousFocus && activeDialog.previousFocus.focus) activeDialog.previousFocus.focus();
+        const dialog = activeDialog;
         activeDialog = null;
+        document.removeEventListener('keydown', dialog.keyHandler);
+        if (window.ModalStack) window.ModalStack.close(dialog.node);
+        dialog.node.remove();
+        if (dialog.previousFocus && dialog.previousFocus.isConnected) dialog.previousFocus.focus();
     }
 
     // Accessible confirm/info dialog. Returns a Promise<boolean>.
@@ -335,12 +344,13 @@
                 'border-radius:10px;padding:1.5rem;max-width:520px;width:92%;max-height:80vh;overflow:auto;';
             const backdrop = el('div', {}, dialog);
             backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;' +
-                'align-items:center;justify-content:center;z-index:10005;';
+                'align-items:center;justify-content:center;z-index:var(--z-modal-base,10000);';
 
-            function finish(result) { closeDialog(); resolve(result); }
+            let finished = false;
+            function finish(result) { if (finished) return; finished = true; closeDialog(); resolve(result); }
             cancelBtn.addEventListener('click', function () { finish(false); });
             if (confirmBtn) confirmBtn.addEventListener('click', function () { finish(true); });
-            backdrop.addEventListener('click', function (e) { if (e.target === backdrop) finish(false); });
+            if (!window.ModalStack) backdrop.addEventListener('click', function (e) { if (e.target === backdrop) finish(false); });
 
             const focusables = [cancelBtn].concat(confirmBtn ? [confirmBtn] : []);
             const keyHandler = function (e) {
@@ -353,9 +363,10 @@
                     next.focus();
                 }
             };
-            document.addEventListener('keydown', keyHandler);
+            if (!window.ModalStack) document.addEventListener('keydown', keyHandler);
             activeDialog = { node: backdrop, keyHandler: keyHandler, previousFocus: document.activeElement };
             document.body.appendChild(backdrop);
+            if (window.ModalStack) window.ModalStack.open(backdrop, { backdropClose: true, onClose: () => finish(false) });
             (confirmBtn || cancelBtn).focus();
         });
     }
@@ -502,7 +513,27 @@
         }
     }
 
+    function monitoringText(wl) {
+        if (wl.deletedAt) return 'Deleted · matching stopped. Historical alerts are retained.';
+        if (!wl.isActive) return 'Paused · this list does not generate new matches.';
+        if (!wl.entriesCount) return 'No eligible identities · add an identity to begin monitoring.';
+        return 'Monitoring enabled · eligible identities can trigger watchlist alerts.';
+    }
+
     function renderWatchlists(items) {
+        const summary = document.getElementById('watchlist-summary');
+        if (summary) summary.replaceChildren(
+            el('div', { className: 'wl-summary-heading' }, [
+                el('h2', { text: 'At a glance' }),
+                el('p', { text: 'On this page · reflects your current filters' })
+            ]),
+            el('div', { className: 'wl-summary-metrics' }, [
+                stat(String(items.length), 'Watchlists shown'),
+                stat(String(items.filter(w => w.isActive && !w.deletedAt).length), 'Active lists'),
+                stat(String(items.reduce((n, w) => n + w.entriesCount, 0)), 'Eligible memberships'),
+                stat(String(items.reduce((n, w) => n + w.alertsToday, 0)), 'Alerts today · UTC')
+            ])
+        );
         const grid = document.getElementById('watchlist-grid');
         if (!grid) return;
         const createCard = grid.querySelector('.create-card');
@@ -550,9 +581,9 @@
 
         const statusText = wl.deletedAt ? 'Deleted' : (wl.isActive ? 'Active' : 'Inactive');
         const stats = el('div', { className: 'watchlist-stats' }, [
-            stat(String(wl.entriesCount), 'Entries'),
-            stat(String(wl.alertsToday), 'Alerts Today'),
-            stat(statusText, 'Status')
+            stat(String(wl.entriesCount), 'Eligible identities'),
+            stat(String(wl.alertsToday), 'Today · UTC'),
+            stat(String(wl.totalAlerts), 'All-time alerts')
         ]);
 
         const actions = el('div', { className: 'watchlist-actions' });
@@ -573,7 +604,12 @@
         }
 
         const card = el('div', { className: 'watchlist-card' + (wl.deletedAt ? ' watchlist-deleted' : '') },
-            [header, stats, actions]);
+            [header,
+                el('div', { className: 'wl-status ' + (wl.isActive && !wl.deletedAt ? 'is-active' : '') }, [
+                    el('span', { className: 'wl-status-dot', attrs: { 'aria-hidden': 'true' } }),
+                    el('strong', { text: statusText }),
+                    el('span', { text: wl.isActive && !wl.deletedAt ? 'Matching enabled' : 'Matching stopped' })
+                ]), stats, el('p', { className: 'wl-help', text: monitoringText(wl) }), actions]);
         if (wl.deletedAt) card.style.opacity = '0.6';
         card.dataset.watchlistId = wl.id;
 
@@ -582,7 +618,7 @@
             text: 'Updated ' + fmtDateTime(wl.updatedAt) +
                 (wl.lastAlertAt ? ' — last alert ' + fmtDateTime(wl.lastAlertAt) : '')
         });
-        meta.style.cssText = 'font-size:0.72rem;color:rgba(255,255,255,0.45);margin-top:0.4rem;';
+
         card.append(meta);
         return card;
     }
@@ -841,10 +877,22 @@
 
     let drawerNode = null;
     let drawerKeyHandler = null;
+    let drawerTrigger = null;
+    let drawerWatchlistId = null;
+    let drawerOverflow = "";
 
     function closeDrawer() {
+        ['detail', 'drawerEntries', 'drawerActivity', 'drawerStats', 'entrySearch'].forEach(function (key) { beginRequest(key); });
+        drawerWatchlistId = null;
+        const node = drawerNode;
+        drawerNode = null;
+        if (node) {
+            if (window.ModalStack) window.ModalStack.close(node);
+            else document.body.style.overflow = drawerOverflow;
+            node.remove();
+        }
+        if (drawerTrigger && drawerTrigger.isConnected) drawerTrigger.focus();
         if (drawerKeyHandler) { document.removeEventListener('keydown', drawerKeyHandler); drawerKeyHandler = null; }
-        if (drawerNode) { drawerNode.remove(); drawerNode = null; }
     }
 
     async function openDetailDrawer(id) {
@@ -852,22 +900,35 @@
         if (!watchlistId) return;
         closeDrawer();
 
-        const panel = el('div', { attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Watchlist details' } });
-        panel.style.cssText = 'position:fixed;top:0;right:0;height:100vh;width:min(560px,95vw);background:#0f1524;' +
-            'color:#fff;border-left:1px solid rgba(99,102,241,0.5);z-index:10004;overflow-y:auto;padding:1.25rem;box-shadow:-8px 0 30px rgba(0,0,0,0.5);';
-        const closeBtn = el('button', { className: 'watchlist-btn', text: 'Close', attrs: { type: 'button', 'aria-label': 'Close details' } });
-        closeBtn.style.cssText = 'position:sticky;top:0;float:right;';
+        drawerTrigger = document.activeElement;
+        drawerWatchlistId = watchlistId;
+        drawerOverflow = document.body.style.overflow;
+        if (!window.ModalStack) document.body.style.overflow = 'hidden';
+        const panel = el('section', { className: 'wl-drawer', attrs: { tabindex: '-1' } });
+        const closeBtn = el('button', { className: 'wl-close', text: '×', attrs: { type: 'button', 'aria-label': 'Close watchlist details' } });
         closeBtn.addEventListener('click', closeDrawer);
-        panel.append(closeBtn);
-
-        const body = el('div', { attrs: { 'aria-live': 'polite' } });
-        body.append(el('p', { text: 'Loading watchlist details...' }));
+        panel.append(el('div', { className: 'wl-drawer-bar' }, [
+            el('span', { text: 'WATCHLIST DETAILS' }), closeBtn
+        ]));
+        const body = el('div', { className: 'wl-drawer-body', attrs: { 'aria-live': 'polite' } });
+        body.append(el('p', { text: 'Loading watchlist details…', attrs: { id: 'wl-detail-title' } }));
         panel.append(body);
-
-        drawerNode = panel;
-        drawerKeyHandler = function (e) { if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); } };
-        document.addEventListener('keydown', drawerKeyHandler);
-        document.body.appendChild(panel);
+        const backdrop = el('div', { className: 'wl-drawer-backdrop', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'wl-detail-title' } }, panel);
+        if (!window.ModalStack) backdrop.addEventListener('click', function (e) { if (e.target === backdrop && !activeDialog) closeDrawer(); });
+        drawerNode = backdrop;
+        drawerKeyHandler = function (e) {
+            if (activeDialog) return;
+            if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+            if (e.key === 'Tab') {
+                const targets = Array.from(panel.querySelectorAll('a[href],button:not([disabled]),input,select,[tabindex="0"]'));
+                const first = targets[0], last = targets[targets.length - 1];
+                if (e.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) { e.preventDefault(); first.focus(); }
+            }
+        };
+        if (!window.ModalStack) document.addEventListener('keydown', drawerKeyHandler);
+        document.body.appendChild(backdrop);
+        if (window.ModalStack) window.ModalStack.open(backdrop, { backdropClose: true, onClose: closeDrawer });
         closeBtn.focus();
 
         const req = beginRequest('detail');
@@ -878,6 +939,8 @@
             if (!wl) { body.replaceChildren(el('p', { text: 'Invalid watchlist data' })); return; }
             renderDrawer(body, wl);
             loadDrawerEntries(wl.id, body, 1);
+            loadDrawerActivity(wl.id, body);
+            loadDrawerStats(wl.id, body);
         } catch (err) {
             if (err.aborted || !req.isCurrent() || !drawerNode) return;
             body.replaceChildren(el('p', {
@@ -888,40 +951,79 @@
     }
 
     function infoRow(label, value) {
-        const row = el('div', {}, [
-            el('strong', { text: label + ': ' }),
-            el('span', { text: value })
-        ]);
-        row.style.cssText = 'padding:0.2rem 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:0.9rem;';
-        return row;
+        return el('div', { className: 'wl-info-row' }, [el('dt', { text: label }), el('dd', { text: value })]);
     }
 
     function renderDrawer(body, wl) {
-        const header = el('div', {}, [
-            el('h2', { text: wl.name }),
-            el('p', { text: wl.description || 'No description' })
-        ]);
-        const badge = el('span', {
-            className: 'alert-level-badge ' + wl.alertLevel,
-            text: ALERT_LEVEL_LABELS[wl.alertLevel]
-        });
-
         body.replaceChildren(
-            header, badge,
-            el('div', { className: 'drawer-info' }, [
-                infoRow('Status', wl.deletedAt ? 'Deleted (' + fmtDateTime(wl.deletedAt) + ')' : (wl.isActive ? 'Active' : 'Inactive')),
-                infoRow('Entries', String(wl.entriesCount)),
-                infoRow('Alerts today', String(wl.alertsToday)),
-                infoRow('Total alerts', String(wl.totalAlerts)),
-                infoRow('Last alert', wl.lastAlertAt ? fmtDateTime(wl.lastAlertAt) : 'Never'),
-                infoRow('Created', fmtDateTime(wl.createdAt)),
-                infoRow('Updated', fmtDateTime(wl.updatedAt)),
-                infoRow('Version', String(wl.version))
+            el('header', { className: 'wl-detail-heading' }, [
+                el('div', { className: 'wl-badges' }, [
+                    el('span', { className: 'alert-level-badge ' + wl.alertLevel, text: ALERT_LEVEL_LABELS[wl.alertLevel] + ' alerts' }),
+                    el('span', { className: 'wl-status-pill', text: wl.deletedAt ? 'Deleted' : wl.isActive ? 'Active' : 'Paused' })
+                ]),
+                el('h2', { text: wl.name, attrs: { id: 'wl-detail-title' } }),
+                el('p', { className: 'wl-description', text: wl.description || 'No description added.' }),
+                el('p', { className: 'wl-monitoring-note', text: monitoringText(wl) })
             ]),
-            el('h3', { text: 'Entries' }),
-            el('div', { attrs: { id: 'drawer-entries' } }, el('p', { text: 'Loading entries...' })),
-            wl.deletedAt ? null : buildAddEntrySection(wl.id)
+            el('div', { className: 'watchlist-stats wl-detail-metrics' }, [
+                stat(String(wl.entriesCount), 'Eligible identities'), stat(String(wl.alertsToday), 'Today · UTC'), stat(String(wl.totalAlerts), 'All-time alerts')
+            ]),
+            el('div', { className: 'wl-entry-health', attrs: { id: 'wl-entry-health' }, text: 'Loading entry and review status…' }),
+            el('section', { className: 'wl-section' }, [
+                el('div', { className: 'wl-section-heading' }, [el('h3', { text: 'Recent alert activity' }), el('a', { text: 'Live alerts ↗', attrs: { href: '/admin/live-alerts' } })]),
+                el('p', { className: 'wl-help', text: 'Latest 8 recorded matches. Times use your browser timezone; “today” is counted in UTC.' }),
+                el('div', { attrs: { id: 'wl-recent-alerts' }, text: 'Loading recent alerts…' })
+            ]),
+            el('section', { className: 'wl-section' }, [
+                el('h3', { text: 'Identities on this list' }),
+                el('p', { className: 'wl-help', text: 'All entries, including inactive and expired identities. Only eligible entries can match while the list is active.' }),
+                el('div', { attrs: { id: 'drawer-entries', 'data-readonly': wl.deletedAt ? 'true' : 'false' } }, el('p', { text: 'Loading entries…' }))
+            ]),
+            wl.deletedAt ? null : buildAddEntrySection(wl.id),
+            el('section', { className: 'wl-section wl-record-details' }, [
+                el('h3', { text: 'List details' }),
+                el('dl', {}, [infoRow('Last alert', wl.lastAlertAt ? fmtDateTime(wl.lastAlertAt) : 'No alerts recorded'), infoRow('Created', fmtDateTime(wl.createdAt)), infoRow('Updated', fmtDateTime(wl.updatedAt)), wl.deletedAt ? infoRow('Deleted', fmtDateTime(wl.deletedAt)) : null, wl.deletionReason ? infoRow('Deletion reason', wl.deletionReason) : null])
+            ])
         );
+    }
+
+    async function loadDrawerStats(id, body) {
+        const req = beginRequest('drawerStats');
+        const host = body.querySelector('#wl-entry-health');
+        try {
+            const data = await api('/api/watchlists/' + encodeURIComponent(id) + '/stats', { signal: req.signal });
+            if (!req.isCurrent() || drawerWatchlistId !== id) return;
+            host.replaceChildren(
+                el('strong', { text: toNonNegativeInteger(data.unacknowledged_alerts) + ' alerts awaiting acknowledgement' }),
+                el('span', { text: toNonNegativeInteger(data.active_entries) + ' eligible / ' + toNonNegativeInteger(data.total_entries) + ' total entries · ' + toNonNegativeInteger(data.expired_entries) + ' expired' })
+            );
+        } catch (err) { if (!err.aborted && req.isCurrent()) host.textContent = 'Entry and review status unavailable. Reopen this panel to retry.'; }
+    }
+
+    async function loadDrawerActivity(id, body) {
+        const req = beginRequest('drawerActivity');
+        const host = body.querySelector('#wl-recent-alerts');
+        try {
+            const [data, pipelines] = await Promise.all([
+                api('/api/watchlist-alerts', { signal: req.signal, params: { watchlist_id: id, limit: 8 } }),
+                api('/api/pipelines', { signal: req.signal }).catch(function () { return []; })
+            ]);
+            const cameraNames = new Map((Array.isArray(pipelines) ? pipelines : []).map(function (camera) {
+                const name = safeText(camera.pipeline_name || camera.location_name).trim();
+                return [String(camera.pipeline_id), /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(name) ? '' : name];
+            }));
+            if (!req.isCurrent() || drawerWatchlistId !== id) return;
+            if (!Array.isArray(data) || !data.length) { host.replaceChildren(el('p', { className: 'wl-empty', text: 'No alerts recorded yet. Matches will appear here when an eligible identity triggers an alert.' })); return; }
+            host.replaceChildren(...data.map(function (alert) {
+                return el('article', { className: 'wl-activity-row' }, [
+                    el('span', { className: 'wl-activity-dot ' + (alert.acknowledged ? 'is-read' : ''), attrs: { 'aria-hidden': 'true' } }),
+                    el('div', {}, [el('strong', { text: safeText(alert.identity_name) || 'Unknown identity' }),
+                        el('p', { text: (alert.pipeline_id ? (cameraNames.get(String(alert.pipeline_id)) || 'Camera name unavailable') : 'No camera recorded') + ' · ' + safeText(alert.triggered_by, 'Match') }),
+                        el('time', { text: fmtDateTime(alert.created_at) })]),
+                    el('span', { className: 'wl-review-label', text: alert.acknowledged ? 'Acknowledged' : 'Needs review' })
+                ]);
+            }));
+        } catch (err) { if (!err.aborted && req.isCurrent()) host.replaceChildren(el('p', { className: 'wl-empty', text: 'Recent alerts could not be loaded. Reopen this panel to retry.' })); }
     }
 
     async function loadDrawerEntries(watchlistId, body, page) {
@@ -931,7 +1033,7 @@
         try {
             const data = await api('/api/watchlists/' + encodeURIComponent(watchlistId) + '/entries', {
                 signal: req.signal,
-                params: { page: page, page_size: ENTRY_PAGE_SIZE }
+                params: { page: page, page_size: ENTRY_PAGE_SIZE, include_inactive: true, include_expired: true }
             });
             if (!req.isCurrent() || !drawerNode) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
@@ -955,28 +1057,34 @@
                         await api('/api/watchlists/' + encodeURIComponent(watchlistId) +
                             '/entries/' + encodeURIComponent(identityId), { method: 'DELETE' });
                         showNotification('Entry removed', 'success');
-                        loadDrawerEntries(watchlistId, body, 1);
+                        if (drawerWatchlistId === watchlistId) openDetailDrawer(watchlistId);
                         loadWatchlists();
                     } catch (err) {
                         if (!err.aborted) showNotification('Failed to remove entry', 'error');
                     }
                 });
-                const row = el('div', {}, [
-                    el('div', {}, [
-                        el('strong', { text: name }),
-                        el('span', { text: '  ' + safeText(entry.identity_type, 'unknown') + ' — priority ' + safeText(entry.priority, 'normal') })
+                const expired = parseTimestamp(entry.expires_at);
+                const status = expired && expired <= new Date() ? 'Expired' : entry.is_active ? 'Eligible' : 'Inactive';
+                const row = el('article', { className: 'wl-entry-card' }, [
+                    el('div', { className: 'wl-entry-top' }, [
+                        el('span', { className: 'wl-avatar', text: name.slice(0, 2).toUpperCase(), attrs: { 'aria-hidden': 'true' } }),
+                        el('div', { className: 'wl-entry-name' }, [el('strong', { text: name }), el('span', { text: safeText(entry.identity_type, 'unknown') + ' identity' })]),
+                        el('span', { className: 'wl-status-pill', text: status })
                     ]),
-                    el('div', { text: 'Added ' + fmtDateTime(entry.added_at) }),
-                    entry.notes ? el('div', { text: 'Notes: ' + safeText(entry.notes) }) : null,
-                    removeBtn
+                    el('dl', { className: 'wl-entry-meta' }, [infoRow('Priority', safeText(entry.priority, 'normal')), infoRow('Added', fmtDateTime(entry.added_at)), infoRow('Expires', entry.expires_at ? fmtDateTime(entry.expires_at) : 'No expiry')]),
+                    entry.notes ? el('p', { className: 'wl-entry-note', text: 'Notes: ' + safeText(entry.notes) }) : null,
+                    entry.action_instructions ? el('p', { className: 'wl-entry-note', text: 'Instructions: ' + safeText(entry.action_instructions) }) : null,
+                    container.dataset.readonly === 'true' ? null : removeBtn
                 ]);
-                row.style.cssText = 'padding:0.5rem;border:1px solid rgba(255,255,255,0.08);border-radius:6px;margin:0.4rem 0;font-size:0.85rem;';
                 return row;
             });
-            container.replaceChildren.apply(container, rows);
+            const previousMore = container.querySelector('.wl-load-more');
+            if (previousMore) previousMore.remove();
+            if (page === 1) container.replaceChildren(...rows);
+            else container.append(...rows);
             if (toNonNegativeInteger(data.total_pages, 1) > page) {
-                const more = el('button', { className: 'watchlist-btn', text: 'Load more entries', attrs: { type: 'button' } });
-                more.addEventListener('click', function () { loadDrawerEntries(watchlistId, body, page + 1); });
+                const more = el('button', { className: 'watchlist-btn wl-load-more', text: 'Load more entries', attrs: { type: 'button' } });
+                more.addEventListener('click', function () { more.disabled = true; loadDrawerEntries(watchlistId, body, page + 1); });
                 container.append(more);
             }
         } catch (err) {
@@ -1001,6 +1109,7 @@
         searchInput.addEventListener('input', function () {
             if (timer) window.clearTimeout(timer);
             timer = window.setTimeout(async function () {
+                if (!searchInput.isConnected || drawerWatchlistId !== watchlistId) return;
                 const q = searchInput.value.trim();
                 if (q.length < 2) { results.replaceChildren(); return; }
                 const req = beginRequest('entrySearch');
@@ -1010,7 +1119,7 @@
                         signal: req.signal,
                         params: { page: 1, page_size: 10, q: q }
                     });
-                    if (!req.isCurrent()) return;
+                    if (!req.isCurrent() || !searchInput.isConnected || drawerWatchlistId !== watchlistId) return;
                     const items = (data && Array.isArray(data.items)) ? data.items : [];
                     if (!items.length) { results.replaceChildren(el('p', { text: 'No identities found' })); return; }
                     results.replaceChildren.apply(results, items.map(function (identity) {
@@ -1030,8 +1139,7 @@
                                     body: { identity_id: identityId, priority: prioritySelect.value }
                                 });
                                 showNotification('Added "' + label + '" to watchlist', 'success');
-                                const body = drawerNode && drawerNode.querySelector('[aria-live]');
-                                if (body) loadDrawerEntries(watchlistId, body, 1);
+                                if (drawerWatchlistId === watchlistId) openDetailDrawer(watchlistId);
                                 loadWatchlists();
                             } catch (err) {
                                 if (!err.aborted) showNotification('Failed to add entry', 'error');
@@ -1048,11 +1156,12 @@
             }, SEARCH_DEBOUNCE_MS);
         });
 
-        const section = el('div', {}, [
-            el('h3', { text: 'Add identity' }),
-            searchInput, prioritySelect, results
+        const section = el('section', { className: 'wl-section wl-add-entry' }, [
+            el('h3', { text: 'Add an identity' }),
+            el('p', { className: 'wl-help', text: 'Search by name, choose a priority, then select an identity to add it to this list.' }),
+            el('label', {}, [el('span', { text: 'Identity search' }), searchInput]),
+            el('label', {}, [el('span', { text: 'Entry priority' }), prioritySelect]), results
         ]);
-        section.style.cssText = 'margin-top:1rem;border-top:1px solid rgba(255,255,255,0.12);padding-top:0.75rem;';
         return section;
     }
 

@@ -16,6 +16,7 @@
         isBatchMode: false,
         isSearching: false,
         currentResults: null,
+        resultContext: null,
         activeTab: 'matches',
         pipelines: [],
         // Upload limits. These are only the fallbacks used before
@@ -663,6 +664,9 @@
         if (state.isSearching) return;
 
         const controller = beginRequest('search');
+        const context = captureSearchContext();
+        const feedback = document.getElementById('search-feedback');
+        if (feedback) { feedback.hidden = false; feedback.textContent = 'Searching… Results below, if present, belong to your previous search.'; }
         state.isSearching = true;
         elements.searchingOverlay.style.display = 'flex';
         updateSearchButton();
@@ -672,13 +676,17 @@
                 ? await performBatchSearch(controller.signal)
                 : await performSingleSearch(controller.signal);
 
+            if (controller.signal.aborted) return;
             state.currentResults = results;
+            state.resultContext = context;
+            if (feedback) feedback.hidden = true;
             displayResults(results);
 
         } catch (error) {
             // A search the user themselves replaced is not a failure.
             if (isAbort(error)) return;
             console.error('Search error:', error);
+            if (feedback) { feedback.hidden = false; feedback.textContent = `Search failed: ${error.message}. ${state.currentResults ? 'The results below are from your previous successful search.' : 'Review your image and search settings, then try again.'}`; }
             showNotification(`Search failed: ${error.message}`, 'error');
         } finally {
             endRequest('search', controller);
@@ -876,6 +884,55 @@
     // ============================================
     // Display Results
     // ============================================
+    function captureSearchContext() {
+        const scope = elements.searchScope.options[elements.searchScope.selectedIndex];
+        const exclusions = getExcludeParams();
+        return {
+            file: state.isBatchMode ? `${state.batchFiles.length} reference images` : (state.selectedFile && state.selectedFile.name) || 'Reference image',
+            scope: scope ? scope.textContent : 'All identities',
+            depth: elements.topK.value,
+            camera: state.isBatchMode ? 'All cameras · batch mode' : elements.pipelineFilter.value ? pipelineLabel(elements.pipelineFilter.value) : 'All cameras',
+            dates: state.isBatchMode ? 'Date filters not applied in batch mode' : `${elements.dateFrom.value || 'Any start date'} → ${elements.dateTo.value || 'Any end date'}`,
+            watchlists: elements.checkWatchlist.checked,
+            excluded: !state.isBatchMode && !!(exclusions.excludeIds || exclusions.excludeWatchlistIds)
+        };
+    }
+
+    function renderResultOverview(results) {
+        const host = document.getElementById('search-overview');
+        if (!host) return;
+        const batch = !!(results.batch_id || results.results);
+        const groups = batch ? results.results || [] : results.faces || [];
+        const matches = groups.flatMap(group => Array.isArray(group.matches) ? group.matches : []);
+        const distinct = new Set(matches.map(match => match.identity_id).filter(Boolean));
+        const metrics = buildEl('div', 'search-result-metrics');
+        const figures = [
+            [batch ? results.total_images ?? groups.length : groups.length, batch ? 'Images submitted' : 'Faces detected'],
+            [matches.length, 'Returned matches'],
+            [distinct.size, 'Distinct identities'],
+            [alertCount(results.watchlist_alerts), 'Watchlist alerts']
+        ];
+        figures.forEach(([value, label]) => {
+            const card = buildEl('div', 'search-result-metric');
+            card.append(buildEl('strong', null, String(value)), buildEl('span', null, label));
+            metrics.append(card);
+        });
+        const context = state.resultContext;
+        const details = buildEl('div', 'search-applied-context');
+        if (context) {
+            details.append(buildEl('strong', null, context.file));
+            details.append(buildEl('p', null, `${context.scope} · Up to ${context.depth} matches per face · ${context.camera}`));
+            details.append(buildEl('p', null, `${context.dates} · Watchlists ${context.watchlists ? 'checked' : 'not checked'}${context.excluded ? ' · Exclusions applied' : ''}`));
+        }
+        const skipped = batch ? groups.filter(group => group.status === 'error').length : groups.filter(group => group.skipped).length;
+        const note = skipped ? `${skipped} ${batch ? 'image(s) failed' : 'face(s) skipped'}. Review the messages below.`
+            : matches.length ? 'Select a match to review identity details and recent sightings.'
+            : 'No matches returned. Check the image quality and applied filters before trying again.';
+        host.replaceChildren(metrics, details, buildEl('p', 'search-result-note', note),
+            buildEl('p', 'search-score-note', 'Similarity measures how closely face features match; it is not a probability or a confirmed identification. The same identity can appear for multiple faces.'));
+        host.hidden = false;
+    }
+
     function displayResults(results) {
         // Backend logic: clear quality results when displaying search results
         clearQualityResults();
@@ -911,6 +968,8 @@
 
         elements.matchesCount.textContent = totalMatches;
         elements.alertsCount.textContent = totalAlerts;
+
+        renderResultOverview(results);
 
         // Render tabs
         renderMatchesTab(results);
@@ -1049,8 +1108,10 @@
                 snapshotUrl = PLACEHOLDER_AVATAR;
             }
 
+            const similarity = Number(match.similarity);
+            const scoreText = Number.isFinite(similarity) ? `${Math.round(similarity * 100)}%` : 'Unavailable';
             const cardLabel = `View details for ${match.display_name || 'unidentified person'}, `
-                + `${Math.round(match.similarity * 100)}% match`;
+                + `${scoreText} similarity`;
 
             // role="button" + tabindex: the card is a div, so without these it
             // cannot be reached or activated by keyboard at all. The keydown
@@ -1069,8 +1130,9 @@
                         <div class="match-name">${escapeHtml(match.display_name || 'Unknown')}</div>
                         <div class="match-meta">
                             <span><i class="fas fa-${match.type === 'known' ? 'user-check' : 'user-secret'}"></i> ${escapeHtml(match.type)}</span>
-                            <span><i class="fas fa-eye"></i> ${escapeHtml(match.appearances_count || 0)}</span>
+                            <span><i class="fas fa-eye" aria-hidden="true"></i> ${escapeHtml(match.appearances_count || 0)} detections</span>
                         </div>
+                        <div class="match-last-seen">Last seen ${escapeHtml(formatDateTime(match.last_seen_at))}</div>
                         ${match.watchlist_match ? `
                             <div class="watchlist-badge ${escapeHtml(match.watchlist_match.alert_level)}" style="margin-top: 0.3rem;">
                                 <i class="fas fa-exclamation-triangle"></i>
@@ -1078,7 +1140,7 @@
                             </div>
                         ` : ''}
                     </div>
-                    <div class="match-similarity ${similarityClass}">${Math.round(match.similarity * 100)}%</div>
+                    <div class="match-score-block"><div class="match-similarity ${similarityClass}">${escapeHtml(scoreText)}</div><span>Similarity</span><small>${escapeHtml(match.confidence_band ? String(match.confidence_band).replace(/_/g, ' ') + ' band' : 'Band unavailable')}</small><span class="match-view-hint">View details →</span></div>
                 </div>
             `;
         }).join('');
@@ -1344,7 +1406,7 @@
         if (!id) return 'Unknown camera';
         const match = (state.pipelines || []).find(p => String(p.pipeline_id) === id);
         const name = match && String(match.display_name || '').trim();
-        return name || id;
+        return name && !UUID_RE.test(name) ? name : !UUID_RE.test(id) ? id : 'Camera name unavailable';
     }
 
     function formatDateTime(value) {
@@ -1404,6 +1466,7 @@
                 String(match.confidence_band).replace(/_/g, ' ')));
         }
         section.appendChild(grid);
+        section.appendChild(buildEl('p', 'identity-score-explainer', 'Compare the reference image with the identity photo and sightings. A similarity score alone does not confirm an identity.'));
 
         const hit = match.watchlist_match;
         if (hit) {
@@ -1529,6 +1592,10 @@
         const section = buildEl('section', 'identity-section');
         section.appendChild(buildEl('h5', 'identity-section-title', 'Watchlists'));
 
+        if (watchlists === null) {
+            section.appendChild(buildEl('p', 'identity-unavailable', 'Watchlist membership could not be loaded. Reopen this identity to retry.'));
+            return section;
+        }
         if (!Array.isArray(watchlists) || watchlists.length === 0) {
             section.appendChild(buildEl('p', 'identity-empty', 'Not on any watchlist.'));
             return section;
@@ -1570,6 +1637,8 @@
         }
         children.push(buildWatchlists(watchlists), buildSightings(sightings));
         body.replaceChildren(...children);
+
+        ['identity-full-profile', 'identity-analyze'].forEach(id => { const link = document.getElementById(id); if (link) link.hidden = false; });
 
         // Full profile opens the dedicated identity page in a NEW tab (the
         // anchor carries target="_blank"), so no `from` param: a back link in
@@ -1619,6 +1688,7 @@
     // global is one more thing an injected script could replace.
     async function viewIdentity(identityId) {
         if (!identityId) return;
+        ['identity-full-profile', 'identity-analyze'].forEach(id => { const link = document.getElementById(id); if (link) link.hidden = true; });
 
         const body = document.getElementById('identity-modal-body');
         const title = document.getElementById('identity-modal-title');
@@ -1659,14 +1729,14 @@
 
             // Watchlist membership is a separate endpoint, and a failure there
             // must not blank the profile that already loaded.
-            let watchlists = [];
+            let watchlists = null;
             try {
                 const wlResponse = await fetch(
                     `/api/identities/${encodeURIComponent(identityId)}/watchlists`,
                     { credentials: 'include', signal: controller.signal });
                 if (wlResponse.ok) {
                     const payload = await wlResponse.json();
-                    watchlists = Array.isArray(payload?.watchlists) ? payload.watchlists : [];
+                    watchlists = Array.isArray(payload?.watchlists) ? payload.watchlists : null;
                 }
             } catch (error) {
                 if (isAbort(error)) return;
@@ -1678,6 +1748,7 @@
 
         } catch (error) {
             if (isAbort(error)) return;
+            if (inflight.identity !== controller) return;
             console.error('Identity detail error:', error);
             if (body) {
                 body.replaceChildren(buildEmptyState(
@@ -1738,7 +1809,7 @@
                         .filter(pipeline => pipeline && pipeline.pipeline_id)
                         .map(pipeline => {
                             const id = String(pipeline.pipeline_id);
-                            const name = String(pipeline.display_name || '').trim() || id;
+                            const name = pipelineLabel(id);
                             // The value stays the id: that is what
                             // /api/search/advanced filters on. Only the label
                             // changes.
@@ -1769,6 +1840,8 @@
     function clearResults() {
         // Backend logic: centralized clearing of all results
         state.currentResults = null;
+        state.resultContext = null;
+        ['search-overview', 'search-feedback'].forEach(id => { const node = document.getElementById(id); if (node) { node.hidden = true; node.replaceChildren(); } });
         
         // Clear quality results
         clearQualityResults();
