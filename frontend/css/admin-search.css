@@ -1973,3 +1973,10 @@ input:-webkit-autofill:focus {
     .search-workspace .identity-row { min-width: 0; }
     .search-workspace .identity-sighting { flex-direction: column; gap: 5px; }
 }
+/* Shared identity badge styles position badges on thumbnails elsewhere. */
+.search-workspace #identity-modal .identity-badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.search-workspace #identity-modal .identity-badge { position: static; inset: auto; transform: none; display: inline-flex; padding: 4px 9px; border-radius: 20px; font-size: .68rem; line-height: 1.4; }
+.search-workspace #identity-modal .modal-close { width: 36px; height: 36px; border: 1px solid #415b75; border-radius: 8px; background: #21354a; color: #dceaf8; }
+.search-workspace #identity-modal .modal-footer :is(.btn-primary, .btn-secondary) { text-transform: none; letter-spacing: 0; font-size: .83rem; box-shadow: none; border-radius: 8px; padding: 10px 14px; }
+.search-workspace #identity-modal .modal-footer .btn-secondary { border: 1px solid #47617d; background: #20344b; color: #d5e7fa; }
+.search-workspace #identity-modal .modal-footer .btn-primary { border: 1px solid #5999eb; background: #347ddd; color: #fff; }

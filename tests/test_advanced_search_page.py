@@ -573,9 +573,10 @@ def test_camera_filter_never_renders_a_blank_option(token):
         assert "location_name" in pipeline
         assert pipeline.get("pipeline_id"), "an option would have no value"
 
-    # The frontend falls back the same way, so the two cannot drift apart.
+    # Missing names remain readable without exposing camera UUIDs.
     loader = read(JS).split("async function loadPipelines", 1)[1].split("\n    // ", 1)[0]
-    assert "|| id" in loader, "no client-side fallback for a blank display_name"
+    assert "pipelineLabel(id)" in loader
+    assert "Camera name unavailable" in read(JS)
 
 
 # ---------------------------------------------------------------------------
