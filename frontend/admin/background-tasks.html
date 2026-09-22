@@ -25,9 +25,10 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-background-tasks.css?v=tasks-2">
+    <link rel="stylesheet" href="/frontend/css/admin-background-tasks.css?v=tasks-3">
+    <link rel="stylesheet" href="/frontend/css/admin-monitoring.css?v=monitor-1">
 </head>
-<body>
+<body class="tasks-workspace">
     <!-- Navbar Component (loaded dynamically) -->
     <div id="navbar-placeholder"></div>
 
@@ -42,7 +43,7 @@
                         Background Tasks Monitor
                     </h1>
                     <p class="page-description">
-                        Monitor all background task executions. Admins see all tasks, regular users see tasks that affect their data.
+                        See what is running, what finished, and what needs attention. Open a task to inspect its outcome.
                     </p>
                 </div>
                 <div class="header-actions">
@@ -58,6 +59,8 @@
                 </div>
             </div>
 
+            <div class="task-monitor-strip"><span id="task-freshness" role="status">Loading task history…</span><a href="/admin/logs">Open system logs</a></div>
+            <p class="monitor-help" id="task-stats-scope">Task statistics are separate from the filters below.</p>
             <!-- Stats Cards -->
             <div class="stats-grid" id="stats-grid" aria-label="Task statistics">
                 <!-- Stats will be populated by JavaScript -->
@@ -88,6 +91,7 @@
                         </button>
                     </div>
                 </div>
+                <p class="monitor-help retention-explainer">Retention removes records older than the configured age. The cleanup interval controls how often eligibility is checked; it does not delete all records each cycle. A dry test previews eligible data without deleting it.</p>
                 <div class="retention-status-grid" id="retention-status-grid">
                     <!-- Populated by JavaScript -->
                 </div>
@@ -95,6 +99,7 @@
                 <div id="retention-job-monitor" class="retention-job-monitor" style="display: none;" role="status" aria-live="polite"></div>
             </section>
 
+            <div class="monitor-section-heading"><h2>Execution history</h2><p>Filter by task type, status, or creation date. Times are shown in your browser timezone.</p></div>
             <!-- Filters -->
             <div class="filters-section">
                 <div class="filter-group">
@@ -173,6 +178,7 @@
                 </button>
             </div>
 
+            <div class="task-status-guide"><strong>Understanding status</strong><span>Scheduled: waiting to start</span><span>Overdue: scheduled time passed</span><span>Running: work in progress</span><span>Failed: inspect the error before retrying</span></div>
             <!-- Tasks Table -->
             <div class="tasks-container">
                 <div id="loading-indicator" class="loading-indicator">

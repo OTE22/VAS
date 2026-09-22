@@ -25,10 +25,11 @@
 <!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
-    <link rel="stylesheet" href="/frontend/css/logs.css?v=jobs-2">
+    <link rel="stylesheet" href="/frontend/css/logs.css?v=logs-5">
     <link rel="stylesheet" href="/frontend/css/footer.css">
+    <link rel="stylesheet" href="/frontend/css/admin-monitoring.css?v=monitor-1">
 </head>
-<body data-page-class="logs-page">
+<body class="logs-page logs-workspace" data-page-class="logs-page">
     <!-- Skip to Main Content for Accessibility -->
     <a href="#main-content" class="skip-to-main" aria-label="Skip to main content" style="position: absolute; left: -9999px; z-index: 999; padding: 1em; background-color: #000; color: white; text-decoration: none;">Skip to main content</a>
 
@@ -49,19 +50,20 @@
                     </div>
                     <div class="header-text">
                         <h1 class="page-title">System Logs Viewer</h1>
-                        <p class="page-subtitle">View and filter all system logs (DEBUG, INFO, WARNING, ERROR, CRITICAL)</p>
+                        <p class="page-subtitle">Inspect recent events, investigate errors, and check the services that produce them.</p>
                     </div>
                 </div>
             </header>
 
+            <div class="logs-page-guide"><strong>Start with a source and severity.</strong><span>ERROR and CRITICAL help locate failures; WARNING highlights conditions to review. Expand an event for its complete message and source details.</span></div>
             <section class="jobs-panel" aria-labelledby="jobs-heading">
                 <div class="jobs-heading"><h2 id="jobs-heading">Background Jobs</h2>
                     <a href="/admin/background-tasks">View execution history</a></div>
                 <p>Service heartbeats confirm recent activity. Completed runs show recorded job results.</p>
-                <p id="jobs-freshness" role="status">Loading worker status?</p>
+                <p id="jobs-freshness" role="status">Loading worker status…</p>
                 <p id="cleanup-result" role="status">Loading cleanup results...</p>
                 <details><summary>All files in the central log directory</summary><p id="log-directory"></p><ul id="log-inventory"></ul></details>
-                <div id="ml-worker-status">Loading ML worker?</div>
+                <div id="ml-worker-status">Loading ML worker…</div>
                 <details><summary>Service status and last completed runs</summary>
                     <div class="jobs-table-scroll"><table class="jobs-table">
                         <thead><tr><th scope="col">Service</th><th scope="col">State</th><th scope="col">Last cycle success</th><th scope="col">Last completed job</th><th scope="col">Next cycle</th><th scope="col">Failures / details</th></tr></thead>
@@ -73,10 +75,12 @@
                 <label><input type="checkbox" id="auto-refresh" checked> Refresh every 15 seconds while visible</label>
                 <p>Older log pages stay still while you read. Refresh reloads the selected page.</p>
                 <p id="config-freshness" role="status"></p>
-                <p id="logs-freshness" role="status">Loading logs?</p>
-                <p id="stats-freshness" role="status">Loading counts?</p>
+                <p id="logs-freshness" role="status">Loading logs…</p>
+                <p id="stats-freshness" role="status">Loading counts…</p>
                 <p id="scan-notice" role="status"></p>
             </div>
+            <h2 id="stats-heading" class="monitor-section-title">Source activity</h2>
+            <p class="monitor-help">Counts describe the scanned log source, including retained rotations. Date and severity filters apply to the event list below.</p>
             <!-- Statistics Bar -->
             <section class="stats-section" id="stats-section" aria-labelledby="stats-heading">
                 <div class="stats-container">
@@ -139,6 +143,7 @@
 
             <!-- Filters -->
             <section class="filter-section" aria-labelledby="filter-heading">
+                <h2 id="filter-heading" class="monitor-section-title">Find events</h2>
                 <div class="filter-controls">
                     <div class="filter-group"><label for="log-source" class="filter-label">Log source</label>
                         <select id="log-source" class="filter-select"><option value="application">Application</option></select>
@@ -198,6 +203,8 @@
 
             <!-- Logs Table -->
             <section class="logs-section" aria-labelledby="logs-heading">
+                <div class="logs-list-heading"><div><h2 id="logs-heading">Log events</h2><p id="log-view-summary" role="status">Waiting for records…</p></div><label class="log-find-label" for="log-page-search">Find on this page<input id="log-page-search" type="search" placeholder="Message, logger or file…" autocomplete="off"></label></div>
+                <p id="log-find-status" class="monitor-help" role="status"></p>
                 <div class="logs-container" id="logs-container">
                     <div class="loading">
                         <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
@@ -236,7 +243,7 @@
     <script src="/frontend/js/actions.js?v=actions-1"></script>
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
-    <script src="/frontend/js/admin-logs.js?v=jobs-4"></script>
+    <script src="/frontend/js/admin-logs.js?v=logs-5"></script>
     <script src="/frontend/js/page-init.js?v=init-1" defer></script>
 </body>
 </html>

@@ -443,4 +443,4 @@ def test_html_tabs_and_confirmation():
     for tab in ("all", "upcoming", "running", "completed", "failed", "cancelled", "overdue"):
         assert f'data-tab="{tab}"' in html, f"missing tab {tab}"
     assert "DELETE_EXPIRED_DATA" in html, "real-run confirmation must be typed"
-    assert "?v=tasks-2" in html, "cache-busted script tag required"
+    assert "?v=tasks-3" in html, "cache-busted script tag required"

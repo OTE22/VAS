@@ -14,7 +14,7 @@
     -->
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/home.css?v=home-5">
-    <link rel="stylesheet" href="/frontend/css/home-workspace.css?v=workspace-1">
+    <link rel="stylesheet" href="/frontend/css/home-workspace.css?v=workspace-2">
     <meta name="theme-color" content="#0c121c">
 </head>
 <body class="hp home-workspace" data-state="loading" data-freshness="never">
@@ -42,12 +42,17 @@
                  ============================================================ -->
             <header class="hp-hero">
                 <div class="hp-hero__lead">
-                    <span class="home-eyebrow">Identity intelligence / Overview</span>
+                    <span class="home-eyebrow">Your operations workspace</span>
                     <p class="hp-hero__eyebrow" id="user-info"></p>
                     <h1 class="hp-hero__title" id="hp-service">Face Recognition Service</h1>
-                    <p class="hp-hero__desc">Live detection, enrolment and pipeline monitoring across every connected source.</p>
+                    <p class="hp-hero__desc">See what is running, review identities, and move from an overview to the details that matter.</p>
+                    <div class="home-hero-links">
+                        <a class="hp-btn hp-btn--primary" href="/dashboard"><i class="fas fa-video" aria-hidden="true"></i>Open live feeds<i class="fas fa-arrow-right" aria-hidden="true"></i></a>
+                        <a class="hp-btn hp-btn--ghost" href="/admin/search"><i class="fas fa-magnifying-glass" aria-hidden="true"></i>Search identities</a>
+                    </div>
                 </div>
                 <div class="hp-hero__meta">
+                    <span class="home-status-caption">Service status</span>
                     <span class="hp-chip" id="hp-version">v —</span>
                     <span class="hp-hero__live" role="status" aria-live="polite" aria-atomic="true">
                         <span class="hp-status hp-status--lg" id="hp-overall" data-status="unknown">
@@ -60,12 +65,21 @@
                 </div>
                 <div class="hp-hero__actions">
                     <p class="hp-hero__updated">Updated <time id="hp-updated" datetime="">never</time></p>
-                    <button type="button" class="hp-btn hp-btn--primary" id="hp-refresh"
+                    <button type="button" class="hp-btn hp-btn--ghost" id="hp-refresh"
                             data-action="refreshStats" aria-label="Refresh system statistics">
                         <i class="fas fa-rotate" id="hp-refresh-icon" aria-hidden="true"></i><span>Refresh</span>
                     </button>
                 </div>
             </header>
+
+            <nav class="home-section-nav" aria-label="On this page">
+                <span>On this page</span>
+                <a href="#overview-section">Overview</a>
+                <a href="#workspace-actions">Workspace</a>
+                <a href="#health-section">System health</a>
+                <a href="#pipelines-section">Pipelines</a>
+                <a href="#retention-panel">Data retention</a>
+            </nav>
 
             <!-- ============================================================
                  ERROR STRIP — sits above every number so a failure is read
@@ -85,10 +99,85 @@
             </div>
 
             <!-- ============================================================
+                 KPI GRID — the numeric headline
+                 ============================================================ -->
+            <section class="hp-section hp-section--kpis" id="overview-section">
+                <div class="home-section-heading"><h2 class="hp-section__title">Operational overview</h2><p>Detection, capacity, and service activity</p></div>
+                <div class="hp-kpi-grid">
+
+                    <article class="hp-kpi" id="kpi-pipelines" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-video" aria-hidden="true"></i>Active pipelines</p>
+                        <p class="hp-kpi__value" id="kpi-pipelines-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-pipelines-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-detections" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-bullseye" aria-hidden="true"></i>Total detections</p>
+                        <p class="hp-kpi__value" id="kpi-detections-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-detections-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-faces" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-user-group" aria-hidden="true"></i>Registered faces</p>
+                        <p class="hp-kpi__value" id="kpi-faces-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-faces-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-queue" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-layer-group" aria-hidden="true"></i>Queue usage</p>
+                        <p class="hp-kpi__value" id="kpi-queue-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-queue-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-processed" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-circle-check" aria-hidden="true"></i>Processed items</p>
+                        <p class="hp-kpi__value" id="kpi-processed-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-processed-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi" id="kpi-storage" data-state="loading">
+                        <p class="hp-kpi__label"><i class="fas fa-hard-drive" aria-hidden="true"></i>Storage used</p>
+                        <p class="hp-kpi__value" id="kpi-storage-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-storage-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi hp-kpi--word" id="kpi-cache" data-state="loading" data-status="unknown">
+                        <p class="hp-kpi__label"><i class="fas fa-bolt" aria-hidden="true"></i>Cache health</p>
+                        <p class="hp-kpi__value" id="kpi-cache-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-cache-note">Loading…</p>
+                    </article>
+
+                    <article class="hp-kpi hp-kpi--word" id="kpi-tracker" data-state="loading" data-status="unknown">
+                        <p class="hp-kpi__label"><i class="fas fa-crosshairs" aria-hidden="true"></i>Tracker status</p>
+                        <p class="hp-kpi__value" id="kpi-tracker-value">—</p>
+                        <p class="hp-kpi__note" id="kpi-tracker-note">Loading…</p>
+                    </article>
+
+                </div>
+            </section>
+
+            <!-- ============================================================
                  QUICK ACTIONS — never gated on /api/stats
                  ============================================================ -->
-            <nav class="hp-section" aria-label="Quick actions">
-                <h2 class="hp-section__title">Quick actions</h2>
+            <nav class="hp-section" id="workspace-actions" aria-label="Quick actions">
+                <div class="home-section-heading"><h2 class="hp-section__title">Your workspace</h2><p>Choose what you want to do next</p></div>
+                <div class="home-feature-grid">
+                    <a class="home-feature" href="/admin/search">
+                        <span class="home-feature__icon"><i class="fas fa-magnifying-glass" aria-hidden="true"></i></span>
+                        <span class="home-feature__body"><strong>Find an identity</strong><span>Search by face and explore matching appearances.</span></span>
+                        <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                    </a>
+                    <a class="home-feature" href="/admin/watchlists">
+                        <span class="home-feature__icon"><i class="fas fa-shield-halved" aria-hidden="true"></i></span>
+                        <span class="home-feature__body"><strong>Review watchlists</strong><span>See monitored identities and recent alerts.</span></span>
+                        <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                    </a>
+                    <a class="home-feature" href="/admin/intelligence">
+                        <span class="home-feature__icon"><i class="fas fa-diagram-project" aria-hidden="true"></i></span>
+                        <span class="home-feature__body"><strong>Explore intelligence</strong><span>Investigate patterns and connections between identities.</span></span>
+                        <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                    </a>
+                </div>
                 <div class="hp-action-grid">
 
                     <a class="hp-action" href="/dashboard">
@@ -151,64 +240,6 @@
 
                 </div>
             </nav>
-
-            <!-- ============================================================
-                 KPI GRID — the numeric headline
-                 ============================================================ -->
-            <section class="hp-section hp-section--kpis">
-                <div class="home-section-heading"><h2 class="hp-section__title">Operational overview</h2><p>Detection, capacity, and service activity</p></div>
-                <div class="hp-kpi-grid">
-
-                    <article class="hp-kpi" id="kpi-pipelines" data-state="loading">
-                        <p class="hp-kpi__label"><i class="fas fa-video" aria-hidden="true"></i>Active pipelines</p>
-                        <p class="hp-kpi__value" id="kpi-pipelines-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-pipelines-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi" id="kpi-detections" data-state="loading">
-                        <p class="hp-kpi__label"><i class="fas fa-bullseye" aria-hidden="true"></i>Total detections</p>
-                        <p class="hp-kpi__value" id="kpi-detections-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-detections-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi" id="kpi-faces" data-state="loading">
-                        <p class="hp-kpi__label"><i class="fas fa-user-group" aria-hidden="true"></i>Registered faces</p>
-                        <p class="hp-kpi__value" id="kpi-faces-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-faces-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi" id="kpi-queue" data-state="loading">
-                        <p class="hp-kpi__label"><i class="fas fa-layer-group" aria-hidden="true"></i>Queue usage</p>
-                        <p class="hp-kpi__value" id="kpi-queue-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-queue-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi" id="kpi-processed" data-state="loading">
-                        <p class="hp-kpi__label"><i class="fas fa-circle-check" aria-hidden="true"></i>Processed items</p>
-                        <p class="hp-kpi__value" id="kpi-processed-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-processed-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi" id="kpi-storage" data-state="loading">
-                        <p class="hp-kpi__label"><i class="fas fa-hard-drive" aria-hidden="true"></i>Storage used</p>
-                        <p class="hp-kpi__value" id="kpi-storage-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-storage-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi hp-kpi--word" id="kpi-cache" data-state="loading" data-status="unknown">
-                        <p class="hp-kpi__label"><i class="fas fa-bolt" aria-hidden="true"></i>Cache health</p>
-                        <p class="hp-kpi__value" id="kpi-cache-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-cache-note">Loading…</p>
-                    </article>
-
-                    <article class="hp-kpi hp-kpi--word" id="kpi-tracker" data-state="loading" data-status="unknown">
-                        <p class="hp-kpi__label"><i class="fas fa-crosshairs" aria-hidden="true"></i>Tracker status</p>
-                        <p class="hp-kpi__value" id="kpi-tracker-value">—</p>
-                        <p class="hp-kpi__note" id="kpi-tracker-note">Loading…</p>
-                    </article>
-
-                </div>
-            </section>
 
             <!-- ============================================================
                  SYSTEM HEALTH — drill-down of the hero verdict

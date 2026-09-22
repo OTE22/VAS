@@ -262,6 +262,8 @@
     }
 
     function renderStats(stats) {
+        const scope = document.getElementById('task-stats-scope');
+        if (scope) scope.textContent = `Completed, failed and running: tasks created in the last ${stats.window_days || 30} days. Upcoming and overdue: all scheduled tasks. Success rate excludes cancelled tasks. Filters below affect history only.`;
         const grid = document.getElementById('stats-grid');
         grid.replaceChildren(
             statCard('Completed', stats.completed || 0, 'completed', 'fa-check-circle'),
@@ -269,7 +271,7 @@
             statCard('Running', stats.running || 0, 'running', 'fa-spinner fa-spin'),
             statCard('Upcoming', stats.upcoming || 0, 'scheduled', 'fa-clock'),
             statCard('Overdue', stats.overdue || 0, 'overdue', 'fa-exclamation-triangle'),
-            statCard('Success Rate', `${(stats.success_rate || 0).toFixed(1)}%`, '', 'fa-chart-line')
+            statCard('Success Rate', (stats.completed || stats.failed) ? `${(stats.success_rate || 0).toFixed(1)}%` : '—', '', 'fa-chart-line')
         );
     }
 
@@ -277,6 +279,7 @@
     // Task history (server-side pagination)
     // ------------------------------------------------------------------
     async function loadTasks() {
+        const freshness = document.getElementById('task-freshness');
         const loading = document.getElementById('loading-indicator');
         if (loading && state.tasksById.size === 0) loading.style.display = 'block';
 
@@ -296,10 +299,12 @@
         const result = await apiFetch(`/api/tasks/history?${params}`);
         if (loading) loading.style.display = 'none';
         if (!result.ok) {
+            if (freshness) freshness.textContent = 'Task refresh failed. Previously displayed records may be out of date.';
             showNotice(`Failed to load tasks: ${errorDetail(result)}`, 'error');
             return;
         }
         renderTasks(result.payload || { items: [], total: 0, page: 1, total_pages: 1 });
+        if (freshness) freshness.textContent = `History updated ${new Date().toLocaleTimeString()} · Refreshes every 30 seconds while visible`;
     }
 
     function renderTasks(pageData) {
@@ -396,15 +401,34 @@
     // Task details modal (accessible — no window.alert)
     // ------------------------------------------------------------------
 
+    let detailGeneration = 0;
     async function openTaskDetails(taskId) {
-        // Always re-fetch: the row cache may be stale for running jobs
-        const result = await apiFetch(`/api/tasks/${taskId}`);
-        const task = result.ok ? result.payload : state.tasksById.get(taskId);
-        if (!task) {
-            showNotice(`Could not load task ${taskId}: ${errorDetail(result)}`, 'error');
-            return;
+        const generation = ++detailGeneration;
+        const modal = document.getElementById('task-modal');
+        const body = document.getElementById('task-modal-body');
+        document.getElementById('task-modal-title-text').textContent = 'Task details';
+        body.replaceChildren(el('p', 'monitor-help', 'Loading the latest task status…'));
+        window.ModalStack.open(modal, { backdropClose: true, onClose: closeTaskModal });
+        try {
+            const result = await apiFetch(`/api/tasks/${taskId}`);
+            if (generation !== detailGeneration || state.destroyed) return;
+            if (!result.ok) throw new Error(errorDetail(result, 'Could not load task details'));
+            renderTaskModal(result.payload);
+        } catch (error) {
+            if (generation !== detailGeneration || state.destroyed) return;
+            body.replaceChildren(el('p', 'task-error-box', `Could not load current task details: ${error.message}. Close and reopen to retry.`));
         }
-        renderTaskModal(task);
+    }
+
+    function taskStatusExplanation(status) {
+        return {
+            scheduled: 'Waiting for its scheduled start. No work has been reported yet.',
+            overdue: 'The scheduled start time has passed. This does not mean the task is running; check worker availability and task history.',
+            running: 'Execution is in progress. Progress reflects the latest report from the worker.',
+            completed: 'The task reported completion. Review its result below for the work performed.',
+            failed: 'The task reported a failure. Review the error and any partial result before taking action.',
+            cancelled: 'The task was cancelled. Work completed before cancellation may still have taken effect.'
+        }[status] || 'Status is unavailable.';
     }
 
     function detailRow(dl, label, value) {
@@ -425,10 +449,9 @@
         const status = safeStatus(task.effective_status || task.status);
         const badge = el('span', `status-badge ${status}`, status.toUpperCase());
         body.appendChild(badge);
+        body.appendChild(el('p', 'task-state-explanation', taskStatusExplanation(status)));
 
         const dl = el('dl', 'task-detail-list');
-        detailRow(dl, 'Task ID', task.id);
-        detailRow(dl, 'Job ID', task.job_id);
         detailRow(dl, 'Type', task.task_type);
         detailRow(dl, 'Status', status + (task.is_overdue ? ' (scheduled time has passed)' : ''));
         detailRow(dl, 'Description', task.description);
@@ -440,13 +463,21 @@
             detailRow(dl, 'Progress', `${task.progress_percent}%`);
         }
         if (task.retry_count) detailRow(dl, 'Retries', `${task.retry_count} of ${task.max_retries || '-'}`);
-        detailRow(dl, 'Created by user', task.created_by_user_id);
-        detailRow(dl, 'Worker', task.worker_name);
-        detailRow(dl, 'Host', task.hostname);
-        detailRow(dl, 'Request ID', task.request_id);
-        detailRow(dl, 'Correlation ID', task.correlation_id);
-        detailRow(dl, 'Error code', task.error_code);
         body.appendChild(dl);
+        const references = el('details', 'task-technical');
+        references.appendChild(el('summary', null, 'Technical references'));
+        const refList = el('dl', 'task-detail-list');
+        detailRow(refList, 'Task ID', task.id);
+        detailRow(refList, 'Job ID', task.job_id);
+        detailRow(refList, 'Created by user', task.created_by_user_id);
+        detailRow(refList, 'Worker', task.worker_name);
+        detailRow(refList, 'Host', task.hostname);
+        detailRow(refList, 'Request ID', task.request_id);
+        detailRow(refList, 'Correlation ID', task.correlation_id);
+        detailRow(refList, 'Error code', task.error_code);
+        references.appendChild(refList);
+        body.appendChild(references);
+
 
         if (task.error_message) {
             const err = el('div', 'task-error-box');
@@ -482,7 +513,10 @@
             }
             const pre = el('pre', 'task-json');
             pre.textContent = JSON.stringify(structured, null, 2);
-            body.appendChild(pre);
+            const raw = el('details', 'task-technical');
+            raw.appendChild(el('summary', null, 'View complete result data'));
+            raw.appendChild(pre);
+            body.appendChild(raw);
         }
 
         // Admin actions
@@ -511,6 +545,7 @@
     }
 
     function closeTaskModal() {
+        detailGeneration++;
         const modal = document.getElementById('task-modal');
         if (!modal) return;
         if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }

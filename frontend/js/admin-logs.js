@@ -10,6 +10,7 @@ let logConfig = null;
 let timer = null;
 let suspended = false;
 let lastCleanupCompletedAt;
+let displayedLogs = [];
 const requests = new Map();
 const updated = new Map();
 const $ = id => document.getElementById(id);
@@ -94,27 +95,48 @@ function loadLogs() {
             currentPage = Math.max(1, data.total_pages || 0);
             return loadLogs();
         }
+        displayedLogs = data.logs;
         $('logs-container').innerHTML = data.logs.length ? data.logs.map(renderLogEntry).join('') : data.source_available === false
             ? `<div class="empty-state"><h3>No logs available yet</h3><p>${escapeHtml(data.source_message)}</p><p>Automatic refresh will show records when they become available.</p></div>`
             : '<div class="empty-state"><h3>No logs found</h3><p>No records match these filters in the scanned portion.</p></div>';
         $('scan-notice').textContent = data.source_available === false && data.logs.length ? `${data.source_message} Showing retained rotated logs.` : data.truncated ? `Partial history: scanned ${data.scanned_files} files and ${data.scanned_bytes} bytes. Counts are not the full log total. Narrow the date or level filter if needed.` : '';
+        const summary = $('log-view-summary');
+        if (summary) summary.textContent = `${data.logs.length} records on this page · ${logConfig?.sources?.[currentSource] || currentSource} · ${currentLevel === 'all' ? 'All levels' : currentLevel} · ${currentDateFrom || 'Any start date'} to ${currentDateTo || 'Any end date'}${data.truncated ? ' · Partial history' : ''}`;
+        filterLogPage();
         updatePagination(data);
         freshness('logs', null, currentPage > 1 ? 'Older page: automatic log refresh paused.' : '');
     });
 }
 function renderLogEntry(log) {
     const level = ['DEBUG','INFO','WARNING','ERROR','CRITICAL'].includes(log.level) ? log.level.toLowerCase() : 'info';
-    return `<div class="log-entry ${level}"><div class="log-header">
-        <span class="log-timestamp">${escapeHtml(log.timestamp)}</span>
+    const message = String(log.message || 'No message recorded');
+    const firstLine = message.split('\n')[0];
+    return `<details class="log-entry ${level}"><summary class="log-event-summary"><span class="log-header">
         <span class="log-level ${level}">${escapeHtml(log.level)}</span>
-        <span class="log-process">PID: ${escapeHtml(log.process_id)}</span>
-        <span class="log-logger">${escapeHtml(log.logger_name)}</span>
-        <span>${escapeHtml(log.source_file)}</span></div>
-        <div class="log-message">${escapeHtml(log.message)}</div></div>`;
+        <time class="log-timestamp">${escapeHtml(log.timestamp)}</time>
+        <span class="log-logger">${escapeHtml(log.logger_name || 'Unknown logger')}</span></span>
+        <span class="log-preview">${escapeHtml(firstLine.slice(0, 240))}${firstLine.length > 240 ? '…' : ''}</span>
+        <span class="log-expand-label">Expand event details</span></summary>
+        <div class="log-event-body"><dl class="log-event-meta"><div><dt>Process</dt><dd>${escapeHtml(log.process_id ?? 'Not recorded')}</dd></div><div><dt>Source file</dt><dd>${escapeHtml(log.source_file || 'Not recorded')}</dd></div><div><dt>Logger</dt><dd>${escapeHtml(log.logger_name || 'Not recorded')}</dd></div></dl>
+        <pre class="log-message">${escapeHtml(message)}</pre></div></details>`;
+}
+function filterLogPage() {
+    const input = $('log-page-search');
+    if (!input || !document.querySelectorAll) return;
+    const needle = input.value.trim().toLowerCase();
+    let visible = 0;
+    document.querySelectorAll('#logs-container .log-entry').forEach((node, index) => {
+        const log = displayedLogs[index] || {};
+        const text = [log.message, log.logger_name, log.source_file, log.level, log.process_id].join(' ').toLowerCase();
+        node.hidden = !!needle && !text.includes(needle);
+        if (!node.hidden) visible++;
+    });
+    const status = $('log-find-status');
+    if (status) status.textContent = needle ? `${visible} of ${displayedLogs.length} loaded records match. This search applies to the current page only.` : 'Select an event to read its full message. Timestamps are shown as recorded in the log.';
 }
 function updatePagination(data) {
     $('pagination-section').style.display = data.logs.length || data.has_previous ? 'flex' : 'none';
-    $('pagination-info').textContent = data.truncated ? `Page ${data.page} ? ${data.total_count} matching records in partial scan` : `Page ${data.page} of ${data.total_pages} (${data.total_count} matching records)`;
+    $('pagination-info').textContent = data.truncated ? `Page ${data.page} · ${data.total_count} matching records in partial scan` : `Page ${data.page} of ${data.total_pages} (${data.total_count} matching records)`;
     $('prev-page-btn').disabled = !data.has_previous;
     $('next-page-btn').disabled = !data.has_next;
 }
@@ -162,7 +184,7 @@ function loadJobs() {
         }
         const worker = data.ml_worker;
         const state = worker.status === 'healthy' ? worker.worker_state : worker.status;
-        $('ml-worker-status').innerHTML = `ML worker: ${stateLabel(state)} ? Last heartbeat: ${escapeHtml(stamp(worker.heartbeat_at))}${worker.current_job_id ? ' ? Job: ' + escapeHtml(worker.current_job_id) : ''}`;
+        $('ml-worker-status').innerHTML = `ML worker: ${stateLabel(state)} · Last heartbeat: ${escapeHtml(stamp(worker.heartbeat_at))}${worker.current_job_id ? ' · Job: ' + escapeHtml(worker.current_job_id) : ''}`;
         const problems = data.services.filter(s => ['stale','degraded','stopped'].includes(s.state)).length;
         const mlProblem = ['stale','offline','unavailable','stopped'].includes(state);
         freshness('jobs', data.errors.length ? data.errors.join(' ') : null,
@@ -211,7 +233,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('log-source').addEventListener('change', () => {
         currentSource = $('log-source').value;
         currentPage = 1;
-        $('logs-container').textContent = 'Loading selected log source?';
+        $('logs-container').textContent = 'Loading selected log source…';
         $('pagination-section').style.display = 'none';
         $('scan-notice').textContent = '';
         updated.delete('logs');
@@ -222,6 +244,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     $('clear-filters-btn').addEventListener('click', () => {
         $('date-from').value = $('date-to').value = '';
+        if ($('log-page-search')) $('log-page-search').value = '';
         currentDateFrom = currentDateTo = null;
         currentLevel = logConfig?.default_level || 'all';
         currentPageSize = logConfig?.default_page_size || null;
@@ -234,6 +257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('prev-page-btn').addEventListener('click', () => { if (currentPage > 1) { currentPage--; loadLogs(); } });
     $('next-page-btn').addEventListener('click', () => { currentPage++; loadLogs(); });
     $('auto-refresh').addEventListener('change', schedule);
+    $('log-page-search')?.addEventListener('input', filterLogPage);
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) suspend();
         else { suspended = false; refresh(true); }
