@@ -1,166 +1,53 @@
-# Face Recognition / Multi-Camera Surveillance System
+# VAS — face recognition and camera operations
 
-Multi-camera face recognition with cross-camera tracking, offline maps, and an
-admin web console. Runs **fully offline** — no internet access is required at
-runtime.
+VAS ingests camera frames, detects and matches faces, stores identity/appearance
+evidence, and provides a browser console for review, search, monitoring and local
+analysis. Offline operation requires the installed images, models, maps and
+local services to be present.
 
-**Version:** see `VERSION` in [`config.py`](config.py) (single source of truth).
+## Start here
 
----
+- [Move this same server to the offline intranet](Docs/offline-deployment.md)
+- [Page-by-page documentation](Docs/README.md)
+- [End-to-end operator demo](Docs/demo.md)
+- [Backup and recovery, including current restore limitations](Docs/backup-and-recovery.md)
 
-## What this is
+The page guides use their webpage filenames: `dashboard.md`, `home.md`,
+`known.md`, `unknown.md`, `ml-ops.md`, and so on. Each explains features,
+controls, permissions and a demo with expected results.
 
-Cameras POST frames to a webhook. Each frame is detected (SCRFD), embedded
-(ArcFace), matched against stored identities (pgvector), and persisted. The
-console lets an administrator review unknown faces, promote them to known
-people, merge duplicates, search by image, and follow a person across cameras
-on an offline map of Lebanon.
+## Production layout
 
-```
-Browser
-  │
-  ▼
-Nginx  ── /frontend/ (static)  ── /tiles/ (offline map)  ── everything else ──┐
-                                                                             ▼
-                                                                    FastAPI (gunicorn)
-                                                                             │
-        ┌────────────────┬──────────────────┬───────────────┬────────────────┤
-        ▼                ▼                  ▼               ▼                ▼
-  PostgreSQL 15     Redis 7          SCRFD/ArcFace     Ollama          Prometheus
-  + pgvector        cache/queues     (ONNX Runtime)    (chatbot LLM)   + Grafana
-  (identities,      (dedupe,         inference pool                    (profile /
-   embeddings,       sessions)                                          prod only)
-   detections)
-```
+The production base is [docker/docker-compose.prod.yml](docker/docker-compose.prod.yml).
+GPU deployments layer [docker/docker-compose.prod.gpu.yml](docker/docker-compose.prod.gpu.yml)
+and may have installation-specific overrides. Preserve the configuration actually
+used by the installed server. The production project name is `face_detector_prod`;
+development uses a separate project and volumes.
 
-Verify this against `docker/docker-compose.cpu.yml` — that file is the
-authority on what actually runs.
+Nginx provides HTTPS access. PostgreSQL, Redis, local inference/model services,
+ML worker, map server, backups and monitoring support the application.
+Production secrets are mounted from `secrets/`; Compose substitutions use the
+installation's environment configuration, including `docker/.env`. Defaults and
+validation live in [config.py](config.py). [Settings](Docs/settings.md) explains
+runtime edits and the distinction between saved and effective values.
 
----
+For the same-server move, use the offline checklist rather than reinstalling.
+Do not delete named volumes or run `docker compose down -v` on real data.
+VMS and the LAF-AI chatbot are separate deployments; the same-server checker
+includes their expected containers and HTTPS endpoints.
 
-## Install and start (development)
+## Development and maintenance
 
-Requires Docker Engine + the Compose plugin. GPU is optional.
+Development Compose files are [CPU](docker/docker-compose.cpu.yml) and its
+[GPU overlay](docker/docker-compose.gpu.yml). They are not substitutes for the
+production files. Inspect `bash deploy.sh --help` for the deployment wrapper's
+commands before using an installation or maintenance action.
 
-```bash
-cp .env.example .env          # then edit — see Configure below
-docker compose -f docker/docker-compose.cpu.yml up -d
-```
+Production disables `/docs` and `/redoc`. API declarations are in
+`backend/routes/` and `sql_agent/api/`; generated explorers are available only
+where explicitly enabled. Frontend files are under `frontend/`.
 
-For GPU development, **layer** the GPU override on the same stack:
-
-```bash
-docker compose -f docker/docker-compose.cpu.yml \
-               -f docker/docker-compose.gpu.yml up -d
-```
-
-`docker-compose.gpu.yml` is an override, not a stack — running it alone
-declares no database. Layering keeps the same project, so CPU and GPU
-development share one database.
-
-**For production, do not use these files.** Follow
-[`Docs/04_DEPLOYMENT_RUNBOOK.md`](Docs/04_DEPLOYMENT_RUNBOOK.md) — the
-development stacks publish PostgreSQL and Redis on host ports and ship seeded
-test credentials.
-
----
-
-## Configure
-
-One file: **`.env` at the repository root**. Every setting is declared in
-[`config.py`](config.py) (`Settings`); `.env` overrides those defaults, and
-compose passes a subset into the containers.
-
-Generate secrets — never reuse examples:
-
-```bash
-openssl rand -hex 32          # SECRET_KEY, JWT secrets, webhook keys
-```
-
-Full reference: [`Docs/06_CONFIGURATION_GUIDE.md`](Docs/06_CONFIGURATION_GUIDE.md)
-(the accurate one). Production secrets are files under `secrets/`, generated by
-`scripts/setup/generate-secrets.sh`.
-
----
-
-## Verify it is running
-
-```bash
-docker compose -f docker/docker-compose.cpu.yml ps        # all services healthy
-curl -fsS http://localhost/health/live                    # {"status":"alive",...}
-curl -fsS http://localhost/health/detailed | head -40      # per-component detail
-```
-
-`/health/detailed` is the detailed health contract — queue depth, DB pool,
-Redis, storage, models, background services. There is no `/api/health`.
-
-Then open <http://localhost/signin> and log in.
-
-On a fresh deployment the first sign-in lands on `/change-password`: the
-bootstrap administrator holds a password from `secrets/bootstrap_admin_password`
-that the system requires it to replace before anything else works. The same
-applies to any account an administrator creates or resets. See
-[`Docs/04_DEPLOYMENT_RUNBOOK.md`](Docs/04_DEPLOYMENT_RUNBOOK.md) §7.
-
----
-
-## API documentation
-
-| URL | What |
-|---|---|
-| `/docs` | Swagger UI (interactive) |
-| `/redoc` | ReDoc (reference) |
-| `/openapi.json` | Raw OpenAPI 3 spec |
-
-Served entirely from vendored local assets (`frontend/vendor/swagger/`); no CDN,
-no internet. **Disabled in production** by design — the docs publish every admin
-route, and the gate cannot be flipped at runtime. For a production system, read
-[`Docs/48_API_REFERENCE.md`](Docs/48_API_REFERENCE.md) (generated from the
-code, kept honest by a test), or extract the live spec without exposing
-anything:
-
-```bash
-docker compose -f docker/docker-compose.prod.yml exec face_recognition \
-  python -c "from backend.main import app; import json; print(json.dumps(app.openapi()))" > openapi-prod.json
-```
-
----
-
-## Stop safely
-
-```bash
-docker compose -f docker/docker-compose.cpu.yml stop      # halt, keep everything
-docker compose -f docker/docker-compose.cpu.yml down      # remove containers, KEEP volumes
-```
-
-> **Never run `docker compose down -v` on a system with real data.** The `-v`
-> deletes named volumes: the PostgreSQL database, stored faces, and logs. There
-> is no undo. Restore then depends entirely on your last backup.
-
----
-
-## Where to go next
-
-| I want to… | Read |
-|---|---|
-| **Deploy to production** | [`Docs/04_DEPLOYMENT_RUNBOOK.md`](Docs/04_DEPLOYMENT_RUNBOOK.md) — the authority |
-| **Run it day to day** | [`Docs/14_ADMIN_CHEAT_SHEET.md`](Docs/14_ADMIN_CHEAT_SHEET.md) |
-| **Fix something that broke** | [`Docs/13_TROUBLESHOOTING.md`](Docs/13_TROUBLESHOOTING.md) |
-| **Harden before go-live** | [`Docs/10_SECURITY_CHECKLIST.md`](Docs/10_SECURITY_CHECKLIST.md) |
-| **Back up / restore** | [`Docs/11_BACKUP_AND_RESTORE.md`](Docs/11_BACKUP_AND_RESTORE.md) |
-| **Understand configuration** | [`Docs/06_CONFIGURATION_GUIDE.md`](Docs/06_CONFIGURATION_GUIDE.md) |
-| **Set up offline maps** | [`Docs/40_MAP_SERVICE.md`](Docs/40_MAP_SERVICE.md) |
-| **Everything else** | [`Docs/00_DOCUMENTATION_INDEX.md`](Docs/00_DOCUMENTATION_INDEX.md) |
-
----
-
-## Testing
-
-The suite runs **inside** the API container and drives the live app.
-
-```bash
-docker exec face_recognition_api python -m pytest tests/ -q
-```
-
-> Tests create and clean their own `qa_`-prefixed data. **Never point the suite
-> at production.** See the regression policy in the deployment runbook.
+Run data-changing tests against an isolated test stack. The regression entry
+point is [scripts/run_regression_isolated.sh](scripts/run_regression_isolated.sh);
+review its help/configuration before execution. Do not point the full suite at
+production data.
