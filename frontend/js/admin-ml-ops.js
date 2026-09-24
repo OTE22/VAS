@@ -44,7 +44,7 @@
             description: 'Review readiness, build datasets, manage labels, and start a manual training run.',
             purpose: 'Create trustworthy, point-in-time data and a candidate model. Nothing in this stage changes live decisions.',
             run: ['Compute missing features and review outcome labels.', 'Build or select a compatible immutable dataset, then start a training run.'],
-            verify: ['The queue reports Completed, readiness shows sufficient coverage, and the dataset records its hashes.', 'A new Validated candidate appears in Review models.'],
+            verify: ['The queue reports Completed, readiness shows sufficient coverage, and the dataset records its hashes.', 'A completed run creates a model record. Inspect its actual stage and evaluation gates in Review models.'],
             recover: ['Read the error beside the action and correct the stated field, time range, or compatibility problem.', 'Use the request ID in Audit when the cause is unclear, then rerun or cancel the active job.'],
             primaryTarget: 'workflows',
             primaryLabel: 'Open build and train'
@@ -227,6 +227,9 @@
     function setConsoleConnection(status, label) {
         const node = getElement('console-connection-state');
         if (!node) return;
+        if (status === 'online' && (state.evidence.overview === 'error' || state.jobPollFailures)) {
+            status = 'offline'; label = 'Some status checks failed — refresh';
+        }
         state.consoleStatus = status;
         node.className = 'mlops-live-state is-' + status;
         const textNode = node.querySelector('span:last-child');
@@ -452,6 +455,8 @@
         modelTypes: [],
         models: [],
         datasets: [],
+        evidence: { overview: 'loading', datasets: 'loading', models: 'loading' },
+        featureSnapshots: null,
         activeWorkspace: 'overview',
         consoleStatus: 'connecting',
         pendingAction: null    // { title, execute(reason) }
@@ -469,6 +474,10 @@
 
     function workspaceStatus(workspace) {
         const workerStatus = toText(state.mlWorker && state.mlWorker.status, 'unknown').toLowerCase();
+        if (['overview', 'prepare'].includes(workspace)) {
+            if (state.evidence.overview === 'error' || state.jobPollFailures) return { text: 'Status unavailable — refresh', tone: 'bad' };
+            if (state.evidence.overview !== 'ready' || !state.mlWorker) return { text: 'Checking readiness', tone: 'warn' };
+        }
         if (workspace === 'overview') {
             if (state.consoleStatus === 'offline' || (state.mlWorker && workerStatus !== 'healthy')) {
                 return { text: 'Needs attention', tone: 'bad' };
@@ -573,6 +582,8 @@
             control.addEventListener('click', function () {
                 const workspace = control.dataset.mlopsView || control.dataset.openMlopsView;
                 activateWorkspace(workspace, true);
+                const target = getElement(control.dataset.nextTarget);
+                if (target) { target.scrollIntoView({ block: 'center' }); target.focus(); }
             });
         });
 
@@ -615,40 +626,38 @@
         const action = getElement('mlops-next-step-action');
         if (!title || !description || !action) return;
 
-        let next = {
-            title: 'Rules are protecting live decisions',
-            description: 'No ML job is active. Prepare data and labels when you are ready to build the next candidate.',
-            workspace: 'prepare',
-            action: 'Prepare data'
-        };
+        let next = { title: 'Build your first dataset', description: 'Feature records are available. Build an immutable dataset, inspect validation, then configure one training run.', workspace: 'prepare', action: 'Build a dataset', target: 'build-dataset-btn' };
         const workerStatus = toText(state.mlWorker && state.mlWorker.status, 'unknown');
-        if (state.consoleStatus === 'offline' || (state.mlWorker && workerStatus !== 'healthy')) {
-            next = {
-                title: 'Restore the ML worker first',
-                description: 'The control plane or worker is unavailable. Durable commands are retained and will resume after recovery.',
-                workspace: 'overview',
-                action: 'Check system health'
-            };
+        if (state.evidence.overview === 'error' || state.jobPollFailures || (state.mlWorker && workerStatus !== 'healthy')) {
+            next = { title: 'Check service health before starting work', description: 'Current readiness could not be confirmed. Check the worker and refresh status; do not submit duplicate jobs.', workspace: 'overview', action: 'Check system health', target: 'refresh-console-btn' };
+        } else if (state.evidence.overview !== 'ready' || !state.mlWorker || state.consoleStatus === 'connecting') {
+            next = { title: 'Checking your workspace…', description: 'Waiting for current service and worker status before recommending an action.', workspace: 'overview', action: 'Check status' };
         } else if (state.activeJobs.size) {
-            next = {
-                title: state.activeJobs.size + (state.activeJobs.size === 1 ? ' job is in progress' : ' jobs are in progress'),
-                description: 'Follow the current stage and wait for completion before starting conflicting work.',
-                workspace: 'overview',
-                action: 'Follow job progress'
-            };
+            next = { title: state.activeJobs.size + ' job(s) in progress', description: 'Follow the current stage. Wait for completion before submitting conflicting work.', workspace: 'overview', action: 'Follow job progress', target: 'jobs-refresh-btn' };
+        } else if (state.evidence.models === 'error' || state.evidence.datasets === 'error') {
+            next = { title: 'Refresh missing evidence', description: 'The model or dataset list could not be loaded. Missing evidence does not mean there are no saved records.', workspace: 'overview', action: 'Refresh status', target: 'refresh-console-btn' };
+        } else if (state.evidence.models !== 'ready' || state.evidence.datasets !== 'ready') {
+            next = { title: 'Loading saved work…', description: 'Checking datasets and models to find your next step.', workspace: 'overview', action: 'Check status' };
+        } else if (state.models.some(model => model.stage === 'validated')) {
+            next = { title: 'Review your trained candidate', description: 'Inspect held-out results, validation gates and intended use. Training completion does not approve a model for deployment.', workspace: 'review', action: 'Review models', target: 'models-refresh-btn' };
         } else if (state.currentMode === 'shadow') {
-            next = {
-                title: 'Review shadow evidence',
-                description: 'Rules still decide. Compare shadow outputs, fallbacks, and drift before considering another lifecycle change.',
-                workspace: 'monitor',
-                action: 'Open monitoring'
-            };
+            next = { title: 'Review shadow evidence', description: 'Rules still decide. Compare shadow outputs and fallbacks before changing the model lifecycle.', workspace: 'monitor', action: 'Open monitoring' };
+        } else if (state.datasets.some(ds => ds.status === 'built' && ds.file_present !== false && ds.parquet_sha256)) {
+            next = { title: 'Inspect data, then configure training', description: 'A saved dataset is available. Check its validation and choose a compatible model. Keep default parameters for your first run.', workspace: 'prepare', action: 'Configure training', target: 'training-dataset-select' };
+        } else if (state.datasets.some(ds => ds.status === 'built')) {
+            next = { title: 'Check your saved dataset', description: 'A dataset needs file or checksum verification before reuse. Inspect its record in Prepare & train.', workspace: 'prepare', action: 'Inspect datasets' };
+        } else if (state.featureSnapshots === 0) {
+            next = { title: 'Start by collecting features', description: 'No feature snapshots or usable datasets are available. Compute features from existing observations, then build a dataset. Supervised training also needs reviewed labels.', workspace: 'prepare', action: 'Prepare features', target: 'compute-features-btn' };
+        } else if (state.featureSnapshots === null) {
+            next = { title: 'Check data availability', description: 'Feature counts are unavailable. Refresh status before choosing a dataset build.', workspace: 'prepare', action: 'Check data readiness' };
         }
 
         title.textContent = next.title;
         description.textContent = next.description;
         action.textContent = next.action;
         action.dataset.openMlopsView = next.workspace;
+        action.dataset.nextTarget = next.target || '';
+        action.disabled = next.title === 'Checking your workspace…' || next.title === 'Loading saved work…';
         updateRunbook(state.activeWorkspace);
     }
 
@@ -729,6 +738,8 @@
         try {
             const data = await api('/api/ml/overview', { signal: req.signal });
             if (!req.isCurrent()) return;
+            state.evidence.overview = 'ready';
+            state.featureSnapshots = toFiniteNumber(data && data.data_readiness && data.data_readiness.feature_snapshots);
             renderSystemState(data && data.system);
             renderModePanel(data && data.mode);
             renderLabelReadiness(data && data.label_readiness);
@@ -738,6 +749,7 @@
             setConsoleConnection('online', 'Control plane connected');
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
+            state.evidence.overview = 'error';
             renderCardError('mode-cards', err);
             renderCardError('label-readiness-body', err);
             renderCardError('data-readiness-body', err);
@@ -1043,6 +1055,8 @@
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
             state.models = items;
+            state.evidence.models = 'ready';
+            updateNextStep();
             if (workflow) workflow.sync('models');
             renderEvidenceModelFilter(items);
             const frag = document.createDocumentFragment();
@@ -1067,6 +1081,8 @@
             if (err.aborted || !req.isCurrent()) return;
             const row = el('tr');
             const cell = el('td', 'mlops-note note-bad', formatActionError('Could not load models', err));
+            state.evidence.models = 'error';
+            updateNextStep();
             if (workflow) workflow.loadError('models', err);
             cell.colSpan = 9;
             row.appendChild(cell);
@@ -2339,6 +2355,8 @@
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
             state.datasets = items;
+            state.evidence.datasets = 'ready';
+            updateNextStep();
             if (workflow) workflow.sync('datasets');
             const frag = document.createDocumentFragment();
             frag.appendChild(el('div', 'mlops-subheading',
@@ -2387,6 +2405,8 @@
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderDatasetsMessage('Failed to load datasets: ' + toText(err.message), 'bad');
+            state.evidence.datasets = 'error';
+            updateNextStep();
             if (workflow) workflow.loadError('datasets', err);
         }
     }
@@ -2809,7 +2829,7 @@
             button.disabled = true;
             button.setAttribute('aria-busy', 'true');
         }
-        setConsoleConnection('online', 'Synchronizing control plane');
+        setConsoleConnection('connecting', 'Synchronizing control plane');
         try {
             await Promise.allSettled([
                 loadOverview(), loadModels(), loadShadowSummary(), loadPredictions(),

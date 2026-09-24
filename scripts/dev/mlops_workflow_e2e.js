@@ -72,6 +72,14 @@ let savedPipelines = [];
             return route.fulfill({ status: 204 });
         });
         await page.goto('http://workflow.test/admin/ml-ops');
+        await page.locator('#mlops-tour-start').click();
+        for (let step = 1; step <= 10; step++) {
+            assert.match(await page.locator('.mlops-tour-count').innerText(), new RegExp(step + ' OF 10'));
+            await page.locator('.mlops-tour-actions button').nth(1).click();
+        }
+        assert.equal(await page.locator('.mlops-tour').evaluate(node => node.open), false);
+        assert.equal(writes.length, 0, 'The tour must not submit operational requests');
+        await page.locator('#mlops-evidence-browser > summary').click();
         await page.waitForFunction(() => document.querySelectorAll('#workflow-dataset option').length === 2);
         assert.equal(await page.locator('#workflow-pipeline button').count(), 7);
         await page.selectOption('#workflow-dataset', did);

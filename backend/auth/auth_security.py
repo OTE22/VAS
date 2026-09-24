@@ -366,8 +366,8 @@ async def revoke_token(jti: str, expires_in_seconds: int) -> bool:
     return True
 
 
-async def is_token_revoked(jti: Optional[str]) -> bool:
-    """Check the denylist. Never fails open on a Redis error."""
+async def is_token_revoked(jti: Optional[str], *, require_shared_store: bool = False) -> bool:
+    """Check revocation; sensitive gateways may require the shared store."""
     if not jti:
         return False
     client = await _redis()
@@ -375,7 +375,11 @@ async def is_token_revoked(jti: Optional[str]) -> bool:
         try:
             return bool(await client.exists(_revocation_key(jti)))
         except Exception:
+            if require_shared_store:
+                raise
             pass  # fall through to the local denylist
+    if client is None and require_shared_store:
+        raise RuntimeError("Shared session verification unavailable")
     expires_at = _revoked_fallback.get(jti)
     if expires_at is None:
         return False

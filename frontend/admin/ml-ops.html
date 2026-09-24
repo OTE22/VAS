@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-15">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-17">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -35,6 +35,8 @@
                     </div>
                 </div>
                 <div class="mlops-page-actions">
+                    <button class="mlops-btn" id="mlops-tour-start" type="button"><i class="fas fa-route" aria-hidden="true"></i> Guide me</button>
+                    <span id="notebook-launch"></span>
                     <div class="mlops-live-state" id="console-connection-state" role="status">
                         <span class="mlops-live-dot" aria-hidden="true"></span>
                         <span>Connecting to control plane</span>
@@ -64,15 +66,51 @@
                 </article>
             </section>
 
+                <div class="mlops-next-step">
+                    <div class="mlops-next-step-icon"><i class="fas fa-compass" aria-hidden="true"></i></div>
+                    <div role="status" aria-live="polite">
+                        <span>Recommended next step</span>
+                        <strong id="mlops-next-step-title">Checking the system…</strong>
+                        <p id="mlops-next-step-description">Waiting for current mode, worker health, and active jobs.</p>
+                    </div>
+                    <button class="mlops-btn mlops-btn-primary" id="mlops-next-step-action" type="button" data-open-mlops-view="overview">Open overview</button>
+                </div>
+            <details class="mlops-guide" aria-labelledby="mlops-guide-title">
+                <summary>Workspace guide and recommended actions</summary>
+                <div class="mlops-guide-intro">
+                    <span class="mlops-guide-label">Start here</span>
+                    <h2 id="mlops-guide-title">Follow the model lifecycle from left to right</h2>
+                    <p>You do not need to inspect every screen. Choose the stage that matches your task; each workspace only shows the tools needed for that stage.</p>
+                </div>
+                <ol class="mlops-lifecycle" aria-label="ML model lifecycle">
+                    <li><button type="button" data-open-mlops-view="overview"><span>1</span><strong>Check</strong><small>Health and live activity</small></button></li>
+                    <li><button type="button" data-open-mlops-view="prepare"><span>2</span><strong>Prepare</strong><small>Data, labels, and training</small></button></li>
+                    <li><button type="button" data-open-mlops-view="review"><span>3</span><strong>Review</strong><small>Evidence before approval</small></button></li>
+                    <li><button type="button" data-open-mlops-view="monitor"><span>4</span><strong>Monitor</strong><small>Shadow results and drift</small></button></li>
+                    <li><button type="button" data-open-mlops-view="audit"><span>5</span><strong>Audit</strong><small>Who changed what</small></button></li>
+                </ol>
+            </details>
+
+            <nav class="mlops-section-nav" aria-label="Choose an ML operations workspace">
+                <span class="mlops-section-nav-label">Workspace</span>
+                <button type="button" class="is-active" data-mlops-view="overview" aria-pressed="true"><i class="fas fa-gauge-high" aria-hidden="true"></i> Overview</button>
+                <button type="button" data-mlops-view="prepare" aria-pressed="false"><i class="fas fa-flask" aria-hidden="true"></i> Prepare &amp; train</button>
+                <button type="button" data-mlops-view="review" aria-pressed="false"><i class="fas fa-clipboard-check" aria-hidden="true"></i> Review models</button>
+                <button type="button" data-mlops-view="monitor" aria-pressed="false"><i class="fas fa-chart-line" aria-hidden="true"></i> Monitor</button>
+                <button type="button" data-mlops-view="audit" aria-pressed="false"><i class="fas fa-shield-halved" aria-hidden="true"></i> Audit</button>
+            </nav>
+
+            <details class="mlops-evidence-browser" id="mlops-evidence-browser">
+                <summary>Inspect a dataset or model <span>Samples, validation, training stages and lineage</span></summary>
             <section class="mlops-workflow" aria-labelledby="workflow-title">
-                <div class="mlops-card-header"><div><span class="mlops-guide-label">Guided workflow</span><h2 id="workflow-title">From dataset to deployment</h2><p>Choose a dataset or a saved model. Inspect each stage, then continue with the existing tools below.</p></div></div>
+                <div class="mlops-card-header"><div><span class="mlops-guide-label">Guided workflow</span><h2 id="workflow-title">Dataset and model evidence</h2><p>Choose a dataset or a saved model. Inspect each stage, then continue with the existing tools below.</p></div></div>
                 <aside class="workflow-evidence" aria-label="Getting started with ML operations">
                     <strong>First time here?</strong>
                     <p>Start with a dataset version, inspect its validation, train one model with default settings, then review the held-out results. The numbered stages explain each step. Selecting a stage only changes what you see; work starts when you submit an action.</p>
                     <details><summary>Walk me through my first run</summary>
                         <ol>
                             <li><strong>Check the worker.</strong> Open Overview and confirm the console and worker are connected. Scheduled jobs wait for the worker.</li>
-                            <li><strong>Choose data.</strong> Select a dataset version above. If none exists, open Prepare, compute features and build a dataset. Inspect its source, dates, samples and validation report.</li>
+                            <li><strong>Choose data.</strong> Select a dataset version below. If none exists, open Prepare, compute features and build a dataset. Inspect its source, dates, samples and validation report.</li>
                             <li><strong>Configure one experiment.</strong> Open Training, then Configure training. Choose an available task and algorithm. Keep the seed and parameter defaults; leave tuning and explanations off for the first run.</li>
                             <li><strong>Start and follow the job.</strong> Select Start training once. Follow progress in Overview. If it fails, read the error, correct its cause and submit a new run.</li>
                             <li><strong>Review before approving.</strong> Select the resulting model and open Evaluation. Compare held-out metrics and the baseline, then inspect lineage and the allowed approval action.</li>
@@ -104,39 +142,7 @@
                 <section id="workflow-summary" aria-label="Run summary" hidden tabindex="-1"></section>
             </section>
 
-            <details class="mlops-guide" aria-labelledby="mlops-guide-title">
-                <summary>Workspace guide and recommended actions</summary>
-                <div class="mlops-guide-intro">
-                    <span class="mlops-guide-label">Start here</span>
-                    <h2 id="mlops-guide-title">Follow the model lifecycle from left to right</h2>
-                    <p>You do not need to inspect every screen. Choose the stage that matches your task; each workspace only shows the tools needed for that stage.</p>
-                </div>
-                <ol class="mlops-lifecycle" aria-label="ML model lifecycle">
-                    <li><button type="button" data-open-mlops-view="overview"><span>1</span><strong>Check</strong><small>Health and live activity</small></button></li>
-                    <li><button type="button" data-open-mlops-view="prepare"><span>2</span><strong>Prepare</strong><small>Data, labels, and training</small></button></li>
-                    <li><button type="button" data-open-mlops-view="review"><span>3</span><strong>Review</strong><small>Evidence before approval</small></button></li>
-                    <li><button type="button" data-open-mlops-view="monitor"><span>4</span><strong>Monitor</strong><small>Shadow results and drift</small></button></li>
-                    <li><button type="button" data-open-mlops-view="audit"><span>5</span><strong>Audit</strong><small>Who changed what</small></button></li>
-                </ol>
-                <div class="mlops-next-step">
-                    <div class="mlops-next-step-icon"><i class="fas fa-compass" aria-hidden="true"></i></div>
-                    <div role="status" aria-live="polite">
-                        <span>Recommended next step</span>
-                        <strong id="mlops-next-step-title">Checking the system…</strong>
-                        <p id="mlops-next-step-description">Waiting for current mode, worker health, and active jobs.</p>
-                    </div>
-                    <button class="mlops-btn mlops-btn-primary" id="mlops-next-step-action" type="button" data-open-mlops-view="overview">Open overview</button>
-                </div>
             </details>
-
-            <nav class="mlops-section-nav" aria-label="Choose an ML operations workspace">
-                <span class="mlops-section-nav-label">Workspace</span>
-                <button type="button" class="is-active" data-mlops-view="overview" aria-pressed="true"><i class="fas fa-gauge-high" aria-hidden="true"></i> Overview</button>
-                <button type="button" data-mlops-view="prepare" aria-pressed="false"><i class="fas fa-flask" aria-hidden="true"></i> Prepare &amp; train</button>
-                <button type="button" data-mlops-view="review" aria-pressed="false"><i class="fas fa-clipboard-check" aria-hidden="true"></i> Review models</button>
-                <button type="button" data-mlops-view="monitor" aria-pressed="false"><i class="fas fa-chart-line" aria-hidden="true"></i> Monitor</button>
-                <button type="button" data-mlops-view="audit" aria-pressed="false"><i class="fas fa-shield-halved" aria-hidden="true"></i> Audit</button>
-            </nav>
 
             <!-- The seven honesty warnings (static so they render even if every API call fails) -->
             <details class="mlops-warnings" id="mlops-warnings">
@@ -170,6 +176,8 @@
                     <span class="mlops-chip chip-warn" id="mlops-runbook-status" role="status">Checking readiness</span>
                 </div>
                 <p class="mlops-runbook-purpose" id="mlops-runbook-purpose">Begin here before changing anything. Confirm that the control plane and worker can accept work and see which system makes live decisions.</p>
+                <details class="mlops-runbook-details">
+                    <summary>Step-by-step instructions and troubleshooting</summary>
                 <ol class="mlops-runbook-steps">
                     <li>
                         <span class="mlops-runbook-number" aria-hidden="true">1</span>
@@ -184,6 +192,7 @@
                         <div><strong>Recover if it fails</strong><ul id="mlops-runbook-recover"><li>Sign in again if the session expired.</li><li>Restore the worker and refresh; queued commands remain recorded and rules stay live.</li></ul></div>
                     </li>
                 </ol>
+                </details>
                 <div class="mlops-runbook-actions">
                     <button class="mlops-btn" id="mlops-runbook-previous" type="button"><i class="fas fa-arrow-left" aria-hidden="true"></i> Previous stage</button>
                     <button class="mlops-btn mlops-btn-primary" id="mlops-runbook-primary" type="button"><i class="fas fa-location-arrow" aria-hidden="true"></i> Go to first task</button>
@@ -194,7 +203,7 @@
             <details class="mlops-status-legend">
                 <summary><i class="fas fa-circle-info" aria-hidden="true"></i> What the status labels mean</summary>
                 <div>
-                    <span><b class="mlops-chip chip-ok">Ready</b> Safe to continue</span>
+                    <span><b class="mlops-chip chip-ok">Ready</b> Prerequisites confirmed; review the action</span>
                     <span><b class="mlops-chip chip-info">Running</b> Work is active; monitor it</span>
                     <span><b class="mlops-chip chip-warn">Needs attention</b> Review before continuing</span>
                     <span><b class="mlops-chip chip-bad">Blocked</b> Fix the stated problem first</span>
@@ -786,7 +795,8 @@
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
     <script src="/frontend/js/mlops-workflow.js?v=workflow-3"></script>
-    <script src="/frontend/js/mlops-diagnostics.js?v=1"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-20"></script>
+    <script src="/frontend/js/mlops-diagnostics.js?v=2"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-21"></script>
+    <script src="/frontend/js/mlops-tour.js?v=1"></script>
 </body>
 </html>

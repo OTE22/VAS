@@ -20,9 +20,9 @@
             .then(response => response.ok ? response.json() : {}).catch(() => ({}));
         workspace.then(data => {
             if (!data.url) return;
-            const url = new URL(data.url);
+            const url = new URL(data.url, window.location.origin);
             if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) return;
-            const link = el('a', 'Open JupyterLab', 'mlops-btn mlops-btn-small');
+            const link = el('a', 'Open Notebook', 'mlops-btn mlops-btn-small');
             link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
             panel.append(link);
         }).catch(() => {});
@@ -69,5 +69,7 @@
         panel.append(el('p', 'Open the notebook in your Jupyter workspace. It inspects saved evidence and rechecks an available snapshot; it does not rerun production jobs.', 'mlops-mode-desc'));
         return panel;
     }
+    const launch = document.getElementById('notebook-launch');
+    if (launch) workspaceLink(launch);
     window.MLOpsDiagnostics = {render, datasetLink: id => download('/api/ml/datasets/' + encodeURIComponent(id) + '/debug-notebook')};
 })();

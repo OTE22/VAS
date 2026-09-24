@@ -10,7 +10,7 @@ Exports are evidence and snapshot rechecks, **not replays of database extraction
 
 ## Start the separate workspace
 
-The notebook service uses its own network, no database/API credentials, a read-only artifact volume, a persistent writable workspace and CPU/memory limits. A small proxy publishes its port on localhost only; the kernel stays on the internal network without outbound access. It is a single-administrator workspace; use separate instances or a managed JupyterHub deployment for independent users.
+The notebook service uses its own network, no database/API credentials, a read-only artifact volume, a persistent writable workspace and CPU/memory limits. An access gateway validates the existing VAS admin session. Kernels stay on an internal network without outbound access. This is a shared admin workspace; use separate instances or JupyterHub for independent users.
 
 Create a strong token in a protected file **outside the repository**. Grant the notebook UID (1000) read access; do not make it world-readable. Set `NOTEBOOK_TOKEN_FILE` to its absolute path. For example, on a UID 1000 deployment host:
 
@@ -23,14 +23,12 @@ docker compose --env-file /dev/null -f docker/docker-compose.notebook.yml up -d 
 
 The default read-only volume is `face_detector_prod_ml_artifacts_data`. Override `NOTEBOOK_ARTIFACT_VOLUME` for a different environment or a dedicated snapshot copy. Never mount the Docker socket, application secrets or the application repository into a notebook kernel.
 
-For remote access, tunnel from your workstation:
+Set `ML_NOTEBOOK_URL=/notebooks/lab` in the API deployment, recreate the API, and reload production nginx. The gateway uses the external `face_detector_prod_edge` network and `/api/ml/notebook-access`. Neither notebook service publishes a host port.
 
-```bash
-ssh -L 8888:127.0.0.1:8888 administrator@your-server
-```
+In **Admin → ML Operations**, click **Open Notebook**. Jupyter opens at `/notebooks/lab` on the same HTTPS site using your VAS admin session. No notebook token is entered or sent to the browser. Upload the downloaded debug notebook and run its cells; `ARTIFACT_ROOT` defaults to `/artifacts`.
 
-Open `http://localhost:8888/lab`, sign in with the token, upload the downloaded notebook, and run its cells. Its default `ARTIFACT_ROOT` is `/artifacts`. The workspace shuts down after one idle hour and disconnected idle kernels are culled after 30 minutes; restart with Compose when needed. Stop it with `docker compose --env-file /dev/null -f docker/docker-compose.notebook.yml stop`.
+The gateway checks ML management permission and session revocation for every request, requires same-origin writes, and rechecks open kernel connections every ten seconds. Missing sessions redirect browser navigation to VAS sign-in. Expired or revoked sessions disconnect notebook access; sign back into VAS and reopen the notebook. The private service token authenticates only gateway-to-Jupyter traffic. Keep the custom identity provider enabled: it prevents Jupyter from exposing that token in browser configuration.
 
-To show **Open JupyterLab** in ML Ops, set `ML_NOTEBOOK_URL` in the API deployment to the separately authenticated HTTPS workspace URL. For an SSH-only workflow, `http://localhost:8888/lab` is allowed, but every browser user needs their own tunnel. URLs containing credentials, query tokens or fragments are rejected. No service is automatically exposed through the production reverse proxy. Do not disable Jupyter token authentication or XSRF protection.
+The workspace restarts automatically after a host restart or crash. Disconnected idle kernels are culled after 30 minutes. Files and kernels are shared between authorized administrators. Stop it with `docker compose --env-file /dev/null -f docker/docker-compose.notebook.yml stop`.
 
 The notebook contains metadata and executable helper source, not embedded dataset rows or credentials. Running it displays records from the mounted snapshot; clear outputs before sharing it. Rechecks cannot approve a model or modify the production registry.

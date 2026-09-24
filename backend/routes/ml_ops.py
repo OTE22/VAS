@@ -1009,11 +1009,32 @@ async def archive_dataset_endpoint(
         raise _safe_500("dataset archive", e)
 
 
+@router.get("/api/ml/notebook-access", tags=["ML Operations"])
+async def notebook_access(request: Request, current_user=Depends(ML_MANAGE)):
+    """Authorize the notebook gateway; never return notebook credentials."""
+    from fastapi.responses import Response
+    from backend.auth.auth_service import AuthService
+    from backend.auth.auth_security import is_token_revoked
+    token = request.cookies.get("__Host-access_token") or request.cookies.get("access_token")
+    payload = AuthService.decode_token(token) if token else None
+    if not payload or not payload.get("jti"):
+        raise HTTPException(401, "Admin session required")
+    try:
+        revoked = await is_token_revoked(payload["jti"], require_shared_store=True)
+    except Exception:
+        raise HTTPException(503, "Session verification unavailable")
+    if revoked:
+        raise HTTPException(401, "Admin session ended")
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/ml/debug-workspace", tags=["ML Operations"])
 async def debug_workspace(current_user=Depends(ML_MANAGE)):
     from urllib.parse import urlsplit
     from config import settings
     url = settings.ML_NOTEBOOK_URL.strip()
+    if url == "/notebooks/lab":
+        return JSONResponse({"url": url}, headers={"Cache-Control": "no-store"})
     try:
         parsed = urlsplit(url)
     except ValueError:
