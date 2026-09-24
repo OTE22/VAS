@@ -102,6 +102,7 @@
         const retention = Number(config.database_retention_days);
         cfg.databaseRetentionDays = (Number.isFinite(retention) && retention > 0) ? retention : cfg.databaseRetentionDays;
         console.log(`[CONFIG] Applied (${source}): display=${cfg.faceDisplayMs}ms alertWindow=${cfg.alertWindowMs}ms retentionDays=${cfg.databaseRetentionDays ?? 'unknown'}`);
+        updateAlertBadge();
         return true;
     }
 
@@ -634,7 +635,7 @@
             const seen = el('div', 'timestamp-secondary');
             seen.appendChild(icon('fa-calendar-alt'));
             seen.appendChild(el('span', 'last-seen-line'));
-            ts.appendChild(seen);
+            ts.insertBefore(seen, primary);
             // "Stored until" line only exists when the backend told us retention
             if (cfg.databaseRetentionDays !== null) {
                 const stored = el('div', 'timestamp-secondary');
@@ -662,7 +663,7 @@
         const procEl = item.querySelector('.processing-time');
         if (procEl) {
             procEl.textContent = Number.isFinite(entry.processing_time_ms)
-                ? ` ⚡ ${entry.processing_time_ms.toFixed(1)}ms` : '';
+                ? `Processed in ${entry.processing_time_ms.toFixed(0)} ms` : '';
         }
         updateItemTimes(item, entry);
     }
@@ -671,10 +672,10 @@
         const remainingEl = item.querySelector('.time-remaining');
         if (remainingEl) {
             const remaining = cfg.faceDisplayMs - (Date.now() - entry.last_seen_at.getTime());
-            remainingEl.textContent = remaining <= 0 ? 'expired' : formatRemaining(remaining);
+            remainingEl.textContent = remaining <= 0 ? 'Leaving live view' : 'Visible for ' + formatRemaining(remaining);
         }
         const seenEl = item.querySelector('.last-seen-line');
-        if (seenEl) seenEl.textContent = ` Last seen: ${formatAge(entry.last_seen_at)}`;
+        if (seenEl) { seenEl.textContent = 'Seen ' + formatAge(entry.last_seen_at); seenEl.title = formatBeirut(entry.last_seen_at) + ' (Beirut)'; }
         const storedEl = item.querySelector('.stored-until-line');
         if (storedEl && cfg.databaseRetentionDays !== null) {
             // Backend-provided retention only — this file never invents a policy
@@ -1161,16 +1162,21 @@
             item.setAttribute('role', 'button');
             const header = el('div', 'alert-history-item-header');
             header.appendChild(el('div', 'alert-history-name', entry.name));
-            header.appendChild(el('div', 'alert-history-time', formatBeirut(entry.detectionTime)));
+            const time = el('time', 'alert-history-time', formatAge(entry.detectionTime));
+            time.dateTime = entry.detectionTime.toISOString();
+            time.title = formatBeirut(entry.detectionTime) + ' (Beirut)';
+            header.appendChild(time);
             item.appendChild(header);
             item.appendChild(el('div', 'alert-history-details',
-                `${getPipelineDisplayName(entry.pipelineId)} • ${(entry.similarity * 100).toFixed(1)}%`));
+                `${getPipelineDisplayName(entry.pipelineId)} · Match ${(entry.similarity * 100).toFixed(1)}%`));
             return item;
         });
         container.replaceChildren(...items);
     }
 
     function updateAlertBadge() {
+        const summary = document.getElementById('alert-history-summary');
+        if (summary) summary.textContent = `${alertHistory.length} recent detection${alertHistory.length === 1 ? '' : 's'} · Display window: ${formatRemaining(cfg.faceDisplayMs)} · This browser session`;
         const badge = document.getElementById('alertBadge');
         if (!badge) return;
         const active = alertHistory.filter(a => Date.now() - a.detectionTime.getTime() < cfg.faceDisplayMs).length;
@@ -1178,9 +1184,22 @@
         badge.style.display = active > 0 ? 'flex' : 'none';
     }
 
+    function positionAlertHistory() {
+        const panel = document.getElementById('alertHistoryPanel');
+        if (!panel) return;
+        const nav = document.querySelector('nav.military-navbar') || document.getElementById('navbar-placeholder');
+        const top = Math.max(16, Math.min((nav?.getBoundingClientRect().bottom || 64) + 12, window.innerHeight - 180));
+        panel.style.top = top + 'px';
+        panel.style.maxHeight = Math.max(140, window.innerHeight - top - 20) + 'px';
+    }
+
     function toggleAlertHistory() {
         const panel = document.getElementById('alertHistoryPanel');
-        if (panel) panel.classList.toggle('show');
+        if (panel) { panel.classList.toggle('show');
+            const opened = panel.classList.contains('show');
+            document.getElementById('alert-toggle-btn')?.setAttribute('aria-expanded', String(opened));
+            if (opened) { positionAlertHistory(); renderAlertHistory(); updateAlertBadge(); }
+        }
     }
 
     function replayHistoryEntry(index) {
@@ -1196,6 +1215,7 @@
         if (overlay) overlay.classList.add('show');
         const panel = document.getElementById('alertHistoryPanel');
         if (panel) panel.classList.remove('show');
+        document.getElementById('alert-toggle-btn')?.setAttribute('aria-expanded', 'false');
     }
 
     function showRealtimeNotification(name, pipelineId, similarity) {
@@ -1220,13 +1240,14 @@
     const SOUND_PREF_KEY = 'dashboardAlertSoundEnabled';
     let audioContext = null;
     let soundEnabled = false;
+    let soundBusy = false;
 
     function soundState() {
         if (!(window.AudioContext || window.webkitAudioContext)) return 'unsupported';
         if (!soundEnabled) return 'disabled';
         if (audioContext && audioContext.state === 'running') return 'enabled';
         if (audioContext && audioContext.state !== 'running') return 'blocked';
-        return 'disabled';
+        return 'blocked';
     }
 
     function updateSoundButton() {
@@ -1235,34 +1256,46 @@
         const state = soundState();
         const label = btn.querySelector('span');
         const text = state === 'enabled' ? 'Sound: Enabled'
-            : state === 'blocked' ? 'Sound: Blocked by browser'
+            : state === 'blocked' ? 'Activate sound'
             : state === 'unsupported' ? 'Sound: Unsupported'
             : 'Enable Alert Sound';
         if (label) label.textContent = text;
         btn.classList.toggle('sound-on', state === 'enabled');
-        btn.setAttribute('aria-pressed', soundEnabled ? 'true' : 'false');
+        btn.setAttribute('aria-pressed', state === 'enabled' ? 'true' : 'false');
+        btn.disabled = soundBusy || state === 'unsupported';
+        const test = document.getElementById('sound-test-btn');
+        if (test) test.disabled = state !== 'enabled' || soundBusy;
+        const status = document.getElementById('sound-status');
+        if (status) status.textContent = soundBusy ? 'Activating audio…' : state === 'enabled' ? 'Audio ready in this tab. Use Test sound to check your speakers.' : state === 'blocked' ? 'Your preference is saved. Click Activate sound to unlock audio in this tab.' : state === 'unsupported' ? 'This browser does not support alert audio.' : 'Sound is off. Click Enable Alert Sound to activate it.';
     }
 
     function ensureAudioContext() {
         const Ctx = window.AudioContext || window.webkitAudioContext;
         if (!Ctx) return null;
-        if (!audioContext) audioContext = new Ctx();
+        if (!audioContext || audioContext.state === 'closed') {
+            audioContext = new Ctx();
+            audioContext.addEventListener('statechange', updateSoundButton);
+        }
         return audioContext;
     }
 
     async function toggleSound() {
-        soundEnabled = !soundEnabled;
-        try { localStorage.setItem(SOUND_PREF_KEY, soundEnabled ? '1' : '0'); } catch (e) { /* ignore */ }
-        if (soundEnabled) {
-            const ctx = ensureAudioContext();
-            if (ctx) {
-                try { if (ctx.state === 'suspended') await ctx.resume(); } catch (e) { /* state check below */ }
-                if (ctx.state === 'running') playTone(ctx); // test tone during the gesture
-            }
-        } else if (audioContext) {
-            try { audioContext.suspend(); } catch (e) { /* ignore */ }
-        }
+        if (soundBusy) return;
+        // A remembered preference is not a browser audio unlock.
+        const mute = soundState() === 'enabled';
+        soundEnabled = !mute; soundBusy = true;
         updateSoundButton();
+        try {
+            const ctx = ensureAudioContext();
+            if (ctx && !mute) {
+                if (ctx.state !== 'running') await Promise.race([ctx.resume(), new Promise(resolve => trackTimeout(resolve, 2000))]);
+                if (ctx.state === 'running') playTone(ctx);
+            } else if (ctx && mute) await ctx.suspend();
+        } catch (_) { /* The status remains off or needs activation; retry is available. */ }
+        finally {
+            try { localStorage.setItem(SOUND_PREF_KEY, soundEnabled ? '1' : '0'); } catch (_) { /* Storage is optional. */ }
+            soundBusy = false; updateSoundButton();
+        }
     }
 
     function playTone(ctx) {
@@ -1502,6 +1535,7 @@
 
         // Sound opt-in
         bindClick('sound-toggle-btn', toggleSound);
+        bindClick('sound-test-btn', playAlertSound);
 
         // Keyboard shortcuts
         document.addEventListener('keydown', onKeydown);
@@ -1509,6 +1543,7 @@
         // Visibility: reconcile immediately on return
         document.addEventListener('visibilitychange', onVisibilityChange);
 
+        window.addEventListener('resize', positionAlertHistory);
         window.addEventListener('pagehide', destroy);
         window.addEventListener('beforeunload', destroy);
     }
@@ -1523,6 +1558,7 @@
             closeAdvancedAlert();
             const panel = document.getElementById('alertHistoryPanel');
             if (panel) panel.classList.remove('show');
+            document.getElementById('alert-toggle-btn')?.setAttribute('aria-expanded', 'false');
         } else if (e.key === 'r' && e.ctrlKey) {
             e.preventDefault();
             // Stats are gone from this page; refresh means "reconcile the feed".
@@ -1543,6 +1579,7 @@
     }
 
     function destroy() {
+        window.removeEventListener('resize', positionAlertHistory);
         if (destroyed) return;
         destroyed = true;
         if (watchlistInbox) watchlistInbox.stop();
@@ -1567,6 +1604,11 @@
         trackInterval(sweepExpiredFaces, FACE_EXPIRY_SWEEP_MS);
         trackInterval(sweepAlertCaches, ALERT_CACHE_CLEANUP_MS);
         trackInterval(tickCountdowns, 1000);
+        trackInterval(() => {
+            if (!document.hidden) document.querySelectorAll('#alertHistoryContent time').forEach(time => {
+                time.textContent = formatAge(new Date(time.dateTime));
+            });
+        }, 30000);
         trackInterval(() => { if (!document.hidden) refreshPipelineDisplayNames(); }, NAME_RECONCILE_MS);
     }
 

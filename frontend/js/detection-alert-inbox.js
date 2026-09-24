@@ -8,7 +8,12 @@
         if (className) item.className = className;
         return item;
     }
-    function time(value) { const d = new Date(value); return Number.isNaN(d.getTime()) ? 'Unavailable' : d.toLocaleString(); }
+    function time(value) {
+        if (typeof value !== 'string' || !value.trim()) return 'Unavailable';
+        const raw = value.trim();
+        const d = new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : raw + 'Z');
+        return Number.isNaN(d.getTime()) ? 'Unavailable' : d.toLocaleString(undefined, {timeZoneName: 'short'});
+    }
     class DetectionAlertInbox {
         constructor(host, playSound) {
             this.host = host; this.playSound = playSound; this.offset = 0;

@@ -6,7 +6,7 @@
     <title>Live Pipeline Feeds | Face Recognition Service</title>
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4" />
-    <link rel="stylesheet" href="/frontend/css/dashboard.css?v=cards-5" />
+    <link rel="stylesheet" href="/frontend/css/dashboard.css?v=cards-6" />
     <link rel="stylesheet" href="/frontend/css/face-cards.css?v=faces-4" />
     <link rel="stylesheet" href="/frontend/css/footer.css" />
     <link rel="stylesheet" href="/frontend/css/detection-alert-inbox.css?v=2">
@@ -59,6 +59,8 @@
                         <i class="fas fa-volume-up" aria-hidden="true"></i>
                         <span>Enable Alert Sound</span>
                     </button>
+                    <button id="sound-test-btn" class="alert-btn alert-btn-secondary" type="button" disabled>Test sound</button>
+                    <span id="sound-status" class="dashboard-sound-status" role="status">Click Enable Alert Sound to activate audio in this tab.</span>
                     <span class="connection-status connecting" id="connectionStatus" title="Live feed connection">
                         <span class="ws-status-dot"></span>
                         <span id="statusText">Connecting...</span>
@@ -135,19 +137,20 @@
         <div class="alert-history-header">
             <div class="alert-history-title">
                 <i class="fas fa-history"></i>
-                Detection History (3h)
+                Recent detections
             </div>
             <button class="alert-history-close" id="alert-history-close-btn" type="button" aria-label="Close history">
                 <i class="fas fa-times"></i>
             </button>
         </div>
+        <p id="alert-history-summary" class="alert-history-summary" role="status">Recent detections in this browser session.</p>
         <div class="alert-history-content" id="alertHistoryContent">
             <div class="no-data"><p>No detection history</p></div>
         </div>
     </div>
 
     <!-- Alert Toggle Button -->
-    <button class="alert-toggle-btn" id="alert-toggle-btn" type="button" aria-label="Toggle detection history">
+    <button class="alert-toggle-btn" id="alert-toggle-btn" type="button" aria-label="Open recent detections" aria-expanded="false" aria-controls="alertHistoryPanel">
         <i class="fas fa-bell"></i>
         <div class="alert-badge" id="alertBadge" style="display: none;">0</div>
     </button>
@@ -173,7 +176,7 @@
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/face-image.js?v=faces-2"></script>
-    <script src="/frontend/js/detection-alert-inbox.js?v=2"></script>
-    <script src="/frontend/js/dashboard.js?v=dash-16"></script>
+    <script src="/frontend/js/detection-alert-inbox.js?v=3"></script>
+    <script src="/frontend/js/dashboard.js?v=dash-17"></script>
 </body>
 </html>

@@ -2136,3 +2136,34 @@ body:not(.admin-user) .stats-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
+
+/* Clear timestamps and a restrained, scrollable recent-detection tray. */
+.dashboard-sound-status { flex-basis: 100%; color: #a9bfce; font-size: .76rem; line-height: 1.5; }
+.alert-history-summary { margin: 0; padding: 12px 18px; color: #a9bfce; font-size: .78rem; line-height: 1.5; border-bottom: 1px solid #33495a; }
+.alert-history-panel { width: min(420px, calc(100vw - 24px)); max-height: min(70vh, 620px); border: 1px solid #3e596e; border-radius: 14px; background: #10202e; box-shadow: 0 18px 50px #0006; }
+.alert-history-content { overflow-y: auto; min-height: 0; }
+.alert-history-item { padding: 14px 16px; margin: 8px; border: 1px solid #30495d; border-radius: 9px; background: #172a3a; }
+.alert-history-item-header { gap: 12px; align-items: baseline; }
+.alert-history-name { overflow-wrap: anywhere; font-size: .94rem; }
+.alert-history-time { white-space: nowrap; color: #a9c9dd; font-size: .75rem; }
+.alert-history-details { margin-top: 7px; color: #9eb5c5; font-size: .8rem; }
+.detection-item .timestamp-primary { font-size: .75rem; color: #93adbf; display: flex; flex-wrap: wrap; gap: 6px; }
+.detection-item .last-seen-line { color: #d5e8f4; font-size: .83rem; }
+.detection-item .processing-time { font-size: .7rem; color: #93adbf; }
+#sound-toggle-btn, #sound-test-btn { white-space: nowrap; }
+#sound-test-btn:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 640px) { .pipeline-section > .section-header { flex-wrap: wrap; gap: 10px; } .alert-history-panel { right: 12px; } }
+
+.pipeline-section > .section-header { flex-wrap: wrap; gap: 10px; }
+.pipeline-section .section-title-text { flex: 1 1 180px; min-width: 0; }
+.pipeline-section .section-title-text h2 { color: #e3eef6; text-transform: none; letter-spacing: 0; text-shadow: none; }
+.pipeline-section .section-subtitle { color: #9db5c7; text-transform: none; letter-spacing: 0; }
+.pipeline-section .dashboard-sound-status { order: 5; text-transform: none; letter-spacing: 0; }
+.pipeline-section #sound-toggle-btn, .pipeline-section #sound-test-btn { padding: 8px 12px; font-size: .78rem; text-transform: none; letter-spacing: 0; border: 1px solid #52738a; background: #1d3447; color: #d4e7f5; }
+.pipeline-section #sound-toggle-btn.sound-on { background: #164238; border-color: #65b69b; }
+.alert-history-title { color: #d4e7f5; text-shadow: none; text-transform: none; letter-spacing: 0; }
+@media (max-width: 768px) {
+    body > .navbar, body > .military-navbar { flex-direction: row; flex-wrap: wrap; padding: 8px 12px; gap: 8px; }
+    .military-navbar .nav-menu { flex-direction: row; flex-wrap: wrap; width: auto; gap: 6px; }
+    .military-navbar .navbar-controls { flex-direction: row; flex-wrap: wrap; }
+}
