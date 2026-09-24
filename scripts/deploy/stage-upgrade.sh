@@ -95,6 +95,19 @@ cmd_logs() {
 # ---------------------------------------------------------------------------
 # backup — delegate to the tested script inside the backup service
 # ---------------------------------------------------------------------------
+backup_existing_database() {
+    LAST_BACKUP_ID=""
+    [ "$DRY_RUN" = 1 ] && { info "DRY: would back up an existing database before migration"; return 0; }
+    local count
+    count="$(compose exec -T postgres psql -U postgres -d face_recognition -tAc \
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | tr -d '\r[:space:]')" \
+        || stage_fail "cannot determine database contents before backup"
+    [[ "$count" =~ ^[0-9]+$ ]] || stage_fail "invalid database table count"
+    [ "$count" -gt 0 ] || { info "empty database — no pre-deployment backup required"; return 0; }
+    compose_mutate up -d --no-deps backup || stage_fail "could not start backup service"
+    stage_backup
+}
+
 stage_backup() {
     stage_begin "backup"
     if [ "$DRY_RUN" = "1" ]; then stage_pass "would take a backup"; return 0; fi
@@ -103,12 +116,12 @@ stage_backup() {
         || stage_fail "postgres is not running — a backup needs the database up"
 
     local before after
-    before="$(compose exec -T backup sh -c 'ls -1 /backups 2>/dev/null | grep "Z$" | wc -l' 2>/dev/null || echo 0)"
+    before="$(compose exec -T backup sh -c 'ls -1 /backups 2>/dev/null | grep "Z$" | sort | tail -1' 2>/dev/null || echo 0)"
     info "running scripts/backup/backup.sh inside the backup service"
     compose_mutate exec -T backup sh /scripts/backup.sh /backups || stage_fail "backup failed"
 
-    after="$(compose exec -T backup sh -c 'ls -1 /backups 2>/dev/null | grep "Z$" | wc -l' 2>/dev/null || echo 0)"
-    [ "${after:-0}" -gt "${before:-0}" ] || stage_fail "no new backup directory appeared"
+    after="$(compose exec -T backup sh -c 'ls -1 /backups 2>/dev/null | grep "Z$" | sort | tail -1' 2>/dev/null || echo 0)"
+    [ -n "$after" ] && [ "$after" != "$before" ] || stage_fail "no new backup directory appeared"
 
     local newest
     newest="$(compose exec -T backup sh -c 'ls -1 /backups | grep "Z$" | tail -1' 2>/dev/null | tr -d '\r')"
@@ -167,6 +180,11 @@ cmd_restore() {
 # ---------------------------------------------------------------------------
 cmd_upgrade() {
     stage_preflight
+    stage_sys_install
+    stage_workspace
+    stage_secrets
+    stage_tls
+    stage_offline_policy
     stage_gpu_detect
     stage_compose_validate
 
@@ -189,15 +207,14 @@ cmd_upgrade() {
     info "current: version=${old_version:-unknown} head=${old_head:-unset}"
     stage_pass "preflight complete"
 
-    # ---- 2. database backup ----------------------------------------------
-    if [ "$running_before" = "1" ]; then
-        LAST_BACKUP_ID=""
-        stage_backup
-        UPGRADE_BACKUP="${LAST_BACKUP_ID:-}"
-    else
-        UPGRADE_BACKUP=""
-        info "no running stack: no pre-upgrade backup to take"
-    fi
+    # Start only the database and backup service before touching application images.
+    stage_db_init
+    local actual_head
+    actual_head="$(compose exec -T postgres psql -U postgres -d face_recognition -tAc \
+        'SELECT version_num FROM alembic_version' 2>/dev/null | tr -d '\r[:space:]')"
+    [ -z "$actual_head" ] || old_head="$actual_head"
+    backup_existing_database
+    UPGRADE_BACKUP="${LAST_BACKUP_ID:-}"
 
     # ---- 3. configuration snapshot ---------------------------------------
     stage_begin "configuration snapshot"
@@ -232,8 +249,17 @@ cmd_upgrade() {
     else
         for image in $images; do
             local repo="${image%%:*}"
-            docker image inspect "$image" >/dev/null 2>&1 || continue
-            docker tag "$image" "${repo}:rollback" 2>/dev/null && { info "tagged ${repo}:rollback"; tagged=$((tagged + 1)); }
+            local source="$image" svc cid
+            for svc in face_recognition ml_worker migrate; do
+                cid="$(compose ps -a -q "$svc" 2>/dev/null | head -1)"
+                [ -n "$cid" ] || continue
+                if [ "$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null)" = "$image" ]; then
+                    source="$(docker inspect -f '{{.Image}}' "$cid")"
+                    break
+                fi
+            done
+            docker image inspect "$source" >/dev/null 2>&1 || continue
+            docker tag "$source" "${repo}:rollback" 2>/dev/null && { info "tagged ${repo}:rollback"; tagged=$((tagged + 1)); }
         done
     fi
     state_set rollback_version "${old_version:-unknown}"
@@ -275,7 +301,7 @@ stage_up_or_rollback() {
     fi
     [ "$DRY_RUN" = "1" ] && { stage_pass "would start"; return; }
 
-    local cid state exitcode waited=0
+    local cid="" state="" exitcode waited=0
     while [ "$waited" -lt 300 ]; do
         cid="$(compose ps -a -q migrate 2>/dev/null | head -1)"
         if [ -n "$cid" ]; then
@@ -285,7 +311,7 @@ stage_up_or_rollback() {
         sleep 3; waited=$((waited + 3))
     done
     exitcode="$(docker inspect -f '{{.State.ExitCode}}' "$cid" 2>/dev/null || echo 1)"
-    if [ "$exitcode" != "0" ]; then
+    if [ "$state" != "exited" ] || [ "$exitcode" != "0" ]; then
         # Migrations failed: the schema did not advance, so the code rollback
         # is safe and automatic.
         upgrade_rollback "database migrations failed (migrate exit $exitcode)"
@@ -307,7 +333,7 @@ upgrade_rollback() {
     local reason="$1"
     printf '\n%s== upgrade failed: %s%s\n' "$C_RED" "$reason" "$C_RESET"
 
-    if [ "${UPGRADE_OLD_HEAD:-}" != "${UPGRADE_NEW_HEAD:-}" ]; then
+    if [ -z "${UPGRADE_OLD_HEAD:-}" ] || [ "${UPGRADE_OLD_HEAD:-}" != "${UPGRADE_NEW_HEAD:-}" ]; then
         # The schema advanced (or may have). Older code refuses a newer schema
         # by design — rolling the code back would produce a stack that cannot
         # start, and silently downgrading a schema loses data.
@@ -350,7 +376,9 @@ EOF
     compose_mutate up -d || true
     stage_up_wait_light
 
-    if service_healthy face_recognition >/dev/null 2>&1; then
+    if [ "$restored" -gt 0 ] && service_healthy face_recognition >/dev/null 2>&1; then
+        state_set deployed_version "$(state_get rollback_version)"
+        state_set migration_head "$UPGRADE_OLD_HEAD"
         ok "rolled back to the previous images ($restored restored); the stack is healthy again"
         state_set last_rollback_at "$(timestamp)"
         state_set last_result "FAIL"

@@ -1770,6 +1770,9 @@
                     toText(task.error_code, 'ERROR') + ' · ' + toText(task.error_message, 'Job failed')
                     + ' Next step: review this job’s details and request ID, correct the cause, then rerun it.'));
             }
+            if (window.MLOpsDiagnostics && (task.task_type === 'ml_dataset_build' || task.kind === 'dataset')) {
+                row.appendChild(window.MLOpsDiagnostics.render(task));
+            }
             list.appendChild(row);
         });
         frag.appendChild(list);
@@ -2269,6 +2272,7 @@
             const counts = (split.counts && typeof split.counts === 'object') ? split.counts : {};
             const frag = document.createDocumentFragment();
             frag.appendChild(el('div', 'mlops-subheading', toText(ds.name) + ' v' + formatMetric(ds.version)));
+            if (window.MLOpsDiagnostics) frag.appendChild(window.MLOpsDiagnostics.datasetLink(datasetId));
             frag.appendChild(kvList([
                 ['Definition', ds.definition_name ? toText(ds.definition_name) + ' ' + toText(ds.definition_version) : 'not recorded (legacy build)'],
                 ['Kind', toText(ds.kind)],

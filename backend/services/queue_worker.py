@@ -68,24 +68,39 @@ def _decode_validate_sync(item: dict):
 
 async def _process_queued_item(item: dict, worker_id: int):
     """Decode (off-loop) then run the recognition pipeline for one queued frame."""
-    loop = asyncio.get_running_loop()
-    image_bytes = await loop.run_in_executor(INFERENCE_POOL, _decode_validate_sync, item)
-    if image_bytes is None:
-        return None
+    from backend.core import processing_feedback
+    feedback = {'status': 'failed'}
+    try:
+        loop = asyncio.get_running_loop()
+        image_bytes = await loop.run_in_executor(INFERENCE_POOL, _decode_validate_sync, item)
+        if image_bytes is None:
+            feedback['status'] = 'invalid_image'
+            return None
 
-    logger.info("[WORKER] pipeline_id=%s location_name=%r", item["pipeline_id"], item.get("location_name"))
-    return await process_image_async(
-        image_bytes,
-        item["pipeline_id"],
-        item.get("predictions", []),
-        use_batch_write=True,
-        send_realtime_updates=True,
-        worker_id=worker_id,
-        location_name=item.get("location_name"),
-        observed_at=datetime.fromisoformat(item['observed_at']) if item.get('observed_at') else
-                    datetime.utcfromtimestamp(item['timestamp']) if item.get('timestamp') else None,
-        timestamp_source=item.get('timestamp_source', 'server_received'),
-    )
+        logger.info("[WORKER] pipeline_id=%s location_name=%r", item["pipeline_id"], item.get("location_name"))
+        return await process_image_async(
+            image_bytes,
+            item["pipeline_id"],
+            item.get("predictions", []),
+            use_batch_write=not bool(item.get('feedback_key')),
+            feedback=feedback if item.get('feedback_key') else None,
+            send_realtime_updates=True,
+            worker_id=worker_id,
+            location_name=item.get("location_name"),
+            observed_at=datetime.fromisoformat(item['observed_at']) if item.get('observed_at') else
+                        datetime.utcfromtimestamp(item['timestamp']) if item.get('timestamp') else None,
+            timestamp_source=item.get('timestamp_source', 'server_received'),
+        )
+    except BaseException:
+        if feedback['status'] not in ('saved', 'quality_rejected'):
+            feedback['status'] = 'failed'
+        raise
+    finally:
+        if item.get('feedback_key'):
+            processing_feedback.complete(item['feedback_key'], feedback['status'])
+            logger.info('FACE_RESULT event_key=%r status=%s reason=%s',
+                        item['feedback_key'], feedback['status'], feedback.get('reason', feedback['status']))
+
 
 
 async def queue_worker(worker_id: int):
@@ -107,18 +122,18 @@ async def queue_worker(worker_id: int):
                     if item.get("is_batch", False):
                         batch = item.get("batch", [])
                         pipeline_id = item.get("pipeline_id", "unknown")
-                        
+
                         logger.debug(f"[WORKER-{worker_id}] Processing batch of {len(batch)} images from pipeline {pipeline_id}")
-                        
+
                         # Process batch concurrently (decode + inference happen in
                         # the inference pool, bounded by its semaphores)
                         tasks = [_process_queued_item(batch_item, worker_id) for batch_item in batch]
                         results = await asyncio.gather(*tasks, return_exceptions=True)
-                        
+
                         successful = sum(1 for r in results if r and not isinstance(r, Exception))
                         processing_queue.total_processed += successful
                         processing_queue.total_skipped += len(batch) - successful
-                        
+
                         logger.info(f"[WORKER-{worker_id}] ✅ Batch completed: {pipeline_id} ({successful}/{len(batch)} successful)")
                     else:
                         # Single item processing

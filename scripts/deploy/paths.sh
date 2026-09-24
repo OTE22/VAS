@@ -113,14 +113,14 @@ apply_deployment_paths() {
     for entry in "${DEPLOY_PATHS[@]}"; do
         read -r path mode owner _ <<< "$entry"
         [ -d "$ROOT/$path" ] || mkdir -p "$ROOT/$path"
-        chmod "$mode" "$ROOT/$path" 2>/dev/null || true
-        chown "$owner" "$ROOT/$path" 2>/dev/null || true
+        chmod "$mode" "$ROOT/$path" || return 1
+        chown "$owner" "$ROOT/$path" || return 1
     done
     for entry in "${DEPLOY_FILES[@]}"; do
         read -r path mode owner _ <<< "$entry"
         [ -e "$ROOT/$path" ] || continue     # generated later by another stage
-        chmod "$mode" "$ROOT/$path" 2>/dev/null || true
-        chown "$owner" "$ROOT/$path" 2>/dev/null || true
+        chmod "$mode" "$ROOT/$path" || return 1
+        chown "$owner" "$ROOT/$path" || return 1
     done
 }
 

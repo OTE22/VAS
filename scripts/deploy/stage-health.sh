@@ -120,6 +120,12 @@ stage_health() {
     if [ -n "$HEALTH_FAILURES" ]; then
         state_set last_health_result "FAIL"
         state_set last_health_at "$(timestamp)"
+        if [ "${UPGRADE_IN_PROGRESS:-0}" = 1 ]; then
+            STAGE_RESULT["$CURRENT_STAGE"]="FAIL"
+            STAGE_DETAIL["$CURRENT_STAGE"]="mandatory health checks failed"
+            fail "$(printf 'mandatory health checks failed:%b' "$HEALTH_FAILURES")"
+            return 1
+        fi
         stage_fail "$(printf 'mandatory health checks failed:%b' "$HEALTH_FAILURES")"
     fi
     state_set last_health_result "PASS"

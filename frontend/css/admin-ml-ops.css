@@ -1768,3 +1768,16 @@
 .mlops-workflow dt { font-weight: 700; margin-top: 12px; }
 .mlops-workflow dd { margin: 4px 0 10px; }
 .mlops-workflow aside li { margin-bottom: 10px; }
+
+/* Dataset build evidence stays collapsed while jobs refresh. */
+.mlops-diagnostics { grid-column: 1 / -1; min-width: 0; border-top: 1px solid #34465b; padding-top: 10px; }
+.mlops-diagnostics summary { cursor: pointer; color: #b8d9ee; padding: 4px 0; font-weight: 600; }
+.mlops-diagnostics p { margin: 10px 0; overflow-wrap: anywhere; }
+.mlops-diagnostic-stages { list-style: none; margin: 12px 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 8px; }
+.mlops-diagnostic-stages li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 12px; background: #132435; border: 1px solid #34465b; border-left: 3px solid #7ab2df; border-radius: 6px; }
+.mlops-diagnostic-stages li[data-status="failed"], .mlops-diagnostic-stages li[data-status="interrupted"] { border-left-color: #f38a92; }
+.mlops-diagnostic-stages li[data-status="completed"] { border-left-color: #71c5a0; }
+.mlops-diagnostic-stages strong { font-size: .85rem; text-transform: capitalize; }
+.mlops-diagnostic-status { margin-left: auto; font-size: .75rem; color: #c1d1dd; }
+.mlops-diagnostic-stages small { flex-basis: 100%; color: #a8bdcd; overflow-wrap: anywhere; }
+.mlops-diagnostic-trace { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #101a26; color: #efbec3; border-radius: 6px; }

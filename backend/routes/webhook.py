@@ -269,6 +269,7 @@ async def _resolve_alias(pipeline_id: str) -> str:
 
 # ---- Idempotency / dedup (short in-memory TTL set) ---------------------------
 _dedup_seen: dict = {}  # job_key -> expiry timestamp
+_dedup_pending: set = set()  # reserved until queue acceptance is known
 _DEDUP_MAX_KEYS = 5000
 
 
@@ -406,6 +407,11 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     request_id = str(uuid.uuid4())[:8]  # short unique ID for logging
+    from backend.core import processing_feedback
+    feedback_key = None
+    reserved_key = None
+    queued = 0
+    accepted_empty = False
 
     try:
         logger.info(f"[WEBHOOK] 📥 Incoming request {request_id} for pipeline: {pipeline_id}")
@@ -481,6 +487,15 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
         # runs WORKERS=1 so per-process == global there). A keyless image-free
         # payload still gets job_key=None -> no dedup, exactly as before.
         job_key = _job_key(payload, pipeline_id, images_b64)
+        wants_feedback = (payload.get('processing_feedback') is True
+                          and len(images_b64) == 1 and job_key is not None)
+        previous_feedback = processing_feedback.lookup(job_key) if wants_feedback else None
+        if previous_feedback is not None:
+            return JSONResponse(status_code=202 if previous_feedback == 'pending' else 200,
+                                content={'status': 'processing', 'processing_status': previous_feedback})
+        if job_key in _dedup_pending:
+            return JSONResponse(status_code=429, headers={"Retry-After": "2"},
+                                content={"status": "pending", "queued": 0})
         if job_key and _dedup_is_duplicate(job_key):
             metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(pipeline_id), status="duplicate").inc()
             logger.info(f"[WEBHOOK] 🔁 Duplicate request {request_id} (key={job_key[:64]}) - acknowledged, not re-queued")
@@ -493,7 +508,18 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
                 "dropped": 0,
             })
 
+        if job_key:
+            reserved_key = job_key
+            _dedup_pending.add(job_key)
+
+        if wants_feedback:
+            if not processing_feedback.reserve(job_key):
+                return JSONResponse(status_code=429, headers={'Retry-After': '2'},
+                                    content={'status': 'feedback_capacity'})
+            feedback_key = job_key
+
         if not images_b64:
+            accepted_empty = True
             metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(pipeline_id), status="no_images").inc()
             return {"status": "ok", "message": "No images", "request_id": request_id}
 
@@ -559,6 +585,7 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
                 "observed_at": observed_at.isoformat(),
                 "timestamp_source": timestamp_source,
                 "request_id": request_id,
+                "feedback_key": feedback_key,
                 "image_index": idx,  # Track which image this is
             })
 
@@ -590,6 +617,7 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
         return JSONResponse(status_code=202, content={
             "status": status,
             "job_id": request_id,
+            **({"processing_status": processing_feedback.lookup(feedback_key)} if feedback_key else {}),
             "request_id": request_id,  # backward compat
             "pipeline_id": pipeline_id,
             "location_name": location_name,
@@ -605,6 +633,13 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
         error_pipeline_id = pipeline_id if 'pipeline_id' in locals() else "unknown"
         metrics_requests_total.labels(pipeline_id=_metric_pipeline_label(error_pipeline_id), status="error").inc()
         raise HTTPException(status_code=500, detail=f"Webhook processing error: {str(e)}")
+    finally:
+        if reserved_key is not None:
+            _dedup_pending.discard(reserved_key)
+            # Rejected/failed requests must remain retryable with the same event ID.
+            if queued == 0 and not accepted_empty:
+                _dedup_seen.pop(reserved_key, None)
+                processing_feedback.discard(feedback_key)
 
 
 # Register webhook endpoint at both /webhook/{pipeline_id} and /api/webhook/{pipeline_id}

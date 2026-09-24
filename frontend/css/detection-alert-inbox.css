@@ -1,19 +1,58 @@
-.watchlist-inbox { margin: 0 0 24px; padding: 20px; border: 1px solid #536377; border-radius: 10px; background: #101b28; color: #f2f5f9; }
-.watchlist-inbox[hidden] { display: none; }
-.watchlist-inbox h2 { font-size: 1.2rem; margin-bottom: 10px; }
-.watchlist-inbox p { line-height: 1.5; margin: 8px 0; overflow-wrap: anywhere; }
-.watchlist-inbox-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; max-height: 60vh; overflow-y: auto; margin: 16px 0; }
-.watchlist-inbox-card { border: 1px solid #4b83b8; border-left: 5px solid #68b8ff; border-radius: 8px; padding: 16px; background: #14263a; min-width: 0; }
-.watchlist-inbox-card.warning { border-color: #eab54d; background: #30291a; }
-.watchlist-inbox-card.critical { border-color: #ff6b75; background: #361e28; }
-.watchlist-inbox-card h3 { font-size: 1rem; color: #9bd0ff; }
-.watchlist-inbox-card.warning h3 { color: #ffda84; }
-.watchlist-inbox-card.critical h3 { color: #ffb0b6; }
-.watchlist-inbox-card img { width: 90px; height: 90px; object-fit: cover; border-radius: 6px; float: right; margin: 0 0 8px 12px; }
-.watchlist-inbox-instructions { font-weight: 600; }
-.watchlist-inbox-controls { display: flex; flex-wrap: wrap; gap: 10px; clear: both; }
-.watchlist-inbox-controls button, .watchlist-inbox-controls a { font: inherit; font-size: .85rem; padding: 10px 14px; border: 1px solid #8092a7; border-radius: 6px; background: #1c3045; color: #fff; text-decoration: none; cursor: pointer; }
-.watchlist-inbox-controls button:hover:not(:disabled), .watchlist-inbox-controls a:hover { background: #304860; }
-.watchlist-inbox-controls :focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
-.watchlist-inbox-controls button:disabled { opacity: .55; cursor: default; }
-.watchlist-inbox-error { color: #ffbd83; }
+/* Keep monitoring space stable: arrivals update the summary, never expand it. */
+.watchlist-inbox {
+    flex: 0 0 auto;
+    min-width: 0;
+    margin: 0 0 4px;
+    border: 1px solid #344b59;
+    border-radius: 12px;
+    background: #101f2a;
+    color: #edf4f7;
+    box-shadow: 0 4px 16px #0002;
+    overflow: hidden;
+}
+.watchlist-inbox [hidden], .watchlist-inbox[hidden] { display: none !important; }
+.watchlist-inbox-header { display: flex; align-items: center; gap: 16px; min-height: 58px; padding: 10px 16px; }
+.watchlist-inbox-title { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.watchlist-inbox h2 { margin: 0; font-size: .95rem; font-weight: 650; letter-spacing: .01em; }
+.watchlist-inbox-count { display: inline-flex; justify-content: center; min-width: 28px; padding: 3px 8px; border-radius: 7px; background: #233c4a; color: #c5f3df; font-size: .8rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.watchlist-inbox-summary { flex: 1; min-width: 0; color: #a7bbc8; font-size: .8rem; }
+.watchlist-inbox button, .watchlist-inbox-controls a { font: inherit; font-size: .8rem; padding: 8px 12px; border: 1px solid #476172; border-radius: 7px; background: #1c3342; color: #edf4f7; text-decoration: none; cursor: pointer; }
+.watchlist-inbox-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 12px; margin-left: auto; white-space: nowrap; }
+.watchlist-inbox-chevron { font-size: 1rem; line-height: 1; }
+.watchlist-inbox-toggle[aria-expanded="true"] .watchlist-inbox-chevron { transform: rotate(180deg); }
+.watchlist-inbox button:hover:not(:disabled), .watchlist-inbox-controls a:hover { background: #2c485a; border-color: #7494a7; }
+.watchlist-inbox :focus-visible { outline: 2px solid #8cf0ca; outline-offset: 3px; }
+.watchlist-inbox button:disabled { opacity: .45; cursor: default; }
+/* The entire expanded region scrolls, including controls on short screens. */
+.watchlist-inbox-body { max-height: min(34vh, 340px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #476172 #101f2a; padding: 12px 16px; border-top: 1px solid #344b59; }
+.watchlist-inbox p { line-height: 1.5; margin: 0; overflow-wrap: anywhere; font-size: .8rem; }
+.watchlist-inbox-help, .watchlist-inbox-body > p { color: #a7bbc8; }
+.watchlist-inbox-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); gap: 10px; margin: 10px 0; }
+.watchlist-inbox-list:empty { display: none; }
+.watchlist-inbox-card { position: relative; min-width: 0; padding: 12px; border: 1px solid #34516a; border-left: 3px solid #7dbfea; border-radius: 8px; background: #162936; }
+.watchlist-inbox-card.warning { border-left-color: #edbd62; }
+.watchlist-inbox-card.critical { border-left-color: #fa7d89; }
+.watchlist-inbox-card h3 { margin: 0 70px 4px 0; font-size: .9rem; line-height: 1.4; color: #f0f5f8; overflow-wrap: anywhere; }
+.watchlist-inbox-severity { position: absolute; right: 10px; top: 12px; padding: 2px 6px; border-radius: 4px; background: #203d51; color: #aedcff; text-transform: uppercase; font-size: .6rem; font-weight: 700; letter-spacing: .05em; }
+.warning .watchlist-inbox-severity { color: #ffda91; background: #403623; }
+.critical .watchlist-inbox-severity { color: #ffb0b9; background: #482934; }
+.watchlist-inbox-rule { color: #bdcdd8; }
+.watchlist-inbox-location { color: #93acbb; }
+.watchlist-inbox-card img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; float: right; margin: 6px 0 6px 10px; }
+.watchlist-inbox-card .watchlist-inbox-instructions { margin-top: 6px; color: #e1eaf0; }
+.watchlist-inbox-details { margin: 8px 0; color: #adc4d2; font-size: .78rem; }
+.watchlist-inbox-details summary { cursor: pointer; padding: 3px 0; }
+.watchlist-inbox-details p { margin-top: 5px; }
+.watchlist-inbox-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; clear: both; margin-top: 8px; }
+.watchlist-inbox-card .watchlist-inbox-controls button { border-color: #3c7463; background: #1b4036; color: #baf4dc; }
+.watchlist-inbox-card > p[role="status"]:empty { display: none; }
+.watchlist-inbox-card > p[role="status"] { margin-top: 8px; color: #ffbd83; }
+.watchlist-inbox .watchlist-inbox-error, .watchlist-inbox-stale .watchlist-inbox-summary { color: #ffbd83; }
+@media (max-width: 640px) {
+    .watchlist-inbox-header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    .watchlist-inbox-summary { order: 3; flex-basis: 100%; font-size: .75rem; }
+    .watchlist-inbox-title { gap: 6px; }
+    .watchlist-inbox h2 { font-size: .85rem; }
+    .watchlist-inbox-toggle { gap: 6px; padding: 7px 9px; }
+    .watchlist-inbox-body { padding: 10px 12px; }
+}

@@ -1009,6 +1009,79 @@ async def archive_dataset_endpoint(
         raise _safe_500("dataset archive", e)
 
 
+@router.get("/api/ml/debug-workspace", tags=["ML Operations"])
+async def debug_workspace(current_user=Depends(ML_MANAGE)):
+    from urllib.parse import urlsplit
+    from config import settings
+    url = settings.ML_NOTEBOOK_URL.strip()
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return JSONResponse({"url": None}, headers={"Cache-Control": "no-store"})
+    allowed = bool(parsed.hostname) and (parsed.scheme == "https" or
+        (parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")))
+    if not allowed or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        url = ""
+    return JSONResponse({"url": url or None}, headers={"Cache-Control": "no-store"})
+
+
+async def _debug_notebook_response(db, *, dataset_id=None, task=None):
+    from pathlib import Path
+    from config import settings
+    from db_models import MLDataset
+    from backend.ml.dataset_builder import serialize_dataset
+    from backend.ml.debug_notebook import build_debug_notebook
+    from backend.core.task_history import task_history_manager
+
+    row = await db.get(MLDataset, dataset_id) if dataset_id else None
+    if dataset_id and row is None and task is None:
+        raise _error(404, "DATASET_NOT_FOUND", "No such dataset")
+    if task is None and row is not None and row.build_job_id:
+        task = await task_history_manager.get_task_by_job_id(row.build_job_id)
+    available, relative = False, None
+    if row is not None and row.storage_path:
+        root = Path(settings.ML_ARTIFACT_DIR).resolve()
+        path = Path(row.storage_path).resolve()
+        if path.is_relative_to(root / "datasets") and path.suffix == ".parquet":
+            available = path.is_file()
+            relative = path.relative_to(root).as_posix()
+    details = (task or {}).get("details") or {}
+    diagnostics = {key: details[key] for key in ("diagnostics_version", "stage", "stage_history", "failure", "configuration") if key in details} if details.get("diagnostics_version") == 1 else {}
+    dataset = serialize_dataset(row) if row is not None else None
+    if dataset is not None:
+        dataset["parquet_sha256"] = row.parquet_sha256
+    evidence = jsonable({
+        "job": {key: task.get(key) for key in ("job_id", "status", "error_code", "request_id")} if task else None,
+        "dataset": dataset, "diagnostics": diagnostics,
+        "artifact_available": available, "artifact_relative": relative,
+    })
+    notebook = build_debug_notebook(evidence)
+    # A generated export is data, never executable inside the web application.
+    identifier = str(row.id) if row is not None else "job"
+    return JSONResponse(notebook, media_type="application/x-ipynb+json", headers={
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'attachment; filename="dataset-debug-{identifier}.ipynb"',
+    })
+
+
+@router.get("/api/ml/datasets/{dataset_id}/debug-notebook", tags=["ML Operations"])
+async def dataset_debug_notebook(dataset_id: uuid_mod.UUID, db: AsyncSession = Depends(get_db),
+                                 current_user=Depends(ML_MANAGE)):
+    """Export a notebook with saved evidence and pure snapshot rechecks."""
+    return await _debug_notebook_response(db, dataset_id=dataset_id)
+
+
+@router.get("/api/ml/jobs/{job_id}/debug-notebook", tags=["ML Operations"])
+async def job_debug_notebook(job_id: str, db: AsyncSession = Depends(get_db),
+                             current_user=Depends(ML_MANAGE)):
+    from backend.core.task_history import task_history_manager
+    task = await task_history_manager.get_task_by_job_id(job_id)
+    if not task or task.get("task_type") != "ml_dataset_build":
+        raise _error(404, "JOB_NOT_FOUND", "Dataset build job not found")
+    dataset_id = (task.get("result") or {}).get("dataset_id")
+    return await _debug_notebook_response(db, dataset_id=uuid_mod.UUID(dataset_id) if dataset_id else None, task=task)
+
+
 @router.get("/api/ml/datasets/{dataset_id}/explorer", tags=["ML Operations"])
 @router.get("/api/ml/datasets/{dataset_id}/validation-report", tags=["ML Operations"])
 async def dataset_explorer(

@@ -1399,6 +1399,7 @@ class Settings(BaseSettings):
         default=False,
         description="Optional SHAP explanations (requires the shap package; native importances are the fallback). Default: False"
     )
+    ML_NOTEBOOK_URL: str = Field(default="", description="Optional separately authenticated JupyterLab HTTPS URL; never include a token or credentials.")
     MLFLOW_TRACKING_URI: str = Field(default="", description="Empty uses a durable SQL-backed MLflow store under ML_ARTIFACT_DIR; alternatively an administrator-managed HTTPS tracking service. Credentials belong in service environment, never this field.")
     MLFLOW_EXPERIMENT_NAME: str = Field(default="ml-platform", description="MLflow experiment for governed training runs")
     MLFLOW_HTTP_REQUEST_TIMEOUT: int = Field(default=10, ge=1, le=120,

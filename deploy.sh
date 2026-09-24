@@ -293,7 +293,7 @@ stage_preflight() {
             info "ports${busy} in use by this deployment's nginx (expected on re-run)"
         else
             stage_warn "ports${busy} already in use — nginx cannot bind until they are free"
-            return 0
+            stage_fail "ports${busy} are owned by another service; free them before deploying"
         fi
     fi
 
@@ -361,7 +361,9 @@ stage_workspace() {
 # ---------------------------------------------------------------------------
 # Stage 04 — secrets (delegated; never overwrites)
 # ---------------------------------------------------------------------------
-REQUIRED_SECRET_FILES=(jwt_secret bootstrap_admin_password webhook_api_keys)
+REQUIRED_SECRET_FILES=(jwt_secret bootstrap_admin_password webhook_api_keys
+    database_url_app database_url_migrator postgres_password_app
+    postgres_password_migrator redis_url sql_agent_db_password backup_db_password)
 REQUIRED_ENV_KEYS=(POSTGRES_SUPERUSER_PASSWORD FR_APP_PASSWORD FR_MIGRATOR_PASSWORD
                    FR_READONLY_PASSWORD FR_BACKUP_PASSWORD REDIS_PASSWORD
                    REDIS_MONITOR_PASSWORD GRAFANA_ADMIN_PASSWORD)
@@ -415,18 +417,12 @@ stage_secrets() {
     done
     [ -z "$missing" ] || stage_fail "still missing after generation:$missing"
 
-    # Mode matters: config_guard refuses a secret file more permissive than
-    # 0444 inside the container, and chmod is a silent no-op on NTFS.
     if ! is_windows_shell; then
-        run chmod 600 "$ROOT/secrets"/* "$ROOT/docker/.env" "$ROOT/docker/redis/users.acl" 2>/dev/null || true
-        local loose
-        loose="$(find "$ROOT/secrets" -maxdepth 1 -type f ! -perm 600 2>/dev/null | head -3)"
-        [ -z "$loose" ] || stage_warn "secret files with permissive modes: $loose"
-    else
-        stage_warn "Windows filesystem: chmod is a no-op — re-run 'chmod 600 secrets/* docker/.env' on the Linux target"
+        apply_deployment_paths || stage_fail "could not apply deployment path permissions"
+        verify_deployment_paths || stage_fail "deployment paths failed verification"
     fi
+    stage_pass "all credential files, Redis ACL and deployment credentials ready"
 
-    stage_pass "3 secret files, redis ACL, 8 deployment credentials"
 }
 
 # ---------------------------------------------------------------------------
@@ -705,7 +701,7 @@ stage_build() {
         info "offline: building without --pull (base images must already be present)"
         compose_mutate build || stage_fail "image build failed (offline: are the base images loaded?)"
     fi
-    state_set deployed_version "$version"
+    PENDING_DEPLOY_VERSION="$version"
     if [ "$DRY_RUN" = "1" ]; then
         stage_pass "would build images ($version)"
     else
@@ -756,6 +752,7 @@ cmd_start() {
     stage_compose_validate
     stage_build
     stage_db_init
+    backup_existing_database
     stage_up
     stage_ollama_models
 }
@@ -770,9 +767,15 @@ main() {
     case "$SUBCOMMAND" in
         ""|deploy|all)
             open_log "$@"
-            cmd_install
-            cmd_start
-            stage_health
+            require_root deploy
+            if [ -s "$ROOT/docker/.env" ] && compose ps -a -q postgres 2>/dev/null | grep -q .; then
+                info "existing deployment detected — using the protected upgrade flow"
+                cmd_upgrade
+            else
+                cmd_install
+                cmd_start
+                stage_health
+            fi
             finish_report ;;
         install)      open_log "$@"; cmd_install; finish_report ;;
         validate)     open_log "$@"; cmd_validate; finish_report ;;
@@ -814,7 +817,12 @@ finish_report() {
     printf '\n%sDEPLOY RESULT: %s%s (%d warning(s))\n' "$colour" "$result" "$C_RESET" "$WARN_COUNT"
     [ -n "$DEPLOY_LOG" ] && printf 'log: %s\n' "$DEPLOY_LOG"
     if [ "$result" = "PASS" ] && [ "${VALIDATE_ONLY:-0}" != "1" ] && [ "$DRY_RUN" != "1" ]; then
-        state_set last_successful_deployment "$(timestamp)"
+        case "$SUBCOMMAND" in
+            ""|deploy|all|start|upgrade)
+                state_set last_successful_deployment "$(timestamp)"
+                [ -z "${PENDING_DEPLOY_VERSION:-}" ] || state_set deployed_version "$PENDING_DEPLOY_VERSION"
+                ;;
+        esac
         state_set last_result "PASS"
         state_set config_fingerprint "$(config_fingerprint)"
     fi
@@ -829,4 +837,16 @@ if [ "$SELF_TEST" = "1" ]; then
     exit $?
 fi
 
+# Serialize production mutations, including install and upgrade, across processes.
+case "$SUBCOMMAND" in
+    ""|deploy|all|install|start|stop|restart|upgrade|restore|backup|uninstall|gpu-test|model-manifest)
+        if [ "$DRY_RUN" != 1 ]; then
+            require_root "${SUBCOMMAND:-deploy}"
+            have flock || die "flock is required (install util-linux)"
+            mkdir -p "$ROOT/.deployment" || die "cannot create deployment state directory"
+            chmod 700 "$ROOT/.deployment" || die "cannot protect deployment state directory"
+            exec 9>"$ROOT/.deployment/deploy.lock"
+            flock -n 9 || die "another deployment operation is running; retry after it finishes"
+        fi ;;
+esac
 main "$@"

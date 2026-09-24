@@ -26,10 +26,15 @@ detect_pkg_manager() {
 compose_version_ok() {
     local raw major minor
     raw="$(docker compose version --short 2>/dev/null)" || return 1
+    raw="${raw#v}"
     major="${raw%%.*}"; minor="${raw#*.}"; minor="${minor%%.*}"
     [ -z "${major//[0-9]/}" ] && [ -z "${minor//[0-9]/}" ] || return 1
     [ "$major" -gt "$COMPOSE_MIN_MAJOR" ] && return 0
-    [ "$major" -eq "$COMPOSE_MIN_MAJOR" ] && [ "$minor" -ge "$COMPOSE_MIN_MINOR" ]
+    [ "$major" -eq "$COMPOSE_MIN_MAJOR" ] || return 1
+    [ "$minor" -gt "$COMPOSE_MIN_MINOR" ] && return 0
+    [ "$minor" -eq "$COMPOSE_MIN_MINOR" ] || return 1
+    local patch="${raw##*.}"; patch="${patch%%-*}"
+    [ -n "$patch" ] && [ -z "${patch//[0-9]/}" ] && [ "$patch" -ge 4 ]
 }
 
 install_docker_online() {
@@ -47,7 +52,7 @@ https://download.docker.com/linux/$ID $VERSION_CODENAME stable" > /etc/apt/sourc
                 apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin' ;;
         dnf|yum)
             run bash -c "$mgr config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
-                $mgr install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin" ;;
+                $mgr install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" ;;
         *)
             return 1 ;;
     esac
@@ -127,11 +132,18 @@ stage_sys_install() {
         fi
     fi
 
-    if [ "$compose_present" != 1 ]; then
-        stage_fail "the docker compose v2 plugin is missing (docker-compose-plugin)"
-    fi
-    if ! compose_version_ok; then
-        stage_fail "docker compose $(docker compose version --short 2>/dev/null) is older than ${COMPOSE_MIN_MAJOR}.${COMPOSE_MIN_MINOR}, which the generated GPU overlay needs (!override support)"
+    if ! compose_version_ok || ! docker buildx version >/dev/null 2>&1; then
+        if [ "$may_install" = 1 ]; then
+            info "repairing Docker Compose and Buildx plugins"
+            case "$(detect_pkg_manager)" in
+                apt) run apt-get update -qq && run apt-get install -y docker-compose-plugin docker-buildx-plugin
+                     ;;
+                dnf|yum) run "$(detect_pkg_manager)" install -y docker-compose-plugin docker-buildx-plugin ;;
+                *) stage_fail "install Docker Compose >= 2.24.4 and Buildx for this distribution" ;;
+            esac
+        fi
+        compose_version_ok || stage_fail "Docker Compose >= 2.24.4 is required; install docker-compose-plugin"
+        docker buildx version >/dev/null 2>&1 || stage_fail "Buildx is required by the Dockerfiles; install docker-buildx-plugin (or import it on offline hosts)"
     fi
 
     # ---- GPU userspace ----------------------------------------------------

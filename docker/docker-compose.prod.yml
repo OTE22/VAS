@@ -199,6 +199,7 @@ services:
       # registry, the single-flight job guards, webhook dedup and FAISS
       # autosave remain process-local. See backend/core/runtime_settings.py.
       WORKERS: 1
+      ML_NOTEBOOK_URL: ${ML_NOTEBOOK_URL:-}
       USE_GPU: "false"
 
       # --- secrets ---

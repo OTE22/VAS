@@ -268,6 +268,7 @@ async def process_image_async(
     location_name: Optional[str] = None,
     observed_at: Optional[datetime] = None,
     timestamp_source: str = 'server_processed',
+    feedback: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     OPTIMIZED VERSION with fixes:
@@ -281,6 +282,13 @@ async def process_image_async(
     it is persisted (fill-empty-only) and attached to realtime broadcasts.
     """
 
+    def report(status):
+        if feedback is not None:
+            feedback['status'] = status
+
+    report('no_face')
+    if feedback is not None:
+        use_batch_write = False  # Feedback must describe a committed database write.
     start_time = time.time()
     captured_at = observed_at or datetime.utcnow()
     capture_id = uuid.uuid4().hex
@@ -307,9 +315,11 @@ async def process_image_async(
     try:
         frame = await loop.run_in_executor(INFERENCE_POOL, _decode_frame_sync, image_bytes)
         if frame is None:
+            report("invalid_image")
             logger.error(f"[PROCESS] Failed to decode image for pipeline {pipeline_id}")
             return None
     except Exception as e:
+        report("invalid_image")
         logger.error(f"[PROCESS] Image decode error for pipeline {pipeline_id}: {e}")
         return None
 
@@ -447,6 +457,7 @@ async def process_image_async(
                 infer_ms = (time.time() - infer_start) * 1000
 
         if crop_result["error"]:
+            report("failed")
             logger.error(f"[PROCESS] ❌ Inference error in crop {pred_idx} at stage '{crop_result['stage']}': {crop_result['error']}")
             continue
 
@@ -463,6 +474,8 @@ async def process_image_async(
 
         faces_detected += 1
         if crop_result.get('acceptance') and not crop_result['acceptance']['accepted']:
+            if feedback is not None:
+                feedback['reason'] = crop_result['acceptance']['reason']
             rejected_faces.append(await _retain_rejected_face(
                 crop_result, pipeline_id=pipeline_id, capture_id=capture_id,
                 captured_at=captured_at, bbox=(x1, y1, x2, y2)))
@@ -634,15 +647,18 @@ async def process_image_async(
                 # while logging "Match (legacy)" as if it had checked something.
                 # A face processed without the identity system is a face NOT
                 # recognized — say so and move on.
+                report("failed")
                 logger.error("[PROCESS] identity_service unavailable — face skipped, "
                              "not silently misclassified")
                 continue
         except Exception as e:
+            report("failed")
             logger.error(f"[PROCESS] Identity/face search error: {e}", exc_info=True)
             continue
 
         # Optionally skip Unknown faces (make this configurable)
         if settings.SKIP_UNKNOWN_FACES and name == "Unknown":
+            report("ignored")
             logger.debug(f"[PROCESS] Skipping Unknown face (config: SKIP_UNKNOWN_FACES={settings.SKIP_UNKNOWN_FACES})")
             continue
 
@@ -670,6 +686,7 @@ async def process_image_async(
                 duplicate_in_batch = True
 
         if duplicate_in_batch:
+            report("duplicate")
             continue
 
         # 2. SECOND: Check temporal face tracker (across time/frames)
@@ -683,6 +700,7 @@ async def process_image_async(
                 )
 
                 if is_tracked and identity and identity.type == IdentityType.KNOWN:
+                    report("duplicate")
                     logger.info(f"[PROCESS] Skipping {name} - already tracked recently")
                     continue
             except Exception as e:
@@ -694,8 +712,8 @@ async def process_image_async(
             batch_face_embeddings[name] = []
         batch_face_embeddings[name].append(embedding)
 
-        # 4. Add to temporal tracker to prevent duplicates in future frames
-        if FACE_TRACKING_ENABLED:
+        # Feedback requests only enter the tracker after the database commit.
+        if FACE_TRACKING_ENABLED and feedback is None:
             try:
                 await face_tracker.add_face(
                     pipeline_id=pipeline_id,
@@ -729,10 +747,12 @@ async def process_image_async(
         try:
             ok, buf = await loop.run_in_executor(INFERENCE_POOL, cv2.imencode, ".jpg", aligned_face)
             if not ok:
+                report("failed")
                 logger.warning(f"[PROCESS] Failed to encode face image")
                 continue
             face_b64 = base64.b64encode(buf).decode()
         except Exception as e:
+            report("failed")
             logger.error(f"[PROCESS] Face encoding error: {e}")
             continue
 
@@ -956,14 +976,25 @@ async def process_image_async(
             async with db_manager.get_session() as db:
                 await ensure_pipeline_registered(db, pipeline_id)
                 outcome = await persist_detection(db, detection_data=detection_data)
+            report("saved" if detected_faces else "quality_rejected")
             logger.info(f"✅ Saved {len(detection_data['faces'])} face evidence rows to DB for pipeline {pipeline_id}")
         except Exception as e:
+            outcome = None
+            report("failed")
             from backend.core.metrics import metrics_db_operation_failures
             if metrics_db_operation_failures:
                 metrics_db_operation_failures.labels(reason="detection_core").inc()
             logger.error(f"[PROCESS] detection NOT persisted (core failure): {e}", exc_info=True)
             await compensate_failed_detection(detection_data)
         if outcome is not None:
+            if feedback is not None and FACE_TRACKING_ENABLED:
+                for tracked_name, embeddings in batch_face_embeddings.items():
+                    for tracked_embedding in embeddings:
+                        try:
+                            await face_tracker.add_face(pipeline_id=pipeline_id,
+                                                        embedding=tracked_embedding, name=tracked_name)
+                        except Exception:
+                            logger.warning('Post-commit face tracker update failed')
             from backend.core.appearance_events import publish_unknown_events
             await publish_unknown_events(outcome.unknown_events)
             await broadcast_detection_alerts(outcome.bundles, location_name=display_name)

@@ -88,3 +88,24 @@ test('stopping prevents in-flight responses from updating the page', async () =>
     assert.equal(h.inbox.list.children.length, 0);
     assert.deepEqual(h.sounds, []);
 });
+test('new alerts update the collapsed summary without opening the inbox', async () => {
+    const h = harness(); reply(h.requests[0], [item('old')]); await flush();
+    assert.equal(h.inbox.body.hidden, true);
+    assert.equal(h.inbox.count.textContent, '1');
+    h.inbox.refresh(); reply(h.requests[1], [item('old'), item('new')]); await flush();
+    assert.equal(h.inbox.count.textContent, '2');
+    assert.equal(h.inbox.body.hidden, true);
+    h.inbox.toggle.events.click();
+    assert.equal(h.inbox.body.hidden, false);
+    h.inbox.refresh(); reply(h.requests[2], [item('old')]); await flush();
+    assert.equal(h.inbox.body.hidden, false);
+    h.inbox.toggle.events.click();
+    assert.equal(h.inbox.body.hidden, true);
+});
+test('expanded alert details survive background refreshes', async () => {
+    const h = harness(); reply(h.requests[0], [item('old')]); await flush();
+    const details = h.inbox.list.children[0].children.find(n => n.tag === 'details');
+    details.open = true; details.events.toggle();
+    h.inbox.refresh(); reply(h.requests[1], [item('old')]); await flush();
+    assert.equal(h.inbox.list.children[0].children.find(n => n.tag === 'details').open, true);
+});
