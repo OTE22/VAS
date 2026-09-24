@@ -143,7 +143,7 @@ def test_page_chrome_follows_the_house_rules():
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-17" in html, "the page stylesheet is not version-pinned"
+    assert "admin-ml-ops.css?v=mlops-18" in html, "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 

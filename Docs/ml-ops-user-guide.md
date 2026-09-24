@@ -332,6 +332,22 @@ Create a second run on the **same saved dataset**, using **Median/MAD baseline**
 | Request fails with 409 / 422 | Refresh and check active jobs/lifecycle gates for 409; correct the reported fields or validation issue for 422. |
 | Unexpected server error | Record the action, time, job ID, error code, and request ID; inspect Audit and provide those references to the maintainer. |
 
+## Tool switches in Prepare & train
+
+Open **Prepare & train → ML tools and tracking**. Each switch saves immediately through the existing Admin Settings API and records an audit reason. Wait for the save message; **On** represents the saved configuration, not proof that every dependency or worker is ready.
+
+| Switch | Effect and prerequisites |
+| --- | --- |
+| Experiment tracking · MLflow | Enable experiment/model tracking for future runs; local dataset lineage remains mandatory. |
+| XGBoost algorithms | Make installed XGBoost algorithms available to compatible future runs. |
+| Parameter tuning · Optuna | Allow supported XGBoost tuning; select tuning separately in each run. |
+| Model explanations · SHAP | Allow supported explanations; select explanations separately in each run. |
+| Scheduled drift monitoring | Save the scheduler setting. A worker restart and sufficient qualifying production inference samples are still required. Enabling it does not bypass production gates. |
+
+Read **Saved**, **API effective**, and **Availability** separately. Worker state is not confirmed by these controls. Restart-required or apply-failed messages must be resolved before treating a feature as active. Running jobs are not reconfigured. If a save times out, refresh its saved state before retrying.
+
+Use **Refresh tool status** to reread values and **Advanced settings** for tracking configuration, limits, intervals and thresholds. Dataset lineage, validation and reproducibility are always on; collection is an explicit job. Model approval and decision modes retain their existing gated controls.
+
 ## 14. When you are ready for more advanced work
 
 - **Supervised ranking:** create evidence-backed labels, review them, satisfy the displayed readiness gate, and build the compatible supervised dataset.

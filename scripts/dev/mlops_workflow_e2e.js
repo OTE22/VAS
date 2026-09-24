@@ -14,7 +14,8 @@ const model = { id: mid, model_type: 'behavior_anomaly_model', algorithm: 'mad_b
     training_config: { algorithm: 'mad_baseline', seed: 42, preprocessor_version: 'fixture-preprocessor', feature_set_version: 'fixture-features', hyperparameters: {} },
     evaluation_report: { splits: { test: { rows: 8, score_p50: 0.2, score_p90: 0.8 } }, engineering_gate: { status: 'PASS' }, scientific_gate: { status: 'INSUFFICIENT_EVIDENCE' } } };
 let jobs = [], models = [], explorerError = 0, denyEvidence = false, slowDataset = false;
-const writes = [], errors = [];
+const writes = [], errors = [], toolWrites = [];
+const toolValues = {MLFLOW_ENABLED: false, XGBOOST_ENABLED: false, OPTUNA_ENABLED: false, SHAP_ENABLED: false, ML_DRIFT_MONITORING_ENABLED: false};
 let savedPipelines = [];
 (async () => {
     const browser = await chromium.launch({ executablePath: process.env.CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
@@ -25,6 +26,19 @@ let savedPipelines = [];
         await page.route('**/*', async route => {
             const url = new URL(route.request().url()), p = url.pathname;
             const reply = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+            if (p.startsWith('/api/settings/')) {
+                const key = p.split('/').pop(), restart = key === 'ML_DRIFT_MONITORING_ENABLED';
+                if (!(key in toolValues)) return reply({detail: 'Not found'}, 404);
+                const setting = () => ({key, stored_value: toolValues[key], effective_value: restart ? false : toolValues[key], can_edit: true, requires_worker_restart: restart});
+                if (route.request().method() === 'PUT') {
+                    const body = route.request().postDataJSON(); toolWrites.push(body);
+                    assert.equal(route.request().headers()['x-requested-with'], 'XMLHttpRequest');
+                    if (key === 'SHAP_ENABLED') return reply({detail: 'Denied'}, 403);
+                    toolValues[key] = body.value === 'true';
+                    return reply({saved: true, applied: !restart, restart_required: restart, message: restart ? 'Worker restart required' : 'Saved', setting: setting()});
+                }
+                return reply(setting());
+            }
             if (p.startsWith('/api/')) {
                 if (route.request().method() !== 'GET') {
                     writes.push({ path: p, body: route.request().postDataJSON() });
@@ -79,6 +93,16 @@ let savedPipelines = [];
         }
         assert.equal(await page.locator('.mlops-tour').evaluate(node => node.open), false);
         assert.equal(writes.length, 0, 'The tour must not submit operational requests');
+        await page.locator('[data-mlops-view="prepare"]').click();
+        for (const expected of [true, false]) {
+            await page.locator('#tool-MLFLOW_ENABLED').click();
+            await page.waitForFunction(value => {const n = document.getElementById('tool-MLFLOW_ENABLED'); return !n.disabled && n.checked === value;}, expected);
+        }
+        await page.locator('#tool-SHAP_ENABLED').click();
+        await page.waitForFunction(() => document.querySelector('#tool-SHAP_ENABLED').closest('article').textContent.includes('permission'));
+        assert.equal(await page.locator('#tool-SHAP_ENABLED').isChecked(), false);
+        assert.equal(toolWrites.length, 3);
+        assert(toolWrites.every(body => body.change_reason));
         await page.locator('#mlops-evidence-browser > summary').click();
         await page.waitForFunction(() => document.querySelectorAll('#workflow-dataset option').length === 2);
         assert.equal(await page.locator('#workflow-pipeline button').count(), 7);

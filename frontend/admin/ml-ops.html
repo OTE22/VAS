@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-17">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-18">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -308,13 +308,16 @@
                 <div class="mlops-card" data-help="capabilities" data-mlops-panel="prepare">
                     <div class="mlops-card-header">
                         <div>
-                            <h2><i class="fas fa-puzzle-piece"></i> Available capabilities</h2>
-                            <p class="mlops-card-intro">See which optional ML features are installed and usable.</p>
+                            <h2><i class="fas fa-puzzle-piece"></i> ML tools and tracking</h2>
+                            <p class="mlops-card-intro">Turn supported tools on or off and check when changes take effect.</p>
                         </div>
                     </div>
+                    <div class="mlops-card-body" id="mlops-tool-controls" aria-label="ML tool on and off controls"></div>
+                    <details class="workflow-evidence"><summary>Technical capability status</summary>
                     <div class="mlops-card-body" id="optional-capabilities-body">
                         <div class="mlops-loading"><i class="fas fa-spinner fa-spin"></i> Loading…</div>
                     </div>
+                    </details>
                 </div>
 
                 <!-- Model registry + lifecycle actions -->
@@ -798,5 +801,6 @@
     <script src="/frontend/js/mlops-diagnostics.js?v=2"></script>
     <script src="/frontend/js/admin-ml-ops.js?v=mlops-21"></script>
     <script src="/frontend/js/mlops-tour.js?v=1"></script>
+    <script src="/frontend/js/mlops-tools.js?v=1"></script>
 </body>
 </html>

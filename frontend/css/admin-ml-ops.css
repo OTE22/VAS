@@ -1814,3 +1814,16 @@
 .mlops-tour-note { color: #a9bed2; font-size: .8rem; }
 .mlops-tour-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .mlops-tour-card :focus-visible { outline: 2px solid #7dd3fc; outline-offset: 3px; }
+
+.mlops-tools-grid { display: grid; gap: 12px; margin: 14px 0; }
+.mlops-tool { padding: 16px; border: 1px solid #3e556d; border-radius: 10px; background: #132335; min-width: 0; }
+.mlops-tool-heading { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.mlops-tool-heading strong { flex: 1; color: #e7f0fb; }
+.mlops-tool-heading input[role="switch"] { appearance: none; flex: 0 0 42px; width: 42px; min-width: 42px; height: 24px; padding: 2px; margin: 0; border: 1px solid #8297ab; border-radius: 20px; background: #3a4b60; cursor: pointer; }
+.mlops-tool-heading input[role="switch"]::before { content: ''; display: block; width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+.mlops-tool-heading input[role="switch"]:checked { background: #087b9a; border-color: #7dd3fc; }
+.mlops-tool-heading input[role="switch"]:checked::before { transform: translateX(17px); }
+.mlops-tool-heading input[role="switch"]:disabled { opacity: .5; cursor: not-allowed; }
+.mlops-tool-heading input[role="switch"]:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 4px; }
+.mlops-tool-state { min-width: 3rem; font-size: .8rem; color: #b4d7eb; }
+.mlops-tool-detail { font-size: .78rem; color: #adc3d8; overflow-wrap: anywhere; line-height: 1.6; }
