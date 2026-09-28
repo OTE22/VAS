@@ -87,7 +87,8 @@ def trace_dataset_build(function):
             if job_id:
                 from backend.core.task_history import task_history_manager
                 async def publish(percent, details):
-                    await task_history_manager.update_progress(job_id, percent, details=details)
+                    await task_history_manager.update_progress(job_id, percent,
+                        details={**details, "dataset_diagnostics": details}, merge_details=True)
             diagnostics = DatasetDiagnostics(job_id, publish)
         diagnostics.configuration = {
             key: value.isoformat() if isinstance(value, datetime) else value

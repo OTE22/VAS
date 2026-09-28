@@ -11,7 +11,7 @@
         ['prepare', 'training-dataset-select', '4. Configure training', 'Select the dataset you inspected and a compatible model. For a first person-behavior run, use Isolation Forest, seed 42 and default parameters. Leave optional tuning off.'],
         ['overview', 'jobs-refresh-btn', '5. Follow the job', 'After submitting training, follow its stage and messages in Work in progress. A failed job needs its cause corrected before retrying.'],
         ['review', 'workflow-model', '6. Review the evidence', 'Select the resulting model, then open Evaluation and Run summary. Completion does not mean approval: check held-out results, lineage and applicable gates.'],
-        ['review', 'notebook-launch', 'Debug with a notebook', 'Download a debug notebook from a dataset or its job diagnostics, then open it here. Your VAS login is reused. Run cells in order and inspect the first failure.'],
+        ['review', 'service-notebook-actions', 'Debug each step in Jupyter', 'Open the selected service’s step-by-step notebook. Your VAS login is reused. Run cells in order to inspect saved evidence, extraction rules, snapshot checks and missing stages. Production jobs stay in ML Ops.'],
         ['monitor', 'mlops-workspace-title', '7. Monitor permitted use', 'Approval is a separate, reasoned action in Review models. After the intended observation path is active, inspect predictions and fallbacks here. Check capability status before requesting drift analysis.'],
         ['audit', 'mlops-workspace-title', '8. Trace and troubleshoot', 'Use Audit to match actions, errors and request IDs. You have completed the tour—not the operational jobs. Return to the recommended next step to begin your own run.']
     ];

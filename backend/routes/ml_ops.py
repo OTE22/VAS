@@ -1047,6 +1047,30 @@ async def debug_workspace(current_user=Depends(ML_MANAGE)):
     return JSONResponse({"url": url or None}, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/ml/workflow-notebook", tags=["ML Operations"])
+async def workflow_notebook(
+    model_type: Optional[str] = Query(default=None, max_length=80),
+    model_id: Optional[uuid_mod.UUID] = None, dataset_id: Optional[uuid_mod.UUID] = None,
+    job_id: Optional[str] = Query(default=None, max_length=128, pattern=r"^[A-Za-z0-9_-]+$"),
+    db: AsyncSession = Depends(get_db), current_user=Depends(ML_MANAGE),
+    _rl=Depends(rate_limited("ml_ops", heavy=True)),
+):
+    """Export all recorded workflow phases for a service or exact run; never execute a job."""
+    from backend.ml.notebook_evidence import build_notebook_evidence, NotebookEvidenceError
+    from backend.ml.debug_notebook import build_pipeline_debug_notebook
+    try:
+        evidence = await build_notebook_evidence(db, model_type=model_type, model_id=model_id,
+                                                dataset_id=dataset_id, job_id=job_id)
+        notebook = build_pipeline_debug_notebook(evidence)
+        return JSONResponse(notebook, media_type="application/x-ipynb+json", headers={
+            "Cache-Control":"no-store", "X-Content-Type-Options":"nosniff",
+            "Content-Disposition":'attachment; filename="vas-workflow-debug.ipynb"'})
+    except NotebookEvidenceError as exc:
+        raise _error(exc.status, exc.code, exc.message)
+    except Exception as exc:
+        raise _safe_500("workflow notebook export", exc)
+
+
 async def _debug_notebook_response(db, *, dataset_id=None, task=None):
     from pathlib import Path
     from config import settings

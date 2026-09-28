@@ -528,6 +528,7 @@
             const panel = document.querySelector('[data-journey-panel="' + stage + '"]');
             if (panel) { panel.setAttribute('tabindex', '-1'); panel.focus({preventScroll: true}); panel.scrollIntoView({block: 'nearest'}); }
         }
+        renderServiceNotebook();
         if (stage === 'test' || stage === 'activate') loadServiceModelEvidence();
     }
     function selectService(modelType, refresh) {
@@ -670,9 +671,28 @@
         getElement('service-mode-advanced').hidden = !behavior;
         renderServiceConsumption(service, choice);
         renderServiceJob();
+        renderServiceNotebook();
         if (!model) getElement('service-model-evidence').replaceChildren(el('p', null, 'Prepare and train a candidate for this service to see its evaluation here.'));
         else if (state.serviceEvidence?.id === model.id) renderServiceModelEvidence(state.serviceEvidence);
         else getElement('service-model-evidence').replaceChildren(el('p', null, 'Select Test & review to load this candidate’s current evidence.'));
+    }
+    function renderServiceNotebook() {
+        if (!window.MLOpsDiagnostics) return;
+        const selection = journeySelection(), model = serviceModel();
+        const context = {model_type: state.selectedService};
+        let label = 'Service walkthrough · no run selected';
+        if (selection.stage !== 'prepare' && model) {
+            context.model_id = model.id;
+            label = 'Selected candidate · version ' + formatMetric(model.version) + ' · linked data and training evidence';
+        } else {
+            const task = state.recentJobs.find(job => job.job_id === selection.job && (job.details?.model_type || job.model_type) === state.selectedService);
+            const dataset = state.datasets.find(item => item.id === selection.dataset && compatibleDataset(item, selectedServiceContract()));
+            if (task) { context.job_id = task.job_id; label = 'Selected training run · ' + humanizeToken(task.status); }
+            else if (dataset) { context.dataset_id = dataset.id; label = 'Selected dataset · ' + toText(dataset.name) + ' v' + formatMetric(dataset.version); }
+        }
+        const note = getElement('service-notebook-context');
+        if (note) note.textContent = label;
+        window.MLOpsDiagnostics.updatePanel(getElement('service-notebook-actions'), context);
     }
     function renderServiceConsumption(service, choice) {
         const usage = service?.consumption || {}, selected = service?.selected_model;
@@ -828,7 +848,7 @@
         const family = SERVICE_CHOICES.some(item => item.model_type === stored.service) ? stored.service : 'behavior_anomaly_model';
         document.querySelectorAll('[data-journey-stage]').forEach(button => button.addEventListener('click', () => setJourneyStage(button.dataset.journeyStage, true)));
         on('mlops-service-guide', 'click', () => { setJourneyStage('prepare', true); getElement('mlops-journey-title').scrollIntoView({block: 'start'}); });
-        on('service-dataset-select', 'change', () => { journeySelection().dataset = getElement('service-dataset-select').value; persistJourney(); });
+        on('service-dataset-select', 'change', () => { journeySelection().dataset = getElement('service-dataset-select').value; journeySelection().job = ''; persistJourney(); renderServiceNotebook(); });
         on('service-model-select', 'change', () => { journeySelection().model = getElement('service-model-select').value; state.serviceEvidence = null; persistJourney(); renderServiceJourney(); loadServiceModelEvidence(); });
         on('service-train-btn', 'click', startServiceTraining);
         on('service-training-advanced', 'click', () => openAdvanced('prepare', 'workflows'));
@@ -1596,6 +1616,7 @@
                     + ' — ' + toText(model.stage);
             }
             const frag = document.createDocumentFragment();
+            if (window.MLOpsDiagnostics) frag.appendChild(window.MLOpsDiagnostics.actions({model_id: String(model.id || modelId)}));
             const trainingConfig = (model.training_config && typeof model.training_config === 'object')
                 ? model.training_config : null;
             frag.appendChild(kvList([
@@ -2170,7 +2191,7 @@
                     toText(task.error_code, 'ERROR') + ' · ' + toText(task.error_message, 'Job failed')
                     + ' Next step: review this job’s details and request ID, correct the cause, then rerun it.'));
             }
-            if (window.MLOpsDiagnostics && (task.task_type === 'ml_dataset_build' || task.kind === 'dataset')) {
+            if (window.MLOpsDiagnostics && (['training', 'dataset', 'collection'].includes(task.kind) || ['ml_training', 'ml_dataset_build', 'ml_feature_computation'].includes(task.task_type))) {
                 row.appendChild(window.MLOpsDiagnostics.render(task));
             }
             list.appendChild(row);

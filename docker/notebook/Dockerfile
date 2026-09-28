@@ -5,6 +5,8 @@ RUN pip install --no-cache-dir 'jupyterlab>=4.3,<5' 'ipykernel>=6.29,<7' 'pyarro
 COPY notebook_config.py /etc/jupyter/jupyter_server_config.py
 COPY gateway_identity.py /etc/jupyter/gateway_identity.py
 RUN mkdir /auth-state && chown notebook:notebook /auth-state && chmod 700 /auth-state
+# Match the deployed ML worker for portable preprocessing rechecks.
+RUN pip install --no-cache-dir 'numpy==2.4.6'
 USER 1000:1000
 WORKDIR /workspace
 ENV JUPYTER_CONFIG_DIR=/etc/jupyter PYTHONDONTWRITEBYTECODE=1

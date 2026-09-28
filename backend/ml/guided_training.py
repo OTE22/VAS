@@ -65,15 +65,23 @@ async def prepare_training_inputs(job_id, payload):
     async def progress(percent):
         await task_history_manager.update_progress(job_id, 1 + int(max(0, min(100, percent)) * .03),
             details={'stage': 'preparing_features', 'model_type': model_type,
-                     'guided_workflow': True, 'preparation_percent': percent})
+                     'guided_workflow': True, 'preparation_percent': percent,
+                     'preparation': {'status': 'running', 'percent': percent}}, merge_details=True)
     await progress(0)
     async with db_manager.get_session() as db:
         result = await run_collection(db, run_id=job_id, full_rebuild=False, progress_cb=progress)
+    preparation = {key: result[key] for key in ('rows_scanned', 'candidate_rows', 'batches', 'batch_rows',
+        'identities_affected', 'current_state_pending', 'reconciled_identities', 'snapshots_written',
+        'snapshots_deduplicated', 'relational_features', 'watermark_event_time', 'full_rebuild') if key in result}
+    preparation['status'] = ('cancelled' if result.get('cancelled') or result.get('status') == 'cancelled' else
+        'incomplete' if result.get('status') in ('failed', 'busy') or result.get('current_state_pending', 0) else 'completed')
+    await task_history_manager.update_progress(job_id, 4, details={
+        'stage': 'preparing_features', 'model_type': model_type, 'guided_workflow': True,
+        'preparation': preparation}, merge_details=True)
     if result.get('cancelled') or result.get('status') == 'cancelled':
         raise GuidedTrainingRefusal('PREPARATION_CANCELLED', 'Preparation was cancelled. Review job status before starting again.')
     if result.get('status') in ('failed', 'busy') or result.get('current_state_pending', 0):
         raise GuidedTrainingRefusal('FEATURE_PREPARATION_INCOMPLETE',
             'Feature preparation did not finish. Inspect feature collection status and retry before training.')
-    await progress(100)
     return {'status': 'prepared', 'snapshots_written': result.get('snapshots_written', 0),
             'snapshots_reused': result.get('snapshots_deduplicated', 0)}

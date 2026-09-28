@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-19-services">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-20-notebooks">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -101,6 +101,12 @@
                     <h3>Confirm that the application uses your model</h3><div id="service-consumption" class="mlops-service-evidence" role="status" aria-live="polite"></div>
                     <div class="mlops-guided-actions"><a id="service-open-consumer" class="mlops-btn mlops-btn-primary" href="/admin/security-intelligence">Open consuming service</a><button type="button" id="service-monitor-refresh" class="mlops-btn">Refresh usage</button><button type="button" id="service-stop-btn" class="mlops-btn" disabled>Stop service model</button></div>
                 </div>
+                <aside class="mlops-notebook-guide" aria-labelledby="service-notebook-title">
+                    <div><span class="mlops-guide-label">Understand and debug each step</span><h3 id="service-notebook-title">Follow the pipeline in Jupyter</h3><p>See where the data comes from, how features are extracted, which rows enter the dataset, and how validation, training, evaluation and service use connect.</p></div>
+                    <p id="service-notebook-context" class="mlops-notebook-context">Preparing the selected service walkthrough…</p>
+                    <div id="service-notebook-actions"></div>
+                    <p class="mlops-notebook-scope">The notebook separates saved production evidence from offline snapshot checks. It explains unavailable stages and never starts production training or changes a service model.</p>
+                </aside>
                 <div id="service-action-note" class="mlops-note" role="status" aria-live="polite"></div>
                 <div id="service-job-progress" class="mlops-service-job" role="status" aria-live="polite" hidden></div>
             </section>
@@ -176,6 +182,7 @@
                     <button type="button" class="mlops-btn" id="workflow-refresh">Refresh evidence</button>
                     <button type="button" class="mlops-btn" id="workflow-summary-button">Run summary</button>
                 </div>
+                <div id="workflow-notebook-actions"></div>
                 <p id="workflow-notice" role="status" aria-live="polite">Loading workflow evidence…</p>
                 <ol id="workflow-pipeline" class="mlops-workflow-pipeline" aria-label="Pipeline execution order"></ol>
                 <div id="workflow-progress" aria-label="Training progress"></div>
@@ -839,10 +846,10 @@
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
-    <script src="/frontend/js/mlops-workflow.js?v=workflow-3"></script>
-    <script src="/frontend/js/mlops-diagnostics.js?v=2"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-22-services"></script>
-    <script src="/frontend/js/mlops-tour.js?v=1"></script>
+    <script src="/frontend/js/mlops-workflow.js?v=workflow-4-notebooks"></script>
+    <script src="/frontend/js/mlops-diagnostics.js?v=3-workflow"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-23-notebooks"></script>
+    <script src="/frontend/js/mlops-tour.js?v=2-notebooks"></script>
     <script src="/frontend/js/mlops-tools.js?v=1"></script>
 </body>
 </html>

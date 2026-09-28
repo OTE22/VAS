@@ -32,7 +32,8 @@ if parent_dir not in sys.path:
 
 from db_connection import db_manager
 from db_models import BackgroundTaskHistory
-from sqlalchemy import select, update, desc, asc, and_, or_, func
+from sqlalchemy import select, update, desc, asc, and_, or_, func, literal
+from sqlalchemy.dialects.postgresql import JSONB
 
 logger = logging.getLogger(__name__)
 
@@ -154,14 +155,15 @@ class TaskHistoryManager:
             return False
 
     async def update_progress(self, job_id: str, percent: int,
-                              details: Optional[Dict[str, Any]] = None) -> None:
-        """Update progress on a running job (best effort)."""
+                              details: Optional[Dict[str, Any]] = None, *, merge_details: bool = False) -> None:
+        """Update progress; opt-in JSON merge preserves independently recorded ML phases."""
         try:
             percent = max(0, min(100, int(percent)))
             async with db_manager.get_session() as db:
                 values = {"progress_percent": percent, "updated_at": datetime.utcnow()}
                 if details is not None:
-                    values["details"] = details
+                    values["details"] = (func.coalesce(BackgroundTaskHistory.details, literal({}, type_=JSONB)).op("||")(literal(details, type_=JSONB))
+                                         if merge_details else details)
                 await db.execute(
                     update(BackgroundTaskHistory)
                     .where(BackgroundTaskHistory.job_id == job_id,

@@ -49,6 +49,10 @@
             return model ? text(model.stage) : 'Not registered';
         }
         function renderPipeline() {
+            if (window.MLOpsDiagnostics) {
+                const context = selectedModel ? {model_id: selectedModel} : selectedJobId ? {job_id: selectedJobId} : selectedDataset ? {dataset_id: selectedDataset} : {model_type: state.selectedService};
+                window.MLOpsDiagnostics.updatePanel(node('workflow-notebook-actions'), context);
+            }
             const list = node('workflow-pipeline');
             if (!list.children.length) stages.forEach((title, index) => {
                 const li = el('li'), b = button('', () => {

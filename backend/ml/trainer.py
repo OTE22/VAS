@@ -654,7 +654,9 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
     async def stage(name: str, percent: int):
         logger.info("[ML_OPS] job_id=%s training_stage=%s progress_percent=%s",
                     job_id, name, percent)
-        await task_history_manager.update_progress(job_id, percent, details=telemetry.stage(name))
+        snapshot = telemetry.stage(name)
+        await task_history_manager.update_progress(job_id, percent,
+            details={**snapshot, "training_diagnostics": snapshot}, merge_details=True)
 
     try:
         async with db_manager.get_session() as db:

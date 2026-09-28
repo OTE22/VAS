@@ -1891,3 +1891,22 @@
     .mlops-guided-actions { align-items: stretch; flex-direction: column; }
     .mlops-advanced-tools > summary span { display: block; margin-top: 7px; padding-left: 0; }
 }
+
+
+/* Notebook entry stays visible throughout the guided service journey. */
+.mlops-notebook-guide { margin-top: 18px; padding: 20px; border: 1px solid #416481; border-radius: 10px; background: #14283b; }
+.mlops-notebook-guide h3 { color: #f1f7ff; margin: 7px 0 10px; font-size: 1.08rem; }
+.mlops-notebook-guide p { max-width: 90ch; color: #c2d2e4; line-height: 1.65; margin: 8px 0; }
+.mlops-notebook-guide .mlops-notebook-context { color: #b9e1ff; font-weight: 600; }
+.mlops-notebook-guide .mlops-notebook-scope { color: #afc1d5; font-size: .86rem; margin-top: 12px; }
+.mlops-notebook-actions { margin: 12px 0; min-width: 0; }
+.mlops-notebook-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.mlops-notebook-buttons .mlops-btn { min-height: 40px; white-space: normal; justify-content: center; }
+.mlops-notebook-status { color: #c2d7ed; margin: 8px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+.mlops-notebook-status:empty { display: none; }
+.mlops-notebook-ready { color: #79d6ff; text-decoration: underline; }
+.mlops-notebook-actions :is(button, a):focus-visible { outline: 3px solid #76c9ff; outline-offset: 3px; }
+@media (max-width: 700px) {
+    .mlops-notebook-guide { padding: 15px; }
+    .mlops-notebook-buttons { align-items: stretch; flex-direction: column; }
+}
