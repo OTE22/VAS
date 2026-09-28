@@ -462,6 +462,7 @@
         lastJobsSyncAt: null,
         modelTypes: [],
         models: [],
+        modelsFamily: null,
         datasets: [],
         evidence: { overview: 'loading', datasets: 'loading', models: 'loading' },
         featureSnapshots: null,
@@ -472,9 +473,9 @@
 
     const SERVICE_CHOICES = [
         {model_type: 'behavior_anomaly_model', title: 'Behavior assessment', icon: 'fa-person-walking', description: 'Add unusual behavior evidence to threat assessment.', destination: 'Security Intelligence · Threat Assessment'},
-        {model_type: 'coappearance_anomaly_model', title: 'Pair relationships', icon: 'fa-user-group', description: 'Observe unusual patterns between identity pairs.', destination: 'Security Intelligence · Suspicious Patterns'},
+        {model_type: 'coappearance_anomaly_model', title: 'Pair relationships', icon: 'fa-user-group', description: 'Observe unusual patterns between identity pairs.', destination: 'Security Intelligence · Social Network'},
         {model_type: 'social_graph_anomaly_model', title: 'Social network', icon: 'fa-diagram-project', description: 'Observe unusual positions in a relationship network.', destination: 'Security Intelligence · Social Network'},
-        {model_type: 'threat_ranking_model', title: 'Analyst review queue', icon: 'fa-list-check', description: 'Prioritize reviews using independently reviewed outcomes.', destination: 'Security Intelligence · Threat Assessment · Review Queue'},
+        {model_type: 'threat_ranking_model', title: 'Analyst review queue', icon: 'fa-list-check', description: 'Prioritize reviews using independently reviewed outcomes.', destination: 'ML Ops · Analyst review'},
         {model_type: 'tabular_regression_model', title: 'Numeric experiments', icon: 'fa-flask', description: 'Predict an explicitly chosen numeric target offline.', destination: 'ML Ops · Offline evaluation only'}
     ];
     const JOURNEY_STORAGE_KEY = 'mlops.serviceJourney.v1';
@@ -489,7 +490,7 @@
     }
     function journeySelection() {
         const family = state.selectedService || 'behavior_anomaly_model';
-        if (!state.journey.selections[family]) state.journey.selections[family] = {};
+        if (!state.journey.selections[family] || typeof state.journey.selections[family] !== 'object' || Array.isArray(state.journey.selections[family])) state.journey.selections[family] = {};
         return state.journey.selections[family];
     }
     function selectedServiceContract() {
@@ -532,6 +533,7 @@
     function selectService(modelType, refresh) {
         if (!SERVICE_CHOICES.some(item => item.model_type === modelType)) return;
         state.selectedService = modelType;
+        if (refresh && state.modelsFamily !== modelType) state.evidence.models = 'loading';
         state.journey.service = modelType;
         state.serviceEvidence = null;
         // Invalidate any pending evidence request when the service changes.
@@ -612,7 +614,7 @@
         if (state.servicesState === 'error') blockers.appendChild(el('p', 'mlops-note note-bad', state.servicesError));
         else if (service && Array.isArray(service.blockers) && service.blockers.length) {
             const list = el('ul', 'mlops-service-blocker-list');
-            for (const blocker of service.blockers) list.appendChild(el('li', null, toText(blocker.message) + (blocker.action ? ' ' + blocker.action : '')));
+            for (const blocker of service.blockers) list.appendChild(el('li', null, toText(blocker.message)));
             blockers.appendChild(list);
         }
         const selection = journeySelection();
@@ -633,7 +635,7 @@
             const option = el('option', null, 'Version ' + formatMetric(model.version) + ' · ' + friendlyAlgorithm(model.algorithm) + ' · ' + humanizeToken(model.stage));
             option.value = model.id; modelPicker.appendChild(option);
         }
-        if (!models.some(model => model.id === selection.model)) {
+        if (state.evidence.models === 'ready' && state.modelsFamily === state.selectedService && !models.some(model => model.id === selection.model)) {
             const recommended = service && service.candidate;
             selection.model = recommended && models.some(model => model.id === recommended.id) ? recommended.id : (models.find(model => ['validated', 'shadow', 'approved'].includes(model.stage)) || {}).id || '';
         }
@@ -649,7 +651,7 @@
         getElement('service-review-btn').disabled = !model;
         getElement('service-readiness-btn').disabled = !model || state.serviceActionBusy;
         getElement('service-continue-btn').disabled = !model;
-        getElement('service-deploy-btn').disabled = !model || offline || !['validated', 'shadow', 'approved'].includes(model.stage) || state.servicesState !== 'ready' || state.serviceActionBusy;
+        getElement('service-deploy-btn').disabled = !model || offline || model.stage !== 'validated' || state.servicesState !== 'ready' || state.serviceActionBusy;
         getElement('service-connect-title').textContent = offline ? 'Offline experiment — no live service connection' : 'Connect the reviewed model';
         getElement('service-activation-summary').replaceChildren(kvList([
             ['Destination', toText(service?.destination?.name, choice.destination)],
@@ -678,10 +680,12 @@
         body.replaceChildren(kvList([
             ['Connected model', selected ? 'Version ' + formatMetric(selected.version) + ' · ' + humanizeToken(selected.stage) : 'No service model connected'],
             ['Last successful use', usage.last_success_at ? formatDateTime(usage.last_success_at) : 'No successful use recorded'],
-            ['Model actually used', usage.model_version !== null && usage.model_version !== undefined ? 'Version ' + formatMetric(usage.model_version) : 'Not recorded'],
+            ['Model actually used', usage.model_version !== null && usage.model_version !== undefined ? String(usage.model_version) : 'Not recorded'],
             ['Last attempt', usage.last_attempt_at ? formatDateTime(usage.last_attempt_at) : 'Not recorded'],
             ['Executed mode', toText(usage.actual_mode_used, 'Not recorded')],
-            ['Fallback', toText(usage.fallback_reason, 'No fallback reported')]
+            ['Fallback', toText(usage.fallback_reason, 'No fallback reported')],
+            ['Selected version used', usage.selected_model_used === true ? 'Yes — confirmed by a consuming request' : 'Not confirmed'],
+            ['Last isolated test', usage.last_test_at ? formatDateTime(usage.last_test_at) : 'Not recorded']
         ]));
         body.appendChild(el('p', 'mlops-mode-desc', toText(usage.note, 'A connected model is verified in use only after the consuming application records a successful request.')));
         if (usage.available === false) body.appendChild(el('p', 'mlops-note note-warn', 'Usage telemetry is unavailable. Model connection alone does not confirm use.'));
@@ -732,16 +736,24 @@
         }
     }
     function renderServiceModelEvidence(model) {
-        const report = model.evaluation_report || {}, engineering = report.engineering_gate || {}, scientific = report.scientific_gate || {};
+        const report = model.evaluation_report || {}, config = model.training_config || {};
+        const engineering = report.engineering_gate?.status || config.engineering_gate?.status || config.engineering_gate;
+        const scientific = report.scientific_gate?.status || config.scientific_gate?.status || config.scientific_gate;
         const body = getElement('service-model-evidence');
         body.replaceChildren(kvList([
             ['Model', 'Version ' + formatMetric(model.version) + ' · ' + friendlyAlgorithm(model.algorithm)],
             ['Registry stage', humanizeToken(model.stage)],
-            ['Engineering checks', toText(engineering.status, 'Not recorded')],
-            ['Scientific evidence', toText(scientific.status, 'Not recorded')],
+            ['Engineering checks', toText(engineering, 'Not recorded')],
+            ['Scientific evidence', toText(scientific, 'Not recorded')],
             ['Held-out rows', formatMetric(report.splits?.test?.rows)],
             ['Feature contract', toText(model.feature_set_version, 'Not recorded')]
         ]));
+        const candidateBlockers = serviceStatus()?.candidate?.id === model.id ? serviceStatus()?.candidate_blockers : [];
+        if (Array.isArray(candidateBlockers) && candidateBlockers.length) {
+            const list = el('ul', 'mlops-service-blocker-list');
+            candidateBlockers.forEach(blocker => list.appendChild(el('li', null, toText(blocker.message))));
+            body.appendChild(list);
+        }
         body.appendChild(el('p', 'mlops-mode-desc', 'Readiness checks and sample counts are evidence, not a guarantee of analytical accuracy. The server checks current deployment gates when you connect.'));
     }
     async function startServiceTraining() {
@@ -777,9 +789,8 @@
         openActionPanel('Connect version ' + formatMetric(model.version) + ' to ' + toText(service.destination?.name, friendlyModelType(family)) + ' for ' + toText(service.serving_mode).replaceAll('_', ' '), async reason => {
             state.serviceActionBusy = true; renderServiceJourney();
             try {
-                const evidence = await api('/api/ml/models/' + encodeURIComponent(model.id));
-                if (!evidence.artifact_hash) throw {message: 'This model has no recorded artifact checksum. Rebuild and validate it before connection.'};
-                await api('/api/ml/services/' + encodeURIComponent(family) + '/deploy', {method: 'POST', body: {model_id: model.id, artifact_hash: evidence.artifact_hash, reason}});
+                if (!model.artifact_hash) throw {message: 'This model has no recorded artifact checksum. Rebuild and validate it before connection.'};
+                await api('/api/ml/services/' + encodeURIComponent(family) + '/deploy', {method: 'POST', body: {model_id: model.id, artifact_hash: model.artifact_hash, reason}});
                 await Promise.allSettled([loadServices(), loadModels(), loadOverview()]);
                 if (state.selectedService === family) {
                     setNote('service-action-note', family === 'behavior_anomaly_model' ? 'Model selected. Start observation alongside rules, then verify actual use in Monitor.' : 'Model connected. Open the consuming service, then return to Monitor to verify actual use.', 'ok');
@@ -816,6 +827,7 @@
         // Read only a known family. Old/stale browser state never chooses an arbitrary service.
         const family = SERVICE_CHOICES.some(item => item.model_type === stored.service) ? stored.service : 'behavior_anomaly_model';
         document.querySelectorAll('[data-journey-stage]').forEach(button => button.addEventListener('click', () => setJourneyStage(button.dataset.journeyStage, true)));
+        on('mlops-service-guide', 'click', () => { setJourneyStage('prepare', true); getElement('mlops-journey-title').scrollIntoView({block: 'start'}); });
         on('service-dataset-select', 'change', () => { journeySelection().dataset = getElement('service-dataset-select').value; persistJourney(); });
         on('service-model-select', 'change', () => { journeySelection().model = getElement('service-model-select').value; state.serviceEvidence = null; persistJourney(); renderServiceJourney(); loadServiceModelEvidence(); });
         on('service-train-btn', 'click', startServiceTraining);
@@ -1412,16 +1424,18 @@
     }
 
     async function loadModels() {
+        const family = state.selectedService;
         const req = beginRequest('models');
         const tbody = getElement('models-table-body');
         if (!tbody) return;
         try {
             const data = await api('/api/ml/models', {
-                params: { page: 1, page_size: 100, model_type: state.selectedService }, signal: req.signal
+                params: { page: 1, page_size: 100, model_type: family }, signal: req.signal
             });
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];
             state.models = items;
+            state.modelsFamily = family;
             state.evidence.models = 'ready';
             renderServiceJourney();
             if (['test', 'activate'].includes(journeySelection().stage)) loadServiceModelEvidence();
@@ -2415,8 +2429,6 @@
         first.value = '';
         const options = [first];
         const contract = selectedModelTypeContract();
-        const wantedKind = toText(contract && contract.dataset_kind, 'unsupervised');
-        const wantedFeatureSet = contract && contract.feature_set_version;
         for (const ds of items) {
             if (!compatibleDataset(ds, contract)) continue;
             const opt = el('option', null, toText(ds.name) + ' v' + formatMetric(ds.version)
@@ -2720,7 +2732,7 @@
         if (!body) return;
         try {
             const data = await api('/api/ml/datasets', {
-                params: { page: 1, page_size: 25 }, signal: req.signal
+                params: { page: 1, page_size: 100 }, signal: req.signal
             });
             if (!req.isCurrent()) return;
             const items = (data && Array.isArray(data.items)) ? data.items : [];

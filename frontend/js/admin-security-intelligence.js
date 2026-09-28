@@ -1392,6 +1392,7 @@
                 body: { identity_id: identityIds[0], related_identity_id: identityIds.length === 2 ? identityIds[1] : null }
             });
             if (!req.isCurrent()) return;
+            if (!enabled.checked) { container.hidden = true; container.replaceChildren(); return; }
             const observation = data.observation;
             const children = [el('strong', { text: 'Deployed ML observation' }), el('p', { text: safeText(data.note) })];
             if (data.status === 'observed' && observation) {
@@ -1400,10 +1401,11 @@
             } else if (data.reason_code) {
                 children.push(el('p', { text: 'Reason: ' + safeText(data.reason_code).replace(/_/g, ' ').toLowerCase() }));
             }
-            children.push(el('a', { href: '/admin/ml-ops', text: 'Open ML Operations' }));
+            children.push(el('a', { attrs: { href: '/admin/ml-ops' }, text: 'Open ML Operations' }));
             container.replaceChildren(...children);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
+            if (!enabled.checked) { container.hidden = true; container.replaceChildren(); return; }
             container.replaceChildren(el('p', { text: 'Model observation is unavailable. The network analysis above still uses its existing statistical rules.' }));
         }
     }
@@ -2718,6 +2720,11 @@
             tab.dataset.listenerAttached = 'true';
         });
         attachOnce('network-analyze-btn', 'click', loadNetwork);
+        attachOnce('network-include-ml', 'change', function () {
+            const enabled = document.getElementById('network-include-ml');
+            const panel = document.getElementById('network-model-insights');
+            if (enabled && !enabled.checked && panel) { panel.hidden = true; panel.replaceChildren(); }
+        });
         attachOnce('patterns-detect-btn', 'click', loadPatterns);
         attachOnce('anomalies-detect-btn', 'click', loadAnomalies);
         attachOnce('threat-assess-btn', 'click', loadThreatAssessment);

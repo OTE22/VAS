@@ -14,6 +14,7 @@ cleanup, and the live operator-console hierarchy.
 """
 
 import json
+from html.parser import HTMLParser
 import re
 import urllib.error
 import urllib.request
@@ -137,13 +138,15 @@ def test_page_chrome_follows_the_house_rules():
     # Version-pinned assets in the required order; actions.js is never deferred.
     actions_at = html.find("js/actions.js?v=actions-1")
     nav_at = html.find("js/navbar-loader.js?v=nav-7")
-    page_at = html.find("js/admin-ml-ops.js?v=mlops-21")
+    page_script = re.search(r"<script\b[^>]*\bsrc=[\"']/frontend/js/admin-ml-ops\.js\?v=mlops-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*[\"']", html)
+    assert page_script, "the page script must have an explicit cache version"
+    page_at = page_script.start()
     assert -1 not in (actions_at, nav_at, page_at), "a pinned script tag is missing"
     assert actions_at < nav_at < page_at, "script order contract broken"
     for tag in re.findall(r"<script[^>]*actions\.js[^>]*>", html):
         assert "defer" not in tag
     assert "footer-loader.js" not in html, "footer-loader.js does not exist in this app"
-    assert "admin-ml-ops.css?v=mlops-18" in html, "the page stylesheet is not version-pinned"
+    assert re.search(r"<link\b[^>]*\bhref=[\"']/frontend/css/admin-ml-ops\.css\?v=mlops-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*[\"']", html), "the page stylesheet is not version-pinned"
     assert "onclick=" not in html, "no inline handlers"
 
 
@@ -225,9 +228,37 @@ def test_each_workspace_explains_run_verify_and_recovery():
 def test_lifecycle_confirmation_is_accessible_and_never_filtered_out():
     html = read(HTML)
     js = read(JS)
-    panels_end = html.find('</div>\n        </div>\n    </main>')
-    dialog_at = html.find('id="registry-action-panel"')
-    assert dialog_at > panels_end > 0, "confirmation must live outside filtered workspaces"
+    class DialogAncestry(HTMLParser):
+        void_tags = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                     "link", "meta", "param", "source", "track", "wbr"}
+
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.dialog_ancestors = []
+
+        def handle_starttag(self, tag, attrs):
+            attributes = dict(attrs)
+            if attributes.get("id") == "registry-action-panel":
+                self.dialog_ancestors.append(list(self.stack))
+            if tag not in self.void_tags:
+                self.stack.append((tag, attributes))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    del self.stack[index:]
+                    break
+
+    structure = DialogAncestry()
+    structure.feed(html)
+    assert len(structure.dialog_ancestors) == 1, "exactly one registry confirmation is required"
+    ancestors = structure.dialog_ancestors[0]
+    assert all(tag not in ("main", "details") for tag, _ in ancestors), \
+        "confirmation must live outside the scrolling main and collapsible advanced details"
+    assert all(attrs.get("id") != "mlops-workspace-panels" and
+               "data-mlops-panel" not in attrs for _, attrs in ancestors), \
+        "confirmation must live outside filtered workspaces"
     assert 'role="alertdialog"' in html
     assert 'aria-describedby="registry-action-description"' in html
     assert 'id="registry-action-note"' in html
