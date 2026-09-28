@@ -4,6 +4,7 @@ Automatic Threshold Learning
 Learns optimal distance and time thresholds for each camera pair based on historical data.
 """
 
+import asyncio
 import logging
 from typing import Dict, Tuple, Optional, List
 from collections import defaultdict
@@ -43,6 +44,9 @@ class ThresholdLearner:
     
     def __init__(self):
         self.learned_thresholds: Dict[Tuple[str, str], Dict] = {}
+        self._pipeline_cache = None
+        self._appearance_cache = None
+        self.history_truncated = False
 
     # Module-level singleton: these must be read per call, not captured in
     # __init__, or an admin edit never reaches them.
@@ -78,8 +82,11 @@ class ThresholdLearner:
             pipeline_query = select(Pipeline).where(
                 Pipeline.pipeline_id.in_([camera_1, camera_2])
             )
-            result = await db.execute(pipeline_query)
-            pipelines = {p.pipeline_id: p for p in result.scalars().all()}
+            if self._pipeline_cache is None:
+                result = await db.execute(pipeline_query)
+                pipelines = {p.pipeline_id: p for p in result.scalars().all()}
+            else:
+                pipelines = self._pipeline_cache
             
             pipeline_1 = pipelines.get(camera_1)
             pipeline_2 = pipelines.get(camera_2)
@@ -88,11 +95,11 @@ class ThresholdLearner:
                 logger.debug(f"[THRESHOLD_LEARNER] Missing pipeline data for {camera_1} or {camera_2}")
                 return None
             
-            if not pipeline_1.latitude or not pipeline_1.longitude:
+            if pipeline_1.latitude is None or pipeline_1.longitude is None:
                 logger.debug(f"[THRESHOLD_LEARNER] Missing coordinates for {camera_1}")
                 return None
             
-            if not pipeline_2.latitude or not pipeline_2.longitude:
+            if pipeline_2.latitude is None or pipeline_2.longitude is None:
                 logger.debug(f"[THRESHOLD_LEARNER] Missing coordinates for {camera_2}")
                 return None
             
@@ -172,8 +179,21 @@ class ThresholdLearner:
             
         except Exception as e:
             logger.error(f"[THRESHOLD_LEARNER] Error learning thresholds for {camera_1} <-> {camera_2}: {e}", exc_info=True)
-            return None
-    
+            raise
+
+    async def _camera_appearances(self, db, camera_id, days_back=90):
+        if self._appearance_cache is not None and camera_id in self._appearance_cache:
+            return self._appearance_cache[camera_id]
+        rows = list((await db.execute(select(IdentityAppearance).where(and_(
+            IdentityAppearance.pipeline_id == camera_id,
+            IdentityAppearance.start_time >= datetime.utcnow() - timedelta(days=days_back)
+        )).order_by(IdentityAppearance.start_time.desc(), IdentityAppearance.id.desc())
+          .limit(THRESHOLD_MAX_APPEARANCES_PER_CAMERA + 1))).scalars().all())
+        self.history_truncated |= len(rows) > THRESHOLD_MAX_APPEARANCES_PER_CAMERA
+        rows = rows[:THRESHOLD_MAX_APPEARANCES_PER_CAMERA]
+        rows.sort(key=lambda row: row.start_time)
+        return rows
+
     async def _get_cross_camera_movements(
         self,
         db: AsyncSession,
@@ -185,59 +205,23 @@ class ThresholdLearner:
         Get historical cross-camera movements between two cameras.
         Returns movements where same identity appeared at both cameras.
         """
-        cutoff_date = datetime.utcnow() - timedelta(days=days_back)
-
-        # Bounded scans: newest-first under the cap, re-sorted ascending so
-        # "first movement per appearance" (the break below) keeps meaning
-        # "earliest subsequent sighting".
-        async def _camera_appearances(camera_id):
-            result = await db.execute(
-                select(IdentityAppearance).where(
-                    and_(
-                        IdentityAppearance.pipeline_id == camera_id,
-                        IdentityAppearance.start_time >= cutoff_date
-                    )
-                ).order_by(IdentityAppearance.start_time.desc())
-                .limit(THRESHOLD_MAX_APPEARANCES_PER_CAMERA)
-            )
-            rows = list(result.scalars().all())
-            rows.sort(key=lambda r: r.start_time)
-            return rows
-
-        appearances_1 = await _camera_appearances(camera_1)
-        appearances_2 = await _camera_appearances(camera_2)
-        
-        # Group by identity
-        appearances_by_identity_1 = defaultdict(list)
-        for app in appearances_1:
-            appearances_by_identity_1[app.identity_id].append(app)
-        
-        appearances_by_identity_2 = defaultdict(list)
-        for app in appearances_2:
-            appearances_by_identity_2[app.identity_id].append(app)
-        
-        # Find cross-camera movements
+        appearances_1 = await self._camera_appearances(db, camera_1, days_back)
+        appearances_2 = await self._camera_appearances(db, camera_2, days_back)
+        by_identity = defaultdict(list)
+        for app in appearances_1 + appearances_2:
+            by_identity[app.identity_id].append(app)
         movements = []
-        for identity_id in set(appearances_by_identity_1.keys()) & set(appearances_by_identity_2.keys()):
-            apps_1 = appearances_by_identity_1[identity_id]
-            apps_2 = appearances_by_identity_2[identity_id]
-            
-            # Find movements: camera_1 -> camera_2
-            for app_1 in apps_1:
-                for app_2 in apps_2:
-                    if app_2.start_time > app_1.start_time:
-                        time_diff = (app_2.start_time - app_1.start_time).total_seconds() / 60.0  # minutes
-                        if 0 < time_diff < 60:  # Within 1 hour (reasonable travel time)
-                            movements.append({
-                                'identity_id': identity_id,
-                                'from_camera': camera_1,
-                                'to_camera': camera_2,
-                                'time_diff_minutes': time_diff,
-                                'from_time': app_1.start_time,
-                                'to_time': app_2.start_time
-                            })
-                            break  # Only count first movement per appearance
-        
+        # Adjacent camera visits in either direction; repeated detections at
+        # one camera do not multiply the same transition into many samples.
+        for identity_id, appearances in by_identity.items():
+            appearances.sort(key=lambda app: (app.start_time, app.pipeline_id))
+            for previous, current in zip(appearances, appearances[1:]):
+                minutes = (current.start_time - previous.start_time).total_seconds() / 60
+                if previous.pipeline_id != current.pipeline_id and 0 < minutes < 60:
+                    movements.append({"identity_id": identity_id,
+                        "from_camera": previous.pipeline_id, "to_camera": current.pipeline_id,
+                        "time_diff_minutes": minutes, "from_time": previous.start_time,
+                        "to_time": current.start_time})
         return movements
     
     def get_thresholds(
@@ -270,36 +254,44 @@ class ThresholdLearner:
     async def learn_all_camera_pairs(
         self,
         db: AsyncSession,
-        pipeline_ids: List[str]
+        pipeline_ids: List[str],
+        progress=None
     ) -> Dict[Tuple[str, str], Dict]:
         """
         Learn thresholds for all camera pairs in the network.
         """
+        if not self.enabled:
+            raise RuntimeError("Threshold learning is disabled")
+        if len(pipeline_ids) > 100:
+            raise ValueError("At most 100 cameras per learning job")
         learned = {}
-        
-        # Get all pipelines with coordinates
-        query = select(Pipeline).where(
-            and_(
+        self.history_truncated = False
+        self._appearance_cache = {}
+        try:
+            rows = await db.execute(select(Pipeline).where(and_(
                 Pipeline.pipeline_id.in_(pipeline_ids),
-                Pipeline.latitude.isnot(None),
-                Pipeline.longitude.isnot(None)
-            )
-        )
-        result = await db.execute(query)
-        pipelines_with_coords = [p.pipeline_id for p in result.scalars().all()]
-        
-        logger.info(f"[THRESHOLD_LEARNER] Learning thresholds for {len(pipelines_with_coords)} cameras")
-        
-        # Learn for each pair
-        for i, camera_1 in enumerate(pipelines_with_coords):
-            for camera_2 in pipelines_with_coords[i+1:]:
-                learned_thresholds = await self.learn_thresholds_for_pair(db, camera_1, camera_2)
-                if learned_thresholds:
-                    learned[(camera_1, camera_2)] = learned_thresholds
-        
-        logger.info(f"[THRESHOLD_LEARNER] Learned thresholds for {len(learned)} camera pairs")
-        return learned
-    
+                Pipeline.latitude.isnot(None), Pipeline.longitude.isnot(None))))
+            self._pipeline_cache = {p.pipeline_id: p for p in rows.scalars().all()
+                if -90 <= p.latitude <= 90 and -180 <= p.longitude <= 180}
+            cameras = sorted(self._pipeline_cache)
+            for camera in cameras:
+                self._appearance_cache[camera] = await self._camera_appearances(db, camera)
+            total = len(cameras) * (len(cameras) - 1) // 2
+            completed = 0
+            for i, camera_1 in enumerate(cameras):
+                for camera_2 in cameras[i+1:]:
+                    result = await self.learn_thresholds_for_pair(db, camera_1, camera_2)
+                    if result:
+                        learned[(camera_1, camera_2)] = result
+                    completed += 1
+                    if progress and (completed % 10 == 0 or completed == total):
+                        await progress(min(95, int(completed / total * 95)))
+                    await asyncio.sleep(0)  # allow timeout/cancellation between pairs
+            return learned
+        finally:
+            self._pipeline_cache = None
+            self._appearance_cache = None
+
     def _calculate_distance_meters(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calculate distance using Haversine formula."""
         from math import radians, sin, cos, sqrt, atan2

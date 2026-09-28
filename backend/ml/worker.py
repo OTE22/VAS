@@ -126,12 +126,18 @@ async def _supervise(job: Dict[str, Any]) -> None:
     )
     cancelled = False
     lease_lost = False
+    timed_out = False
+    started = monotonic()
     while process.returncode is None:
         try:
             await asyncio.wait_for(process.wait(), timeout=heartbeat_seconds)
             break
         except asyncio.TimeoutError:
             pass
+        if job.get("task_type") == "threshold_learning" and monotonic() - started >= 900:
+            timed_out = True
+            await _terminate(process, terminate_grace)
+            break
         control = await _job_control(job_id)
         await _heartbeat("running", job_id)
         if control is None:
@@ -168,7 +174,7 @@ async def _supervise(job: Dict[str, Any]) -> None:
                 error_message="job cancelled by an administrator",
             )
         else:
-            code = "WORKER_LEASE_LOST" if lease_lost else "ML_JOB_PROCESS_FAILED"
+            code = "THRESHOLD_JOB_TIMEOUT" if timed_out else "WORKER_LEASE_LOST" if lease_lost else "ML_JOB_PROCESS_FAILED"
             await task_history_manager.finish_job(
                 job_id, success=False, error_code=code,
                 error_message=f"ML job process exited with status {return_code}",
@@ -267,6 +273,15 @@ async def execute_job(job_id: str) -> int:
         from backend.core.runtime_settings import hydrate_from_db
         async with db_manager.get_session() as db:
             await hydrate_from_db(db)
+        if task_type == "threshold_learning":
+            from backend.ml.threshold_learning import run_threshold_learning
+            async def threshold_progress(percent):
+                await task_history_manager.update_progress(job_id, percent, details={"stage": "learning_camera_pairs"})
+            async with db_manager.get_session() as db:
+                result = await run_threshold_learning(db, payload.get("pipeline_ids"), progress=threshold_progress)
+            if not await task_history_manager.finish_job(job_id, success=True, result=result):
+                raise RuntimeError("Unable to persist threshold job completion")
+            return 0
         if task_type == "ml_tracking_sync":
             from backend.ml.mlflow_tracking import sync_job
             result = await sync_job(payload["training_job_id"])
@@ -364,8 +379,8 @@ async def execute_job(job_id: str) -> int:
     except Exception as exc:
         logger.error("[ML_WORKER] job failed job_id=%s: %s", job_id, exc, exc_info=True)
         await task_history_manager.finish_job(
-            job_id, success=False, error_code="ML_JOB_FAILED",
-            error_message=str(exc)[:500],
+            job_id, success=False, error_code=("THRESHOLD_JOB_TIMEOUT" if isinstance(exc, TimeoutError) else "THRESHOLD_JOB_FAILED") if task_type == "threshold_learning" else "ML_JOB_FAILED",
+            error_message="Threshold learning failed; inspect worker logs using this job ID." if task_type == "threshold_learning" else str(exc)[:500],
         )
         return 2
 

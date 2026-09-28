@@ -19,6 +19,7 @@ from db_models import BackgroundTaskHistory
 
 ML_QUEUE = "ml"
 ML_TASK_TYPES = (
+    "threshold_learning",
     "ml_training",
     "ml_feature_computation",
     "ml_dataset_build",
@@ -30,6 +31,7 @@ TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ACTIVE_STATUSES = ("scheduled", "running")
 
 _JOB_DEFINITIONS = {
+    "threshold": {"prefix": "threshold", "task_type": "threshold_learning", "task_name": "Learn Camera-Pair Thresholds"},
     "tracking": {"prefix": "mlsync", "task_type": "ml_tracking_sync", "task_name": "MLflow evidence synchronization"},
     "training": {
         "prefix": "mltrain", "task_type": "ml_training",

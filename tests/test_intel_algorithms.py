@@ -429,7 +429,8 @@ def test_trajectory_predicts_mid_route(token, seeded):
                f"?identity_id={seeded['walker']}&current_camera={CAM.format('tb')}",
         token=token)
     assert status == 200, body
-    assert body["model_version"] == "trajectory-v2"
+    assert body["model_version"] == "trajectory-v3"
+    assert body["evidence"]["calibration_status"] == "uncalibrated"
     assert body["insufficient_evidence"] is False, (
         "mid-route queries must not read as insufficient evidence")
     predicted = {p["camera_id"]: p for p in body["predictions"]}
@@ -650,26 +651,18 @@ def test_intel_metrics_exposed(token, seeded):
     assert 'feature="patterns"' in text
 
 
-def test_legacy_threshold_learn_releases_single_flight(token):
-    """The sync endpoint now holds the SAME guard as the job path. Two
-    sequential calls must both succeed — a leaked guard would 409 forever."""
-    headers = {"X-Requested-With": "XMLHttpRequest"}
-    status1, body1 = _http("POST", "/api/intelligence/thresholds/learn",
-                           body={}, token=token, headers=headers, timeout=120)
-    if status1 == 409:
-        pytest.skip(f"a real threshold job is running: {body1}")
-    assert status1 == 200, body1
-    status2, body2 = _http("POST", "/api/intelligence/thresholds/learn",
-                           body={}, token=token, headers=headers, timeout=120)
-    assert status2 == 200, f"guard not released after sync completion: {body2}"
+def test_legacy_threshold_learn_requires_durable_job(token):
+    status, body = _http("POST", "/api/intelligence/thresholds/learn", body={},
+                         token=token, headers={"X-Requested-With": "XMLHttpRequest"})
+    assert status == 410, body
+    assert body["detail"]["error_code"] == "USE_THRESHOLD_JOB"
 
 
-def test_legacy_threshold_guard_in_source():
+def test_legacy_threshold_cannot_execute_learning_in_api():
     src = _read(ROUTES_PATH)
-    section = src.split("DEPRECATED synchronous variant", 1)[1].split("async def _run_threshold_job", 1)[0]
-    assert "_try_acquire_threshold_job" in section, "sync endpoint must hold the single-flight guard"
-    assert "_release_threshold_job" in section
-    assert "finally:" in section, "the guard must be released on every path"
+    section = src.split("async def learn_thresholds(", 1)[1].split("@router.post", 1)[0]
+    assert "status_code=410" in section
+    assert "learn_all_camera_pairs" not in section
 
 
 def test_capabilities_report_algorithm_versions(token):
@@ -680,7 +673,7 @@ def test_capabilities_report_algorithm_versions(token):
     assert caps["pattern_detection"]["algorithm_version"] == "patterns-v3"
     assert caps["threat_assessment"]["algorithm_version"] == "risk-engine-v1"
     assert caps["network_analysis"]["risk_score_version"]
-    assert caps["trajectory_prediction"]["model_version"] == "trajectory-v2"
+    assert caps["trajectory_prediction"]["model_version"] == "trajectory-v3"
 
 
 def test_network_reports_risk_rubric_version(token):

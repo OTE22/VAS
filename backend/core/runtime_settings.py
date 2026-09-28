@@ -168,6 +168,7 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "BATCH_SEARCH_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "EXPORT_RESULTS_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "NEGATIVE_SEARCH_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
+    "ACTIVITY_CORRELATION_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "AUTO_THRESHOLD_LEARNING_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "TRAJECTORY_PREDICTION_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),
     "PIPELINE_AWARE_CLUSTERING_ENABLED": SettingMeta("boolean", "on/off", apply_mode=_DYN),

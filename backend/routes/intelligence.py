@@ -227,8 +227,8 @@ _threshold_job_lock = threading.Lock()
 _THRESHOLD_JOB = {"job_id": None, "started_at": None}
 _THRESHOLD_JOB_MAX_AGE_SECONDS = 3600  # threshold learning is minutes, not hours
 
-THRESHOLD_ALGORITHM_VERSION = "threshold-v2"
-TRAJECTORY_MODEL_VERSION = "trajectory-v2"
+THRESHOLD_ALGORITHM_VERSION = "threshold-v3"
+TRAJECTORY_MODEL_VERSION = "trajectory-v3"
 CORRELATION_ALGORITHM_VERSION = "xcca-v2"
 # Rules-only features name their own algorithm in an `engine` block so the UI
 # never has to assume what produced a result. These two had no version yet.
@@ -274,7 +274,8 @@ async def _observation_for(db, assessment_id):
 CORRELATION_MIN_SEQUENCES = 3
 
 CORRELATION_NOTE = (
-    "Measures temporal and spatial association between two identities. "
+    "Heuristic directional association: identity A followed by identity B at a nearby camera. "
+    "This score is not a probability of coordination. "
     "Correlation does not prove causation."
 )
 
@@ -423,7 +424,9 @@ class TrajectoryPredictionItem(BaseModel):
     camera_id: str
     probability: float
     estimated_time: str
-    confidence: str  # high | moderate | low
+    confidence: str  # uncalibrated; never inferred from frequency alone
+    transition_count: int = 0
+    total_transitions: int = 0
 
 
 class TrajectoryPredictionResponse(BaseModel):
@@ -431,6 +434,7 @@ class TrajectoryPredictionResponse(BaseModel):
     current_camera: str
     predictions: List[TrajectoryPredictionItem]
     model_version: str
+    evidence: Dict[str, Any] = Field(default_factory=dict)
     insufficient_evidence: bool
     note: str
     engine: Optional[Dict[str, Any]] = None
@@ -1700,60 +1704,9 @@ async def get_relationship_job(
 
 @router.post(
     "/api/intelligence/thresholds/learn",
-    response_model=ThresholdLearningResponse,
-    tags=["Intelligence - Advanced Features"],
-    summary="Learn Optimal Thresholds",
-    description="""
-    Learn optimal distance and time thresholds for all camera pairs based on historical data.
-    
-    **What It Does:**
-    - Analyzes historical cross-camera movements
-    - Learns optimal time windows per camera pair
-    - Learns optimal distance thresholds per camera pair
-    - Adapts to actual travel patterns
-    
-    **Use Cases:**
-    - Initial setup: Learn thresholds for your camera network
-    - After adding cameras: Update thresholds for new pairs
-    - Periodic refresh: Re-learn as patterns change (monthly recommended)
-    
-    **Requirements:**
-    - Pipelines must have coordinates (latitude/longitude) set
-    - Need at least 10 cross-camera movements per pair
-    - Historical data: 90+ days recommended
-    
-    **Returns:**
-    - Learned thresholds for each camera pair
-    - Confidence scores (0.0 to 1.0)
-    - Sample counts (number of movements analyzed)
-    
-    **Duration:** 1-5 minutes (depending on number of cameras)
-    """,
-    responses={
-        200: {
-            "description": "Thresholds learned successfully",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "status": "success",
-                        "learned_pairs": 3,
-                        "thresholds": [
-                            {
-                                "camera_1": "camera_1",
-                                "camera_2": "camera_2",
-                                "optimal_time_window_minutes": 5.2,
-                                "optimal_distance_meters": 240.0,
-                                "actual_distance_meters": 200.0,
-                                "confidence": 0.85,
-                                "sample_count": 42
-                            }
-                        ]
-                    }
-                }
-            }
-        },
-        500: {"description": "Server error"}
-    }
+    tags=["Intelligence - Advanced Features"], deprecated=True,
+    summary="Retired synchronous threshold learning",
+    description="Returns 410. Use POST /api/intelligence/thresholds/jobs for durable execution.",
 )
 async def learn_thresholds(
     pipeline_ids: Optional[str] = Query(
@@ -1766,253 +1719,56 @@ async def learn_thresholds(
     _csrf: None = Depends(require_intel_csrf)
 ,
     _rl: None = Depends(rate_limited("threshold_learning", heavy=True))):
-    """DEPRECATED synchronous variant — prefer POST /api/intelligence/thresholds/jobs.
-
-    Holds the SAME single-flight guard as the job path: this endpoint used to
-    bypass it, so a sync call could run concurrently with a scheduled job.
-    """
-    sync_job_id = f"threshold-sync-{uuid_mod.uuid4().hex[:8]}"
-    running = _try_acquire_threshold_job(sync_job_id)
-    if running is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "JOB_ALREADY_RUNNING",
-                "message": "A threshold learning job is already running.",
-                "job_id": running,
-            },
-        )
-    sync_dlock = DistributedLock("threshold-job",
-                                 ttl_seconds=_THRESHOLD_JOB_MAX_AGE_SECONDS)
-    if not await sync_dlock.acquire(holder_label=sync_job_id):
-        _release_threshold_job(sync_job_id)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "JOB_ALREADY_RUNNING",
-                "message": "A threshold learning job is already running (another worker).",
-                "job_id": sync_dlock.holder_hint or "unknown",
-            },
-        )
-    try:
-        if pipeline_ids:
-            pipeline_list = [pid.strip() for pid in pipeline_ids.split(',')]
-        else:
-            # Get all active pipelines
-            from db_models import Pipeline
-            from sqlalchemy import select
-            query = select(Pipeline).where(Pipeline.is_active == 1)
-            result = await db.execute(query)
-            pipelines = result.scalars().all()
-            pipeline_list = [p.pipeline_id for p in pipelines]
-
-        learned = await threshold_learner.learn_all_camera_pairs(db, pipeline_list)
-
-        return ThresholdLearningResponse(
-            status="success",
-            learned_pairs=len(learned),
-            thresholds=[
-                ThresholdData(
-                    camera_1=pair[0],
-                    camera_2=pair[1],
-                    optimal_time_window_minutes=data['optimal_time_window_minutes'],
-                    optimal_distance_meters=data['optimal_distance_meters'],
-                    actual_distance_meters=data['actual_distance_meters'],
-                    confidence=data['confidence'],
-                    sample_count=data['sample_count'],
-                    p95_minutes=data.get('p95_minutes'),
-                    spread_minutes=data.get('spread_minutes')
-                )
-                for pair, data in learned.items()
-            ]
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _safe_500("threshold learning", e)
-    finally:
-        _release_threshold_job(sync_job_id)
-        await sync_dlock.release()
-
-
-async def _persist_threshold_candidates(db, learned: dict) -> int:
-    """Persist learning output as CANDIDATE learned_thresholds rows —
-    global + per-pipeline scopes, activation strictly manual (an admin
-    reviews and activates via /api/security/learned-thresholds)."""
-    from backend.core.threshold_store import (
-        threshold_store, SIGNAL_DISTANCE, SIGNAL_TIME_WINDOW)
-    if not learned:
-        return 0
-    per_pipeline: Dict[str, Dict[str, list]] = {}
-    all_windows, all_distances, total_samples = [], [], 0
-    for (cam1, cam2), data in learned.items():
-        window = float(data.get("optimal_time_window_minutes") or 0)
-        distance = float(data.get("optimal_distance_meters") or 0)
-        samples = int(data.get("sample_count") or 0)
-        all_windows.append(window)
-        all_distances.append(distance)
-        total_samples += samples
-        for cam in (cam1, cam2):
-            bucket = per_pipeline.setdefault(cam, {"windows": [], "distances": [], "samples": 0, "pairs": []})
-            bucket["windows"].append(window)
-            bucket["distances"].append(distance)
-            bucket["samples"] += samples
-            bucket["pairs"].append({"pair": [cam1, cam2], "window": window,
-                                    "distance": distance, "samples": samples})
-    written = 0
-    # Global candidates: the max over learned routes (covers the slowest one).
-    await threshold_store.record_candidate(
-        db, scope_type="global", scope_id="", signal_name=SIGNAL_TIME_WINDOW,
-        value=max(all_windows), sample_count=total_samples,
-        extras={"aggregation": "max_over_pairs", "pairs": len(learned)})
-    await threshold_store.record_candidate(
-        db, scope_type="global", scope_id="", signal_name=SIGNAL_DISTANCE,
-        value=max(all_distances), sample_count=total_samples,
-        extras={"aggregation": "max_over_pairs", "pairs": len(learned)})
-    written += 2
-    for cam, bucket in per_pipeline.items():
-        await threshold_store.record_candidate(
-            db, scope_type="pipeline", scope_id=cam, signal_name=SIGNAL_TIME_WINDOW,
-            value=max(bucket["windows"]), sample_count=bucket["samples"],
-            extras={"aggregation": "max_over_pairs", "pairs": bucket["pairs"][:20]})
-        written += 1
-    await db.commit()
-    return written
-
-
-async def _run_threshold_job(job_id: str, pipeline_list: Optional[List[str]],
-                             dlock: Optional[DistributedLock] = None):
-    """Background worker for threshold learning — never inside an HTTP request."""
-    from backend.core.task_history import task_history_manager
-    from db_connection import db_manager
-    started = time.monotonic()
-    await task_history_manager.mark_running(job_id)
-    candidates_written = 0
-    try:
-        async with db_manager.get_session() as db:
-            if not pipeline_list:
-                result = await db.execute(select(Pipeline).where(Pipeline.is_active == 1))
-                pipeline_list = [p.pipeline_id for p in result.scalars().all()]
-            learned = await threshold_learner.learn_all_camera_pairs(db, pipeline_list)
-            try:
-                candidates_written = await _persist_threshold_candidates(db, learned)
-            except Exception:
-                logger.warning("[INTELLIGENCE] threshold candidate persistence failed "
-                               "job_id=%s (results still reported)", job_id, exc_info=True)
-
-        thresholds = [
-            {
-                "camera_1": pair[0],
-                "camera_2": pair[1],
-                "optimal_time_window_minutes": data.get("optimal_time_window_minutes"),
-                "optimal_distance_meters": data.get("optimal_distance_meters"),
-                "actual_distance_meters": data.get("actual_distance_meters"),
-                "confidence": data.get("confidence"),
-                "sample_count": data.get("sample_count"),
-                "p95_minutes": data.get("p95_minutes"),
-                "spread_minutes": data.get("spread_minutes"),
-            }
-            for pair, data in learned.items()
-        ]
-        result_payload = {
-            "learned_pairs": len(thresholds),
-            "thresholds": thresholds[:200],
-            "algorithm_version": THRESHOLD_ALGORITHM_VERSION,
-            "calculated_at": _iso_z(datetime.utcnow()),
-            "pipelines_scoped": len(pipeline_list or []),
-            "candidates_written": candidates_written,
-            "activation_note": ("Learned values are CANDIDATES — nothing is "
-                                "consumed until activated via "
-                                "/api/security/learned-thresholds."),
-        }
-        await task_history_manager.finish_job(job_id, success=True, result=result_payload)
-        logger.info("[INTELLIGENCE] threshold job completed job_id=%s learned_pairs=%s "
-                    "candidates=%s duration_ms=%s",
-                    job_id, len(thresholds), candidates_written,
-                    int((time.monotonic() - started) * 1000))
-    except Exception as e:
-        logger.error("[INTELLIGENCE] threshold job failed job_id=%s error=%s", job_id, e, exc_info=True)
-        await task_history_manager.finish_job(
-            job_id, success=False,
-            error_code="THRESHOLD_JOB_FAILED", error_message=str(e)[:500])
-    finally:
-        _release_threshold_job(job_id)
-        if dlock is not None:
-            await dlock.release()
+    """Retired: learning must execute in the durable worker."""
+    raise HTTPException(status_code=410, detail={
+        "error_code": "USE_THRESHOLD_JOB",
+        "message": "Use POST /api/intelligence/thresholds/jobs and poll the returned job ID.",
+    })
 
 
 @router.post(
     "/api/intelligence/thresholds/jobs",
     tags=["Intelligence - Advanced Features"],
     summary="Schedule Threshold Learning Job",
-    description="Schedule threshold learning as a background job (202 + job_id; 409 while one is running)."
+    description="Persist threshold learning in the worker queue (202 + job_id; 409 while queued or running; 503 if worker unavailable)."
 )
 async def create_threshold_job(
     request: Request,
     pipeline_ids: Optional[str] = Query(default=None, description="Comma-separated pipeline IDs; empty = all active"),
-    background_tasks: BackgroundTasks = None,
     current_user: dict = Depends(require_admin()),
-    _csrf: None = Depends(require_intel_csrf)
-,
+    _csrf: None = Depends(require_intel_csrf),
     _rl: None = Depends(rate_limited("threshold_learning", heavy=True))):
-    """Schedule threshold learning in the background — single-flight
-    (in-process guard + cross-worker distributed lock)."""
-    job_id = f"threshold-{uuid_mod.uuid4().hex[:8]}"
-    running = _try_acquire_threshold_job(job_id)
-    if running is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "JOB_ALREADY_RUNNING",
-                "message": "A threshold learning job is already running.",
-                "job_id": running,
-            },
-        )
-    dlock = DistributedLock("threshold-job", ttl_seconds=_THRESHOLD_JOB_MAX_AGE_SECONDS)
-    if not await dlock.acquire(holder_label=job_id):
-        _release_threshold_job(job_id)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error_code": "JOB_ALREADY_RUNNING",
-                "message": "A threshold learning job is already running (another worker).",
-                "job_id": dlock.holder_hint or "unknown",
-            },
-        )
+    """Persist work for the leased worker; HTTP acceptance requires a commit."""
+    if not settings.AUTO_THRESHOLD_LEARNING_ENABLED:
+        raise _feature_disabled("AUTO_THRESHOLD_LEARNING_ENABLED", "Threshold learning")
+    from backend.ml.job_service import enqueue_ml_job, MLJobConflict, ml_worker_health
+    from db_connection import db_manager
+    pipeline_list = list(dict.fromkeys(p.strip() for p in (pipeline_ids or "").split(',') if p.strip()))
+    if len(pipeline_list) > 100:
+        raise HTTPException(status_code=422, detail="Select at most 100 cameras per job")
     try:
-        pipeline_list = None
-        if pipeline_ids:
-            pipeline_list = [p.strip() for p in pipeline_ids.split(',') if p.strip()][:100]
-
-        from backend.core.task_history import task_history_manager
-        task_id = await task_history_manager.create_job(
-            job_id=job_id,
-            task_type="threshold_learning",
-            task_name="Learn Camera-Pair Thresholds",
-            description="Learn optimal time/distance thresholds per camera pair",
-        )
-        background_tasks.add_task(_run_threshold_job, job_id, pipeline_list, dlock)
-        _audit("threshold_job_scheduled", current_user, job_id=job_id,
-               pipeline_scope=len(pipeline_list) if pipeline_list else "all")
-        return JSONResponse(
-            status_code=202,
-            content={
-                "accepted": True,
-                "job_id": job_id,
-                "task_id": task_id,
-                "status": "scheduled",
-                "task_type": "threshold_learning",
-            },
-        )
+        async with db_manager.get_session() as db:
+            worker = await ml_worker_health(db, lease_seconds=settings.ML_JOB_LEASE_SECONDS)
+            if worker["status"] != "healthy":
+                raise HTTPException(status_code=503, detail="Threshold worker is unavailable; try again when it is healthy")
+            if pipeline_list:
+                rows = await db.execute(select(Pipeline.pipeline_id).where(Pipeline.pipeline_id.in_(pipeline_list)))
+                if set(rows.scalars().all()) != set(pipeline_list):
+                    raise HTTPException(status_code=422, detail="One or more selected cameras no longer exist")
+            outcome = await enqueue_ml_job(db, kind="threshold", payload={"pipeline_ids": pipeline_list},
+                description="Learn camera-pair threshold candidates for manual review")
+            await db.commit()
+        _audit("threshold_job_scheduled", current_user, job_id=outcome["job_id"],
+               pipeline_scope=len(pipeline_list) or "all")
+        return JSONResponse(status_code=202, content=outcome)
+    except MLJobConflict as exc:
+        raise HTTPException(status_code=409, detail={"error_code": "JOB_ALREADY_RUNNING",
+            "message": "A threshold learning job is already queued or running.",
+            "job_id": exc.existing.get("job_id")})
     except HTTPException:
-        _release_threshold_job(job_id)
-        await dlock.release()
         raise
-    except Exception as e:
-        _release_threshold_job(job_id)
-        await dlock.release()
-        raise _safe_500("threshold job scheduling", e)
+    except Exception as exc:
+        raise _safe_500("threshold job scheduling", exc)
 
 
 @router.get(
@@ -2067,7 +1823,10 @@ async def get_security_capabilities(
     usable_basemaps = sorted(name for name, ok in
                              (_map_snapshot.public()["styles"].items() if _map_snapshot else [])
                              if ok)
-    running_threshold_job = _threshold_job_running() or await peek_holder("threshold-job")
+    from backend.ml.job_service import _active_job, ml_worker_health
+    threshold_job = await _active_job(db, "threshold_learning")
+    running_threshold_job = threshold_job.job_id if threshold_job else None
+    worker_health = await ml_worker_health(db, lease_seconds=settings.ML_JOB_LEASE_SECONDS)
     with _relationship_job_lock:
         running_rel_job = _RELATIONSHIP_JOB["job_id"]
     running_rel_job = running_rel_job or await peek_holder("relationship-job")
@@ -2098,19 +1857,25 @@ async def get_security_capabilities(
             "detail": "Assessments persist to threat_assessments with idempotent dedup.",
         },
         "threshold_learning": {
-            "enabled": True,
-            "status": "job_running" if running_threshold_job else "ready",
+            "enabled": bool(settings.AUTO_THRESHOLD_LEARNING_ENABLED),
+            "status": ("disabled" if not settings.AUTO_THRESHOLD_LEARNING_ENABLED else
+                       "worker_unavailable" if worker_health["status"] != "healthy" else
+                       threshold_job.status if threshold_job else "available"),
             "job_id": running_threshold_job,
+            "worker_status": worker_health["status"],
+            "detail": "Availability is not evidence sufficiency. Learning requires cross-camera history; saved candidates require manual activation.",
             "algorithm_version": THRESHOLD_ALGORITHM_VERSION,
         },
         "trajectory_prediction": {
-            "enabled": True,
-            "status": "ready",
+            "enabled": bool(settings.TRAJECTORY_PREDICTION_ENABLED),
+            "status": "available" if settings.TRAJECTORY_PREDICTION_ENABLED else "disabled",
+            "detail": "Evidence is checked for each identity and camera. Frequencies are uncalibrated; at least three outgoing sessions are required.",
             "model_version": TRAJECTORY_MODEL_VERSION,
         },
         "activity_correlation": {
-            "enabled": True,
-            "status": "ready",
+            "enabled": bool(settings.ACTIVITY_CORRELATION_ENABLED),
+            "status": "available" if settings.ACTIVITY_CORRELATION_ENABLED else "disabled",
+            "detail": "Evidence is checked per identity pair. Directional heuristic association, not a probability of coordination.",
             "algorithm_version": CORRELATION_ALGORITHM_VERSION,
         },
         "relationship_calculation": {
@@ -2174,7 +1939,7 @@ async def get_security_capabilities(
     - **Security**: Predict suspicious movements and coordinate responses
     
     **Requirements:**
-    - Identity must have at least 3 historical trajectories
+    - Identity must have outgoing transitions from this camera in at least 3 separate sessions
     - Identity must have appeared at current camera before
     - Historical data: 90+ days recommended
     
@@ -2183,7 +1948,7 @@ async def get_security_capabilities(
     - Probability scores (0.0 to 1.0)
     - Estimated arrival times
     
-    **Performance:** ~50-200ms per prediction
+    Observed frequencies are uncalibrated. Evidence is checked for the selected camera.
     """,
     responses={
         200: {
@@ -2225,17 +1990,19 @@ async def predict_next_camera(
     if not settings.TRAJECTORY_PREDICTION_ENABLED:
         raise _feature_disabled("TRAJECTORY_PREDICTION_ENABLED", "Trajectory prediction")
     await _get_identity_or_404(db, identity_id)
+    camera = await db.execute(select(Pipeline.pipeline_id).where(Pipeline.pipeline_id == current_camera))
+    if camera.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
     try:
-        predictions = await trajectory_predictor.predict_next_cameras(
+        evidence = await _bounded_intel_call("trajectory", trajectory_predictor.predict_with_evidence(
             db=db,
             identity_id=identity_id,
             current_camera=current_camera,
             current_time=datetime.utcnow(),
             top_k=top_k
-        )
+        ))
 
-        def _confidence(prob: float) -> str:
-            return "high" if prob >= 0.6 else "moderate" if prob >= 0.3 else "low"
+        predictions = evidence.pop("predictions")
 
         _audit("trajectory_prediction", current_user, identity_id,
                current_camera=current_camera, predictions=len(predictions))
@@ -2244,18 +2011,21 @@ async def predict_next_camera(
             current_camera=current_camera,
             predictions=[
                 TrajectoryPredictionItem(
-                    camera_id=camera,
-                    probability=float(prob),
-                    estimated_time=_iso_z(est_time),
-                    confidence=_confidence(float(prob))
+                    camera_id=item["camera_id"],
+                    probability=item["probability"],
+                    estimated_time=_iso_z(item["estimated_time"]),
+                    confidence="uncalibrated",
+                    transition_count=item["transition_count"],
+                    total_transitions=evidence["total_transitions"],
                 )
-                for camera, prob, est_time in predictions
+                for item in predictions
             ],
             model_version=TRAJECTORY_MODEL_VERSION,
+            evidence=evidence,
             engine=rules_engine_block("transition-frequency trajectory model", TRAJECTORY_MODEL_VERSION),
             insufficient_evidence=len(predictions) == 0,
-            note=("Estimated times are statistical projections from historical "
-                  "movement, not certainties.")
+            note=("Percentages are observed transition frequencies, not calibrated probabilities. "
+                  "Estimated times are historical projections, not certainties.")
         )
 
     except HTTPException:
@@ -2275,18 +2045,18 @@ async def predict_next_camera(
     **What It Does:**
     - Measures **temporal and spatial association** between activities at different cameras
     - Identifies coordinated movements (people moving together)
-    - Scores relationship confidence (0.0 to 1.0)
+    - Reports a heuristic association score (0.0 to 1.0), not calibrated confidence
     - Finds activity sequences (Person A at Camera 1 → Person B at Camera 2)
     
     **Use Cases:**
     - **Higher Confidence Relationship Detection**: Distinguish coincidental vs. coordinated appearances
-    - **Coordinated Activity Detection**: Identify groups moving together (security use case)
+    - Review time-ordered cross-camera associations; these do not establish coordination
     - **Security Investigation**: Detect suspicious patterns and coordinated behaviors
     - **Relationship Quality Assessment**: Filter out false positives from coincidental co-appearances
     
     **Correlation Strength:**
-    - **Strong** (≥0.7): High confidence relationship, likely coordinated
-    - **Moderate** (≥0.4): Medium confidence, some correlation
+    - **Strong** (≥0.7): High heuristic association score
+    - **Moderate** (≥0.4): Moderate heuristic association score
     - **Weak** (≥0.1): Low confidence, may be coincidental
     - **None** (<0.1): No significant correlation
     
@@ -2344,6 +2114,10 @@ async def calculate_activity_correlation(
     Correlation measures temporal/spatial association only — it does not
     prove causation, and the response says so explicitly.
     """
+    if not settings.ACTIVITY_CORRELATION_ENABLED:
+        raise _feature_disabled("ACTIVITY_CORRELATION_ENABLED", "Activity correlation")
+    if identity_a == identity_b:
+        raise HTTPException(status_code=400, detail="Select two different identities")
     await _get_identity_or_404(db, identity_a)
     await _get_identity_or_404(db, identity_b)
     try:
@@ -2373,7 +2147,7 @@ async def calculate_activity_correlation(
             identity_b=identity_b,
             correlation_score=float(correlation_score),
             correlation_strength=strength,
-            sequence_count=len(sequences),
+            sequence_count=correlation_meta.get("sequence_count", len(sequences)),
             sequences=[
                 ActivitySequenceResponse(
                     from_camera=seq['from_camera'],
@@ -2385,7 +2159,7 @@ async def calculate_activity_correlation(
                 for seq in sequences[:20]  # Limit to first 20 sequences
             ],
             days_back=days_back,
-            insufficient_evidence=len(sequences) < CORRELATION_MIN_SEQUENCES,
+            insufficient_evidence=correlation_meta.get("sequence_count", len(sequences)) < CORRELATION_MIN_SEQUENCES,
             algorithm_version=CORRELATION_ALGORITHM_VERSION,
             engine=rules_engine_block("cross-camera activity correlation", CORRELATION_ALGORITHM_VERSION),
             note=CORRELATION_NOTE,

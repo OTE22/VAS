@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,9 @@ class ThresholdStore:
         """Insert the next-version CANDIDATE row (never auto-activates)."""
         from db_models import LearnedThreshold
         from sqlalchemy import func as sa_func
+        # Serialize writers for the same scope/signal across API/worker processes.
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
+            f"threshold:{scope_type}:{scope_id}:{signal_name}", 0))))
         current_max = (await db.execute(
             select(sa_func.max(LearnedThreshold.version))
             .where(LearnedThreshold.scope_type == scope_type,
@@ -148,6 +151,9 @@ class ThresholdStore:
         )).scalar_one_or_none()
         if row is None:
             raise ValueError("Threshold not found")
+        await db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
+            f"threshold:{row.scope_type}:{row.scope_id}:{row.signal_name}", 0))))
+        await db.refresh(row)
         if row.status == "active":
             return {"id": str(row.id), "status": "active", "already_active": True}
         if row.sample_count < min_samples:

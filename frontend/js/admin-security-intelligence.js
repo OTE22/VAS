@@ -697,7 +697,7 @@
 
         const trigger = el('button', {
             className: 'identity-selector-trigger',
-            attrs: { type: 'button', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-controls': listboxId }
+            attrs: { type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'aria-controls': originalSelect.id + '-picker' }
         }, [
             el('span', { className: 'trigger-text', text: config.label }),
             faIcon('fas fa-chevron-down trigger-icon')
@@ -706,13 +706,30 @@
         const selectedTags = el('div', { className: 'selected-identity-tags' });
         selectedTags.style.display = config.multi ? 'flex' : 'none';
 
-        const panel = el('div', { className: 'identity-selector-panel' });
+        // A native top-layer dialog cannot be clipped by the tab's scroll container.
+        const panel = el('dialog', { className: 'identity-selector-panel', attrs: {
+            id: originalSelect.id + '-picker', 'aria-labelledby': originalSelect.id + '-picker-title'
+        } });
+        const closePicker = el('button', { className: 'identity-picker-close', attrs: {
+            type: 'button', 'aria-label': 'Close selector'
+        } }, faIcon('fas fa-times'));
+        const pickerHead = el('header', { className: 'identity-picker-head' }, [
+            el('div', {}, [
+                el('h2', { text: config.label, attrs: { id: originalSelect.id + '-picker-title' } }),
+                el('p', { text: config.multi ? 'Search and select one or more. Choose Done when finished.' :
+                    'Search, then choose a result to continue.' })
+            ]), closePicker
+        ]);
+        const selectionSummary = el('span', { className: 'identity-picker-summary', text: 'None selected', attrs: { 'aria-live': 'polite' } });
+        const clearSelection = el('button', { className: 'btn-secondary', text: 'Clear selection', attrs: { type: 'button' } });
+        const donePicker = el('button', { className: 'btn-primary', text: config.multi ? 'Done' : 'Close', attrs: { type: 'button' } });
+        const pickerFoot = el('footer', { className: 'identity-picker-foot' }, [selectionSummary, clearSelection, donePicker]);
         panel.style.display = 'none';
 
         const searchInput = el('input', {
             className: 'filter-search',
             attrs: {
-                type: 'text', placeholder: 'Search by name or ID...', autocomplete: 'off',
+                type: 'text', placeholder: 'Search by name or ID...', autocomplete: 'off', 'aria-label': 'Search identities or cameras', 'aria-expanded': 'false',
                 role: 'combobox', 'aria-autocomplete': 'list', 'aria-controls': listboxId
             }
         });
@@ -770,7 +787,7 @@
         const loadMoreBtn = el('button', { className: 'btn-secondary identity-load-more', text: 'Load more', attrs: { type: 'button' } });
         loadMoreBtn.style.display = 'none';
 
-        panel.append(el('div', { className: 'identity-selector-filters' }, filterRows), statusLine, resultsContainer, loadMoreBtn);
+        panel.append(pickerHead, el('div', { className: 'identity-selector-filters' }, filterRows), statusLine, resultsContainer, loadMoreBtn, pickerFoot);
         wrapper.append(trigger, selectedTags, panel);
         originalSelect.parentNode.insertBefore(wrapper, originalSelect.nextSibling);
 
@@ -792,6 +809,9 @@
         }
 
         function updateTrigger() {
+            const count = config.multi ? component.selection.length : (component.selection ? 1 : 0);
+            selectionSummary.textContent = count ? count + ' selected' : 'None selected';
+            clearSelection.disabled = count === 0;
             const textSpan = trigger.querySelector('.trigger-text');
             if (config.multi) {
                 const count = component.selection.length;
@@ -824,6 +844,7 @@
             resultsContainer.querySelectorAll('[role="option"]').forEach(function (opt) {
                 const id = opt.dataset.itemId;
                 opt.classList.toggle('selected', isSelected(id));
+                opt.setAttribute('aria-selected', isSelected(id) ? 'true' : 'false');
             });
         }
 
@@ -848,12 +869,13 @@
         function setActive(index) {
             const options = resultsContainer.querySelectorAll('[role="option"]');
             if (!options.length) { component.activeIndex = -1; searchInput.removeAttribute('aria-activedescendant'); return; }
-            component.activeIndex = Math.max(0, Math.min(index, options.length - 1));
+            component.activeIndex = Math.max(-1, Math.min(index, options.length - 1));
             options.forEach(function (opt, i) {
                 opt.classList.toggle('active', i === component.activeIndex);
-                opt.setAttribute('aria-selected', i === component.activeIndex ? 'true' : 'false');
+                opt.setAttribute('aria-selected', isSelected(opt.dataset.itemId) ? 'true' : 'false');
             });
             const active = options[component.activeIndex];
+            if (!active) { searchInput.removeAttribute('aria-activedescendant'); return; }
             searchInput.setAttribute('aria-activedescendant', active.id);
             active.scrollIntoView({ block: 'nearest' });
         }
@@ -884,7 +906,7 @@
                 }
                 const node = el('div', {
                     className: 'identity-selector-item' + (isSelected(item.id) ? ' selected' : ''),
-                    attrs: { role: 'option', id: optionId, 'aria-selected': 'false', tabindex: '-1' }
+                    attrs: { role: 'option', id: optionId, 'aria-selected': isSelected(item.id) ? 'true' : 'false', tabindex: '-1' }
                 }, [
                     el('div', { className: 'identity-item-thumbnail' },
                         config.mode === 'identity'
@@ -1058,86 +1080,17 @@
         }
 
         component.open = function () {
-            panel.style.display = 'block';
-            fitPanelToViewport();
+            for (const other of Array.from(openSelectorPanels)) other.close(false);
+            panel.style.display = 'flex';
+            panel.showModal();
             trigger.classList.add('active');
             trigger.setAttribute('aria-expanded', 'true');
+            searchInput.setAttribute('aria-expanded', 'true');
             openSelectorPanels.add(component);
+            updateTrigger();
             refresh(true);
-            // preventScroll matters: fitPanelToViewport() has just placed the
-            // panel against the CURRENT scroll position, but the panel is
-            // absolutely positioned against this wrapper. A plain focus() makes
-            // the browser scroll .security-content to reveal the search box,
-            // which moves the wrapper — and the panel with it — leaving the
-            // freshly computed fit stale and the panel hanging below the fold.
-            window.setTimeout(function () { searchInput.focus({ preventScroll: true }); }, 50);
+            searchInput.focus({ preventScroll: true });
         };
-
-
-        /** Size the panel to the space actually available, and flip it above
-         *  the trigger when there is more room there.
-         *
-         *  A fixed max-height cannot fit: the trigger sits partway down the
-         *  page, so the panel opened at y=365 and ran to y=865 in a 768px
-         *  viewport — the last faces, the Load-more button and the pager were
-         *  all below the fold and unreachable. Measured, not assumed: the probe
-         *  asserts the panel's bottom edge is on screen.
-         */
-        function fitPanelToViewport() {
-            const GAP = 12;                     // breathing room at the edge
-            const MIN = 260;                    // below this the list is useless
-            const rect = trigger.getBoundingClientRect();
-            const below = window.innerHeight - rect.bottom - GAP;
-            const above = rect.top - GAP;
-            // Use whichever side has more room; only prefer flipping up when
-            // below is genuinely too small to be useful.
-            const openUp = below < MIN && above > below;
-
-            panel.style.top = openUp ? 'auto' : '100%';
-            panel.style.bottom = openUp ? '100%' : 'auto';
-
-            // Measure the panel's OWN top rather than assuming it sits just
-            // under the trigger: `top: 100%` is relative to the wrapper, which
-            // also holds the selected-identity tags, so the real offset was
-            // 24px where the trigger implied 8 — and the panel overhung the
-            // viewport by exactly that difference.
-            const panelTop = panel.getBoundingClientRect().top;
-            // Clamp to what exists. Forcing a MIN taller than the available
-            // space is how the panel overhung the fold at 1024x768: the floor
-            // is a preference, not a licence to leave the viewport.
-            const available = Math.floor(openUp ? above : window.innerHeight - panelTop - GAP);
-            const space = Math.max(120, Math.min(available, Math.max(MIN, available)));
-
-            panel.style.maxHeight = space + 'px';
-
-            // Horizontal clamp. The panel is positioned against its wrapper,
-            // so on a narrow viewport a wrapper sitting right of centre pushes
-            // it off-screen even at 92vw. Nudge it back by however much it
-            // overhangs, and never let it start left of the edge.
-            panel.style.left = '0';
-            panel.style.right = 'auto';
-            const box = panel.getBoundingClientRect();
-            const overhangRight = box.right - (window.innerWidth - GAP);
-            if (overhangRight > 0) {
-                panel.style.left = (-overhangRight) + 'px';
-            }
-            const shifted = panel.getBoundingClientRect();
-            if (shifted.left < GAP) {
-                panel.style.left = (parseFloat(panel.style.left || '0') + (GAP - shifted.left)) + 'px';
-            }
-
-            if (openUp) {
-                panel.style.top = 'auto';
-                panel.style.bottom = '100%';
-                panel.style.marginTop = '0';
-                panel.style.marginBottom = '0.5rem';
-            } else {
-                panel.style.top = '100%';
-                panel.style.bottom = 'auto';
-                panel.style.marginTop = '0.5rem';
-                panel.style.marginBottom = '0';
-            }
-        }
 
         component.close = function (restoreFocus) {
             // Nothing may keep running behind a closed picker; reopening must
@@ -1147,7 +1100,10 @@
                 try { previous.abort(); } catch (_) { /* noop */ }
             }
             if (component.photoMode) exitPhotoMode(false);
+            if (component.searchTimer) window.clearTimeout(component.searchTimer);
+            if (panel.open) panel.close();
             panel.style.display = 'none';
+            searchInput.setAttribute('aria-expanded', 'false');
             trigger.classList.remove('active');
             trigger.setAttribute('aria-expanded', 'false');
             openSelectorPanels.delete(component);
@@ -1194,6 +1150,7 @@
         };
 
         component.destroy = function () {
+            component.close(false);
             for (const fn of component.cleanups.splice(0)) {
                 try { fn(); } catch (_) { /* noop */ }
             }
@@ -1208,6 +1165,15 @@
             component.cleanups.push(function () { target.removeEventListener(evt, fn); });
         }
 
+        on(closePicker, 'click', function () { component.close(true); });
+        on(donePicker, 'click', function () { component.close(true); });
+        on(clearSelection, 'click', function () { component.clear(); searchInput.focus(); });
+        on(panel, 'cancel', function (e) { e.preventDefault(); component.close(true); });
+        on(panel, 'click', function (e) {
+            if (e.target !== panel) return;
+            const box = panel.getBoundingClientRect();
+            if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) component.close(true);
+        });
         on(trigger, 'click', function (e) {
             e.stopPropagation();
             if (panel.style.display === 'none') component.open(); else component.close(false);
@@ -1323,6 +1289,7 @@
 
     function switchTab(rawTab) {
         const tabName = VALID_SECURITY_TABS.has(rawTab) ? rawTab : 'network';
+        for (const component of Array.from(openSelectorPanels)) component.close(false);
         state.activeTab = tabName;
         document.querySelectorAll('.sec-tab').forEach(function (tab) {
             const active = tab.dataset.tab === tabName;
@@ -1332,6 +1299,10 @@
         document.querySelectorAll('.sec-tab-content').forEach(function (content) {
             content.classList.toggle('active', content.id === 'tab-' + tabName);
         });
+        if (tabName === 'map' && state.mapController) {
+            window.requestAnimationFrame(function () { if (state.mapController) state.mapController.resize(); });
+        }
+        if (tabName === 'network' && state.networkInstance) state.networkInstance.redraw();
     }
 
     // ============================================
@@ -2169,7 +2140,7 @@
     }
 
     function renderThresholdTable(thresholds) {
-        const header = el('tr', {}, ['Camera 1', 'Camera 2', 'Time Window (min)', 'Distance (m)', 'Confidence', 'Samples']
+        const header = el('tr', {}, ['Camera 1', 'Camera 2', 'Time Window (min)', 'Distance (m)', 'Evidence score', 'Samples']
             .map(function (h) { return el('th', { text: h }); }));
         const rows = thresholds.map(function (t) {
             if (!t || typeof t !== 'object') return null;
@@ -2192,9 +2163,11 @@
     function renderThresholdJobResult(resultsDiv, task) {
         const result = (task && task.result) || {};
         const thresholds = Array.isArray(result.thresholds) ? result.thresholds : [];
+        const saved = toNonNegativeInteger(result.candidates_written, 0);
         const children = [
-            faIcon('fas fa-check-circle'),
-            el('h4', { text: 'Threshold Learning Complete' }),
+            faIcon(saved ? 'fas fa-check-circle' : 'fas fa-info-circle'),
+            el('h4', { text: saved ? 'Threshold Candidates Saved' : 'Insufficient Evidence' }),
+            el('p', { text: saved ? saved + ' candidates saved. Administrator review and activation are required before analysis uses them.' : 'No threshold candidates were saved. More cross-camera movement history is required.' }),
             el('p', { text: 'Learned thresholds for ' + toNonNegativeInteger(result.learned_pairs, thresholds.length) + ' camera pairs' }),
             el('p', {
                 className: 'threshold-meta',
@@ -2208,7 +2181,53 @@
             details.append(renderThresholdTable(thresholds));
             children.push(details);
         }
-        resultsDiv.replaceChildren(el('div', { className: 'success-message' }, children));
+        if (result.history_truncated || result.thresholds_truncated) {
+            children.push(el('p', { text: 'History or displayed results were capped. Review sample counts before activation.' }));
+        }
+        resultsDiv.replaceChildren(el('div', { className: saved ? 'success-message' : 'info-message' }, children));
+    }
+
+    async function showThresholdReview(status) {
+        const selectedStatus = typeof status === 'string' ? status : 'candidate';
+        try {
+            const data = await api('/api/security/learned-thresholds', { params: { status: selectedStatus } });
+            const items = Array.isArray(data.items) ? data.items : [];
+            const filters = el('div', { className: 'sec-controls' });
+            ['candidate', 'active', 'retired'].forEach(function (value) {
+                const button = el('button', { type: 'button', className: 'btn-secondary', text: value === selectedStatus ? value + ' (selected)' : value });
+                button.addEventListener('click', function () { showThresholdReview(value); });
+                filters.append(button);
+            });
+            const children = [el('p', { text: 'Review the value, scope and sample count before activation. Activation replaces the active value for this scope and signal. Changes can take up to 60 seconds to reach analysis; a retired value can be reactivated to roll back.' }), filters];
+            if (!items.length) children.push(el('p', { text: 'No ' + selectedStatus + ' thresholds are saved.' }));
+            items.forEach(function (item) {
+                const time = item.signal_name === 'multi_camera_time_window_minutes';
+                const card = el('div', { className: 'info-message' }, [
+                    el('strong', { text: (time ? 'Time window: ' : 'Distance: ') + formatScore(item.value, 2) + (time ? ' minutes' : ' metres') }),
+                    el('p', { text: 'Scope: ' + safeText(item.scope_type) + (item.scope_id ? ' · ' + pipelineDisplayName(item.scope_id) : ' · all cameras') }),
+                    el('p', { text: toNonNegativeInteger(item.sample_count, 0) + ' samples · version ' + toNonNegativeInteger(item.version, 0) + ' · ' + safeText(item.status) })
+                ]);
+                if (item.status !== 'active') {
+                    const activate = el('button', { type: 'button', className: 'btn-primary', text: item.status === 'retired' ? 'Reactivate this value' : 'Activate this value' });
+                    activate.addEventListener('click', async function () {
+                        activate.disabled = true;
+                        try {
+                            await api('/api/security/learned-thresholds/' + encodeURIComponent(item.id) + '/activate', { method: 'POST' });
+                            showNotification('Threshold activated', 'success');
+                            await showThresholdReview(selectedStatus);
+                        } catch (err) {
+                            showNotification('Activation failed. Check the sample requirement and try again.', 'error');
+                        } finally { activate.disabled = false; }
+                    });
+                    card.append(activate);
+                }
+                children.push(card);
+            });
+            if (items.length >= 200) children.push(el('p', { text: 'Showing the first 200 saved values in this status.' }));
+            showModal('Review Thresholds', children);
+        } catch (err) {
+            showNotification('Could not load saved thresholds', 'error');
+        }
     }
 
     async function pollThresholdJob(jobId, resultsDiv, attempt) {
@@ -2221,7 +2240,11 @@
             const status = safeText(task && task.status, 'unknown');
             if (status === 'completed') {
                 renderThresholdJobResult(resultsDiv, task);
-                showNotification('Threshold learning finished', 'success');
+                showNotification(task.result && task.result.candidates_written > 0 ? 'Candidates saved; activation required' : 'Learning finished without enough evidence', 'info');
+                return;
+            }
+            if (status === 'cancelled') {
+                renderStateInto(resultsDiv, 'fas fa-info-circle', 'Threshold learning was cancelled.');
                 return;
             }
             if (status === 'failed') {
@@ -2239,7 +2262,7 @@
                 // pruned. Polling to the cap would end with a misleading
                 // "check Background Tasks" for a job that is not there.
                 renderStateInto(resultsDiv, 'fas fa-info-circle',
-                    'Threshold job ' + jobId + ' is no longer tracked — it likely finished. Re-run to see fresh results.');
+                    'Threshold job ' + jobId + ' is no longer tracked. Its outcome cannot be verified; check Background Tasks before starting another job.');
                 return;
             }
             // transient poll failure — keep trying within the bound
@@ -2271,7 +2294,7 @@
                 showNotification('A threshold learning job is already running' + (running ? ' (job ' + running + ')' : ''), 'info');
                 if (running) pollThresholdJob(running, resultsDiv, 1);
             } else if (!err.aborted) {
-                renderError(resultsDiv, 'Failed to schedule threshold learning', err.referenceId);
+                renderError(resultsDiv, err.status === 403 ? 'Threshold learning is disabled in system settings' : err.status === 503 ? 'Threshold worker is unavailable; check System status' : 'Failed to schedule threshold learning', err.referenceId);
                 showNotification('Failed to schedule threshold learning', 'error');
             }
         } finally {
@@ -2307,7 +2330,7 @@
             renderTrajectory(data || {}, identityId, currentCamera);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            renderError(resultsDiv, err.status === 404 ? 'Identity not found' : 'Failed to predict trajectory', err.referenceId);
+            renderError(resultsDiv, err.status === 403 ? 'Trajectory prediction is disabled in system settings' : err.status === 404 ? 'Identity or camera not found' : 'Failed to predict trajectory', err.referenceId);
         }
     }
 
@@ -2320,19 +2343,17 @@
             resultsDiv.replaceChildren(el('div', { className: 'info-message' }, [
                 faIcon('fas fa-info-circle'),
                 el('h4', { text: 'Insufficient Evidence' }),
-                el('p', { text: 'Not enough historical trajectories to make a prediction for this identity from this camera.' })
+                el('p', { text: 'Not enough outgoing movement sessions from this camera. At least ' + toNonNegativeInteger(data.evidence && data.evidence.minimum_supporting_sessions, 3) + ' are required; observed ' + toNonNegativeInteger(data.evidence && data.evidence.supporting_sessions, 0) + '.' })
             ]));
             return;
         }
 
         const items = predictions.map(function (pred, idx) {
             if (!pred || typeof pred !== 'object') return null;
-            const confidence = ['high', 'moderate', 'low'].indexOf(String(pred.confidence || '').toLowerCase()) >= 0
-                ? String(pred.confidence).toLowerCase() : 'low';
-            return el('div', { className: 'prediction-item confidence-' + confidence }, [
+            return el('div', { className: 'prediction-item' }, [
                 el('div', { className: 'prediction-main' }, [
                     el('strong', { text: '#' + (idx + 1) + ' ' + pipelineDisplayName(pred.camera_id) }),
-                    el('span', { className: 'prediction-prob', text: ' ' + formatPercent01(pred.probability) + ' probability (' + confidence + ' confidence)' })
+                    el('span', { className: 'prediction-prob', text: ' ' + formatPercent01(pred.probability) + ' observed frequency · ' + toNonNegativeInteger(pred.transition_count, 0) + ' of ' + toNonNegativeInteger(pred.total_transitions, 0) + ' transitions (uncalibrated)' })
                 ]),
                 el('div', { className: 'prediction-time', text: 'Estimated around ' + fmtDateTime(pred.estimated_time) + ' (projection, not certainty)' })
             ]);
@@ -2351,7 +2372,7 @@
             ]),
             el('p', { className: 'prediction-note', text: safeText(data.note, 'Estimated times are statistical projections, not certainties.') }),
             el('div', { className: 'predictions-list' }, items),
-            el('p', { className: 'prediction-model', text: 'Model: ' + safeText(data.model_version, 'unknown') })
+            el('p', { className: 'prediction-model', text: 'Model: ' + safeText(data.model_version, 'unknown') + (data.evidence && data.evidence.history_truncated ? ' · History capped at the latest 2,000 appearances' : '') })
         ]));
     }
 
@@ -2382,7 +2403,7 @@
             renderCorrelation(data || {}, identityA, identityB);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
-            renderError(resultsDiv, err.status === 404 ? 'Identity not found' : 'Failed to calculate correlation', err.referenceId);
+            renderError(resultsDiv, err.status === 403 ? 'Activity correlation is disabled in system settings' : err.status === 404 ? 'Identity not found' : 'Failed to calculate correlation', err.referenceId);
         }
     }
 
@@ -2402,8 +2423,8 @@
                 text: safeText(data.note, 'Measures temporal and spatial association between two identities. Correlation does not prove causation.')
             }),
             el('div', { className: 'correlation-summary' }, [
-                el('div', { text: shortId(identityA) + '... ↔ ' + shortId(identityB) + '...' }),
-                el('div', { className: 'correlation-score strength-' + strength, text: formatPercent01(data.correlation_score) })
+                el('div', { text: shortId(identityA) + '... → ' + shortId(identityB) + '...' }),
+                el('div', { className: 'correlation-score strength-' + strength, text: formatScore(data.correlation_score, 2) + ' / 1 heuristic score' })
             ]),
             el('div', { className: 'correlation-stats' }, [
                 el('div', { className: 'correlation-stat' }, [
@@ -2417,6 +2438,9 @@
             ])
         ];
 
+        if (data.truncated === true) {
+            children.push(el('p', { className: 'correlation-warning', text: 'History was capped at the latest 500 appearances per identity. This is not an exhaustive analysis.' }));
+        }
         if (data.insufficient_evidence === true) {
             const warning = el('p', {
                 className: 'correlation-warning',
@@ -2428,7 +2452,7 @@
 
         if (sequences.length) {
             const details = el('details');
-            details.append(el('summary', { text: 'View Activity Sequences (' + sequences.length + ')' }));
+            details.append(el('summary', { text: 'View Activity Sequences (' + sequences.length + ' shown of ' + sequenceCount + ')' }));
             const list = el('div', { className: 'sequence-list' }, sequences.map(function (seq) {
                 if (!seq || typeof seq !== 'object') return null;
                 return el('div', { className: 'sequence-item' }, [
@@ -2465,19 +2489,20 @@
                 el('strong', { text: label + ': ' }),
                 el('span', { text: (enabled ? 'enabled' : 'disabled') + ' — ' + status + (cap.job_id ? ' (job ' + safeText(cap.job_id) + ')' : '') })
             ]);
+            if (cap.detail) line.append(el('p', { text: safeText(cap.detail) }));
             line.style.cssText = 'padding:0.3rem 0;border-bottom:1px solid rgba(255,255,255,0.08);' +
                 (enabled ? '' : 'opacity:0.6;');
             return line;
         });
-        showModal('Feature Status (backend-verified)', rows);
+        showModal('Feature Availability', rows);
     }
 
     function showFeatureHelp() {
         showModal('Advanced SNA Features Help', [
             el('h4', { text: '1. Automatic Threshold Learning' }),
-            el('p', { text: 'Learns optimal distance/time thresholds per camera pair from historical data. Runs as a background job — progress appears in Background Tasks.' }),
+            el('p', { text: 'Learns optimal distance/time thresholds per camera pair from historical data. Runs in the durable worker — progress appears in Background Tasks. Saved candidates require administrator review and activation.' }),
             el('h4', { text: '2. Trajectory Prediction' }),
-            el('p', { text: 'Predicts where a person may appear next based on historical movement. Estimates are statistical projections with confidence levels, not certainties.' }),
+            el('p', { text: 'Predicts where a person may appear next based on historical movement. Requires outgoing transitions in at least three separate sessions. Frequencies are uncalibrated historical observations, not certainty.' }),
             el('h4', { text: '3. Activity Correlation' }),
             el('p', { text: 'Measures temporal and spatial association between two identities. Correlation does not prove causation — treat low-sample results as inconclusive.' })
         ]);
@@ -2502,7 +2527,9 @@
         const req = beginRequest('map');
         const btn = document.getElementById('map-load-btn');
         if (btn) btn.disabled = true;
-        renderLoading(mapContainer, 'Loading map...');
+        // Keep the existing MapLibre canvas attached when refreshing overlays.
+        if (!state.mapController) renderLoading(mapContainer, 'Loading map...');
+        mapContainer.setAttribute('aria-busy', 'true');
         try {
             const params = {};
             const date = document.getElementById('map-date') && document.getElementById('map-date').value;
@@ -2568,11 +2595,19 @@
             if (req.isCurrent() && btn) btn.disabled = false;
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
+            if (state.mapController) state.mapController.destroy();
+            state.mapController = null;
+            state.mapDataKey = null;
             renderError(mapContainer,
                 err.status === 503 ? 'Map service is temporarily unavailable' :
                     err.status === 404 ? 'Identity not found' : 'Map generation failed',
                 err.referenceId);
             if (btn) btn.disabled = false;
+        } finally {
+            if (req.isCurrent()) {
+                mapContainer.removeAttribute('aria-busy');
+                if (btn) btn.disabled = false;
+            }
         }
     }
 
@@ -2650,6 +2685,7 @@
         attachOnce('patterns-detect-btn', 'click', loadPatterns);
         attachOnce('anomalies-detect-btn', 'click', loadAnomalies);
         attachOnce('threat-assess-btn', 'click', loadThreatAssessment);
+        attachOnce('threshold-review-btn', 'click', showThresholdReview);
         attachOnce('threshold-learn-btn', 'click', function () { learnThresholds(false); });
         attachOnce('learn-all-thresholds-btn', 'click', function () { learnThresholds(true); });
         attachOnce('trajectory-predict-btn', 'click', predictTrajectory);

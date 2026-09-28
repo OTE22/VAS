@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 TRAJECTORY_MAX_APPEARANCES = 2000
 
 
+class TrajectoryHistory(list):
+    """Chronological sessions plus bounded-query provenance."""
+    truncated = False
+
+
 class TrajectoryPredictor:
     """
     First-order Markov predictor over camera transitions.
@@ -50,78 +55,43 @@ class TrajectoryPredictor:
         settings page but gated nothing. Read per call (module singleton)."""
         return bool(settings.TRAJECTORY_PREDICTION_ENABLED)
 
-    async def predict_next_cameras(
-        self,
-        db: AsyncSession,
-        identity_id: str,
-        current_camera: str,
-        current_time: datetime,
-        top_k: int = 3
-    ) -> List[Tuple[str, float, datetime]]:
-        """
-        Predict which cameras the person will appear at next.
+    async def predict_next_cameras(self, db, identity_id, current_camera, current_time, top_k=3):
+        """Compatibility interface; evidence-aware API uses predict_with_evidence."""
+        result = await self.predict_with_evidence(db, identity_id, current_camera, current_time, top_k)
+        return [(p["camera_id"], p["probability"], p["estimated_time"]) for p in result["predictions"]]
 
-        Returns:
-            List of (camera_id, probability, estimated_time), sorted by
-            probability. Empty ONLY means insufficient evidence — an
-            infrastructure failure raises (the old blanket `except → []`
-            made a database error render as "Insufficient Evidence").
-        """
+    async def predict_with_evidence(self, db, identity_id, current_camera, current_time, top_k=3):
         trajectories = await self._get_historical_trajectories(db, identity_id)
-
-        if len(trajectories) < self.min_trajectories_for_prediction:
-            logger.debug(
-                f"[TRAJECTORY] Insufficient trajectories for {identity_id}: "
-                f"{len(trajectories)} (need {self.min_trajectories_for_prediction})"
-            )
-            return []
-
-        # Learn transitions from EVERY adjacent pair in every session, then
-        # condition on the current camera — wherever it occurs in a route.
-        transition_counts = defaultdict(lambda: {'count': 0, 'times': []})
-        for traj in trajectories:
-            cameras = traj['cameras']
-            diffs = traj['time_diffs']
-            for i in range(len(cameras) - 1):
-                if cameras[i] != current_camera:
+        counts = defaultdict(lambda: {"count": 0, "times": []})
+        supporting_sessions = 0
+        for trajectory in trajectories:
+            contributed = False
+            for i, (start, end) in enumerate(zip(trajectory["cameras"], trajectory["cameras"][1:])):
+                if start != current_camera or start == end:
                     continue
-                next_camera = cameras[i + 1]
-                if next_camera == current_camera:
-                    continue  # self-loop (re-detection on the same camera)
-                transition_counts[next_camera]['count'] += 1
-                if i < len(diffs) and diffs[i] is not None and diffs[i] > 0:
-                    transition_counts[next_camera]['times'].append(diffs[i])
-
-        if not transition_counts:
-            logger.debug(
-                f"[TRAJECTORY] No observed transitions out of {current_camera} "
-                f"for {identity_id}")
-            return []
-
-        total = sum(data['count'] for data in transition_counts.values())
-        predictions = []
-
-        for camera, data in transition_counts.items():
-            probability = data['count'] / total
-
-            if data['times']:
-                avg_time_minutes = sum(data['times']) / len(data['times'])
-            else:
-                # Fallback: walking-speed distance estimate.
-                avg_time_minutes = await self._estimate_travel_time(db, current_camera, camera)
-
-            estimated_time = current_time + timedelta(minutes=avg_time_minutes)
-            predictions.append((camera, probability, estimated_time))
-
-        # Sort by probability (highest first)
-        predictions.sort(key=lambda x: x[1], reverse=True)
-
-        logger.debug(
-            f"[TRAJECTORY] Predicted {len(predictions)} next cameras for {identity_id} "
-            f"from {current_camera}: {[(c, f'{p:.2f}') for c, p, _ in predictions[:top_k]]}"
-        )
-
-        return predictions[:top_k]
+                times = trajectory["time_diffs"]
+                if i >= len(times) or times[i] is None or times[i] <= 0:
+                    continue  # simultaneous detections do not establish direction
+                counts[end]["count"] += 1
+                counts[end]["times"].append(times[i])
+                contributed = True
+            supporting_sessions += int(contributed)
+        total = sum(item["count"] for item in counts.values())
+        result = {"predictions": [], "total_transitions": total,
+                  "supporting_sessions": supporting_sessions,
+                  "minimum_supporting_sessions": self.min_trajectories_for_prediction,
+                  "calibration_status": "uncalibrated",
+                  "history_limit": TRAJECTORY_MAX_APPEARANCES,
+                  "history_days": 90, "history_truncated": bool(getattr(trajectories, "truncated", False))}
+        if supporting_sessions < self.min_trajectories_for_prediction:
+            return result
+        for camera, data in counts.items():
+            result["predictions"].append({"camera_id": camera,
+                "probability": data["count"] / total, "transition_count": data["count"],
+                "estimated_time": current_time + timedelta(minutes=sum(data["times"]) / len(data["times"]))})
+        result["predictions"].sort(key=lambda item: (-item["probability"], item["camera_id"]))
+        result["predictions"] = result["predictions"][:top_k]
+        return result
 
     async def _get_historical_trajectories(
         self,
@@ -147,17 +117,20 @@ class TrajectoryPredictor:
                 IdentityAppearance.identity_id == identity_uuid,
                 IdentityAppearance.start_time >= cutoff_date
             )
-        ).order_by(IdentityAppearance.start_time.desc()).limit(TRAJECTORY_MAX_APPEARANCES)
+        ).order_by(IdentityAppearance.start_time.desc()).limit(TRAJECTORY_MAX_APPEARANCES + 1)
 
         result = await db.execute(query)
         appearances = list(result.scalars().all())
+        history_truncated = len(appearances) > TRAJECTORY_MAX_APPEARANCES
+        appearances = appearances[:TRAJECTORY_MAX_APPEARANCES]
         appearances.sort(key=lambda a: a.start_time)
 
         if len(appearances) < 2:
             return []
 
         # Build trajectories (sequences of cameras)
-        trajectories = []
+        trajectories = TrajectoryHistory()
+        trajectories.truncated = history_truncated
         current_trajectory = {
             'cameras': [],
             'times': [],
@@ -215,7 +188,7 @@ class TrajectoryPredictor:
             p1 = pipelines.get(camera_1)
             p2 = pipelines.get(camera_2)
 
-            if not p1 or not p2 or not p1.latitude or not p1.longitude or not p2.latitude or not p2.longitude:
+            if not p1 or not p2 or p1.latitude is None or p1.longitude is None or p2.latitude is None or p2.longitude is None:
                 return 10.0  # Default: 10 minutes (no coordinates to estimate from)
 
             # Calculate distance

@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/vendor/maplibre/maplibre-gl.css">
     <link rel="stylesheet" href="/frontend/css/admin-intelligence.css?v=maplibre-2">
-    <link rel="stylesheet" href="/frontend/css/admin-security-intelligence.css?v=sec-ui-6">
+    <link rel="stylesheet" href="/frontend/css/admin-security-intelligence.css?v=sec-ui-7-picker">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -78,7 +78,7 @@
                             <select id="network-identity-ids" class="form-control" multiple>
                                 <option value="">-- Select Identities (optional) --</option>
                             </select>
-                            <small>Leave empty to analyse every identity. Hold Ctrl/Cmd to pick several.</small>
+                            <small>Leave empty to analyse every identity. Select several identities in the picker, then choose Done.</small>
                         </div>
                         <div class="sec-field">
                             <label for="network-min-connections">Min connections</label>
@@ -96,7 +96,12 @@
                     </div>
 
                     <div class="network-container">
-                        <div id="network-graph" class="network-graph"></div>
+                        <div id="network-graph" class="network-graph">
+                            <div class="info-message">
+                                <i class="fas fa-project-diagram" aria-hidden="true"></i>
+                                <p>Choose identities or leave the selection empty, then select <strong>Analyze Network</strong>.</p>
+                            </div>
+                        </div>
                         <div class="network-stats" id="network-stats">
                             <div class="stat-card">
                                 <div class="stat-value" id="stat-nodes">-</div>
@@ -164,9 +169,9 @@
                     </div>
 
                     <div class="patterns-container sec-results" id="patterns-container">
-                        <div class="loading-state">
-                            <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
-                            <p>Loading patterns...</p>
+                        <div class="info-message">
+                            <i class="fas fa-search" aria-hidden="true"></i>
+                            <p>Choose a camera and time window, then select <strong>Detect Patterns</strong>.</p>
                         </div>
                     </div>
                 </div>
@@ -261,8 +266,8 @@
 
                     <div class="feature-section">
                         <div class="feature-header">
-                            <h3><i class="fas fa-brain" aria-hidden="true"></i> Automatic threshold learning</h3>
-                            <p>Learn distance and time thresholds per camera pair from historical movement</p>
+                            <h3><i class="fas fa-brain" aria-hidden="true"></i> Threshold candidate learning</h3>
+                            <p>Learn candidate thresholds from movement history; review and activate before use</p>
                         </div>
                         <div class="sec-controls">
                             <div class="sec-field sec-field--wide">
@@ -278,6 +283,7 @@
                                 </button>
                             </div>
                         </div>
+                        <button class="btn-secondary" id="threshold-review-btn" type="button">Review saved thresholds</button>
                         <div id="threshold-results" class="feature-results"></div>
                     </div>
 
@@ -460,6 +466,6 @@
     <script src="/frontend/vendor/vis-network/vis-network.min.js"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script type="module" src="/frontend/js/identity-map.js?v=maplibre-4"></script>
-    <script src="/frontend/js/admin-security-intelligence.js?v=sec-14-consistency"></script>
+    <script src="/frontend/js/admin-security-intelligence.js?v=sec-16-evidence"></script>
 </body>
 </html>
