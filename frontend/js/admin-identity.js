@@ -281,156 +281,9 @@
     }
 
     // --------------------------------------------
-    // Movement timeline — ported from the Unknown Faces Center modal.
-    // Returns an HTML string (kept, to reuse admin.css's timeline styling
-    // verbatim); every interpolated value is escaped, and snapshot URLs go
-    // through safeImageUrl. Zoom controls reuse the data-action delegation.
-    // --------------------------------------------
-
-    let currentTimelineScale = 0.3;
-
+    // Shared chronological appearance viewer.
     function renderAdvancedTimeline(appearances) {
-        if (!appearances || appearances.length === 0) {
-            return '<div class="timeline-empty"><i class="fas fa-info-circle"></i> No appearance data available</div>';
-        }
-
-        const sorted = [...appearances].sort(
-            (a, b) => new Date(a.start_time) - new Date(b.start_time));
-        const uniquePipelines = [...new Set(sorted.map(a => a.pipeline_id || 'Unknown'))];
-
-        const hoursInDay = 24;
-        const firstTime = new Date(sorted[0].start_time);
-        const lastTime = new Date(sorted[sorted.length - 1].start_time);
-        const totalDuration = lastTime - firstTime;
-
-        const hourWidth = 120;
-        const timelineWidth = hoursInDay * hourWidth;
-        const containerWidth = 1000;
-        const defaultScale = Math.max(0.3, Math.min(1, (containerWidth - 100) / timelineWidth));
-        currentTimelineScale = defaultScale;
-
-        let html = `
-            <div class="timeline-controls">
-                <div class="timeline-legend">
-                    <div class="legend-item"><div class="legend-color" style="background: #00ff96;"></div><span>Location</span></div>
-                    <div class="legend-item"><div class="legend-color" style="background: rgba(0, 255, 150, 0.3);"></div><span>Movement Path</span></div>
-                    <div class="legend-item"><div class="legend-color" style="background: #ffc107;"></div><span>Time Gap</span></div>
-                </div>
-                <div class="timeline-zoom-controls">
-                    <button class="zoom-btn" data-action="timelineZoomOut" title="Zoom Out"><i class="fas fa-search-minus"></i></button>
-                    <input type="range" id="timeline-scale-slider" min="0.1" max="2" step="0.1" value="${defaultScale}"
-                           data-action-input="updateTimelineScale" style="width: 150px; margin: 0 0.5rem;">
-                    <span class="zoom-value" id="zoom-value">${Math.round(defaultScale * 100)}%</span>
-                    <button class="zoom-btn" data-action="timelineZoomIn" title="Zoom In"><i class="fas fa-search-plus"></i></button>
-                    <button class="zoom-btn" data-action="timelineFitToView" title="Fit to View"><i class="fas fa-compress-arrows-alt"></i></button>
-                </div>
-            </div>
-            <div class="timeline-track" id="timeline-track" style="transform: scale(${defaultScale}); transform-origin: left center; width: ${timelineWidth}px;">
-        `;
-
-        sorted.forEach((app, index) => {
-            const startTime = new Date(app.start_time);
-            const endTime = app.end_time ? new Date(app.end_time) : null;
-            const duration = endTime ? Math.round((endTime - startTime) / 1000) : null;
-
-            const decimalHours = startTime.getHours()
-                + startTime.getMinutes() / 60 + startTime.getSeconds() / 3600;
-            const perHour = timelineWidth / hoursInDay;
-            let leftPosition = decimalHours * perHour;
-
-            const prevApp = index > 0 ? sorted[index - 1] : null;
-            if (prevApp) {
-                const prev = new Date(prevApp.start_time);
-                const prevLeft = (prev.getHours() + prev.getMinutes() / 60 + prev.getSeconds() / 3600) * perHour;
-                if (Math.abs(leftPosition - prevLeft) < 50) leftPosition = prevLeft + 50;
-            }
-
-            const nextApp = index < sorted.length - 1 ? sorted[index + 1] : null;
-            const isPipelineChange = prevApp && prevApp.pipeline_id !== app.pipeline_id;
-            const timeSincePrev = prevApp
-                ? Math.round((startTime - new Date(prevApp.start_time)) / 1000 / 60) : null;
-
-            let gapLeft = 0, gapWidth = 0;
-            if (isPipelineChange && timeSincePrev > 5 && prevApp) {
-                const prev = new Date(prevApp.start_time);
-                gapLeft = (prev.getHours() + prev.getMinutes() / 60 + prev.getSeconds() / 3600) * perHour;
-                gapWidth = leftPosition - gapLeft;
-            }
-
-            const snapshot = safeImageUrl(app.snapshot_url || app.best_snapshot_path || '');
-
-            html += `
-                ${isPipelineChange && timeSincePrev > 5 && gapWidth > 0 ? `
-                    <div class="timeline-gap" style="left: ${gapLeft}px; width: ${gapWidth}px;">
-                        <div class="gap-indicator"><i class="fas fa-arrow-right"></i><span>${Number(timeSincePrev)} min</span></div>
-                    </div>` : ''}
-                <div class="timeline-node ${index === 0 ? 'first' : ''} ${index === sorted.length - 1 ? 'last' : ''} ${isPipelineChange ? 'pipeline-change' : ''}"
-                     style="left: ${leftPosition}px;" data-index="${index}">
-                    <div class="timeline-node-connector"></div>
-                    <div class="timeline-node-content">
-                        <div class="node-image">
-                            ${snapshot
-                                ? `<img src="${escapeHtml(snapshot)}" alt="Appearance ${index + 1}" data-fallback-class="node-image-placeholder" data-fallback-icon="fas fa-user">`
-                                : '<div class="node-image-placeholder"><i class="fas fa-user"></i></div>'}
-                        </div>
-                        <div class="node-info">
-                            <div class="node-pipeline" title="${escapeHtml(app.pipeline_id || '')}">
-                                <i class="fas fa-video"></i>
-                                <span>${escapeHtml(app.pipeline_id ? pipelineLabel(app.pipeline_id) : 'Unknown')}</span>
-                            </div>
-                            <div class="node-time"><i class="fas fa-clock"></i><span>${escapeHtml(startTime.toLocaleTimeString())}</span></div>
-                            ${duration ? `<div class="node-duration"><i class="fas fa-hourglass-half"></i><span>${Number(duration)}s</span></div>` : ''}
-                            ${app.track_id ? `<div class="node-track"><i class="fas fa-fingerprint"></i><span>${escapeHtml(String(app.track_id).substring(0, 8))}...</span></div>` : ''}
-                        </div>
-                        <div class="node-date">${escapeHtml(startTime.toLocaleDateString())}</div>
-                    </div>
-                    ${nextApp && nextApp.pipeline_id !== app.pipeline_id ? `
-                        <div class="timeline-connection">
-                            <div class="connection-line"></div>
-                            <div class="connection-label" title="${escapeHtml(nextApp.pipeline_id || '')}">
-                                <i class="fas fa-arrow-right"></i>
-                                <span>${escapeHtml(nextApp.pipeline_id ? pipelineLabel(nextApp.pipeline_id) : 'Unknown')}</span>
-                            </div>
-                        </div>` : ''}
-                </div>
-            `;
-        });
-
-        let hourMarkers = '';
-        for (let hour = 0; hour <= hoursInDay; hour++) {
-            hourMarkers += `
-                <div class="hour-marker" style="left: ${(hour / hoursInDay) * timelineWidth}px;">
-                    <div class="hour-marker-line"></div>
-                    <div class="hour-marker-label">${hour}:00</div>
-                </div>`;
-        }
-
-        html += `
-                ${hourMarkers}
-            </div>
-            <div class="timeline-summary">
-                <div class="summary-item"><i class="fas fa-route"></i><div>
-                    <div class="summary-value">${uniquePipelines.length}</div>
-                    <div class="summary-label">Cameras Visited</div></div></div>
-                <div class="summary-item"><i class="fas fa-clock"></i><div>
-                    <div class="summary-value">${escapeHtml(formatDuration(totalDuration))}</div>
-                    <div class="summary-label">Total Time Span</div></div></div>
-                <div class="summary-item"><i class="fas fa-map-marker-alt"></i><div>
-                    <div class="summary-value">${sorted.length}</div>
-                    <div class="summary-label">Total Stops</div></div></div>
-            </div>
-        `;
-        return html;
-    }
-
-    function applyTimelineScale(scale) {
-        currentTimelineScale = Math.max(0.1, Math.min(2, scale));
-        const track = document.getElementById('timeline-track');
-        const readout = document.getElementById('zoom-value');
-        const slider = document.getElementById('timeline-scale-slider');
-        if (track) track.style.transform = `scale(${currentTimelineScale})`;
-        if (readout) readout.textContent = `${Math.round(currentTimelineScale * 100)}%`;
-        if (slider) slider.value = String(currentTimelineScale);
+        return window.MovementTimeline.render(appearances, pipelineLabel);
     }
 
     // ============================================
@@ -783,10 +636,6 @@
         openLiveAlertModal: () => openLiveAlertModal(),
         copyProfileIdentityId: () => copyIdentityIdToClipboard(),
         copyIdentityIdFromAlert: () => copyIdentityIdToClipboard(),
-        timelineZoomIn: () => applyTimelineScale(currentTimelineScale + 0.1),
-        timelineZoomOut: () => applyTimelineScale(currentTimelineScale - 0.1),
-        timelineFitToView: () => applyTimelineScale(0.3),
-        updateTimelineScale: (el) => applyTimelineScale(parseFloat(el.value)),
     });
 
     if (document.readyState === 'loading') {

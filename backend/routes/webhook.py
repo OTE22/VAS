@@ -492,7 +492,8 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
         previous_feedback = processing_feedback.lookup(job_key) if wants_feedback else None
         if previous_feedback is not None:
             return JSONResponse(status_code=202 if previous_feedback == 'pending' else 200,
-                                content={'status': 'processing', 'processing_status': previous_feedback})
+                                content={'status': 'processing', 'processing_status': previous_feedback,
+                                         'status_path': '/webhook/status/' + processing_feedback.token_for(job_key)})
         if job_key in _dedup_pending:
             return JSONResponse(status_code=429, headers={"Retry-After": "2"},
                                 content={"status": "pending", "queued": 0})
@@ -657,6 +658,21 @@ async def webhook_api(pipeline_id: str, request: Request, background_tasks: Back
     """Webhook endpoint - /api/webhook/{pipeline_id} (alias for compatibility)"""
     payload = await parse_webhook_request(request)
     return await webhook_handler(pipeline_id, payload, background_tasks)
+
+
+@router.get("/webhook/status/{token}", dependencies=[Depends(require_webhook_key)])
+@router.get("/api/webhook/status/{token}", dependencies=[Depends(require_webhook_key)])
+async def webhook_status(token: str):
+    """Authenticated, body-free result lookup. Never queues or processes images."""
+    from backend.core import processing_feedback
+    status = processing_feedback.lookup_token(token)
+    if status is None:
+        # Expired handle or receiver restart: sender may resubmit the same event.
+        return JSONResponse(status_code=410, content={'status': 'unknown'},
+                            headers={'Cache-Control': 'no-store'})
+    return JSONResponse(status_code=202 if status == 'pending' else 200,
+                        content={'processing_status': status},
+                        headers={'Cache-Control': 'no-store', 'Retry-After': '2'})
 
 
 # Connectivity probe. Key-gated on purpose: as a credential self-check for a

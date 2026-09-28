@@ -269,8 +269,8 @@ services:
       PGVECTOR_HNSW_EF_CONSTRUCTION: "128"
       MAX_QUEUE_SIZE: 2000
       QUEUE_WORKERS: 15
-      INFERENCE_WORKERS: 3
-      MAX_CONCURRENT_INFERENCE: 3
+      INFERENCE_WORKERS: 4
+      MAX_CONCURRENT_INFERENCE: 4
       # The in-memory duplicate-suppression window. config.py defaults this to 0,
       # which the tracker's own docstring contradicts (it documents 30s). At 0 the
       # expiry test `now - last_seen > window` is true for every re-sighting, so

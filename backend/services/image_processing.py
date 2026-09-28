@@ -439,9 +439,10 @@ async def process_image_async(
         # bounded globally and per pipeline so cameras can't starve each other
         # or the event loop.
         # =====================================================
-        async with _inference_semaphore:
-            async with _get_pipeline_semaphore(pipeline_id):
-                # Utilization of the hard 3-wide inference bottleneck. When
+        # Wait for this camera before occupying a shared inference slot.
+        async with _get_pipeline_semaphore(pipeline_id):
+            async with _inference_semaphore:
+                # Utilization of the configured inference bottleneck. When
                 # this gauge sits at MAX_CONCURRENT_INFERENCE while the queue
                 # grows, inference is the limiting resource — previously that
                 # diagnosis required guesswork.

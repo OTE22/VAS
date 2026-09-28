@@ -211,15 +211,13 @@ def test_promote_and_merge_stay_in_the_unknown_center():
 
 
 def test_snapshot_urls_are_guarded_in_the_timeline():
-    """The ported timeline renderer is the page's one string renderer; every
-    interpolation is escaped and image URLs go through the same-origin guard."""
     source = read(JS)
-    timeline = source.split("function renderAdvancedTimeline", 1)[1].split("\n    function applyTimelineScale", 1)[0]
-    assert "safeImageUrl(" in timeline
-    assert "escapeHtml(" in timeline
-    # The raw fields never reach the markup unescaped.
-    for raw in ("${app.pipeline_id}", "${app.track_id}", "${app.snapshot_url}"):
-        assert raw not in timeline, f"unescaped interpolation: {raw}"
+    assert "window.MovementTimeline.render(appearances, pipelineLabel)" in source
+    timeline = read(f"{FRONTEND}/js/movement-timeline.js")
+    assert "url.origin === location.origin" in timeline
+    assert "escape(url)" in timeline
+    assert "escape(app.track_id)" in timeline
+    assert "movement-timeline.js?v=" in read(HTML)
 
 
 def test_timeline_scrolls_inside_its_container_not_the_page():

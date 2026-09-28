@@ -628,10 +628,9 @@
             const ts = el('div', 'timestamp');
             const primary = el('div', 'timestamp-primary');
             primary.appendChild(icon('fa-hourglass-half'));
-            primary.appendChild(el('span', 'visible-label', ' Visible for: '));
             primary.appendChild(el('span', 'time-remaining'));
-            primary.appendChild(el('span', 'processing-time'));
             ts.appendChild(primary);
+            ts.appendChild(el('div', 'timestamp-secondary processing-time'));
             const seen = el('div', 'timestamp-secondary');
             seen.appendChild(icon('fa-calendar-alt'));
             seen.appendChild(el('span', 'last-seen-line'));
