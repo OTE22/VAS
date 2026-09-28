@@ -49,4 +49,18 @@ Validation uses synthetic artifacts, isolated API fixtures, a disposable Jupyter
 - 12 generated-notebook tests passed in the actual rebuilt Jupyter image, including real temporary Parquet and complete cell execution for all five model families, changed-artifact refusal and preprocessing comparisons.
 - Firefox checks passed for selected-record context, direct import, popup fallback, error handling, stage status and 390px layout; zero JavaScript errors. The existing guided training/deployment browser fixture still passes.
 
-Final release image identities and live results follow after verification.
+Deployment verified:
+
+- Release commit: `a6f37c1fe3888b2dd4fa35e9d1300b0ef2747bc4`.
+- API image: `sha256:8efa4bbc79b7f60aa040417afe8bec759d7bf4ba5e6cf2e55d4e78644f560fc6`.
+- ML worker image: `sha256:19d918fbea278ccd4721326f1434f4922d0151e322f6e01f6245d755e5611cbb`.
+- Jupyter and gateway image: `sha256:36c8aa91470b53e6ad70d39d81355d2e78a3f4f3a9e40b7830bfea5aac915c9b`.
+- API/worker clean image provenance verified both before deployment and in the running containers. Built-image backend suite passed all 116 checks.
+- User confirmed saved work and authorized restarting the active Jupyter session before its runtime was recreated.
+- HTTPS readiness from VMS returned 200 with database, models, cache, queue and all 34 background services healthy. Notebook/export routes correctly returned 401 without an admin session.
+- Live read-only evidence export succeeded. Created `VAS-ML-Workflow-a6f37c1.ipynb` in the persistent workspace, without overwriting any existing file. The actual Jupyter Contents API verified it is available with 26 cells.
+- Starter notebook schema validated; all 11 available code cells executed offline in the rebuilt notebook image. It has no immutable dataset/model yet, so data-dependent rechecks explain their missing inputs.
+- Running notebook dependency check: NumPy 2.4.6, PyArrow 23.0.1, ipykernel 6.31.0.
+- Rollback image tags retain the previous API/worker (`before-workflow-notebook-20260928`) and notebook (`before-workflow-debug-20260928`). No production training, extraction or model activation was triggered by these verification checks.
+
+Open the starter at `/notebooks/lab/tree/VAS-ML-Workflow-a6f37c1.ipynb` while signed in as an administrator. Use a new ML Ops export after subsequent runs to inspect their exact evidence.
