@@ -47,24 +47,24 @@ async def fixture():
             db.add(Pipeline(pipeline_id=f'validation-camera-{camera}', timezone='UTC'))
         await db.flush()
         now = datetime.utcnow().replace(microsecond=0)
-        base = now-timedelta(days=110)
+        base = now-timedelta(days=80)
         people=[]
         for i in range(120):
             person=uuid.uuid5(uuid.NAMESPACE_DNS, 'isolated-notebook-person-'+str(i))
-            anchor=base+timedelta(days=28*(i//40)+(i%40)*.2)
+            anchor=base+timedelta(days=(0,45,65)[i//40]+(i%40)*.2)
             people.append((person,anchor))
-            db.add(Identity(id=person,type=IdentityType.UNKNOWN,first_seen_at=anchor,last_seen_at=anchor+timedelta(days=24)))
+            db.add(Identity(id=person,type=IdentityType.UNKNOWN,first_seen_at=anchor,last_seen_at=anchor+timedelta(days=8)))
         await db.flush()
         for i,(person,anchor) in enumerate(people):
             for j in range(8):
-                start=anchor+timedelta(days=j*3,hours=i%5,minutes=(i*j)%43)
+                start=anchor+timedelta(days=j*.75,hours=i%5,minutes=(i*j)%43)
                 db.add(IdentityAppearance(identity_id=person,pipeline_id=f'validation-camera-{(i+j)%4}',
                     start_time=start,end_time=start+timedelta(seconds=30+i*3+j*11),created_at=start))
             # Reviewed outcomes are a simulated workflow state in this disposable DB.
             # They must never be copied into production or cited as real accuracy evidence.
             db.add(MLLabel(subject_id=str(person),person_id=person,label='positive' if i%2 else 'negative',
                 label_kind='manual',label_definition_version='v1',source='validation_fixture_review',
-                event_time=anchor+timedelta(days=25),review_status='reviewed',status='active',
+                event_time=anchor+timedelta(days=9),review_status='reviewed',status='active',
                 created_by='isolated-author',created_by_user_id=1,idempotency_key='validation-'+str(person),reviewed_by='isolated-reviewer',reviewed_by_user_id=2,reviewed_at=now))
         for group in range(3):
             for i in range(40):
@@ -75,9 +75,9 @@ async def fixture():
                     db.add(IdentityRelationship(identity_id_1=a,identity_id_2=b,
                         co_appearance_count=5+(i*7+offset)%41,co_appearance_percentage=15+(i*3)%80,
                         common_pipelines=[f'validation-camera-{c}' for c in range(1+i%4)],
-                        first_co_appearance=base+timedelta(days=28*group),
-                        last_co_appearance=base+timedelta(days=28*group+24+i*.1),
-                        calculated_at=base+timedelta(days=28*group+31)))
+                        first_co_appearance=base+timedelta(days=(0,45,65)[group]-8),
+                        last_co_appearance=base+timedelta(days=(0,45,65)[group]+8+i*.01),
+                        calculated_at=base+timedelta(days=(0,45,65)[group]+9)))
         await db.commit()
     from backend.ml.collector import run_collection
     from backend.ml.relational_feature_service import collect_relational_snapshots
@@ -86,7 +86,7 @@ async def fixture():
         save('collection.json',stats)
         for group in range(3):
             # Only cache observations whose calculated_at precedes this cutoff are read.
-            result=await collect_relational_snapshots(db,as_of=base+timedelta(days=28*group+32),run_id=f'validation-relational-{group}')
+            result=await collect_relational_snapshots(db,as_of=base+timedelta(days=(0,45,65)[group]+10),run_id=f'validation-relational-{group}')
             await db.commit()
             save(f'relational-{group}.json',result)
     save('fixture.json',{'synthetic':True,'people':120,'appearances':960,'relationships':360,
@@ -202,6 +202,8 @@ async def main():
         for family in MODEL_SPECS: outcomes.append(await one(family,attempt))
         save('service-results.json',outcomes)
         print('ALL_SERVICE_RUNS_FINISHED',flush=True)
+        if not all(item['status']=='passed' for item in outcomes):
+            raise SystemExit(1)
     finally: await db_manager.close_db()
 
 if __name__=='__main__': asyncio.run(main())

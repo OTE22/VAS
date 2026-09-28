@@ -1,7 +1,7 @@
 """Execute exported service notebooks using real ipykernel, retaining every output.
 
 Runs in the isolated Jupyter image. Input artifacts must be mounted read-only at
-/artifacts; /validation-output contains only disposable validation exports.
+/validation-output/artifacts; /validation-output contains only disposable exports.
 """
 import hashlib,json,time,traceback
 from pathlib import Path
@@ -38,13 +38,29 @@ assert training.get('stage_history'), 'Training stage history missing'
 assert all(matrices[name].shape[0] > 0 for name in ('train','val','test')), 'A declared split is empty'
 assert all(matrices[name].shape[1] == len(model['feature_names']) for name in matrices), 'Feature dimension mismatch'
 if pipeline['model_type'] == 'tabular_regression_model':
-    assert pipeline['service']['state'] == 'offline_only', 'Regression unexpectedly has live deployment'
+    assert pipeline['service']['destination']['mode'] == 'offline_only' and pipeline['service']['selected_model'] is None, 'Regression unexpectedly has live deployment'
 else:
     assert pipeline['service']['selected_model']['id'] == model['id'], 'Consumer is bound to a different model'
 print('PASS: worker outcome, family, immutable dataset, validation, split matrices, engineering, code revision, stage history and deployment scope')
 print('Scientific status:', model['training_config'].get('scientific_gate', 'not recorded'))
 print('Synthetic validation does not establish real-world accuracy, scientific approval or 30-camera throughput.')
 '''))
+    book.cells.append(nbformat.v4.new_markdown_cell('## Isolated worker and service lifecycle result\nThe real worker ran before this notebook. Read its recorded outcome, including scoring and stopping the selected model.'))
+    book.cells.append(nbformat.v4.new_code_cell("""worker_result = json.loads((Path('..') / (pipeline['model_type'] + '-result.json')).read_text())
+assert worker_result['status'] == 'passed', worker_result
+assert worker_result['engineering'] == 'PASS', worker_result
+assert worker_result['model_id'] == model['id'], 'Worker evidence belongs to another model'
+assert worker_result['code_version'] == model['code_version'], 'Worker release differs from notebook evidence'
+if pipeline['model_type'] == 'tabular_regression_model':
+    assert worker_result['expected_offline_refusal'] == 'OFFLINE_ONLY'
+else:
+    assert worker_result['deployment']['success'] and worker_result['stop']['success']
+    print('Real consumer result:')
+    pprint(worker_result['consumer'])
+    print('Stop result:')
+    pprint(worker_result['stop'])
+print('PASS: isolated training, artifact reload, deployment scope, actual consumer scoring and stop checks')
+"""))
     headings={};heading='Setup'
     for i,c in enumerate(book.cells):
         if c.cell_type=='markdown': heading=c.source.splitlines()[0] if c.source else heading
