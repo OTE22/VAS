@@ -3,13 +3,27 @@
 Only opaque event keys and reason codes are retained, never images or identities.
 Methods run on the API event loop; no await occurs inside a cache operation.
 """
+from collections import OrderedDict
 import time
 import hashlib
 import re
 
 TTL = 600
-MAX_EVENTS = 5000
-_events = {}
+# Metadata budget: 150 events/s for ten minutes plus burst/backlog headroom.
+# This is not an inference throughput claim; no images are retained here.
+MAX_EVENTS = 100_000
+_events = OrderedDict()
+
+
+def _expire(now):
+    # Fixed TTL and monotonic timestamps keep records in expiry order.
+    # Completion moves refreshed records to the end. No full-cache scan on GET.
+    while _events:
+        token = next(iter(_events))
+        if _events[token][0] > now:
+            break
+        _events.popitem(last=False)
+
 
 def token_for(key):
     """Opaque, deterministic handle; never contains a pipeline ID or payload."""
@@ -23,24 +37,28 @@ def lookup(key):
 def lookup_token(token):
     if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{64}', token):
         return None
-    now = time.monotonic()
-    for old, record in list(_events.items()):
-        if record[0] <= now:
-            _events.pop(old, None)
+    _expire(time.monotonic())
     record = _events.get(token)
     return record[1] if record else None
 
 def reserve(key):
-    lookup(key)
+    now = time.monotonic()
+    _expire(now)
+    token = token_for(key)
+    if token in _events:
+        return True
     if len(_events) >= MAX_EVENTS:
         return False
-    _events[token_for(key)] = (time.monotonic() + TTL, 'pending')
+    _events[token] = (now + TTL, 'pending')
     return True
 
 def complete(key, status):
+    now = time.monotonic()
+    _expire(now)
     token = token_for(key)
     if token in _events:
-        _events[token] = (time.monotonic() + TTL, status)
+        _events[token] = (now + TTL, status)
+        _events.move_to_end(token)
 
 def discard(key):
     _events.pop(token_for(key), None)

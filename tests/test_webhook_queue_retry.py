@@ -75,7 +75,11 @@ class QueueRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_feedback_pending_then_committed_without_requeue(self):
         self.payload['processing_feedback'] = True
-        self.assertEqual((await self.send()).content['processing_status'], 'pending')
+        first = await self.send()
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(first.content['processing_status'], 'pending')
+        self.assertEqual(first.content['status_path'], '/webhook/status/' +
+                         self.feedback.token_for('camera-1:event_id:event-1'))
         self.assertEqual((await self.send()).content['processing_status'], 'pending')
         self.feedback.complete('camera-1:event_id:event-1', 'saved')
         self.assertEqual((await self.send()).content['processing_status'], 'saved')

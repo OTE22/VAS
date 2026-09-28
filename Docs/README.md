@@ -63,3 +63,5 @@ To keep a guide current, compare the page HTML **and** its JavaScript-generated
 controls, then verify permissions and mutations in the backend routes. Update the
 demo whenever button labels or behavior change. Shared navigation and Cancel/Close
 behavior are documented once and linked from every page.
+
+Deployment audit for the 30-camera scaling changes: [28 September 2026 readiness report](DEPLOYMENT_READINESS_20260928.md).

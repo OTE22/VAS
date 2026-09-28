@@ -618,7 +618,9 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
         return JSONResponse(status_code=202, content={
             "status": status,
             "job_id": request_id,
-            **({"processing_status": processing_feedback.lookup(feedback_key)} if feedback_key else {}),
+            **({"processing_status": processing_feedback.lookup(feedback_key),
+                "status_path": "/webhook/status/" + processing_feedback.token_for(feedback_key)}
+               if feedback_key else {}),
             "request_id": request_id,  # backward compat
             "pipeline_id": pipeline_id,
             "location_name": location_name,

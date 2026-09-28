@@ -86,3 +86,12 @@ Docs/
 # on demand and mounted the same way.
 map-data/
 map-data-test/
+
+# Host deployment state and backups (including secrets) must stay out of images.
+backups/
+.deployment/
+.agents/
+.codex/
+docker/.env*
+!docker/.env.example
+docker/gpu-allocation.generated.yml

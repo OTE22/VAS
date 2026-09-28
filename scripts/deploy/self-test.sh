@@ -171,14 +171,14 @@ test_gpu_allocation() {
     NVIDIA_SMI="$stub_dir/none"
     t_eq "no GPU -> empty inventory" "" "$(gpu_inventory | tr -d '[:space:]')"
 
-    # 1 GPU -> API gets it, ollama shares, no ollama block in the overlay
+    # 1 GPU -> both reservations pin the same card (CPU forcing is in base compose)
     make_nvidia_stub "$stub_dir/one" "0|GPU-1111|NVIDIA RTX A4000|16376"
     NVIDIA_SMI="$stub_dir/one"
     t_eq "1 GPU inventory line count" "1" "$(gpu_inventory | grep -c '|')"
     t_eq "resolves index 0 to its UUID" "GPU-1111" "$(uuid_for_index 0)"
     local one; one="$(render_gpu_overlay "GPU-1111" "")"
     t_contains "1 GPU: face_recognition pinned to the card" "$one" 'device_ids: ["GPU-1111"]'
-    t_not_contains "1 GPU: no separate ollama reservation" "$one" "ollama:"
+    t_contains "1 GPU: explicit shared ollama reservation" "$one" "ollama:"
     t_contains "1 GPU: WORKERS stays 1" "$one" 'WORKERS: "1"'
     t_contains "1 GPU: overrides rather than appends" "$one" "devices: !override"
 
