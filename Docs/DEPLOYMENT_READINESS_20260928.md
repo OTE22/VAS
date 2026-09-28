@@ -2,22 +2,50 @@
 
 ## Verdict and deployment state
 
-The code and GPU image are prepared for a controlled deployment of the current
+The updated GPU image and nginx settings are deployed and healthy for the current
 30-camera VMS target. This is not certification of 30 or more physical cameras
 at 5 analysis FPS with every feature active. Representative cameras have not
 been added yet, and a complete HTTP/recognition/database/storage endurance test
 has not been performed.
 
-This audit **did not restart the running VAS services**. Source fixes below are
-in the newly built image; the live API and nginx resource limit still need the
-controlled rollout below.
+The audit initially built and tested the fixes without restarting VAS. Following
+explicit deployment authorization, **the API and nginx were recreated successfully
+on 28 September 2026 at approximately 10:36 UTC**. The fixes are now live.
+The acceptance limits below still apply.
 
 - Built image: `face_detector_prod-face_recognition:latest`,
   `sha256:d370a948d5f35002d9b0143eb7b246dafb23fc5ce1dac438a95b903e683870f4`.
-- Running API image at audit time:
+- Previous API image at initial audit time:
   `sha256:cedbd26bf06686a6e009bd19cde4cbec42bc595b31d990ef2524896bb854418a`.
 - No database records, camera configurations or credentials were changed.
 - Unit tests used fake events and isolated processes, never live webhook uploads.
+
+## Deployment completed
+
+- Running API now matches the prepared `d370a948d5f3...` image. Both modified
+  receiver source files were hash-checked against the reviewed working tree.
+- API and nginx healthy; `/health/ready` and `/health/detailed` passed.
+  All 34 supervised background services report no degraded or stale services.
+- CUDA available = 1; CPU fallback active = 0; queue capacity = 2,000;
+  pending and processing counts = 0 after deployment.
+- nginx configuration passes with no open-file warning; soft/hard limit 16,384.
+- Both VMS workers passed health, CUDA execution, NVDEC prerequisite and
+  TLS/authenticated VAS status checks. Invalid credentials returned 401 and
+  a valid credential with an unknown status handle returned 410 as intended.
+- Both existing saved VMS pipelines remain stopped. No test detection images
+  were sent to the live receiver.
+- Verified backup: `/backups/20260928T102848Z` in the production backup volume;
+  checksums passed for database, gallery, indexes and ML artifacts.
+- API rollback tag:
+  `face_detector_prod-face_recognition:before-readiness-deploy-20260928`,
+  digest `sha256:35dd4c38e67975f9e4e33e6cf73325a0e5e2d03d39d14a29ba58b62611f1ae42`.
+  Docker no longer retained the original image layers, so this is an imported
+  snapshot of the prior running filesystem with explicit nonsecret startup
+  metadata. Source hashes match the prior receiver; mounted credentials are
+  excluded. Isolated SCRFD and ArcFace inference on CUDA also passed in this
+  rollback image. Production Compose supplies its normal environment and secrets.
+- nginx rollback tag: `nginx:before-vas-readiness-deploy-20260928`.
+- No schema migration or datastore recreation was needed for this update.
 
 ## Verified on this host
 
@@ -57,8 +85,8 @@ local evidence files, not part of the deployment package.
    minutes at 150/second. It is a cache correctness test, not a throughput or
    face-recognition benchmark.
 4. Production nginx now declares soft and hard `nofile` limits of 16,384.
-   The running container's soft limit is still 1,024 until recreation, despite
-   its `worker_connections=8192` configuration.
+   The initial container had a soft limit of 1,024 despite
+   `worker_connections=8192`. After deployment, both actual limits are 16,384.
 5. Docker build exclusions now cover host backup directories, deployment state,
    nested deployment environment files and generated GPU allocation. The GPU
    allocation stays a host-specific Compose overlay.
