@@ -33,3 +33,9 @@ Regression suite: 122 tests passed with disposable PostgreSQL, including new ide
 ## Limits
 
 This validates five ML families and their named consumer functions, not every Docker service or the entire browser application. It does not establish real camera/GPU decoding capacity, 30-camera throughput, migration safety on an existing database, production traffic handling, or scientific model accuracy. Anomaly scientific status remains INSUFFICIENT_EVIDENCE; ranking REQUIRES_CALIBRATION; regression OFFLINE_EVALUATION_ONLY. No synthetic dataset/model was placed in the production ML artifact volume or activated in the production database. The user workspace contains only independent test evidence and dataset copies.
+
+## Deployment verification
+
+API and ML worker were recreated from the tested release. Both running containers report verified, clean sealed provenance for `1b23cf7`. API image: `sha256:0d705f34e07d0a25138353a1850f4cb0afd1319557fc4019c92bd8d158230a11`. Worker image: `sha256:bbf58524cfdcd0054a1db5b7533c6ba2662d2a211a39cedbbce78f6fb7a8416c`.
+
+After normal startup, TLS-verified `/health/ready` returned HTTP 200 at `2026-09-28T20:40:11Z`: database, models, cache, queue and offline policy healthy; 34 background services with no degraded or stale entries. Jupyter was not restarted. The two disposable PostgreSQL containers and their internal test network were removed after validation. Published notebooks and fixture datasets remain in the notebook workspace.
