@@ -169,3 +169,26 @@ def test_worker_dispatch_persists_empty_evidence_result(monkeypatch):
         assert record['status']=='completed'
         assert record['result']['outcome']=='insufficient_evidence'
     run(check())
+
+
+@pytest.mark.parametrize('entity_type', ['pair', 'person'])
+def test_persisted_relational_snapshot_preserves_serving_identity_on_insert_and_reuse(entity_type):
+    import uuid
+    from backend.ml.relational_feature_service import _persist_snapshot
+    async def check():
+        subject = str(uuid.uuid4())
+        stamp = datetime.utcnow()
+        async with session() as db:
+            args = dict(entity_type=entity_type, entity_id=subject,
+                feature_set_version='isolated-serving-contract', as_of=stamp, event_ts=stamp,
+                features={'degree': 3.0}, unavailable={}, run_id='isolated-contract', source_counts={})
+            first = await _persist_snapshot(db, **args)
+            repeated = await _persist_snapshot(db, **{**args, 'features': {'degree': 99.0}})
+            for snapshot in (first, repeated):
+                assert snapshot['entity_type'] == entity_type
+                assert snapshot['entity_id'] == subject
+                assert snapshot['features'] == {'degree': 3.0}
+                assert snapshot['features_checksum'] == first['features_checksum']
+            assert first['deduplicated'] is False
+            assert repeated['deduplicated'] is True
+    run(check())

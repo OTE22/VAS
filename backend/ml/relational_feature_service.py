@@ -58,6 +58,7 @@ async def _persist_snapshot(db: AsyncSession, *, entity_type: str, entity_id: st
         MLFeatureSnapshot.as_of_timestamp == as_of,
     ))).scalar_one()
     return {"snapshot_id": row.id, "deduplicated": not bool(result.rowcount),
+            "entity_type": row.entity_type, "entity_id": row.entity_id,
             "features": dict(row.features or {}),
             "unavailable_features": dict(row.unavailable_features or {}),
             "features_checksum": row.features_checksum,

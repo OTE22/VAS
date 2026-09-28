@@ -133,13 +133,13 @@ async def one(family, attempt):
                 if family!='tabular_regression_model':
                     try:
                         result['deployment']=await deploy_service(db,family,model_id=str(model.id),artifact_hash=model.artifact_hash,
-                            reason='Disposable mechanical validation; not production evidence',actor='validation-fixture',actor_id=None)
+                            reason='Disposable mechanical validation; not production evidence',actor='validation-fixture',actor_id=2)
                     except Exception as exc:
                         await db.rollback(); result['deployment_error']={'type':type(exc).__name__,'message':str(exc)}
                 else:
                     try:
                         await deploy_service(db,family,model_id=str(model.id),artifact_hash=model.artifact_hash,
-                            reason='Expected offline-only refusal',actor='validation-fixture',actor_id=None)
+                            reason='Expected offline-only refusal',actor='validation-fixture',actor_id=2)
                     except Exception as exc:
                         result['expected_offline_refusal']=getattr(exc,'code',type(exc).__name__)
                         await db.rollback()
@@ -174,7 +174,7 @@ async def one(family, attempt):
         if 'deployment' in result:
             async with db_manager.get_session() as db:
                 result['stop']=await stop_service(db,family,model_id=model_ref,
-                    reason='Finish isolated validation',actor='validation-fixture',actor_id=None)
+                    reason='Finish isolated validation',actor='validation-fixture',actor_id=2)
                 stopped=(await db.execute(select(MLModel).where(MLModel.id==uuid.UUID(model_ref)))).scalar_one()
                 assert stopped.stage=='archived', 'Stop did not archive the selected model'
                 from backend.ml.registry_service import registry_service
