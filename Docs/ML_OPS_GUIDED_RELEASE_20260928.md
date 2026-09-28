@@ -44,4 +44,17 @@ Checks before image build:
 - 23 standalone build-provenance tests passed.
 - Firefox fixture checks passed for compatible selections, persistence, durable-job progress/failure messages, evidence review, exact-hash connection, unavailable-service blocking, offline-only experiments and a 500px layout; zero JavaScript errors.
 
-Final image and rollout results follow after verification.
+Final image and rollout verification:
+
+- Built-image backend suite: **83 passed**; built-image static contracts: **71 passed**, two live-login tests excluded. The additional backend case covers rejecting a mismatched input feature schema.
+- Security Intelligence Firefox checks passed on the real graph canvas for pair/graph requests, exact model labels, no deployed model, HTTP failure, larger selections and checkbox changes during pending requests. Model-observation failures preserve the existing network view.
+- Release source commit: `1dd400c13bab02efadacf0847081ee08bd39bf2b`.
+- API image: `sha256:3155281a3b789b18608060696da2a0aa12bc9a12b40104f63783a2382617fb69`.
+- ML worker image: `sha256:93cfceb92b31e154e71e6e1d2b139da6bdde4fd69e226cb68550f24ad8e4e9c9`.
+- Both running containers report verified clean image provenance, build ID `fbced738f8a03b2783c88f8730865365387399d96273624bdea04811a1983cd6`.
+- Recreated only `face_recognition` and `ml_worker`; no active ML jobs existed before restart. Prior images remain tagged `before-guided-mlops-20260928` for infrastructure rollback.
+- Verified from VMS through the configured HTTPS CA: `/health/ready` returned 200, all 34 background services healthy, database/models/cache/queue healthy; protected ML status returned 401 without credentials; ML Ops redirected unauthenticated access to sign-in; updated JavaScript returned 200.
+- Read-only live service projection succeeded: worker healthy/idle, decision mode rules, zero models/datasets; 392 behavior snapshots and 372 pair snapshots. Those counts are historical feature rows, not training-quality evidence.
+- No production labels, training jobs or model selections were created by validation. Disposable test database/network and test browser fixtures were stopped after use.
+
+The workflow is deployed. Model training and governed activation remain operator actions using real available data. Camera-capacity validation remains a separate deployment exercise.
