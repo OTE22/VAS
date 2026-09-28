@@ -26,7 +26,7 @@ def _git_commit() -> str:
     """Best-effort commit id, without requiring git in the image.
 
     Priority: an explicitly injected GIT_COMMIT (the reliable path for baked
-    production images), then reading .git directly (works in the dev stack,
+    production images), then verified sealed image provenance, then reading .git directly (works in the dev stack,
     which bind-mounts the repository), then the git binary, then "unknown".
 
     GIT_COMMIT comes from settings, not os.environ: config.py is the one
@@ -36,6 +36,17 @@ def _git_commit() -> str:
     injected = (settings.GIT_COMMIT or "").strip()
     if injected:
         return injected
+
+    # Training, dataset lineage and health must resolve the same release.
+    # Production images deliberately exclude .git; a verified sealed manifest
+    # is authoritative, but a dirty/changed/unverified build must not supply it.
+    try:
+        from backend.ml.build_provenance import inspect_provenance
+        identity = inspect_provenance()
+        if identity.get("verified") and identity.get("git_commit"):
+            return identity["git_commit"]
+    except Exception:
+        pass  # Preserve best-effort health reporting if provenance is unavailable.
 
     git_dir = "/app/.git"
     try:
