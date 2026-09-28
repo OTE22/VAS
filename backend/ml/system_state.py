@@ -200,8 +200,8 @@ async def ml_system_state(db: AsyncSession) -> Dict[str, Any]:
     ml_mode_available = availability["modes"]["ml"]["available"]
     mapping = await decision_service._mapping_policy(db)
     contract = {
-        "dataset": "VALID_FOR_EXPERIMENTATION",
-        "feature_set": "ACTIVE",
+        "dataset": "BUILT_DATASETS_AVAILABLE" if ds_built else "NO_BUILT_DATASET",
+        "feature_set": "DEFINED" if active_defs else "NO_ACTIVE_DEFINITIONS",
         "model": ("SHADOW_APPROVED" if shadow and shadow_compatible
                   else "SHADOW_INCOMPATIBLE" if shadow else "NONE"),
         "engineering_readiness": _gate_of(shadow, "engineering_gate"),

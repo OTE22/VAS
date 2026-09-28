@@ -179,6 +179,17 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # =====================================================
 COPY . .
 
+# Reproducible training uses sealed build evidence, not a runtime .git folder.
+# deploy.sh derives these arguments from the actual checkout. Direct builds
+# without them remain runnable, but cannot claim clean release provenance.
+ARG VAS_BUILD_GIT_COMMIT=unknown
+ARG VAS_BUILD_GIT_DIRTY=unknown
+ARG VAS_BUILD_SOURCE_SHA256
+RUN python backend/ml/build_provenance.py seal
+LABEL org.opencontainers.image.revision=$VAS_BUILD_GIT_COMMIT \
+      io.vas.build.git-dirty=$VAS_BUILD_GIT_DIRTY \
+      io.vas.build.source-sha256=$VAS_BUILD_SOURCE_SHA256
+
 # =====================================================
 # Runtime directories & permissions
 # =====================================================

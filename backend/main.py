@@ -644,6 +644,8 @@ if risk_assessments_router:
     logger.info("✅ Risk assessments router registered")
 if ml_ops_router:
     app.include_router(ml_ops_router)
+    from backend.routes.ml_services import router as ml_services_router
+    app.include_router(ml_services_router)
     logger.info("✅ ML operations router registered")
     # Log available routes for debugging.
     # This iterated intelligence_router.routes — a copy-paste from the block

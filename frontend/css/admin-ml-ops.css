@@ -1827,3 +1827,67 @@
 .mlops-tool-heading input[role="switch"]:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 4px; }
 .mlops-tool-state { min-width: 3rem; font-size: .8rem; color: #b4d7eb; }
 .mlops-tool-detail { font-size: .78rem; color: #adc3d8; overflow-wrap: anywhere; line-height: 1.6; }
+
+/* Service-first guided workflow. Engineering workspaces remain available below. */
+.mlops-services, .mlops-journey {
+    background: #101c2b;
+    border: 1px solid #30465e;
+    border-radius: 14px;
+    margin-bottom: 20px;
+    padding: 22px;
+    color: #e6eef8;
+}
+.mlops-service-heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 14px; margin-bottom: 18px; }
+.mlops-service-heading h2 { color: #f1f6fc; font-size: 1.3rem; margin: 5px 0 7px; letter-spacing: 0; text-transform: none; }
+.mlops-service-heading p { color: #b8c9dd; margin: 0; line-height: 1.6; }
+.mlops-service-cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.mlops-service-card { text-align: left; display: flex; flex-direction: column; align-items: flex-start; gap: 11px; background: #152335; color: #e9f1fb; border: 1px solid #3c526c; border-radius: 10px; padding: 17px; font: inherit; cursor: pointer; min-width: 0; }
+.mlops-service-card:hover { background: #1b3046; border-color: #82b6d3; }
+.mlops-service-card.is-active { border: 2px solid #2ce3b0; padding: 16px; background: #10342f; }
+.mlops-service-card > i { color: #5ce1c1; font-size: 1.1rem; }
+.mlops-service-card > strong { font-size: 1rem; line-height: 1.4; }
+.mlops-service-card > span:not(.mlops-chip) { color: #bdcddd; font-size: .86rem; line-height: 1.5; }
+.mlops-service-card > .mlops-chip { margin-top: auto; white-space: normal; text-align: left; }
+.mlops-journey-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 22px 0; }
+.mlops-journey-steps button { display: grid; grid-template-columns: 28px 1fr; text-align: left; column-gap: 10px; row-gap: 4px; border: 1px solid #3b506b; border-radius: 8px; padding: 13px; background: #172538; color: #c4d4e8; font: inherit; cursor: pointer; }
+.mlops-journey-steps button > span { grid-row: 1 / 3; border: 1px solid #52738d; align-self: center; border-radius: 50%; width: 28px; height: 28px; display: grid; place-items: center; font-size: .82rem; }
+.mlops-journey-steps button strong { font-size: .93rem; }
+.mlops-journey-steps button small { font-size: .79rem; color: #a8bbd0; }
+.mlops-journey-steps button.is-active { background: #14382f; border-color: #2ce3b0; color: #effff8; }
+.mlops-journey-steps button.is-active > span { background: #2ce3b0; border-color: #2ce3b0; color: #09281f; }
+.mlops-journey-panel { background: #142131; border: 1px solid #34495f; border-radius: 10px; padding: 22px; outline: none; }
+.mlops-journey-panel[hidden] { display: none !important; }
+.mlops-journey-panel h3 { margin: 0 0 10px; font-size: 1.08rem; color: #f2f6fb; }
+.mlops-journey-panel p { color: #bdcede; line-height: 1.65; max-width: 85ch; }
+.mlops-guided-field { display: grid; gap: 9px; font-weight: 600; max-width: 780px; margin: 20px 0 10px; }
+.mlops-guided-field select { width: 100%; min-width: 0; background: #0c1928; color: #f0f6ff; font-size: .94rem; min-height: 44px; }
+.mlops-guided-field option { background: #102236; color: #f0f6ff; }
+.mlops-guided-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.mlops-guided-actions .mlops-btn { min-height: 44px; justify-content: center; white-space: normal; }
+.mlops-service-evidence { padding: 5px 0; }
+.mlops-service-evidence .mlops-kv { margin: 0; }
+.mlops-service-blocker-list { margin: 10px 0; border-left: 3px solid #eaba64; padding: 10px 16px 10px 30px; background: #2c2922; color: #f4dcb1; line-height: 1.6; border-radius: 6px; }
+.mlops-service-blocker-list li + li { margin-top: 5px; }
+.mlops-service-job { margin-top: 16px; background: #182c40; padding: 17px; border: 1px solid #405e79; border-radius: 9px; }
+.mlops-service-job[hidden] { display: none; }
+.mlops-service-job p { line-height: 1.6; margin: 8px 0; }
+.mlops-advanced-tools { margin: 20px 0; border-top: 1px solid #334d67; padding-top: 12px; }
+.mlops-advanced-tools > summary { cursor: pointer; color: #dce9f9; padding: 14px 5px; font-weight: 600; font-size: 1rem; }
+.mlops-advanced-tools > summary span { font-weight: 400; font-size: .85rem; color: #9fb5cd; padding-left: 12px; }
+.mlops-advanced-tools[open] > summary { margin-bottom: 16px; }
+.mlops-service-card:focus-visible, .mlops-journey-steps button:focus-visible, .mlops-guided-actions a:focus-visible, .mlops-guided-actions button:focus-visible { outline: 3px solid #76c9ff; outline-offset: 3px; }
+@media (max-width: 1150px) {
+    .mlops-service-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .mlops-journey-steps button { grid-template-columns: 1fr; }
+    .mlops-journey-steps button > span { grid-row: auto; }
+}
+@media (max-width: 700px) {
+    .mlops-services, .mlops-journey { padding: 15px; border-radius: 10px; }
+    .mlops-service-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mlops-service-card { padding: 13px; }
+    .mlops-service-card.is-active { padding: 12px; }
+    .mlops-journey-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mlops-journey-panel { padding: 15px; }
+    .mlops-guided-actions { align-items: stretch; flex-direction: column; }
+    .mlops-advanced-tools > summary span { display: block; margin-top: 7px; padding-left: 0; }
+}

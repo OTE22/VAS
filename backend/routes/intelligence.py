@@ -2171,3 +2171,55 @@ async def calculate_activity_correlation(
     except Exception as e:
         raise _safe_500("activity correlation", e)
 
+
+
+class ModelInsightRequest(BaseModel):
+    identity_id: uuid_mod.UUID
+    related_identity_id: Optional[uuid_mod.UUID] = None
+
+
+@router.post("/api/security/model-insights", tags=["Security Intelligence"])
+async def network_model_insights(
+    body: ModelInsightRequest, db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin()),
+    _csrf: None = Depends(require_intel_csrf),
+    _rl: None = Depends(rate_limited("model_insights", heavy=True)),
+):
+    """One selected graph node or pair, using the deployed observational model.
+
+    No model means no feature extraction. Observations never change the
+    statistical graph, risk score or identity decision.
+    """
+    from backend.ml.registry_service import registry_service, RegistryError
+    from backend.ml.model_scoring_service import score_relational_subject
+    identity_id = str(body.identity_id)
+    related_id = str(body.related_identity_id) if body.related_identity_id else None
+    if related_id == identity_id:
+        raise HTTPException(status_code=422, detail="Choose two different identities for pair analysis")
+    await _get_identity_or_404(db, identity_id)
+    if related_id:
+        await _get_identity_or_404(db, related_id)
+    model_type = "coappearance_anomaly_model" if related_id else "social_graph_anomaly_model"
+    try:
+        deployed = await registry_service.get_stage_model(db, model_type, "shadow")
+        if deployed is None:
+            return {"status": "not_deployed", "model_type": model_type,
+                    "applied_to_live_result": False,
+                    "note": "No model is deployed for this analysis. Prepare and activate one in ML Operations."}
+        result = await _bounded_intel_call("model_insights", score_relational_subject(
+            db, model_type=model_type, identity_id=identity_id,
+            related_identity_id=related_id, model_id=str(deployed.id),
+            consumer="security_intelligence"))
+        _audit("network_model_observation", current_user, identity_id,
+               model_id=result.get("model_id"), model_type=model_type)
+        return {"status": "observed", "observation": result, "applied_to_live_result": False,
+                "note": "Deployed model observation for investigation. It does not change the network or threat score."}
+    except RegistryError as exc:
+        await db.rollback()
+        return {"status": "unavailable", "model_type": model_type,
+                "reason_code": exc.code, "applied_to_live_result": False,
+                "note": "The deployed model could not provide an observation for this selection. Check service readiness in ML Operations."}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _safe_500("network model insights", exc)

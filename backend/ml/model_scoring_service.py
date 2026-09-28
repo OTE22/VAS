@@ -2,9 +2,9 @@
 
 This service is deliberately admin-facing and observational.  It never
 mutates a threat assessment, alert, watchlist or decision mode.  Anomaly
-models may score only from the registry's approved shadow stage; a threat
-ranker may score only a validated, explicitly identified candidate and its
-output is labelled as relative analyst priority.
+models may score only from the registry's approved shadow stage. A threat
+ranker resolves the explicitly approved analyst model; validated candidates
+require an explicit id for testing. Output is relative analyst priority.
 """
 
 import math
@@ -43,12 +43,12 @@ async def _load_model(db, model_type: str, model_id: Optional[str]):
         row = await registry_service.get_model(db, model_id)
         if row is None or row.model_type != model_type:
             raise RegistryError("MODEL_NOT_FOUND", "model not found for the requested type")
-        allowed = ("validated", "shadow") if model_type == MODEL_TYPE_THREAT_RANKING else ("shadow",)
+        allowed = ("validated", "approved") if model_type == MODEL_TYPE_THREAT_RANKING else ("shadow",)
         if row.stage not in allowed:
             raise RegistryError("MODEL_STAGE_NOT_SERVABLE",
                                 f"{model_type} must be in {allowed}, found {row.stage}")
     else:
-        stage = "validated" if model_type == MODEL_TYPE_THREAT_RANKING else "shadow"
+        stage = "approved" if model_type == MODEL_TYPE_THREAT_RANKING else "shadow"
         row = await registry_service.get_stage_model(db, model_type, stage)
         if row is None:
             raise RegistryError("MODEL_NOT_AVAILABLE", f"no {stage} {model_type} is available")
@@ -66,6 +66,9 @@ async def _score_snapshot(db, *, model_type: str, snapshot: Dict[str, Any],
                           model_id: Optional[str] = None) -> Dict[str, Any]:
     started = time.monotonic()
     row, payload, spec = await _load_model(db, model_type, model_id)
+    if snapshot.get("feature_set_version") != spec.feature_set_version:
+        raise RegistryError("FEATURE_SCHEMA_MISMATCH",
+                            "input snapshot does not match the selected service model schema")
     vector, missing = preprocess_feature_vector(payload, snapshot["features"])
     if len(missing) == len(payload["feature_names"]):
         raise RegistryError("MISSING_REQUIRED_FEATURES", "all model features are unavailable")
@@ -101,7 +104,10 @@ async def _score_snapshot(db, *, model_type: str, snapshot: Dict[str, Any],
 
 async def score_relational_subject(db, *, model_type: str, identity_id: str,
                                    related_identity_id: Optional[str] = None,
-                                   model_id: Optional[str] = None) -> Dict[str, Any]:
+                                   model_id: Optional[str] = None,
+                                   consumer: str = "ml_ops") -> Dict[str, Any]:
+    if consumer not in ("ml_ops", "security_intelligence"):
+        raise RegistryError("INVALID_CONSUMER", "Unknown observational model consumer")
     now = datetime.utcnow().replace(second=0, microsecond=0)
     run_id = f"on-demand-{uuid.uuid4().hex[:12]}"
     if model_type == MODEL_TYPE_COAPPEARANCE_ANOMALY:
@@ -127,32 +133,69 @@ async def score_relational_subject(db, *, model_type: str, identity_id: str,
     else:
         raise RegistryError("MODEL_TYPE_NOT_RELATIONAL", "requested model is not a relational anomaly model")
     await db.commit()
-    return await _score_snapshot(db, model_type=model_type, snapshot=snapshot, model_id=model_id)
+    result = await _score_snapshot(db, model_type=model_type, snapshot=snapshot, model_id=model_id)
+    await _record_consumption(db, result, consumer=consumer)
+    await db.commit()
+    return result
 
 
 async def rank_identities(db, identity_ids: Iterable[str], *,
                           model_id: Optional[str] = None) -> Dict[str, Any]:
     from backend.ml.feature_store import feature_store
 
+    # Resolve once for the whole queue. A concurrently approved model cannot
+    # split one ranking response across versions; an explicit candidate id is
+    # still supported for operator testing.
+    requested_ids = list(dict.fromkeys(str(value) for value in identity_ids))
+    try:
+        resolved, _, _ = await _load_model(db, MODEL_TYPE_THREAT_RANKING, model_id)
+    except RegistryError as exc:
+        return {"items": [{"subject_type": "person", "subject_id": identity_id,
+                "error_code": exc.code, "message": exc.message,
+                "applied_to_live_result": False} for identity_id in requested_ids],
+                "total": len(requested_ids), "scored": 0, "failed": len(requested_ids),
+                "model_id": None, "model_version": None,
+                "semantics": "relative analyst review priority; not a threat probability",
+                "applied_to_live_result": False}
+    resolved_id = str(resolved.id)
     items = []
-    for identity_id in dict.fromkeys(str(value) for value in identity_ids):
+    for identity_id in requested_ids:
         try:
             snapshot = await feature_store.compute_online_features(db, identity_id)
             scored = await _score_snapshot(
                 db, model_type=MODEL_TYPE_THREAT_RANKING,
                 snapshot={**snapshot, "entity_type": "person", "entity_id": identity_id},
-                model_id=model_id)
+                model_id=resolved_id)
             items.append(scored)
         except Exception as exc:
             code = exc.code if isinstance(exc, RegistryError) else "FEATURE_COMPUTATION_FAILED"
             items.append({"subject_type": "person", "subject_id": identity_id,
-                          "error_code": code, "message": str(exc)[:300],
+                          "error_code": code, "message": "This identity could not be scored; inspect its feature readiness.",
                           "applied_to_live_result": False})
     successful = [item for item in items if item.get("score") is not None]
     successful.sort(key=lambda item: (-item["score"], item["subject_id"]))
     failed = [item for item in items if item.get("score") is None]
+    if successful:
+        await _record_consumption(db, successful[0], scored=len(successful), failed=len(failed),
+                                  candidate_test=resolved.stage == "validated",
+                                  consumer="ml_ops_analyst_review")
+        await db.commit()
     return {"items": successful + failed, "total": len(items),
+            "model_id": resolved_id, "model_version": f"{MODEL_TYPE_THREAT_RANKING}-v{resolved.version}",
+            "candidate_test": resolved.stage == "validated",
             "scored": len(successful), "failed": len(failed),
             "semantics": "relative analyst review priority; not a threat probability",
             "applied_to_live_result": False}
 
+
+
+async def _record_consumption(db, result, **extra):
+    """Durable exact-version observation; never treated as a live decision."""
+    from backend.ml.audit import ml_audit
+    await ml_audit(db, action="ml_candidate_tested" if extra.get("candidate_test") else "ml_service_consumed", object_type="ml_model",
+        object_id=result["model_id"], after={
+            "model_type": result["model_type"], "model_version": result["model_version"],
+            "feature_set_version": result["feature_set_version"],
+            "threshold_version": result.get("threshold_version"),
+            "latency_ms": result.get("latency_ms"), "applied_to_live_result": False,
+            **extra})

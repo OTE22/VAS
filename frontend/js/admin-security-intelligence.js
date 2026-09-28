@@ -1348,6 +1348,8 @@
             document.getElementById('network-days-back').value, 90) || 90;
 
         const req = beginRequest('network');
+        const modelPanel = document.getElementById('network-model-insights');
+        if (modelPanel) { modelPanel.hidden = true; modelPanel.replaceChildren(); }
         const btn = document.getElementById('network-analyze-btn');
         if (btn) btn.disabled = true;
         renderLoading(graphContainer, 'Building network graph...');
@@ -1364,11 +1366,45 @@
             renderNetwork(data || {});
             prependEngineBadge(document.getElementById('network-stats'), data && data.engine);
             updateNetworkStats(data || {});
+            await loadNetworkModelInsights(identityIds, req);
         } catch (err) {
             if (err.aborted || !req.isCurrent()) return;
             renderError(graphContainer, 'Failed to load network', err.referenceId);
         } finally {
             if (req.isCurrent() && btn) btn.disabled = false;
+        }
+    }
+
+    async function loadNetworkModelInsights(identityIds, req) {
+        const container = document.getElementById('network-model-insights');
+        if (!container) return;
+        const enabled = document.getElementById('network-include-ml');
+        if (!enabled || !enabled.checked) { container.hidden = true; container.replaceChildren(); return; }
+        container.hidden = false;
+        if (!Array.isArray(identityIds) || identityIds.length < 1 || identityIds.length > 2) {
+            container.replaceChildren(el('p', { text: 'Select one identity for a graph-model observation, or two for a pair-model observation. The network analysis remains available for larger selections.' }));
+            return;
+        }
+        renderStateInto(container, 'fas fa-spinner fa-spin', 'Checking deployed model observation…');
+        try {
+            const data = await api('/api/security/model-insights', {
+                method: 'POST', signal: req.signal, timeout: LONG_TIMEOUT_MS,
+                body: { identity_id: identityIds[0], related_identity_id: identityIds.length === 2 ? identityIds[1] : null }
+            });
+            if (!req.isCurrent()) return;
+            const observation = data.observation;
+            const children = [el('strong', { text: 'Deployed ML observation' }), el('p', { text: safeText(data.note) })];
+            if (data.status === 'observed' && observation) {
+                children.push(el('p', { text: 'Model: ' + safeText(observation.model_version) + ' · Observational score: ' + formatScore(observation.score, 3) + ' / 1 (not a probability)' }));
+                children.push(el('p', { text: 'Threshold version: ' + safeText(observation.threshold_version, 'not available') }));
+            } else if (data.reason_code) {
+                children.push(el('p', { text: 'Reason: ' + safeText(data.reason_code).replace(/_/g, ' ').toLowerCase() }));
+            }
+            children.push(el('a', { href: '/admin/ml-ops', text: 'Open ML Operations' }));
+            container.replaceChildren(...children);
+        } catch (err) {
+            if (err.aborted || !req.isCurrent()) return;
+            container.replaceChildren(el('p', { text: 'Model observation is unavailable. The network analysis above still uses its existing statistical rules.' }));
         }
     }
 

@@ -289,6 +289,8 @@ async def execute_job(job_id: str) -> int:
                 error_code="MLFLOW_SYNC_FAILED" if result.get("status") == "failed" else None)
             return 0 if result.get("status") in ("synchronized", "disabled") else 2
         if task_type == "ml_training":
+            from backend.ml.guided_training import prepare_training_inputs
+            await prepare_training_inputs(job_id, payload)
             from backend.ml import trainer
             busy = trainer.try_acquire_training(job_id)
             if busy is not None:
@@ -377,6 +379,12 @@ async def execute_job(job_id: str) -> int:
 
         raise RuntimeError(f"unsupported ML task type {task_type!r}")
     except Exception as exc:
+        from backend.ml.guided_training import GuidedTrainingRefusal
+        if isinstance(exc, GuidedTrainingRefusal):
+            await task_history_manager.finish_job(job_id, success=False,
+                error_code=exc.code, error_message=exc.message,
+                cancelled=exc.code == "PREPARATION_CANCELLED")
+            return 2
         logger.error("[ML_WORKER] job failed job_id=%s: %s", job_id, exc, exc_info=True)
         await task_history_manager.finish_job(
             job_id, success=False, error_code=("THRESHOLD_JOB_TIMEOUT" if isinstance(exc, TimeoutError) else "THRESHOLD_JOB_FAILED") if task_type == "threshold_learning" else "ML_JOB_FAILED",

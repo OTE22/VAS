@@ -695,11 +695,17 @@ stage_build() {
     local version
     version="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)"
     info "image version: $version"
+    # Only these non-secret values enter the build. Never export runtime env.
+    local provenance_output
+    local -a provenance_args=()
+    provenance_output="$(python3 "$ROOT/backend/ml/build_provenance.py" args --root "$ROOT")" \
+        || stage_fail "could not record build provenance"
+    while IFS= read -r arg; do provenance_args+=("$arg"); done <<< "$provenance_output"
     if [ "$ONLINE" = "1" ]; then
-        compose_mutate build --pull || stage_fail "image build failed"
+        compose_mutate build "${provenance_args[@]}" --pull || stage_fail "image build failed"
     else
         info "offline: building without --pull (base images must already be present)"
-        compose_mutate build || stage_fail "image build failed (offline: are the base images loaded?)"
+        compose_mutate build "${provenance_args[@]}" || stage_fail "image build failed (offline: are the base images loaded?)"
     fi
     PENDING_DEPLOY_VERSION="$version"
     if [ "$DRY_RUN" = "1" ]; then

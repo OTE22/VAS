@@ -649,7 +649,7 @@ async def run_training_job(job_id: str, *, model_type: str = MODEL_TYPE_BEHAVIOR
         return
 
     from backend.ml.training_telemetry import TrainingTelemetry
-    telemetry = TrainingTelemetry(dataset_id)
+    telemetry = TrainingTelemetry(dataset_id, model_type=model_type)
 
     async def stage(name: str, percent: int):
         logger.info("[ML_OPS] job_id=%s training_stage=%s progress_percent=%s",

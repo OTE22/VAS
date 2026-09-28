@@ -3,21 +3,17 @@ import hashlib
 import importlib.metadata
 import os
 import platform
-import subprocess
 from pathlib import Path
 
 
 def capture(seed, parameters, dataset=None, pipeline=None, require_clean=False):
     from backend.ml.registry_service import RegistryError
     root = Path(__file__).resolve().parents[2]
-    def git(*args):
-        try:
-            return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-        except Exception:
-            return None
-    commit, status = git("rev-parse", "HEAD"), git("status", "--porcelain", "--untracked-files=normal")
-    if require_clean and (not commit or status is None or status):
-        raise RegistryError("REPRODUCIBILITY_CODE_UNVERIFIED", "A clean, identifiable Git checkout is required for this run")
+    from backend.ml.build_provenance import inspect_provenance
+    code_identity = inspect_provenance(root)
+    commit, dirty = code_identity.get("git_commit"), code_identity.get("git_dirty")
+    if require_clean and not code_identity["verified"]:
+        raise RegistryError("REPRODUCIBILITY_CODE_UNVERIFIED", code_identity["reason"])
     digest = hashlib.sha256()
     for directory in (root / "backend" / "ml",):
         for file in sorted(directory.glob("*.py")):
@@ -28,7 +24,8 @@ def capture(seed, parameters, dataset=None, pipeline=None, require_clean=False):
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             pass
-    return {"manifest_version": 1, "git_commit": commit, "git_dirty": None if status is None else bool(status),
+    return {"manifest_version": 2, "git_commit": commit, "git_dirty": dirty,
+            "code_identity": code_identity,
             "training_source_sha256": digest.hexdigest(), "seed": seed, "parameters": parameters,
             "dataset": dataset, "pipeline": pipeline, "dependencies": versions,
             "environment_dependencies": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions() if d.metadata.get("Name")},

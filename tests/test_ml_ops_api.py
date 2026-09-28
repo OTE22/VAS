@@ -142,7 +142,7 @@ def test_overview_carries_the_seven_warnings_verbatim(token):
         "Heuristic scores are not probabilities.",
         "Uncalibrated model outputs are not probabilities.",
         "Shadow mode does not affect live decisions.",
-        "ML and HYBRID modes are currently gated.",
+        "Live ML activation depends on service readiness; HYBRID is unavailable.",
         "Drift does not automatically prove model failure.",
         "Human review remains required.",
     ]

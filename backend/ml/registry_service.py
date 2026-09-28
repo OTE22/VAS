@@ -315,9 +315,29 @@ class RegistryService:
         before_stage = row.stage
 
         if to_stage == "approved":
+            # A reviewed analyst model is an explicit service selection. Serialize
+            # competing approvals and retire prior selections in this transaction;
+            # never resolve service use to an unrelated newer validated candidate.
+            from sqlalchemy import text
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                             {"key": "ml-approved-service:" + row.model_type})
             validate_artifact(row.artifact_path, expected_hash=row.artifact_hash,
                               expected_feature_names=row.feature_names,
                               expected_dependencies=row.dependency_versions)
+            prior = (await db.execute(select(MLModel).where(
+                MLModel.model_type == row.model_type,
+                MLModel.stage == "approved", MLModel.id != row.id)
+                .with_for_update())).scalars().all()
+            from backend.ml.mlflow_tracking import mark_pending
+            for previous in prior:
+                previous.stage = "archived"
+                previous.archived_at = now
+                await mark_pending(db, previous)
+                await ml_audit(db, action="model_archived", actor_username=actor,
+                    actor_user_id=actor_user_id, object_type="ml_model",
+                    object_id=str(previous.id), before={"stage": "approved"},
+                    after={"stage": "archived", "replacement_model_id": str(row.id)},
+                    reason="replaced by explicitly approved analyst model")
             row.approved_at = now
             row.approved_by = actor[:255]
 

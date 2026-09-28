@@ -351,7 +351,8 @@ def test_overview_contract_and_evidence_block(token):
     assert c["rules"] == "AUTHORITATIVE" and c["fallback"] == "RULES"
     assert c["signal_mapping"] == "REQUIRES_VALIDATION" and c["ml_decision_authority"] == "DISABLED"
     assert c["scientific_validity"] in ("INSUFFICIENT_EVIDENCE", "NOT_RECORDED")
-    assert c["dataset"] == "VALID_FOR_EXPERIMENTATION" and c["feature_set"] == "ACTIVE"
+    assert c["dataset"] in ("BUILT_DATASETS_AVAILABLE", "NO_BUILT_DATASET")
+    assert c["feature_set"] in ("DEFINED", "NO_ACTIVE_DEFINITIONS")
     status, ev = _http("GET", "/api/ml/shadow/evidence?days=90", token=token)
     assert status == 200 and ev["mapping_decision"] == "REQUIRES_VALIDATION"
     for entry in ev["models"].values():

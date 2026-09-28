@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 
 
 class TrainingTelemetry:
-    def __init__(self, dataset_id=None):
+    def __init__(self, dataset_id=None, model_type=None):
         self.dataset_id = dataset_id
+        self.model_type = model_type
         self.events = []
         self.started = time.monotonic()
         self.previous = self.started
@@ -26,5 +27,5 @@ class TrainingTelemetry:
             resources["cpu_seconds"] = round(cpu.user + cpu.system, 2)
         except Exception:
             resources["status"] = "unavailable"
-        return {"stage": name, "dataset_id": self.dataset_id,
+        return {"stage": name, "dataset_id": self.dataset_id, "model_type": self.model_type,
                 "stage_history": [dict(e) for e in self.events], "resource_usage": resources}

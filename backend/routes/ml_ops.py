@@ -235,6 +235,7 @@ class TrainingRequest(BaseModel):
     sampling_policy: Optional[str] = Field(default=None, pattern="^(refuse|newest_first|oldest_first)$")
     pipeline_id: Optional[uuid_mod.UUID] = None
     run_options: RunOptions = Field(default_factory=RunOptions)
+    prepare_features: bool = Field(default=False, description="Guided workflow: prepare features before building and training; saved datasets are reused unchanged")
 
 
 class PipelineCreateRequest(BaseModel):
@@ -548,7 +549,7 @@ async def ml_overview(
                 "Heuristic scores are not probabilities.",
                 "Uncalibrated model outputs are not probabilities.",
                 "Shadow mode does not affect live decisions.",
-                "ML and HYBRID modes are currently gated.",
+                "Live ML activation depends on service readiness; HYBRID is unavailable.",
                 "Drift does not automatically prove model failure.",
                 "Human review remains required.",
             ],
@@ -1225,9 +1226,19 @@ async def create_training_job(
                      f"{body.algorithm} is not valid for {body.model_type}; "
                      f"choose one of {spec.algorithms}")
 
+    if body.prepare_features:
+        from backend.ml.guided_training import preflight_guided_training, GuidedTrainingRefusal
+        try:
+            await preflight_guided_training(db, model_type=body.model_type, dataset_id=body.dataset_id)
+        except GuidedTrainingRefusal as exc:
+            details = dict(exc.details)
+            status_code = details.pop("status_code", 422)
+            raise _error(status_code, exc.code, exc.message, **details)
+
     try:
         from backend.ml.job_service import enqueue_ml_job, MLJobConflict
         payload = {
+            "prepare_features": body.prepare_features,
             "model_type": body.model_type, "algorithm": body.algorithm,
             "requested_by": _actor_id(current_user),
             "dataset_id": body.dataset_id, "seed": body.seed,
@@ -1255,7 +1266,8 @@ async def create_training_job(
                               "dataset_id": body.dataset_id,
                               "seed": body.seed,
                               "hyperparameters": body.hyperparameters, "pipeline": pipeline,
-                              "run_options": body.run_options.model_dump()})
+                              "run_options": body.run_options.model_dump(),
+                              "prepare_features": body.prepare_features})
         await db.commit()
         return JSONResponse(status_code=202, content=outcome)
     except HTTPException:

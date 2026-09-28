@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-18">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-19-services">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -30,8 +30,8 @@
                     </div>
                     <div class="header-text">
                         <div class="mlops-eyebrow">ML control center</div>
-                        <h1 class="page-title">Machine Learning Operations</h1>
-                        <p class="page-description">See what is running, prepare data, review models, and monitor results. Rules remain the production decision authority.</p>
+                        <h1 class="page-title">ML Services</h1>
+                        <p class="page-description">Choose a service, prepare its data, review a model, and connect it to the application. Follow one guided journey from setup to monitoring.</p>
                     </div>
                 </div>
                 <div class="mlops-page-actions">
@@ -66,6 +66,44 @@
                 </article>
             </section>
 
+            <section class="mlops-services" aria-labelledby="mlops-services-title">
+                <div class="mlops-service-heading"><div><span class="mlops-guide-label">1 · Choose what you want to improve</span><h2 id="mlops-services-title">Your services</h2><p>Each service has its own data, model, and deployment status.</p></div><span class="mlops-chip chip-info">Scope: all configured cameras</span></div>
+                <div id="mlops-service-cards" class="mlops-service-cards" aria-label="Choose a service"><p class="mlops-loading">Loading service status…</p></div>
+            </section>
+            <section class="mlops-journey" aria-labelledby="mlops-journey-title">
+                <div class="mlops-service-heading"><div><span class="mlops-guide-label">Selected service</span><h2 id="mlops-journey-title">Behavior assessment</h2><p id="mlops-service-destination">Checking the consuming application…</p></div><span id="mlops-service-state" class="mlops-chip chip-warn">Checking</span></div>
+                <div id="mlops-service-blockers" role="status" aria-live="polite"></div>
+                <nav class="mlops-journey-steps" aria-label="Service setup stages">
+                    <button type="button" data-journey-stage="prepare" aria-pressed="true"><span>1</span><strong>Prepare &amp; train</strong><small>Create a candidate</small></button>
+                    <button type="button" data-journey-stage="test" aria-pressed="false"><span>2</span><strong>Test &amp; review</strong><small>Check evidence</small></button>
+                    <button type="button" data-journey-stage="activate" aria-pressed="false"><span>3</span><strong>Connect service</strong><small>Review and enable</small></button>
+                    <button type="button" data-journey-stage="monitor" aria-pressed="false"><span>4</span><strong>Monitor</strong><small>Verify actual use</small></button>
+                </nav>
+                <div class="mlops-journey-panel" data-journey-panel="prepare">
+                    <h3>Prepare data and train with recommended settings</h3>
+                    <p id="mlops-prepare-copy">One durable job collects features, builds and validates a dataset, then trains and evaluates a compatible candidate. This does not activate a model.</p>
+                    <label class="mlops-guided-field" for="service-dataset-select">Training data<select id="service-dataset-select" class="mlops-select"><option value="">Prepare a new dataset from available history</option></select></label>
+                    <p id="service-dataset-note" class="mlops-mode-desc">Only compatible, verified datasets appear here.</p>
+                    <div class="mlops-guided-actions"><button type="button" id="service-train-btn" class="mlops-btn mlops-btn-primary" disabled><i class="fas fa-play" aria-hidden="true"></i> Prepare &amp; train</button><button type="button" id="service-training-advanced" class="mlops-btn">Advanced training options</button></div>
+                </div>
+                <div class="mlops-journey-panel" data-journey-panel="test" hidden>
+                    <h3>Review the candidate before connecting it</h3><p>Check held-out evaluation, data quality and the exact deployment blockers. A completed training job alone does not approve a model.</p>
+                    <label class="mlops-guided-field" for="service-model-select">Candidate for this service<select id="service-model-select" class="mlops-select"><option value="">No candidate yet</option></select></label>
+                    <div id="service-model-evidence" class="mlops-service-evidence" role="status" aria-live="polite"></div>
+                    <div class="mlops-guided-actions"><button type="button" id="service-review-btn" class="mlops-btn" disabled>Inspect full evidence</button><button type="button" id="service-readiness-btn" class="mlops-btn" disabled>Recheck readiness</button><button type="button" id="service-continue-btn" class="mlops-btn mlops-btn-primary" disabled>Continue to connection</button></div>
+                </div>
+                <div class="mlops-journey-panel" data-journey-panel="activate" hidden>
+                    <h3 id="service-connect-title">Connect the reviewed model</h3><div id="service-activation-summary" class="mlops-service-evidence"></div>
+                    <p id="service-activation-note">Connection selects an exact model version for the named service. Current lifecycle and evidence gates are checked by the server.</p>
+                    <div class="mlops-guided-actions"><button type="button" id="service-deploy-btn" class="mlops-btn mlops-btn-primary" disabled>Connect reviewed model</button><button type="button" id="service-shadow-btn" class="mlops-btn" hidden>Start observing alongside rules</button><button type="button" id="service-mode-advanced" class="mlops-btn" hidden>Review live decision gates</button></div>
+                </div>
+                <div class="mlops-journey-panel" data-journey-panel="monitor" hidden>
+                    <h3>Confirm that the application uses your model</h3><div id="service-consumption" class="mlops-service-evidence" role="status" aria-live="polite"></div>
+                    <div class="mlops-guided-actions"><a id="service-open-consumer" class="mlops-btn mlops-btn-primary" href="/admin/security-intelligence">Open consuming service</a><button type="button" id="service-monitor-refresh" class="mlops-btn">Refresh usage</button><button type="button" id="service-stop-btn" class="mlops-btn" disabled>Stop service model</button></div>
+                </div>
+                <div id="service-action-note" class="mlops-note" role="status" aria-live="polite"></div>
+                <div id="service-job-progress" class="mlops-service-job" role="status" aria-live="polite" hidden></div>
+            </section>
                 <div class="mlops-next-step">
                     <div class="mlops-next-step-icon"><i class="fas fa-compass" aria-hidden="true"></i></div>
                     <div role="status" aria-live="polite">
@@ -75,6 +113,8 @@
                     </div>
                     <button class="mlops-btn mlops-btn-primary" id="mlops-next-step-action" type="button" data-open-mlops-view="overview">Open overview</button>
                 </div>
+            <details class="mlops-advanced-tools" id="mlops-advanced-tools">
+                <summary>Advanced tools <span>Detailed evidence, algorithms, labels, integrations and audit</span></summary>
             <details class="mlops-guide" aria-labelledby="mlops-guide-title">
                 <summary>Workspace guide and recommended actions</summary>
                 <div class="mlops-guide-intro">
@@ -152,7 +192,7 @@
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Heuristic scores are not probabilities.</li>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Uncalibrated model outputs are not probabilities.</li>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Shadow mode does not affect live decisions.</li>
-                    <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> ML and HYBRID modes are currently gated.</li>
+                    <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Live decision modes require their backend evidence gates; check current availability.</li>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Drift does not automatically prove model failure.</li>
                     <li><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Human review remains required.</li>
                 </ul>
@@ -516,7 +556,7 @@
                                 <div class="mlops-form-row"><label for="platform-space">Search space (JSON)</label><textarea id="platform-space" rows="4" spellcheck="false">{"max_depth":{"type":"int","low":2,"high":6},"learning_rate":{"type":"float","low":0.01,"high":0.2,"log":true}}</textarea></div>
                             </div>
                             <label><input type="checkbox" id="platform-shap" aria-describedby="platform-options-reading platform-shap-help" disabled> Generate SHAP explanations</label><p id="platform-shap-help">Checking availability...</p>
-                            <label><input type="checkbox" id="platform-clean" aria-describedby="platform-clean-reading"> Require a clean, identifiable Git checkout</label><p id="platform-clean-reading">Advanced reproducibility control: this refuses a run if the source revision cannot be identified or has uncommitted changes. Leave it off for an initial run; code and environment evidence are still recorded.</p>
+                            <label><input type="checkbox" id="platform-clean" aria-describedby="platform-clean-reading"> Require verified clean build provenance</label><p id="platform-clean-reading">Advanced reproducibility control: this checks the immutable build manifest in deployed images, or source revision in a development checkout. Leave it off for an initial run; code and environment evidence are still recorded.</p>
                             <p>Dataset checksums, code identity, seed, parameters, dependencies and runtime are recorded on every run. SHAP uses a bounded holdout sample and does not establish causation.</p>
                         </fieldset>
                         <div class="mlops-form-row">
@@ -753,6 +793,7 @@
                 </div>
 
             </div>
+            </details>
         </div>
     </main>
 
@@ -799,7 +840,7 @@
     <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
     <script src="/frontend/js/mlops-workflow.js?v=workflow-3"></script>
     <script src="/frontend/js/mlops-diagnostics.js?v=2"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-21"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-22-services"></script>
     <script src="/frontend/js/mlops-tour.js?v=1"></script>
     <script src="/frontend/js/mlops-tools.js?v=1"></script>
 </body>
