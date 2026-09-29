@@ -1925,3 +1925,47 @@
 #existing-data-inspector .mlops-form-row label { display: flex; flex-direction: column; gap: .4rem; }
 #existing-data-cameras { display: flex; flex-wrap: wrap; gap: .8rem; margin: 1rem 0; padding: .8rem; }
 #existing-data-output .mlops-table-wrap { max-height: 480px; overflow: auto; }
+
+/* Readable preparation and validation evidence across the guided and advanced views. */
+.mlops-training-checks { grid-column: 1 / -1; min-width: 0; border: 1px solid #496279; border-radius: 12px; padding: 18px; background: #102332; color: #e5eef5; }
+.mlops-training-checks[data-state="blocked"] { border-top: 3px solid #efbc67; }
+.mlops-training-checks[data-state="failed"] { border-top: 3px solid #ef9298; }
+.mlops-training-checks h4, .mlops-validation-report h4 { margin: 0 0 12px; font-size: 1rem; }
+.mlops-training-checks p { line-height: 1.6; overflow-wrap: anywhere; }
+.mlops-training-track { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 0; margin: 16px 0; list-style: none; }
+.mlops-training-track li { display: grid; gap: 7px; align-content: start; border: 1px solid #43596e; border-radius: 8px; padding: 12px; min-width: 0; }
+.mlops-training-track strong { font-size: .85rem; }
+.mlops-training-track small { color: #b5c8d8; }
+.mlops-training-number { color: #b5c8d8; font-variant-numeric: tabular-nums; }
+.mlops-training-track [data-state="blocked"] { background: #392e1e; border-color: #c49a53; }
+.mlops-training-track [data-state="completed"] { border-color: #4e9c87; }
+.mlops-training-track [data-state="in-progress"] { background: #163a50; border-color: #74bfe8; }
+.mlops-validation-report { margin: 16px 0; min-width: 0; }
+.mlops-validation-table-wrap { overflow-x: auto; max-width: 100%; border: 1px solid #43596e; border-radius: 8px; }
+.mlops-validation-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .85rem; }
+.mlops-validation-table th, .mlops-validation-table td { padding: 11px 12px; vertical-align: top; border-bottom: 1px solid #30475b; min-width: 95px; }
+.mlops-validation-table thead { background: #1e3447; color: #d7e7f2; }
+.mlops-validation-table tbody th { font-weight: 500; min-width: 160px; }
+.mlops-validation-table td:last-child { min-width: 240px; line-height: 1.5; }
+.mlops-validation-table [data-result="blocked"] td:nth-child(2) { color: #ffd088; font-weight: 700; }
+.mlops-validation-table [data-result="passed"] td:nth-child(2) { color: #8edfc4; }
+.mlops-validation-technical { margin-top: 14px; }
+.mlops-validation-technical summary { cursor: pointer; padding: 6px 0; color: #bed7e9; }
+.mlops-validation-technical pre { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+.mlops-training-checks > .mlops-btn { margin: 8px 8px 0 0; }
+#service-data-requirements { padding: 14px; border-left: 3px solid #74bfe8; background: #102332; border-radius: 6px; margin: 12px 0; }
+#service-data-requirements h4 { margin: 0 0 8px; }
+@media (max-width: 900px) { .mlops-training-track { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 480px) { .mlops-training-track { grid-template-columns: 1fr; } .mlops-training-checks { padding: 12px; } }
+
+.mlops-check-detail { display: block; margin-top: 5px; color: #b5c8d8; font-weight: 400; overflow-wrap: anywhere; }
+.mlops-validation-table td { overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+    .mlops-validation-table, .mlops-validation-table tbody, .mlops-validation-table tr { display: block; }
+    .mlops-validation-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    .mlops-validation-table tbody th { display: block; min-width: 0; background: #1e3447; }
+    .mlops-validation-table td, .mlops-validation-table td:last-child { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 10px; min-width: 0; }
+    .mlops-validation-table td::before { content: attr(data-label); font-weight: 600; color: #b5c8d8; }
+    .mlops-validation-table tr + tr { border-top: 2px solid #607990; }
+}

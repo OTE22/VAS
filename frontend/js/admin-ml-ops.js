@@ -606,6 +606,7 @@
         const steps = [
             ['Check data', trained || !dataBlocked ? 'Ready' : 'Blocked', 'prepare'],
             ['Prepare dataset', trained ? 'Completed' : datasetId ? 'Saved dataset selected' : 'Pending', 'prepare'],
+            ['Validate dataset', trained ? 'Passed before fitting' : 'Checked before model fitting', 'prepare'],
             ['Train model', trained ? 'Completed' : state.activeJobs.size ? 'Job in progress' : 'Pending', 'prepare'],
             ['Review evaluation', !model ? 'Pending' : blockers.length ? 'Blocked' : 'Ready for review', 'test'],
             ['Connect service', connected ? 'Selected version ' + selected.version : 'Pending', 'activate'],
@@ -697,7 +698,11 @@
             ? 'Numeric experiments need an explicit target and a saved pipeline. Configure those in Advanced training options; the result remains offline.'
             : 'One durable job collects features, builds and validates a dataset, then trains and evaluates a compatible candidate. This does not activate a model.';
         getElement('service-train-btn').disabled = offline || !contract || !contract.trainable || state.servicesState !== 'ready' || state.mlWorker?.status !== 'healthy' || state.activeJobs.size > 0 || state.serviceActionBusy || serviceTrainingBlocked(service, datasetPicker.value);
-        getElement('service-data-requirements').replaceChildren();
+        const requirements = getElement('service-data-requirements');
+        requirements.replaceChildren();
+        const blocked = serviceTrainingBlocked(service, datasetPicker.value);
+        requirements.appendChild(el('h4', null, !service?.training_readiness || state.servicesState !== 'ready' ? 'Source readiness unavailable' : blocked ? 'Before you can start' : datasetPicker.value ? 'Saved dataset selected' : 'Source requirements checked'));
+        requirements.appendChild(el('p', null, datasetPicker.value ? 'The worker verifies the saved dataset and its training population before model fitting. Fresh source history is not required to reuse this version.' : 'Source checks run before the job starts. Dataset quality and training population checks run after preparation and before model fitting.'));
         for (const requirement of service?.training_readiness?.blockers || []) {
             if (datasetPicker.value && requirement.code === 'SOURCE_HISTORY_REQUIRED') continue;
             getElement('service-data-requirements').appendChild(el('p', 'mlops-note note-warn', requirement.message));
@@ -774,18 +779,26 @@
         stop.textContent = choice.model_type === 'behavior_anomaly_model' ? 'Stop model and return to rules' : 'Stop service model';
         stop.disabled = !service?.rollback?.available || !selected || state.servicesState !== 'ready' || state.serviceActionBusy;
     }
+    function inspectTrainingDataset(datasetId) {
+        getElement('mlops-evidence-browser').open = true;
+        const picker = getElement('workflow-dataset');
+        if (![...picker.options].some(option => option.value === datasetId)) {
+            const option = el('option', null, 'Dataset linked to this run'); option.value = datasetId; picker.appendChild(option);
+        }
+        picker.value = datasetId; picker.dispatchEvent(new Event('change'));
+        picker.scrollIntoView({block: 'center', behavior: 'smooth'}); picker.focus();
+    }
     function renderServiceJob() {
         const selection = journeySelection();
-        const task = state.recentJobs.find(job => job.job_id === selection.job)
+        const task = state.recentJobs.find(job => job.job_id === selection.job && (job.details?.model_type || job.model_type) === state.selectedService)
             || state.recentJobs.find(job => (job.details?.model_type || job.model_type) === state.selectedService && job.kind === 'training');
         const body = getElement('service-job-progress');
         if (!body) return;
         body.hidden = !task;
         if (!task) return;
         const details = task.details || {};
-        body.replaceChildren(el('strong', null, 'Latest training · ' + humanizeToken(task.status)));
+        body.replaceChildren(window.MLOpsDiagnostics.trainingPanel(task, {openDataset: inspectTrainingDataset}));
         body.appendChild(el('p', null, 'Step: ' + humanizeToken(details.stage || task.status) + (toFiniteNumber(task.progress_percent) !== null ? ' · ' + formatMetric(task.progress_percent) + '%' : '')));
-        if (task.status === 'failed') body.appendChild(el('p', 'mlops-note note-bad', toText(task.error_message, 'Training failed. Open Advanced tools → Work in progress for details.') + ' Correct the reported cause, then use Prepare & train to retry.'));
         if (task.status === 'completed') body.appendChild(el('p', null, 'Training finished. Continue to Test & review; the service model has not been changed.'));
         if (['scheduled', 'running'].includes(task.status)) {
             const button = el('button', 'mlops-btn mlops-btn-small', task.cancel_requested ? 'Cancellation requested' : 'Cancel this run');
@@ -2203,8 +2216,9 @@
             const title = el('div', 'mlops-job-title');
             title.appendChild(faIcon(presentation.icon));
             title.appendChild(el('span', null, presentation.label));
-            title.appendChild(chip(humanizeToken(status),
-                status === 'completed' ? 'ok'
+            const dataBlocked = task.kind === 'training' && window.MLOpsDiagnostics?.jobEvidence(task).blocked;
+            title.appendChild(chip(dataBlocked ? 'Blocked · data' : humanizeToken(status),
+                dataBlocked ? 'warn' : status === 'completed' ? 'ok'
                     : ((status === 'failed' || status === 'cancelled') ? 'bad' : 'warn')));
             identity.appendChild(title);
             const id = el('div', 'mlops-job-id', toText(task.job_id));
@@ -2250,7 +2264,9 @@
             }
             row.appendChild(time);
 
-            if (task.error_code || task.error_message) {
+            if (task.kind === 'training' && task.status === 'failed' && window.MLOpsDiagnostics) {
+                row.appendChild(window.MLOpsDiagnostics.trainingPanel(task, {openDataset: inspectTrainingDataset, compact: true}));
+            } else if (task.error_code || task.error_message) {
                 row.appendChild(el('div', 'mlops-job-error',
                     toText(task.error_code, 'ERROR') + ' · ' + toText(task.error_message, 'Job failed')
                     + ' Next step: review this job’s details and request ID, correct the cause, then rerun it.'));
@@ -2795,7 +2811,7 @@
             }
             if (ds.quality_report) {
                 frag.appendChild(el('div', 'mlops-subheading', 'Quality report'));
-                frag.appendChild(jsonBlock(ds.quality_report));
+                frag.appendChild(window.MLOpsDiagnostics.validationReport(ds.quality_report));
             }
             body.replaceChildren(frag);
         } catch (err) {

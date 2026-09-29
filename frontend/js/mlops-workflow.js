@@ -88,7 +88,7 @@
                 ['Resource snapshot', d.resource_usage ? 'Process memory: ' + metric(d.resource_usage.memory_mb, 1) + ' MB · CPU time: ' + metric(d.resource_usage.cpu_seconds, 2) + ' seconds · sampled at ' + text(d.resource_usage.sampled_at) + '. GPU usage is not reported.' : 'Worker does not report CPU, memory or GPU usage for this run.'],
                 ['Last worker message', text(job.progress_message)], ['Job', job.job_id]
             ]));
-            if (job.error_message) area.append(el('p', 'mlops-note note-bad', text(job.error_message) + ' Fix the reported cause, then review configuration and submit a new run.'));
+            if (window.MLOpsDiagnostics) area.append(window.MLOpsDiagnostics.trainingPanel(job, {openDataset: openDatasetDetail}));
         }
         function readyText() {
             if (!model) return 'No model selected. Train and evaluate a candidate first.';
@@ -258,6 +258,7 @@
                 ['Output', typeof outputs[selectedStage] === 'object' && outputs[selectedStage] ? 'See evidence below' : text(outputs[selectedStage])],
                 ['Stage duration', measured.length ? duration(measured.reduce((sum, e) => sum + e.duration_seconds, 0)) : 'Not recorded separately; total run duration is shown above.']]));
             area.append(detail('Stage configuration', selectedStage <= 1 ? { extraction: dataset && dataset.extraction, split: dataset && dataset.split_config } : config || 'No resolved configuration recorded'));
+            if (selectedStage === 1 && dataset?.quality_report && window.MLOpsDiagnostics) area.append(window.MLOpsDiagnostics.validationReport(dataset.quality_report));
             if (selectedStage <= 1) renderExplorer(area);
             if (selectedStage === 2 || selectedStage === 3) {
                 area.append(el('p', null, selectedStage === 2
