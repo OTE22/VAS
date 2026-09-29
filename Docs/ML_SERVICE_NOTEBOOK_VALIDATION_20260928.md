@@ -39,3 +39,28 @@ This validates five ML families and their named consumer functions, not every Do
 API and ML worker were recreated from the tested release. Both running containers report verified, clean sealed provenance for `1b23cf7`. API image: `sha256:0d705f34e07d0a25138353a1850f4cb0afd1319557fc4019c92bd8d158230a11`. Worker image: `sha256:bbf58524cfdcd0054a1db5b7533c6ba2662d2a211a39cedbbce78f6fb7a8416c`.
 
 After normal startup, TLS-verified `/health/ready` returned HTTP 200 at `2026-09-28T20:40:11Z`: database, models, cache, queue and offline policy healthy; 34 background services with no degraded or stale entries. Jupyter was not restarted. The two disposable PostgreSQL containers and their internal test network were removed after validation. Published notebooks and fixture datasets remain in the notebook workspace.
+
+## Output-driven audit, 2026-09-29
+
+The executed outputs were reviewed quantitatively, beyond successful cell execution. `tests/isolated_ml/audit_notebook_outputs.py` now checks model/job/dataset/release identity, retained/excluded row accounting, evaluation population and band totals, quantile ordering, registered quantitative evaluation, selected/consumed model identity, score ranges and probability semantics, threshold-to-band consistency, ranked ordering, archival identity, and recorded observational consumption. It also verifies the saved cell sequence/output hashes against the execution report, normalizing notebook multiline text serialization. Hashes are consistency checks, not signatures.
+
+All **110 cross-stage checks passed** on the published bundle. Nine tests passed, including rejection of wrong model identity, incorrect bands, probability misrepresentation, unaccounted rows, evaluation count changes, nonfinite prediction, different dataset release and modified saved output. The executed `OUTPUT-AUDIT-executed.ipynb` contains seven code cells with saved findings and is linked from START-HERE.
+
+Interpretation of the actual outputs:
+
+- Ranking test ROC AUC is 0.575 (validation 0.4275). Arbitrary synthetic labels support mechanical validation, not a claim of useful ranking accuracy.
+- Regression test R² is approximately 0.999999997. The synthetic fixture has a simple relationship between target and predictors; this does not establish generalization.
+- Pair scoring returns 1.0 as an anomaly score, explicitly not a probability, and reports `pair_co_appearance_count_30d` unavailable. A valid score does not imply complete feature coverage.
+- Behavioral inference succeeds directly, but captured usage correctly has `selected_model_used=false`: the fixture did not exercise assessment-linked prediction persistence. This remains a coverage gap, not a proven defect.
+- Pair, graph and ranking usage records reference the selected model; observational output is explicitly not applied to live decisions.
+
+No additional production defect was established by this audit, so no thresholds, accuracy gates or production behavior were changed to improve fixture results. The audit/checks are new regression tooling; no application rebuild is needed for these test-only files.
+
+Run against a downloaded/local copy of the complete bundle:
+
+```bash
+python3 tests/isolated_ml/audit_notebook_outputs.py /path/to/Validation-passed-20260928
+python3 tests/isolated_ml/test_audit_notebook_outputs.py /path/to/Validation-passed-20260928
+```
+
+The audit returns nonzero on inconsistent evidence. Review observations even when all checks pass; scientific and integration gaps must not be hidden by a passing mechanical audit.
