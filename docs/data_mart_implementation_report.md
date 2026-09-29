@@ -6,7 +6,7 @@ Date: 2026-09-29. Scope: approved Stage 1 design, superseded by the user's expli
 
 Implemented a bounded logical analytics layer by extending the existing dataset explorer, notebook exporter and ML Ops page, and refactoring existing pair/graph/camera-prediction code. No new database objects, migrations, grants, model registrations, feature snapshots, labels or training jobs were created. Existing operational and managed training workflows remain separate.
 
-**The application changes have not been deployed.** Executed inspection notebooks have been published in the existing Jupyter workspace for review. Publishing these files did not restart Jupyter, modify its runtime or activate a model.
+**Deployed on 2026-09-29:** release `c59affce10d4a2a43a561563b921ef31596a1a5c` is running in both the VAS API and ML worker. Both containers are healthy and image provenance is verified. Executed inspection notebooks are available in the existing Jupyter workspace. Jupyter was not restarted or upgraded, and no model was activated.
 
 Executed notebooks: [Existing-data-audit-20260929/START-HERE.ipynb](https://face-detector.internal/notebooks/lab/tree/Existing-data-audit-20260929/START-HERE.ipynb).
 
@@ -102,7 +102,7 @@ The existing frequency predictor now filters event time **and record-availabilit
 
 ## 14. Notebook and UI workflow
 
-After application deployment: **ML Ops → Advanced tools → Dataset and model evidence → Inspect existing database data**. Select cameras, period and projection, then preview the returned records or download the inspection notebook. Existing dataset/model stage controls remain in place.
+Available now: **ML Ops → Advanced tools → Dataset and model evidence → Inspect existing database data**. Select cameras, period and projection, then preview the returned records or download the inspection notebook. Existing dataset/model stage controls remain in place.
 
 The first notebook cell contains and displays the actual exported records; full returned data is in `dataset`. It verifies the embedded payload checksum. The second cell shows bounds, grain, coverage and unavailable measurements; the third checks relevant source-key/target invariants. No database credentials or network-dependent extraction are embedded. Saved-model notebooks retain their existing workflow and now make feature grain/unsupported motion measurements explicit.
 
@@ -156,8 +156,20 @@ Reviews/caches report current mutable values; model artifacts retain their recor
 
 Continuous trajectory/next-position/next-zone modeling remains blocked by missing source grain. The new next-camera export is inspection evidence, not a fitted or automatically registered model. The current source population is too limited to establish production accuracy or 30-camera capacity. Review data may be empty or unlinked, and scope/limits are explicit. Query caps and timeouts protect responsiveness but are not evidence of complete analysis over larger deployments.
 
-Application build/deployment and a browser smoke test against the deployed endpoint are still separate release steps; this report does not claim they happened.
+Application build/deployment and authenticated HTTP smoke checks are complete. Full interactive browser testing and representative camera-load validation are separate checks; this report does not claim they happened.
 
 ## 20. Recommended next steps
 
-Review the executed notebooks and this code change, then deploy through the existing release workflow. After deployment, smoke-test the read-only inspector and map warnings. Keep existing feature/model versions pinned. Continue the existing managed dataset → evaluation → approval → service-connection workflow; do not bypass its held-out evaluation or label requirements. When representative cameras are available, separately measure end-to-end load at the requested camera count/frame rate.
+Review the executed notebooks and use the deployed read-only inspector. The inspector and map data passed authenticated HTTP checks. Keep existing feature/model versions pinned. Continue the existing managed dataset → evaluation → approval → service-connection workflow; do not bypass its held-out evaluation or label requirements. When representative cameras are available, separately measure end-to-end load at the requested camera count/frame rate.
+
+## Deployment verification — 2026-09-29
+
+- Release commit: `c59affce10d4a2a43a561563b921ef31596a1a5c`.
+- Verified API/worker build ID: `4ec6c2e4cb5d4c38d221d3d27be2331186924baf971c473e5da0f0bfccbfe249`.
+- API image: `sha256:d73dd02e465533f5996e46279d89b35046c4d8aeb6828649ee721258f4a2d8a1`.
+- Worker image: `sha256:e2f1d39a12f38b8f8d365f740f661e332aec0f7ad0260e157b41ef9cfd658432`.
+- Both containers reported **healthy**. HTTPS `/health/ready` returned HTTP 200 / `ready` at `2026-09-29T09:18:32Z`; all five component checks passed and all 34 background services had no degraded/stale entries.
+- 16 HTTP checks passed: readiness, ML Ops page/JavaScript, seven analytics projections, notebook download, unauthenticated rejection (401), unsupported projection rejection (422), capability status, map data and the checksum-verified saved-dataset explorer. Credentials stayed in memory and no login/model/training/registration mutation endpoint was exercised.
+- Existing migration head remains `ff17b8c9d0e1`; six registered models remain. Serving containers use migration **verify** mode. Only `face_recognition` and `ml_worker` were recreated with `--no-deps`; no migration job or database service was restarted.
+- Rollback images: `face_detector_prod-face_recognition:before-readonly-mart-20260929` and `face_detector_prod-ml_worker:before-readonly-mart-20260929`.
+- VMS and the existing Jupyter runtime remained running. The Jupyter index was updated to reflect the deployment status; executed evidence outputs remain the recorded read-only snapshot.
