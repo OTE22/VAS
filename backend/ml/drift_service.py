@@ -17,9 +17,9 @@ import logging
 import math
 import uuid as uuid_mod
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, func as sa_func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from backend.utils.time_utils import iso_utc
@@ -27,6 +27,12 @@ from backend.utils.time_utils import iso_utc
 logger = logging.getLogger(__name__)
 
 DRIFT_BINS = 10
+DRIFT_SAMPLE_LIMIT = 20000
+
+
+def _finite_number(value):
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value))
 
 
 def psi(baseline: List[float], current: List[float], bins: int = DRIFT_BINS) -> Optional[float]:
@@ -102,21 +108,40 @@ def _severity_for_psi(worst_psi: Optional[float]) -> str:
 
 class DriftService:
 
+    async def _model(self, db, model_id):
+        from db_models import MLModel
+        from backend.ml.model_specs import get_model_spec
+        model = await db.get(MLModel, uuid_mod.UUID(str(model_id)))
+        if model is None:
+            raise ValueError("Drift monitoring requires an existing model")
+        spec = get_model_spec(model.model_type)
+        if not model.feature_set_version or not model.feature_names:
+            raise ValueError("Drift monitoring requires a recorded feature contract")
+        return model, spec
+
     async def _snapshot_features(self, db: AsyncSession, start: datetime,
-                                 end: datetime) -> Dict[str, List[float]]:
+                                 end: datetime, *, model, spec):
         from db_models import MLFeatureSnapshot
         rows = (await db.execute(
             select(MLFeatureSnapshot.features)
-            .where(MLFeatureSnapshot.entity_type == "person",
+            .where(MLFeatureSnapshot.entity_type == spec.entity_type,
+                   MLFeatureSnapshot.feature_set_version == model.feature_set_version,
                    MLFeatureSnapshot.computed_at >= start,
                    MLFeatureSnapshot.computed_at < end)
-            .limit(20000))).scalars().all()
-        by_feature: Dict[str, List[float]] = {}
+            .order_by(MLFeatureSnapshot.computed_at.desc(), MLFeatureSnapshot.id.desc())
+            .limit(DRIFT_SAMPLE_LIMIT + 1))).scalars().all()
+        truncated = len(rows) > DRIFT_SAMPLE_LIMIT
+        rows = rows[:DRIFT_SAMPLE_LIMIT]
+        by_feature = {name: [] for name in model.feature_names}
+        invalid = {name: 0 for name in model.feature_names}
         for features in rows:
-            for name, value in (features or {}).items():
-                if isinstance(value, (int, float)):
-                    by_feature.setdefault(name, []).append(float(value))
-        return by_feature
+            for name in by_feature:
+                value = (features or {}).get(name)
+                if _finite_number(value):
+                    by_feature[name].append(float(value))
+                elif value is not None:
+                    invalid[name] += 1
+        return by_feature, len(rows), truncated, invalid
 
     async def run_data_drift(self, db: AsyncSession, *, model_id, window_days: int = 7,
                              baseline_days: int = 30,
@@ -128,29 +153,36 @@ class DriftService:
         now = datetime.utcnow()
         window_start = now - timedelta(days=window_days)
         baseline_start = window_start - timedelta(days=baseline_days)
-        current = await self._snapshot_features(db, window_start, now)
-        baseline = await self._snapshot_features(db, baseline_start, window_start)
+        model, spec = await self._model(db, model_id)
+        current, current_n, current_cap, current_invalid = await self._snapshot_features(
+            db, window_start, now, model=model, spec=spec)
+        baseline, baseline_n, baseline_cap, baseline_invalid = await self._snapshot_features(
+            db, baseline_start, window_start, model=model, spec=spec)
 
-        min_samples = int(settings.ML_DRIFT_MIN_SAMPLES)
-        current_n = max((len(v) for v in current.values()), default=0)
-        baseline_n = max((len(v) for v in baseline.values()), default=0)
-        insufficient = current_n < min_samples or baseline_n < min_samples
-
+        min_samples = max(2, int(settings.ML_DRIFT_MIN_SAMPLES))
+        insufficient = current_n < min_samples or baseline_n < min_samples or current_cap or baseline_cap
         metrics: Dict[str, Any] = {}
         worst_psi = None
-        if not insufficient:
-            for name in sorted(set(baseline) & set(current)):
-                feature_psi = psi(baseline[name], current[name])
-                metrics[name] = {
-                    "psi": feature_psi,
-                    "ks": ks_statistic(baseline[name], current[name]),
-                    "js_divergence": js_divergence(baseline[name], current[name]),
-                    "baseline_n": len(baseline[name]),
-                    "current_n": len(current[name]),
-                }
-                if feature_psi is not None and (worst_psi is None or feature_psi > worst_psi):
-                    worst_psi = feature_psi
-        severity = "normal" if insufficient else _severity_for_psi(worst_psi)
+        for name in sorted(baseline):
+            bn, cn = len(baseline[name]), len(current[name])
+            enough = bn >= min_samples and cn >= min_samples
+            invalid_values = baseline_invalid[name] + current_invalid[name] > 0
+            insufficient = insufficient or not enough or invalid_values
+            feature_psi = psi(baseline[name], current[name]) if enough else None
+            metrics[name] = {
+                "psi": feature_psi,
+                "ks": ks_statistic(baseline[name], current[name]) if enough else None,
+                "js_divergence": js_divergence(baseline[name], current[name]) if enough else None,
+                "baseline_n": bn, "current_n": cn,
+                "insufficient_data": not enough or invalid_values,
+                "baseline_missing_rate": round((baseline_n - bn - baseline_invalid[name]) / baseline_n, 6) if baseline_n else None,
+                "current_missing_rate": round((current_n - cn - current_invalid[name]) / current_n, 6) if current_n else None,
+                "baseline_invalid_n": baseline_invalid[name], "current_invalid_n": current_invalid[name],
+            }
+            if feature_psi is not None and (worst_psi is None or feature_psi > worst_psi):
+                worst_psi = feature_psi
+        # Keep any observed warning even when another feature lacks evidence.
+        severity = _severity_for_psi(worst_psi)
 
         baseline_stats = {
             name: {"n": len(values),
@@ -164,7 +196,14 @@ class DriftService:
             baseline_stats=baseline_stats, baseline_sample_count=baseline_n,
             window_start=window_start, window_end=now,
             sample_count=current_n, insufficient_data=insufficient,
-            metrics={"features": metrics, "worst_psi": worst_psi},
+            metrics={"monitoring_contract_version": 2, "features": metrics, "worst_psi": worst_psi,
+                     "assessment_status": "insufficient_data" if insufficient else "assessed",
+                     "model_type": model.model_type, "entity_type": spec.entity_type,
+                     "feature_set_version": model.feature_set_version,
+                     "baseline_kind": "previous_processing_time_window",
+                     "time_basis": "computed_at", "population": "matching_feature_snapshots",
+                     "sample_limit": DRIFT_SAMPLE_LIMIT,
+                     "truncated": {"baseline": baseline_cap, "current": current_cap}},
             severity=severity, job_id=job_id, created_at=now)
         db.add(report)
         await db.commit()
@@ -182,41 +221,68 @@ class DriftService:
         window_start = now - timedelta(days=window_days)
         baseline_start = window_start - timedelta(days=baseline_days)
 
-        async def _scores(start, end) -> Tuple[List[float], int, int]:
+        model, spec = await self._model(db, model_id)
+        score_supported = model.model_type == "behavior_anomaly_model"
+
+        async def _scores(start, end):
+            if not score_supported:
+                return [], 0, 0, False, 0
             rows = (await db.execute(
                 select(MLPrediction.behavioral_anomaly_score,
                        MLPrediction.fallback_reason)
-                .where(MLPrediction.created_at >= start,
+                .where(MLPrediction.model_id == model.id,
+                       MLPrediction.model_type == model.model_type,
+                       MLPrediction.created_at >= start,
                        MLPrediction.created_at < end)
-                .limit(20000))).all()
-            scores = [float(r[0]) for r in rows if r[0] is not None]
+                .order_by(MLPrediction.created_at.desc(), MLPrediction.id.desc())
+                .limit(DRIFT_SAMPLE_LIMIT + 1))).all()
+            truncated = len(rows) > DRIFT_SAMPLE_LIMIT
+            rows = rows[:DRIFT_SAMPLE_LIMIT]
+            scores = [float(r[0]) for r in rows if _finite_number(r[0]) and r[1] is None]
+            invalid = sum(1 for r in rows if r[0] is not None and not _finite_number(r[0]))
             fallbacks = sum(1 for r in rows if r[1] is not None)
-            return scores, len(rows), fallbacks
+            return scores, len(rows), fallbacks, truncated, invalid
 
-        current_scores, current_total, current_fallbacks = await _scores(window_start, now)
-        baseline_scores, baseline_total, _ = await _scores(baseline_start, window_start)
+        current_scores, current_total, current_fallbacks, current_cap, current_invalid = await _scores(window_start, now)
+        baseline_scores, baseline_total, _, baseline_cap, baseline_invalid = await _scores(baseline_start, window_start)
 
         comparisons = (await db.execute(
             select(MLShadowComparison.operational_disagreement,
                    MLShadowComparison.ml_failed, MLShadowComparison.ml_latency_ms)
-            .where(MLShadowComparison.created_at >= window_start)
-            .limit(20000))).all()
+            .where(MLShadowComparison.model_id == model.id,
+                   MLShadowComparison.created_at >= window_start,
+                   MLShadowComparison.created_at < now)
+            .order_by(MLShadowComparison.created_at.desc(), MLShadowComparison.id.desc())
+            .limit(DRIFT_SAMPLE_LIMIT + 1))).all()
+        comparisons_cap = len(comparisons) > DRIFT_SAMPLE_LIMIT
+        comparisons = comparisons[:DRIFT_SAMPLE_LIMIT]
         disagreement: Dict[str, int] = {}
         failures = 0
         latencies = []
         for kind, failed, latency in comparisons:
             disagreement[kind] = disagreement.get(kind, 0) + 1
             failures += int(bool(failed))
-            if latency is not None:
+            if _finite_number(latency) and latency >= 0:
                 latencies.append(latency)
         latencies.sort()
 
-        min_samples = int(settings.ML_DRIFT_MIN_SAMPLES)
-        insufficient = len(current_scores) < min_samples or len(baseline_scores) < min_samples
+        min_samples = max(2, int(settings.ML_DRIFT_MIN_SAMPLES))
+        insufficient = (not score_supported or len(current_scores) < min_samples
+                        or len(baseline_scores) < min_samples or current_cap or baseline_cap
+                        or comparisons_cap or current_invalid > 0 or baseline_invalid > 0)
         score_psi = None if insufficient else psi(baseline_scores, current_scores)
         severity = "normal" if insufficient else _severity_for_psi(score_psi)
 
         metrics = {
+            "monitoring_contract_version": 2,
+            "assessment_status": "insufficient_data" if insufficient else "assessed",
+            "model_type": model.model_type,
+            "score_source_supported": score_supported,
+            "unavailable_reason": None if score_supported else "PERSISTED_SCORE_TELEMETRY_UNAVAILABLE_FOR_MODEL_FAMILY",
+            "baseline_kind": "previous_prediction_time_window",
+            "sample_limit": DRIFT_SAMPLE_LIMIT,
+            "truncated": {"baseline": baseline_cap, "current": current_cap, "comparisons": comparisons_cap},
+            "invalid_scores": {"baseline": baseline_invalid, "current": current_invalid},
             "anomaly_score_psi": score_psi,
             "prediction_volume": {"baseline": baseline_total, "current": current_total},
             "fallback_rate": (round(current_fallbacks / current_total, 4)
@@ -281,6 +347,7 @@ class DriftService:
             "sample_count": row.sample_count,
             "insufficient_data": row.insufficient_data,
             "metrics": row.metrics, "severity": row.severity,
+            "assessment_status": "insufficient_data" if row.insufficient_data else "assessed",
             "created_at": iso(row.created_at),
         }
 

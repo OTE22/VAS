@@ -6,7 +6,7 @@ Supervised threat ranking (logreg / random_forest / gradient_boosting) is
 GATED: below the reviewed-label minimums the job finishes with a structured
 refusal — no fabricated training. Its output is a relative review-rank score,
 not a calibrated probability. XGBoost/Optuna/SHAP/MLflow are optional-flag
-guarded and not consumed this release.
+guarded and used only when enabled for a supported run.
 
 Every metric recorded is something truthfully measured on the selected data:
 anomaly score distributions/cutpoints/stability, or ranking ROC-AUC and
@@ -156,16 +156,21 @@ def _assemble_matrix(rows: List[Dict[str, Any]]):
     (feature_names, medians, matrix builder)."""
     import numpy as np
 
+    import math
     coverage: Dict[str, int] = {}
     for row in rows:
-        for name in row["features"]:
+        for name, value in row["features"].items():
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise RegistryError("INVALID_FEATURE_VALUE", f"Feature {name!r} must be finite numeric or missing")
             coverage[name] = coverage.get(name, 0) + 1
     usable = sorted(
         name for name, count in coverage.items()
         if count / max(1, len(rows)) >= FEATURE_COVERAGE_FLOOR)
     medians: Dict[str, float] = {}
     for name in usable:
-        values = [row["features"][name] for row in rows if name in row["features"]]
+        values = [row["features"][name] for row in rows if row["features"].get(name) is not None]
         medians[name] = float(np.median(values)) if values else 0.0
 
     contract = {"feature_names": usable, "imputation_medians": medians}

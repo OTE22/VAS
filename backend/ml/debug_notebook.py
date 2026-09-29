@@ -211,6 +211,12 @@ def pipeline_source_references():
         'graph_features': ('relational_feature_service', '_graph_metrics'),
         'dataset': ('dataset_builder', 'build_dataset'),
         'training_matrix': ('trainer', '_assemble_matrix'),
+        'sparse_feature_selection': ('dataset_builder', '_select_supervised_features'),
+        'hyperparameter_tuning': ('tabular', 'fit_xgboost'),
+        'ranking_metrics': ('trainer', '_binary_ranking_metrics'),
+        'data_drift': ('drift_service', 'DriftService.run_data_drift'),
+        'prediction_drift': ('drift_service', 'DriftService.run_prediction_drift'),
+        'service_connection': ('service_deployment', 'deploy_service'),
         'target_selection': ('tabular', 'prepare_rows'),
         'fit_unsupervised': ('trainer', '_fit_unsupervised'),
         'fit_supervised': ('trainer', '_fit_supervised'),
@@ -334,7 +340,12 @@ def build_pipeline_debug_notebook(evidence):
     markdown('## 3 · Feature meaning: value, source, window and missingness\n'
              'Definitions identify the computation and its parameters. Compare each saved value with its snapshot cutoff and '
              'source-row counts. Missing values and explicit unavailable reasons are distinct from numerical zero. '
-             'Definitions supplied at export time are reference material unless explicitly frozen with the dataset.')
+             'Definitions supplied at export time are reference material unless explicitly frozen with the dataset.\n\n'
+             '**Engineering used here:** counts, ratios, recency and activity-window aggregates; cyclic hour sine/cosine; '
+             'numeric identity status; pair and graph statistics, including a log transform of weighted degree. '
+             'These are already numeric predictors. There is no generic one-hot encoder, categorical label encoder, '
+             'standard scaler, PCA or SMOTE step in this pipeline. Such transforms must be chosen for a specific '
+             'model and fitted on training data; adding every technique is not a quality improvement.')
     code('definitions = lineage.get("definitions") or []\n'
          'print("Feature definitions:")\n'
          'table(definitions, [("name", "Feature"), ("computation", "Production computation"), ("version", "Version"), ("window", "Window"), ("leakage_class", "Leakage class")])\n'
@@ -372,13 +383,27 @@ def build_pipeline_debug_notebook(evidence):
              'Covered features are selected from the training split. Missing values are imputed with training medians; '
              'validation/test rows never supply those medians. Feature order is part of the serving contract. '
              'The algorithm, seed, parameters, target/predictor choices, tuning options and dependency versions below '
-             'describe the saved run. A model fitting step is inspected here; it is not rerun or registered from this notebook.')
-    code('show(training_config)\n'
+             'describe the saved run. A model fitting step is inspected here; it is not rerun or registered from this notebook.\n\n'
+             '**Missingness:** absent keys and explicit nulls use the same training-median policy. Real zero stays zero. '
+             'NaN, infinity, booleans and nonnumeric features fail numeric validation. New supervised builds fit their '
+             'sparse-column filter on training rows only; inspect `quality["feature_selection"]` for that evidence. '
+             'Older datasets may predate this correction. The final matrix requires at least 70% training coverage.\n\n'
+             '**Tuning method:** optional XGBoost-only Optuna TPE search, minimizing validation log loss for classification '
+             'or validation RMSE for regression, with trial/time limits and optional median pruning. '
+             'No test data enters tuning. Other algorithms use the requested bounded parameters. '
+             'An enabled integration is not proof that this run tuned anything: look for recorded trial results.')
+    code('show(quality.get("feature_selection"))\n'
+         'show(training_config)\n'
          'show({k: model.get(k) for k in ("algorithm", "seed", "hyperparameters", "feature_names", "feature_set_version", "score_type", "is_probability")})\n')
     markdown('## 7 · Evaluation and readiness: what the result proves\n'
              'Inspect validation/test sample sizes before their metrics. Unsupervised anomaly scores and classifier review-rank '
              'scores are not calibrated probabilities of threat. An engineering pass establishes technical checks; scientific '
-             'readiness and reviewed real-world evidence are separate requirements. Training success alone does not enable a service.')
+             'readiness and reviewed real-world evidence are separate requirements. Training success alone does not enable a service.\n\n'
+             '**Metrics by task:** anomaly models record score quantiles, band counts and stability/distribution diagnostics; '
+             'without reviewed outcomes they cannot report detection accuracy. Ranking uses ROC-AUC and average precision '
+             'when both reviewed classes exist, plus a diagnostic confusion matrix at 0.5. '
+             'Regression uses MAE, RMSE and R² with a training-mean baseline. Empty held-out sets are insufficient evidence, '
+             'even when the training job succeeds.')
     code('evaluation = training.get("evaluation") or model.get("evaluation_report") or {}\n'
          'show(evaluation)\n'
          'show(training.get("quality_gates") or model.get("quality_gates"))\n'
@@ -398,10 +423,24 @@ def build_pipeline_debug_notebook(evidence):
              'Anomaly families remain observations in shadow mode; reviewed ranking models support analyst ordering; numeric '
              'experiments have no live security consumer. Use ML Ops to review/activate/stop a model, then download a fresh export.')
     code('show(pipeline.get("service"))\n')
+    markdown('### Maintenance: data drift, score drift and performance drift\n'
+             '**Data drift** compares PSI, KS and Jensen–Shannon statistics for the model’s entity/schema/features '
+             'between recent and preceding processing-time windows. This is not a comparison with the saved training dataset. '
+             'Missingness, invalid values, sample caps and insufficient feature counts must be inspected.\n\n'
+             '**Prediction drift** compares persisted behavioral scores for one model version, with fallback rate, '
+             'shadow disagreement and latency. Pair/graph/ranking consumers do not yet persist equivalent score telemetry; '
+             'missing monitoring data is not a healthy-model result. Distribution drift does not measure accuracy loss.\n\n'
+             '**Performance/concept drift** requires delayed reviewed outcomes joined to predictions and repeat evaluation; '
+             'this is not currently implemented as a complete recurring report. Scheduled drift remains gated on production '
+             'inference, while current anomaly deployment is shadow-only. Scheduled retraining is disabled in this release. '
+             'Use a reviewed new training job and compare candidates through the existing workflow; no drift statistic '
+             'automatically replaces a model. This notebook describes source capabilities; check live configuration for enabled features.')
     markdown('## 10 · Browse the production implementation\n'
              'The source index names each exported function, repository location and SHA-256. '
              'Use `show_source("person_context")` to inspect cutoff filters, `show_source("dataset")` for extraction/labels/splits, '
-             '`show_source("feature:appearance_count")` for a feature’s formula, or any other key below. These strings are reference code and never execute database, fitting or deployment operations.')
+             '`show_source("feature:appearance_count")` for a feature’s formula, '
+             '`show_source("hyperparameter_tuning")` for the Optuna objective, '
+             '`show_source("data_drift")` / `show_source("prediction_drift")` for monitoring, or any other key below. These strings are reference code and never execute database, fitting or deployment operations.')
     references = pipeline_source_references()
     code('sources = json.loads(' + repr(json.dumps(references, ensure_ascii=True)) + ')\n'
          'def show_source(name):\n'

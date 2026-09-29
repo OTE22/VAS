@@ -42,6 +42,33 @@ from backend.ml.dataset_steps import (
 from backend.ml.dataset_diagnostics import trace_dataset_build
 
 
+def _select_supervised_features(rows, definitions, *, strategy, val_fraction, holdout_fraction):
+    """Fit sparse-column selection on training rows, then apply the same schema.
+
+    Split boundaries depend only on entity/time. No held-out feature values or
+    labels participate in choosing columns. Preserve input rows for inspection.
+    """
+    train, _, _, _ = split_rows(rows, strategy, val_fraction=val_fraction,
+                               holdout_fraction=holdout_fraction)
+    excluded = {}
+    if train:
+        for definition in definitions:
+            if definition.get("leakage_class", "safe") != "safe":
+                continue
+            name = definition["name"]
+            rate = sum((row.get("features") or {}).get(name) is None for row in train) / len(train)
+            if rate > MAX_NULL_RATE:
+                excluded[name] = round(rate, 3)
+    selected = [{**row, "features": {name: value for name, value in (row.get("features") or {}).items()
+                                    if name not in excluded}} for row in rows]
+    return selected, [d for d in definitions if d["name"] not in excluded], {
+        "method": "training_split_missing_rate", "fitted_on": "train",
+        "training_rows": len(train), "max_missing_rate": MAX_NULL_RATE,
+        "excluded_sparse_features": excluded,
+        "insufficient_data": not bool(train),
+    }
+
+
 def _repo_root() -> str:
     # backend/ml/dataset_builder.py -> repository root, wherever it is checked out
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -314,34 +341,14 @@ async def build_dataset(db: AsyncSession, *, name: str, kind: str,
         rows = labeled_rows
 
         await diagnostics.stage('selecting_features', input_rows=len(snapshots), output_rows=len(rows), reviewed_labels=len(labels))
-        # Feature selection by coverage, BEFORE validation. The validator's
-        # hard rule — a supervised feature missing in >MAX_NULL_RATE of rows
-        # fails the build — is right: a model trained on a mostly-absent
-        # column is fiction. But applied to the raw inventory it let ONE
-        # sparse feature veto the whole dataset: baseline_hour_deviation_last
-        # needs six prior sightings and is therefore unavailable for almost
-        # everyone on a young or quiet deployment, so no supervised dataset
-        # could ever be built. Columns that cannot be learned from are
-        # dropped here, by name, and the drop is recorded in the quality
-        # report so the lineage says exactly which features the model never
-        # saw. The validator then judges what remains.
-        excluded = {}
-        if rows:
-            safe_names = [d["name"] for d in definitions
-                          if d.get("leakage_class", "safe") == "safe"]
-            for feature_name in safe_names:
-                missing = sum(1 for r in rows if feature_name not in (r.get("features") or {}))
-                rate = missing / len(rows)
-                if rate > MAX_NULL_RATE:
-                    excluded[feature_name] = round(rate, 3)
-            if excluded:
-                for r in rows:
-                    for feature_name in excluded:
-                        (r.get("features") or {}).pop(feature_name, None)
-                definitions = [d for d in definitions if d["name"] not in excluded]
-                logger.warning("[ML_OPS] supervised dataset: excluded %d sparse feature(s) "
-                               "above %.0f%% missing: %s", len(excluded),
-                               MAX_NULL_RATE * 100, excluded)
+        # Learn the sparse-column policy only from the declared training split.
+        rows, definitions, selection = _select_supervised_features(
+            rows, definitions, strategy=split_strategy or definition.split_strategy,
+            val_fraction=definition.val_fraction, holdout_fraction=definition.holdout_fraction)
+        excluded = selection["excluded_sparse_features"]
+        if excluded:
+            logger.warning("[ML_OPS] supervised dataset: excluded %d sparse training features: %s",
+                           len(excluded), excluded)
 
     await diagnostics.stage('validation', output_rows=len(rows), feature_count=len(definitions))
     quality = validate_rows(rows, kind=kind, definitions=definitions)
@@ -355,6 +362,7 @@ async def build_dataset(db: AsyncSession, *, name: str, kind: str,
     quality["feature_set_limitations"] = feature_set_limitations(definition.feature_set_version)
     quality["extraction"] = dict(extraction)
     if kind == "supervised":
+        quality["feature_selection"] = selection
         quality["excluded_sparse_features"] = excluded if rows else {}
         if excluded:
             quality.setdefault("warnings", []).append(
@@ -463,7 +471,8 @@ async def build_dataset(db: AsyncSession, *, name: str, kind: str,
         "parquet_bytes": size,
         "lineage_summary": dataset.lineage_summary,
         "quality": {"passed": True, "warnings": quality.get("warnings", []),
-                    "excluded_sparse_features": quality.get("excluded_sparse_features", {})},
+                    "excluded_sparse_features": quality.get("excluded_sparse_features", {}),
+                    "feature_selection": quality.get("feature_selection")},
         "population": quality.get("population"),
         "feature_availability_by_split": quality.get("feature_availability_by_split"),
         "maturity": quality.get("maturity"),
