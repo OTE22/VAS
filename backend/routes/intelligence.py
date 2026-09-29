@@ -228,7 +228,7 @@ _THRESHOLD_JOB = {"job_id": None, "started_at": None}
 _THRESHOLD_JOB_MAX_AGE_SECONDS = 3600  # threshold learning is minutes, not hours
 
 THRESHOLD_ALGORITHM_VERSION = "threshold-v3"
-TRAJECTORY_MODEL_VERSION = "trajectory-v3"
+TRAJECTORY_MODEL_VERSION = "trajectory-v4"
 CORRELATION_ALGORITHM_VERSION = "xcca-v2"
 # Rules-only features name their own algorithm in an `engine` block so the UI
 # never has to assume what produced a result. These two had no version yet.
@@ -882,7 +882,7 @@ async def verify_map_datasets(
 
 
 async def _security_inputs(db: AsyncSession, identity_id: str, tracks_dict: list):
-    """Watchlist matches + derived security zones for an identity — the exact
+    """Watchlist matches and unavailable zone geometry for an identity — the exact
     assembly the HTML map endpoint performed inline, factored so both routes
     hand identical authorized inputs to their renderer/data builder."""
     watchlist_matches = None
@@ -892,38 +892,9 @@ async def _security_inputs(db: AsyncSession, identity_id: str, tracks_dict: list
         watchlist_matches = await watchlist_service.get_identity_watchlists(db, identity_id)
     except Exception as e:                                             # noqa: BLE001
         logger.warning(f"[MAP] Could not load watchlist matches: {e}")
-    try:
-        import math
-        from sqlalchemy import select
-        from db_models import Pipeline
-        pipeline_ids = {m.get("pipeline_id") for t in tracks_dict
-                        for m in t.get("movements", []) if m.get("pipeline_id")}
-        if pipeline_ids:
-            result = await db.execute(select(Pipeline).where(Pipeline.pipeline_id.in_(list(pipeline_ids))))
-            security_zones = []
-            for pipeline in result.scalars().all():
-                if pipeline.latitude is None or pipeline.longitude is None:
-                    continue
-                lat, lng = float(pipeline.latitude), float(pipeline.longitude)
-                radius = 0.0009  # ~100 m
-                zone_coords = [[lat + radius * math.cos(math.radians(a)),
-                                lng + radius * math.sin(math.radians(a))] for a in range(0, 360, 30)]
-                pname = pipeline.location_name if getattr(pipeline, "location_name", None) else pipeline.pipeline_id
-                low = str(pname).lower()
-                if "restricted" in low or "secure" in low:
-                    ztype, risk = "restricted", 8
-                elif "entrance" in low or "exit" in low:
-                    ztype, risk = "high_security", 7
-                else:
-                    ztype, risk = "monitored", 5
-                security_zones.append({
-                    "name": pname or f"Zone {pipeline.pipeline_id[:8]}",
-                    "coordinates": zone_coords, "zone_type": ztype, "risk_level": risk,
-                    "description": f"Security zone around {pname or 'pipeline'}",
-                })
-    except Exception as e:                                             # noqa: BLE001
-        logger.warning(f"[MAP] Could not generate security zones: {e}")
-        security_zones = None
+    # Camera coordinates locate a camera, not the boundaries of a security zone.
+    # Existing storage has no observed/configured zone geometry. Do not infer
+    # risk classifications or 100m polygons from names such as "entrance".
     return watchlist_matches, security_zones
 
 
@@ -1865,6 +1836,10 @@ async def get_security_capabilities(
             "worker_status": worker_health["status"],
             "detail": "Availability is not evidence sufficiency. Learning requires cross-camera history; saved candidates require manual activation.",
             "algorithm_version": THRESHOLD_ALGORITHM_VERSION,
+        },
+        "security_zones": {
+            "enabled": False, "status": "unavailable",
+            "detail": "No stored zone geometry; camera locations do not define security zones.",
         },
         "trajectory_prediction": {
             "enabled": bool(settings.TRAJECTORY_PREDICTION_ENABLED),

@@ -42,6 +42,14 @@ class RelatedIdentityInfo:
     best_snapshot_path: Optional[str]
 
 
+class CoAppearanceResults(list):
+    """Existing list API plus optional bounded source evidence for inspection."""
+    def __init__(self, values=(), *, metadata=None, evidence=None):
+        super().__init__(values)
+        self.metadata = metadata or {}
+        self.evidence = evidence or []
+
+
 @dataclass
 class TemporalPattern:
     """Temporal pattern for an identity"""
@@ -264,6 +272,9 @@ class IntelligenceService:
         cutoff_date: Optional[datetime] = None,
         use_requested_filters: bool = False,
         related_identity_id: Optional[uuid.UUID] = None,
+        period_end: Optional[datetime] = None,
+        pipeline_ids: Optional[List[str]] = None,
+        include_evidence: bool = False,
     ) -> List[RelatedIdentityInfo]:
         """
         Calculate co-appearances from appearance data.
@@ -278,20 +289,37 @@ class IntelligenceService:
         """
         from config import settings
 
+        period_end = period_end or datetime.utcnow()
+        period_filters = [IdentityAppearance.start_time < period_end]
+        if cutoff_date is not None:
+            period_filters.append(IdentityAppearance.start_time >= cutoff_date)
+        if pipeline_ids is not None:
+            period_filters.append(IdentityAppearance.pipeline_id.in_(pipeline_ids))
+        if include_evidence:
+            period_filters.append(IdentityAppearance.created_at < period_end)
+        metadata = {"policy_version": "bounded-co-observation-v2",
+                    "period_start": cutoff_date, "period_end": period_end,
+                    "interval": "[start,end)", "target_limit": 500,
+                    "candidate_limit_per_window": 1000, "evidence_limit": 5000,
+                    "truncated": False, "evidence_truncated": False,
+                    "anchor_identity_id": str(identity_id),
+                    "threshold_time_basis": "currently activated thresholds; not historical threshold reconstruction",
+                    "count_semantics": "distinct source appearance pairs, not physical encounters"}
+        evidence = []
         # Appearances of the target identity — bounded and cutoff-aware.
         target_appearances_query = select(IdentityAppearance).where(
-            IdentityAppearance.identity_id == identity_id
+            IdentityAppearance.identity_id == identity_id, *period_filters
         )
-        if cutoff_date is not None:
-            target_appearances_query = target_appearances_query.where(
-                IdentityAppearance.start_time >= cutoff_date)
         target_appearances_query = target_appearances_query.order_by(
-            IdentityAppearance.start_time.desc()).limit(500)
+            IdentityAppearance.start_time.desc(), IdentityAppearance.id.desc()).limit(501)
         result = await db.execute(target_appearances_query)
-        target_appearances = result.scalars().all()
+        target_appearances = list(result.scalars().all())
+        metadata['truncated'] = len(target_appearances) > 500
+        target_appearances = target_appearances[:500]
+        metadata['target_appearance_count'] = len(target_appearances)
 
         if not target_appearances:
-            return []
+            return CoAppearanceResults(metadata=metadata, evidence=evidence)
 
         # Check if multi-camera detection is enabled
         multi_camera_enabled = settings.MULTI_CAMERA_CO_APPEARANCE_ENABLED
@@ -345,6 +373,12 @@ class IntelligenceService:
         multi_camera_distance = distance_resolved.value
         multi_camera_time_window = global_window_resolved.value
         multi_camera_min = settings.MULTI_CAMERA_MIN_CO_APPEARANCES
+        metadata.update(threshold_provenance=sorted(threshold_provenance),
+                        same_camera_tolerance_minutes=time_window_minutes,
+                        cross_camera_tolerance_minutes=(time_window_minutes if use_requested_filters else window_by_pipeline),
+                        distance_threshold_meters=multi_camera_distance,
+                        cross_camera_enabled=bool(multi_camera_enabled),
+                        explicit_time_override=use_requested_filters)
 
         # Pre-load pipeline coordinates if multi-camera is enabled
         pipeline_coords = {}
@@ -369,6 +403,33 @@ class IntelligenceService:
             'last': None
         })
 
+        def record_match(window_index, co_app, classification):
+            target = target_appearances[window_index]
+            # PK-selected rows occur once per target window; same/cross-camera
+            # populations are disjoint. No reverse self-join or giant dedup set.
+            data = co_appearance_counts[str(co_app.identity_id)]
+            data['count'] += 1
+            data[classification + '_count'] += 1
+            data['matched_windows'].add(window_index)
+            data['pipelines'].update((target.pipeline_id, co_app.pipeline_id))
+            data['first'] = min(data['first'], co_app.start_time) if data['first'] else co_app.start_time
+            data['last'] = max(data['last'], co_app.start_time) if data['last'] else co_app.start_time
+            if include_evidence:
+                if len(evidence) >= metadata['evidence_limit']:
+                    metadata['evidence_truncated'] = True
+                    return
+                first, second = sorted((target, co_app), key=lambda a: str(a.identity_id))
+                evidence.append({
+                    'identity_id_1': str(first.identity_id), 'identity_id_2': str(second.identity_id),
+                    'appearance_id_1': first.id, 'appearance_id_2': second.id,
+                    'evidence_key': sorted((target.id, co_app.id)),
+                    'pipeline_id_1': first.pipeline_id, 'pipeline_id_2': second.pipeline_id,
+                    'start_time_1': first.start_time, 'start_time_2': second.start_time,
+                    'classification': classification,
+                    'sighting_gap_seconds': abs((first.start_time - second.start_time).total_seconds()),
+                    'physical_encounter_duration_seconds': None,
+                })
+
         # Process same-camera co-appearances (original logic)
         for window_index, (pipeline_id, window_start, window_end, app_time) in enumerate(time_windows):
             # Other identities in this window on the same pipeline. Interval
@@ -380,6 +441,7 @@ class IntelligenceService:
             query = select(IdentityAppearance).where(
                 and_(
                     IdentityAppearance.identity_id != identity_id,
+                    *period_filters,
                     (IdentityAppearance.identity_id == related_identity_id
                      if related_identity_id is not None else True),
                     IdentityAppearance.pipeline_id == pipeline_id,
@@ -389,21 +451,14 @@ class IntelligenceService:
                         IdentityAppearance.start_time
                     ) >= window_start,
                 )
-            ).order_by(IdentityAppearance.start_time.desc()).limit(1000)
+            ).order_by(IdentityAppearance.start_time.desc(), IdentityAppearance.id.desc()).limit(1001)
             result = await db.execute(query)
-            co_appearances = result.scalars().all()
+            co_appearances = list(result.scalars().all())
+            metadata['truncated'] |= len(co_appearances) > 1000
+            co_appearances = co_appearances[:1000]
 
             for co_app in co_appearances:
-                other_id = str(co_app.identity_id)
-                co_appearance_counts[other_id]['count'] += 1
-                co_appearance_counts[other_id]['same_camera_count'] += 1
-                co_appearance_counts[other_id]['matched_windows'].add(window_index)
-                co_appearance_counts[other_id]['pipelines'].add(pipeline_id)
-
-                if co_appearance_counts[other_id]['first'] is None or co_app.start_time < co_appearance_counts[other_id]['first']:
-                    co_appearance_counts[other_id]['first'] = co_app.start_time
-                if co_appearance_counts[other_id]['last'] is None or co_app.start_time > co_appearance_counts[other_id]['last']:
-                    co_appearance_counts[other_id]['last'] = co_app.start_time
+                record_match(window_index, co_app, 'same_camera')
 
         # Process cross-camera co-appearances (if enabled)
         if multi_camera_enabled and pipeline_coords:
@@ -458,6 +513,7 @@ class IntelligenceService:
                         query = select(IdentityAppearance).where(
                             and_(
                                 IdentityAppearance.identity_id != identity_id,
+                                *period_filters,
                                 (IdentityAppearance.identity_id == related_identity_id
                                  if related_identity_id is not None else True),
                                 IdentityAppearance.pipeline_id.in_(nearby_pipelines),
@@ -467,31 +523,18 @@ class IntelligenceService:
                                     IdentityAppearance.start_time
                                 ) >= cross_camera_window_start,
                             )
-                        ).order_by(IdentityAppearance.start_time.desc()).limit(1000)  # deterministic newest-first under the cap
+                        ).order_by(IdentityAppearance.start_time.desc(), IdentityAppearance.id.desc()).limit(1001)  # deterministic newest-first under the cap
 
                         result = await db.execute(query)
-                        cross_camera_appearances = result.scalars().all()
+                        cross_camera_appearances = list(result.scalars().all())
+                        metadata['truncated'] |= len(cross_camera_appearances) > 1000
+                        cross_camera_appearances = cross_camera_appearances[:1000]
                     except Exception as e:
                         logger.warning(f"[INTELLIGENCE] Error querying cross-camera appearances for {target_pipeline_id}: {e}")
-                        continue
+                        raise
 
                     for co_app in cross_camera_appearances:
-                        other_id = str(co_app.identity_id)
-                        # Only count if not already counted as same-camera
-                        if co_app.pipeline_id != target_pipeline_id:
-                            co_appearance_counts[other_id]['cross_camera_count'] += 1
-                            # Add to total count (but weight cross-camera less if desired)
-                            co_appearance_counts[other_id]['count'] += 1
-                            co_appearance_counts[other_id]['matched_windows'].add(window_index)
-                            co_appearance_counts[other_id]['pipelines'].add(co_app.pipeline_id)
-                            co_appearance_counts[other_id]['pipelines'].add(target_pipeline_id)  # Also track target pipeline
-
-                            # Use the earlier time for first, later time for last
-                            co_app_time = co_app.start_time
-                            if co_appearance_counts[other_id]['first'] is None or co_app_time < co_appearance_counts[other_id]['first']:
-                                co_appearance_counts[other_id]['first'] = co_app_time
-                            if co_appearance_counts[other_id]['last'] is None or co_app_time > co_appearance_counts[other_id]['last']:
-                                co_appearance_counts[other_id]['last'] = co_app_time
+                        record_match(window_index, co_app, 'cross_camera')
 
         # Filter by minimum co-appearances
         # For same-camera: use min_co_appearances
@@ -509,7 +552,7 @@ class IntelligenceService:
 
         if not filtered:
             logger.debug(f"[INTELLIGENCE] No co-appearances found meeting thresholds (same-camera min: {min_co_appearances}, cross-camera min: {multi_camera_min})")
-            return []
+            return CoAppearanceResults(metadata=metadata, evidence=evidence)
 
         # Get identity details
         identity_ids = [uuid.UUID(i) for i in filtered.keys()]
@@ -540,7 +583,7 @@ class IntelligenceService:
 
             # Check activity correlation if enabled (for higher confidence relationships)
             correlation_boost = 1.0
-            if settings.ACTIVITY_CORRELATION_ENABLED:
+            if settings.ACTIVITY_CORRELATION_ENABLED and cutoff_date is None:
                 try:
                     from backend.core.activity_correlation import activity_correlation_analyzer
                     correlation_score, _, _corr_meta = await activity_correlation_analyzer.calculate_correlation(
@@ -576,14 +619,14 @@ class IntelligenceService:
                 co_appearance_count=data['count'],
                 co_appearance_percentage=round(co_appearance_pct, 1),
                 relationship_strength=strength,
-                common_pipelines=list(data['pipelines']),
+                common_pipelines=sorted(data['pipelines']),
                 first_co_appearance=data['first'],
                 last_co_appearance=data['last'],
                 best_snapshot_path=identity.best_snapshot_path if identity else None
             ))
 
         # Sort by count and limit
-        results.sort(key=lambda x: x.co_appearance_count, reverse=True)
+        results.sort(key=lambda x: (-x.co_appearance_count, x.identity_id))
 
         logger.info(
             f"[INTELLIGENCE] Found {len(results)} related identities for {identity_id} "
@@ -591,7 +634,8 @@ class IntelligenceService:
             f"cross-camera enabled: {multi_camera_enabled})"
         )
 
-        return results[:limit]
+        metadata['result_truncated'] = len(results) > limit
+        return CoAppearanceResults(results[:limit], metadata=metadata, evidence=evidence)
 
     async def refresh_relationships(
         self,

@@ -376,7 +376,64 @@
                 }
                 if (generation !== selectionGeneration) return;
                 message(model ? 'Showing the dataset and configuration linked to this model.' : dataset ? 'Dataset selected. Continue through validation and training.' : 'No evidence selected. Prepare a dataset to begin.');
-                renderPipeline(); renderStage(); renderProgress(); summary(); if (dataset) loadExplorer();
+                // Inspect existing tables without invoking any dataset-build mutation.
+        const inspector = node('existing-data-inspector');
+        if (inspector) {
+            const now = new Date();
+            node('existing-data-end').value = now.toISOString().slice(0, 16);
+            node('existing-data-start').value = new Date(now.getTime() - 86400000).toISOString().slice(0, 16);
+            let camerasLoaded = false;
+            const invalidate = () => { node('existing-data-notebook').hidden = true; };
+            inspector.addEventListener('change', invalidate);
+            inspector.addEventListener('toggle', async () => {
+                if (!inspector.open || camerasLoaded) return;
+                camerasLoaded = true;
+                try {
+                    const response = await api('/api/pipelines');
+                    const cameras = Array.isArray(response) ? response : response.pipelines || response.items || [];
+                    const field = node('existing-data-cameras');
+                    for (const camera of cameras) {
+                        const label = el('label', 'mlops-inline-label');
+                        const input = el('input'); input.type = 'checkbox'; input.value = camera.pipeline_id;
+                        label.append(input, document.createTextNode(camera.location_name || camera.pipeline_id)); field.append(label);
+                    }
+                    if (!cameras.length) node('existing-data-status').textContent = 'No cameras available.';
+                } catch (error) {
+                    camerasLoaded = false;
+                    node('existing-data-status').textContent = formatActionError('Could not load cameras. Close and reopen to retry.', error);
+                }
+            });
+            node('existing-data-load').addEventListener('click', async () => {
+                const load = node('existing-data-load'), status = node('existing-data-status');
+                invalidate(); node('existing-data-output').replaceChildren();
+                const cameras = [...node('existing-data-cameras').querySelectorAll('input:checked')].map(n => n.value);
+                const start = node('existing-data-start').value, end = node('existing-data-end').value;
+                if (!start || !end || cameras.length < 1 || cameras.length > 30) {
+                    status.textContent = 'Choose a start, end and 1 to 30 cameras.'; return;
+                }
+                const query = new URLSearchParams({kind: node('existing-data-kind').value, start: start + 'Z', end: end + 'Z', limit: '500'});
+                cameras.forEach(id => query.append('pipeline_ids', id));
+                const identity = node('existing-data-identity').value.trim();
+                if (identity) query.set('identity_id', identity);
+                const controls = [...inspector.querySelectorAll('input, select')];
+                controls.forEach(control => { control.disabled = true; });
+                load.disabled = true; status.textContent = 'Reading saved evidence…';
+                try {
+                    const response = await api('/api/ml/analytics/existing?' + query, {timeout: 30000});
+                    const meta = response.metadata, rows = response.items;
+                    status.textContent = meta.grain + ' · ' + rows.length + ' rows returned. ' + (meta.truncated ? 'Partial result: narrow the period or cameras.' : rows.length ? 'Within query limits.' : 'No saved observations in this scope.');
+                    const area = node('existing-data-output');
+                    area.append(jsonBlock(meta));
+                    const columns = [...new Set(rows.flatMap(row => Object.keys(row)))];
+                    if (rows.length) area.append(simpleTable(columns, rows.slice(0, 20).map(row => columns.map(k => text(row[k])))));
+                    area.append(el('p', 'mlops-note', 'Preview shows up to 20 rows. The notebook reads the same requested scope again and records its own capture time.'));
+                    query.set('notebook', 'true');
+                    const link = node('existing-data-notebook'); link.href = '/api/ml/analytics/existing?' + query; link.hidden = false;
+                } catch (error) { status.textContent = formatActionError('Could not inspect data', error); }
+                finally { load.disabled = false; controls.forEach(control => { control.disabled = false; }); }
+            });
+        }
+        renderPipeline(); renderStage(); renderProgress(); summary(); if (dataset) loadExplorer();
             } catch (err) {
                 if (err.aborted || generation !== selectionGeneration) return;
                 dataset = null; model = null;

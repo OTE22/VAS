@@ -1128,6 +1128,56 @@ async def job_debug_notebook(job_id: str, db: AsyncSession = Depends(get_db),
     return await _debug_notebook_response(db, dataset_id=uuid_mod.UUID(dataset_id) if dataset_id else None, task=task)
 
 
+@router.get("/api/ml/analytics/existing", tags=["ML Operations"])
+async def existing_analytics(
+    kind: str = Query(...), start: datetime = Query(...), end: datetime = Query(...),
+    pipeline_ids: List[str] = Query(...), identity_id: Optional[uuid_mod.UUID] = Query(None),
+    limit: int = Query(500, ge=1, le=2000), window_seconds: int = Query(10, ge=1, le=3600),
+    notebook: bool = Query(False), current_user=Depends(ML_MANAGE),
+    _rl: None = Depends(rate_limited("ml-existing-analytics", heavy=True)),
+):
+    """Admin-only inspection, bounded and read-only even with the application role.
+
+    Uses a separate transaction because authentication may already have read
+    through the request's session. No migrations, refresh, registration or jobs.
+    """
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+    from db_connection import db_manager
+    from backend.ml.dataset_explorer import explore_existing_data, analytics_scope
+    from backend.ml.debug_notebook import build_analytics_notebook
+    try:
+        analytics_scope(kind, start, end, pipeline_ids, limit, window_seconds)
+        async with db_manager.get_session() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout = '10s'"))
+            await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+            result = await asyncio.wait_for(explore_existing_data(session, kind=kind,
+                start=start, end=end, pipeline_ids=pipeline_ids, identity_id=identity_id,
+                limit=limit, window_seconds=window_seconds), timeout=25)
+        from fastapi.encoders import jsonable_encoder
+        payload = jsonable_encoder(result, custom_encoder={datetime: iso_utc})
+        headers = {"Cache-Control": "no-store"}
+        if notebook:
+            headers["Content-Disposition"] = 'attachment; filename="existing-data-inspection.ipynb"'
+            payload = build_analytics_notebook(payload)
+        return JSONResponse(payload, headers=headers)
+    except ValueError as exc:
+        raise _error(422, "INVALID_ANALYTICS_SCOPE", str(exc))
+    except asyncio.TimeoutError:
+        raise _error(503, "ANALYTICS_TIMEOUT", "Narrow the period or select fewer cameras.")
+    except DBAPIError as exc:
+        state = getattr(exc.orig, "sqlstate", None)
+        if state in ("57014", "55P03"):
+            raise _error(503, "ANALYTICS_TIMEOUT", "Query budget exceeded. Narrow the period or select fewer cameras.")
+        if state == "42501":
+            raise _error(403, "DATA_SOURCE_ACCESS_DENIED", "The existing database role cannot read the selected source. No grants were changed.")
+        raise _safe_500("existing data inspection", exc)
+    except Exception as exc:
+        raise _safe_500("existing data inspection", exc)
+
+
 @router.get("/api/ml/datasets/{dataset_id}/explorer", tags=["ML Operations"])
 @router.get("/api/ml/datasets/{dataset_id}/validation-report", tags=["ML Operations"])
 async def dataset_explorer(

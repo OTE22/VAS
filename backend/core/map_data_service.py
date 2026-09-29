@@ -192,6 +192,8 @@ def build_map_data(
         ))
 
     # ---- security analysis (pure data) -----------------------------------
+    if include_security and not security_zones:
+        warnings.append("Security zones unavailable: camera locations do not define zone boundaries.")
     zones_fc: List[Dict[str, Any]] = []
     zone_objs: List[Any] = []
     patterns_fc: List[Dict[str, Any]] = []
@@ -328,6 +330,9 @@ def build_map_data(
                        "route_points": len(positions), "zones": len(zones_fc),
                        "patterns": len(patterns_fc), "threats": len(threats_fc),
                        "risk_points": len(risk_points)},
+            "observation_grain": "saved camera sightings; connecting lines are not measured paths",
+            "security_zone_status": "provided" if security_zones else "unavailable",
+            "security_zone_reason": None if security_zones else "No stored zone geometry supplied; camera names do not define zones.",
             "features_enabled": {"routes": include_routes, "patterns": detect_patterns,
                                  "risk": include_risk, "security": include_security},
             "warnings": warnings,

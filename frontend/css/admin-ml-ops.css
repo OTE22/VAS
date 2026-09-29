@@ -1917,3 +1917,11 @@
 .mlops-checklist-item { padding: .5rem; }
 .mlops-checklist-item .mlops-btn { display: block; width: 100%; text-align: left; margin-bottom: .4rem; }
 .mlops-checklist-item > span { display: block; font-size: .9rem; line-height: 1.5; }
+
+/* Existing-data inspector shares the ML Ops forms and table components. */
+#existing-data-inspector [hidden] { display: none !important; }
+#existing-data-inspector summary { cursor: pointer; font-weight: 600; }
+#existing-data-inspector .mlops-form-row { align-items: flex-end; }
+#existing-data-inspector .mlops-form-row label { display: flex; flex-direction: column; gap: .4rem; }
+#existing-data-cameras { display: flex; flex-wrap: wrap; gap: .8rem; margin: 1rem 0; padding: .8rem; }
+#existing-data-output .mlops-table-wrap { max-height: 480px; overflow: auto; }

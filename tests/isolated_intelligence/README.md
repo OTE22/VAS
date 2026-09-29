@@ -10,3 +10,7 @@ These tests replace app startup/config imports with a small explicit harness. Th
 For database tests, provide a disposable pgvector PostgreSQL instance on an internal Docker network with hostname **intel-test-db**, and set `INTELLIGENCE_TEST_DATABASE_URL` to that test database. The harness refuses a different database host. It creates tables and truncates test job/threshold tables; never point it at a real application database. With no DSN, the database tests skip and pure algorithm/route checks still run. `--network none` can enforce isolation for that variant.
 
 The test PostgreSQL image used in this run was `pgvector/pgvector:pg15`; the Python runner was the freshly built VAS worker image with pytest mounted separately. Only the test directory was overlaid for final runs; application modules came from the built image.
+
+## Existing-data analytics regression checks
+
+`test_readonly_analytics.py` also creates/truncates synthetic camera, identity, detection, assessment and label fixtures **only in the disposable database**. It verifies half-open periods, independent camera aggregation, source pair evidence, historical prediction cutoffs, review/score separation, artifact integrity, notebook cells and SELECT-only execution. The source-under-review run mounts the complete repository read-only into the worker image; it does not certify that those changes are deployed.

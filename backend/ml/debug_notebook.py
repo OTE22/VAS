@@ -36,6 +36,8 @@ PREVIEW_ROWS = 20  # Change up to 100; the complete dataset is checked later.
 print("THIS IS THE DATA USED")
 print("Dataset:", data_used['dataset_id'], "Version:", data_used['dataset_version'], "Model:", data_used['model_id'])
 print("Saved extracted feature rows, not a fresh query of the current database.")
+print("Grain: one saved feature snapshot per entity/as-of anchor. Labels and model scores are separate.")
+print("No continuous position history, frame dimensions, measured occupancy, speed or observed zones are retained for this dataset.")
 if not data_used['available']:
     print("No saved dataset is available yet. Prepare a dataset in ML Ops, then open a fresh notebook.")
 else:
@@ -538,3 +540,47 @@ def build_pipeline_debug_notebook(evidence):
                          'language_info': {'name': 'python'}, 'vas_debug_export': 2,
                          'vas_debug_scope': 'workflow_evidence_and_offline_rechecks'},
             'cells': [dict(cell, id=f'workflow-{index:02d}') for index, cell in enumerate(cells)]}
+
+
+def build_analytics_notebook(payload):
+    """Offline notebook over the exact read-only SELECT response, no DB credentials."""
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha256(encoded.encode()).hexdigest()
+    sources = [
+        'import json, hashlib, html\ntry:\n    from IPython.display import display, HTML\nexcept ImportError:\n    display, HTML = print, str\n'
+        f'export_json = {encoded!r}\n'
+        f'assert hashlib.sha256(export_json.encode()).hexdigest() == {digest!r}\n'
+        'data_used = json.loads(export_json)\n'
+        'print("THIS IS THE DATA USED: existing database records at", data_used["metadata"]["captured_at"])\n'
+        'print("Grain:", data_used["metadata"]["grain"])\n'
+        'print("Returned rows:", len(data_used["items"]))\n'
+        'dataset = data_used["items"]\n'
+        'columns = list(dict.fromkeys(key for row in dataset for key in row))\n'
+        'header = "".join("<th>" + html.escape(key) + "</th>" for key in columns)\n'
+        'body = "".join("<tr>" + "".join("<td>" + html.escape(json.dumps(row.get(key), ensure_ascii=False)) + "</td>" for key in columns) + "</tr>" for row in dataset[:20])\n'
+        'display(HTML(\'<div style="overflow:auto;max-height:480px"><table><thead><tr>\' + header + \'</tr></thead><tbody>\' + body + \'</tbody></table></div>\'))\n'
+        'print("Preview: first 20 rows. Full returned records are in dataset.")\n',
+        'metadata = data_used["metadata"]\nassert metadata["read_only"] is True\n'
+        'assert metadata["returned_rows"] == len(dataset)\n'
+        'display(metadata)\n'
+        'print("Partial result: narrow the period or cameras before interpreting counts." if metadata["truncated"] else "Returned population is within the declared query limits.")\n',
+        'rows = data_used["items"]\nkind = metadata["kind"]\n'
+        'if kind == "next_camera":\n'
+        '    for row in rows:\n'
+        '        assert row["anchor_time"] < row["target_time"]\n'
+        '        assert row["target_appearance_id"] not in row["input_appearance_ids"]\n'
+        '        assert row["horizon_seconds"] > 0\n'
+        'elif kind == "co_occurrences":\n'
+        '    keys = [tuple(row["evidence_key"]) for row in rows]\n'
+        '    assert len(keys) == len(set(keys))\n'
+        '    assert all(row["identity_id_1"] < row["identity_id_2"] for row in rows)\n'
+        'elif kind == "camera_windows":\n'
+        '    assert all(all(value >= 0 for value in row["counts"].values()) for row in rows)\n'
+        'print("Inspection checks passed. This does not train, deploy, or certify model accuracy.")\n'
+        'print("Unsupported measurements:", metadata["unavailable"])\n',
+    ]
+    return {'nbformat': 4, 'nbformat_minor': 5,
+        'metadata': {'kernelspec': {'display_name':'Python 3 (ipykernel)', 'language':'python', 'name':'python3'},
+                     'language_info': {'name':'python'}, 'vas_debug_scope':'existing_database_read_only'},
+        'cells': [dict(cell_type='code', id=f'analytics-{i}', metadata={}, execution_count=None,
+                       outputs=[], source=source.splitlines(True)) for i, source in enumerate(sources)]}

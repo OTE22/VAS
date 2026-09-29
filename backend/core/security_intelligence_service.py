@@ -1191,7 +1191,7 @@ class SecurityIntelligenceService:
     ) -> List:
         """
         Calculate relationships on-the-fly from appearance data.
-        Used as fallback when cache is empty. BOUNDED: at most
+        Uses the requested period, independently of the mutable cache. BOUNDED: at most
         NETWORK_FALLBACK_MAX_IDENTITIES most-recently-seen identities are
         considered (the unbounded version scanned every identity in the
         database inside one HTTP request).
@@ -1199,6 +1199,7 @@ class SecurityIntelligenceService:
         from backend.core.intelligence_service import intelligence_service
 
         logger.info(f"[SECURITY_INTEL] Calculating relationships from appearances (cutoff: {cutoff_date})")
+        period_end = datetime.utcnow()
         max_identities = int(settings.NETWORK_FALLBACK_MAX_IDENTITIES)
 
         if identity_ids:
@@ -1207,13 +1208,15 @@ class SecurityIntelligenceService:
                 and_(
                     Identity.id.in_(identity_uuids),
                     Identity.id.in_(select(IdentityAppearance.identity_id).where(
-                        IdentityAppearance.start_time >= cutoff_date))
+                        IdentityAppearance.start_time >= cutoff_date,
+                        IdentityAppearance.start_time < period_end))
                 )
             ).order_by(Identity.last_seen_at.desc()).limit(max_identities)
         else:
             identities_query = select(Identity).where(
                 Identity.id.in_(select(IdentityAppearance.identity_id).where(
-                        IdentityAppearance.start_time >= cutoff_date))
+                        IdentityAppearance.start_time >= cutoff_date,
+                        IdentityAppearance.start_time < period_end))
             ).order_by(Identity.last_seen_at.desc()).limit(max_identities)
 
         identities_result = await db.execute(identities_query)
@@ -1237,7 +1240,7 @@ class SecurityIntelligenceService:
                     time_window,
                     min_co_appearances,
                     100,  # limit
-                    cutoff_date=cutoff_date,
+                    cutoff_date=cutoff_date, period_end=period_end,
                 )
 
                 for rel_info in related:
@@ -1252,21 +1255,20 @@ class SecurityIntelligenceService:
                     if identity.id != id1:
                         canonical = await intelligence_service._calculate_co_appearances(
                             db, id1, time_window, min_co_appearances, 1,
-                            cutoff_date=cutoff_date, related_identity_id=id2,
+                            cutoff_date=cutoff_date, period_end=period_end, related_identity_id=id2,
                         )
                         if not canonical:
                             continue
                         rel_info = canonical[0]
 
-                    # Use the relationship with higher co-appearance count
-                    if key not in all_relationships or rel_info.co_appearance_count > all_relationships[key].co_appearance_count:
-                        strength_map = {
-                            "strong": RelationshipStrength.STRONG,
-                            "moderate": RelationshipStrength.MODERATE,
-                            "weak": RelationshipStrength.WEAK
-                        }
-                        strength = strength_map.get(rel_info.relationship_strength, RelationshipStrength.WEAK)
-                        all_relationships[key] = _RelationshipView(id1, id2, rel_info, strength)
+                    # Canonical direction fixes the percentage denominator.
+                    strength_map = {
+                        "strong": RelationshipStrength.STRONG,
+                        "moderate": RelationshipStrength.MODERATE,
+                        "weak": RelationshipStrength.WEAK
+                    }
+                    strength = strength_map.get(rel_info.relationship_strength, RelationshipStrength.WEAK)
+                    all_relationships[key] = _RelationshipView(id1, id2, rel_info, strength)
 
             except Exception as e:
                 logger.warning(f"[SECURITY_INTEL] Error calculating relationships for {identity.id}: {e}")

@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-21-checklist">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=existing-data-1-mlops-21-checklist">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -158,6 +158,33 @@
             <details class="mlops-evidence-browser" id="mlops-evidence-browser">
                 <summary>Inspect a dataset or model <span>Samples, validation, training stages and lineage</span></summary>
             <section class="mlops-workflow" aria-labelledby="workflow-title">
+                <details id="existing-data-inspector" class="mlops-card-body">
+                    <summary>Inspect existing database data</summary>
+                    <p>Choose cameras and a period (up to seven days). Preview saved evidence and download an inspection notebook. Counts describe saved observations; continuous movement measurements are unavailable.</p>
+                    <div class="mlops-form-row">
+                        <label>Data <select id="existing-data-kind" class="mlops-select">
+                            <option value="observations">Recognition observations</option>
+                            <option value="sightings">Identity sightings</option>
+                            <option value="camera_windows">Camera counts (10 seconds)</option>
+                            <option value="co_occurrences">Pair source evidence</option>
+                            <option value="period_edges">Period relationship edges</option>
+                            <option value="cached_edges">Current cached relationships</option>
+                            <option value="events">Assessments and alert events</option>
+                            <option value="reviews">Existing reviews and predictions</option>
+                            <option value="next_camera">Observed next-camera examples</option>
+                        </select></label>
+                        <label>Start (UTC) <input id="existing-data-start" type="datetime-local" class="mlops-input"></label>
+                        <label>End (UTC) <input id="existing-data-end" type="datetime-local" class="mlops-input"></label>
+                        <label>Identity UUID (required for pair / next-camera data) <input id="existing-data-identity" type="text" class="mlops-input" maxlength="36"></label>
+                    </div>
+                    <fieldset id="existing-data-cameras"><legend>Cameras (select up to 30)</legend></fieldset>
+                    <div class="mlops-header-actions">
+                        <button id="existing-data-load" type="button" class="mlops-btn">Preview existing data</button>
+                        <a id="existing-data-notebook" class="mlops-btn" hidden>Download inspection notebook</a>
+                    </div>
+                    <p id="existing-data-status" role="status" aria-live="polite"></p>
+                    <div id="existing-data-output"></div>
+                </details>
                 <div class="mlops-card-header"><div><span class="mlops-guide-label">Guided workflow</span><h2 id="workflow-title">Dataset and model evidence</h2><p>Choose a dataset or a saved model. Inspect each stage, then continue with the existing tools below.</p></div></div>
                 <aside class="workflow-evidence" aria-label="Getting started with ML operations">
                     <strong>First time here?</strong>
@@ -854,7 +881,7 @@
     <script src="/frontend/js/modal-stack.js?v=mstack-2"></script>
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
-    <script src="/frontend/js/mlops-workflow.js?v=workflow-4-notebooks"></script>
+    <script src="/frontend/js/mlops-workflow.js?v=workflow-5-existing-data"></script>
     <script src="/frontend/js/mlops-diagnostics.js?v=3-workflow"></script>
     <script src="/frontend/js/admin-ml-ops.js?v=mlops-24-checklist"></script>
     <script src="/frontend/js/mlops-tour.js?v=2-notebooks"></script>

@@ -86,6 +86,9 @@ FEATURE_SET_LIMITATIONS: Dict[str, Tuple[Dict[str, str], ...]] = {
                    "rather than an undercount"},
     ),
     "coappearance-features-v1": (
+        {"feature": "legacy pair count",
+         "class": "frozen_feature_contract",
+         "detail": "v1 numeric self-join counts same-camera source pairs; only the first side has a lower lookback bound. Cache-derived 90d fields are collection-time summaries, not reconstructed period edges. Use read-only period evidence for bounded analysis; saved v1 vectors are not redefined."},
         {"feature": "relationship cache",
          "class": "processing_time_observation",
          "detail": "pair snapshots observe the mutable relationship cache at collection time; "
