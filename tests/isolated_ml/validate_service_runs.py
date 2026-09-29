@@ -3,7 +3,7 @@
 The caller must provide isolated container networking, no production mounts,
 and an explicit output volume. Fixtures are synthetic, not accuracy evidence.
 """
-import asyncio, json, logging, os, sys, time, uuid
+import asyncio, csv, json, logging, os, sys, time, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,6 +34,23 @@ logging.basicConfig(level=logging.WARNING)
 def save(name, data):
     (OUT/name).write_text(json.dumps(data,default=str,indent=2))
 
+def selected_families():
+    names = [name.strip() for name in os.environ.get('VAS_VALIDATION_FAMILIES', ','.join(MODEL_SPECS)).split(',')]
+    if not names or any(name not in MODEL_SPECS for name in names):
+        raise ValueError('Select implemented model families explicitly')
+    return list(dict.fromkeys(names))
+
+
+def save_csv(name, rows):
+    if not rows:
+        return
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    with (OUT/name).open('w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 async def fixture():
     async with db_manager.engine.begin() as conn:
         await conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
@@ -62,10 +79,11 @@ async def fixture():
                     start_time=start,end_time=start+timedelta(seconds=30+i*3+j*11),created_at=start))
             # Reviewed outcomes are a simulated workflow state in this disposable DB.
             # They must never be copied into production or cited as real accuracy evidence.
-            db.add(MLLabel(subject_id=str(person),person_id=person,label='positive' if i%2 else 'negative',
-                label_kind='manual',label_definition_version='v1',source='validation_fixture_review',
-                event_time=anchor+timedelta(days=9),review_status='reviewed',status='active',
-                created_by='isolated-author',created_by_user_id=1,idempotency_key='validation-'+str(person),reviewed_by='isolated-reviewer',reviewed_by_user_id=2,reviewed_at=now))
+            if 'threat_ranking_model' in selected_families():
+                db.add(MLLabel(subject_id=str(person),person_id=person,label='positive' if i%2 else 'negative',
+                    label_kind='manual',label_definition_version='v1',source='validation_fixture_review',
+                    event_time=anchor+timedelta(days=9),review_status='reviewed',status='active',
+                    created_by='isolated-author',created_by_user_id=1,idempotency_key='validation-'+str(person),reviewed_by='isolated-reviewer',reviewed_by_user_id=2,reviewed_at=now))
         for group in range(3):
             for i in range(40):
                 for offset in (1,2,3+(i%4)):
@@ -82,8 +100,15 @@ async def fixture():
     from backend.ml.collector import run_collection
     from backend.ml.relational_feature_service import collect_relational_snapshots
     async with db_manager.get_session() as db:
-        stats=await run_collection(db,run_id='validation-collection',full_rebuild=False)
-        save('collection.json',stats)
+        if set(selected_families()) - {'social_graph_anomaly_model', 'coappearance_anomaly_model'}:
+            stats=await run_collection(db,run_id='validation-collection',full_rebuild=False)
+            save('collection.json',stats)
+        edges = (await db.execute(select(IdentityRelationship).order_by(IdentityRelationship.identity_id_1,IdentityRelationship.identity_id_2))).scalars().all()
+        save_csv('SYNTHETIC-relationship-source.csv', [dict(synthetic=True, source_id=str(e.id),
+            identity_id_1=str(e.identity_id_1),identity_id_2=str(e.identity_id_2),
+            co_appearance_count=e.co_appearance_count, co_appearance_percentage=e.co_appearance_percentage,
+            first_co_appearance=e.first_co_appearance,last_co_appearance=e.last_co_appearance,
+            calculated_at=e.calculated_at,common_pipelines=json.dumps(e.common_pipelines)) for e in edges])
         for group in range(3):
             # Only cache observations whose calculated_at precedes this cutoff are read.
             result=await collect_relational_snapshots(db,as_of=base+timedelta(days=(0,45,65)[group]+10),run_id=f'validation-relational-{group}')
@@ -191,6 +216,56 @@ async def one(family, attempt):
     print(json.dumps({key:result.get(key) for key in ('family','status','training_status','failure','engineering','deployment_error','exception','message')}),flush=True)
     return result
 
+async def validate_graph_drift(outcome):
+    """Synthetic monitoring telemetry only, in the guarded disposable DB.
+
+    Scores come from the saved model; current node weights are deliberately
+    shifted. Repeated synthetic observations test plumbing, not independence
+    or real model quality. Existing sample thresholds are left intact.
+    """
+    import numpy as np
+    from backend.ml.drift_service import drift_service, psi
+    async with db_manager.get_session() as db:
+        model=await db.get(MLModel,uuid.UUID(outcome['model_id']))
+        payload=validate_artifact(model.artifact_path,expected_hash=model.artifact_hash,
+            expected_feature_names=model.feature_names,expected_dependencies=model.dependency_versions)
+        source=(await db.execute(select(MLFeatureSnapshot).where(
+            MLFeatureSnapshot.feature_set_version==model.feature_set_version).order_by(MLFeatureSnapshot.id))).scalars().all()
+        now=datetime.utcnow()
+        sample_count=max(250,int(settings.ML_DRIFT_MIN_SAMPLES))
+        scores_by_window = {}
+        for days in (15,2):
+            scores_by_window[days] = []
+            for index in range(sample_count):
+                original=source[index%len(source)]
+                features=dict(original.features)
+                if days==2:
+                    for key in ('graph_weighted_degree_log_90d','graph_mean_edge_weight_90d'):
+                        features[key] *= 2.0
+                stamp=now-timedelta(days=days,seconds=index)
+                snap=MLFeatureSnapshot(entity_type='person',entity_id=original.entity_id,
+                    feature_set_version=model.feature_set_version,as_of_timestamp=stamp,
+                    event_timestamp=stamp,computed_at=stamp,features=features,
+                    computation_run_id='SYNTHETIC-drift-telemetry',source_row_counts={'synthetic_monitoring_observation':1})
+                db.add(snap)
+                vector,_=preprocess_feature_vector(payload,features)
+                score=float(score_with_payload(payload,np.array([vector]))[0])
+                scores_by_window[days].append(score)
+        await db.commit()
+        data=await drift_service.run_data_drift(db,model_id=model.id)
+        prediction=await drift_service.run_prediction_drift(db,model_id=model.id)
+        assert not data['insufficient_data'], data
+        assert prediction['insufficient_data'] is True
+        assert prediction['metrics']['unavailable_reason']=='PERSISTED_SCORE_TELEMETRY_UNAVAILABLE_FOR_MODEL_FAMILY'
+        assert data['metrics']['worst_psi'] > 0, data
+        save('SYNTHETIC-drift-results.json',dict(synthetic=True,model_id=outcome['model_id'],
+            scenario='Current graph node weights doubled; all telemetry is synthetic',
+            samples_per_window=sample_count,data_drift=data,prediction_drift=prediction,
+            offline_score_psi=psi(scores_by_window[15],scores_by_window[2]),
+            offline_score_note='Computed from synthetic scored vectors only; not persistent production score monitoring',
+            note='No operational outcome/accuracy drift can be measured without real outcomes.'))
+
+
 async def main():
     db_manager.engine=create_async_engine(settings.DATABASE_URL,echo=False)
     db_manager.session_maker=async_sessionmaker(db_manager.engine,expire_on_commit=False,autoflush=False)
@@ -199,7 +274,20 @@ async def main():
         await fixture()
         attempt=uuid.uuid4().hex[:8]
         outcomes=[]
-        for family in MODEL_SPECS: outcomes.append(await one(family,attempt))
+        for family in selected_families():
+            outcome = await one(family,attempt)
+            outcomes.append(outcome)
+            if outcome['status'] == 'passed':
+                async with db_manager.get_session() as db:
+                    model = await db.get(MLModel, uuid.UUID(outcome['model_id']))
+                    dataset = await db.get(MLDataset, model.dataset_id)
+                    import pyarrow.parquet as pq
+                    raw = pq.read_table(dataset.storage_path).to_pylist()
+                    save_csv('SYNTHETIC-' + family + '-dataset.csv', [dict(synthetic=True,
+                        **{k:v for k,v in row.items() if k!='features_json'},
+                        **json.loads(row['features_json'])) for row in raw])
+                if family == 'social_graph_anomaly_model':
+                    await validate_graph_drift(outcome)
         save('service-results.json',outcomes)
         print('ALL_SERVICE_RUNS_FINISHED',flush=True)
         if not all(item['status']=='passed' for item in outcomes):

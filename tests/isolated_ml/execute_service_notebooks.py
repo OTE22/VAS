@@ -3,14 +3,14 @@
 Runs in the isolated Jupyter image. Input artifacts must be mounted read-only at
 /validation-output/artifacts; /validation-output contains only disposable exports.
 """
-import hashlib,json,time,traceback
+import hashlib,json,time,traceback,os
 from pathlib import Path
 import nbformat
 from nbclient import NotebookClient
 from nbconvert import HTMLExporter
 
 ROOT=Path('/validation-output')
-FAMILIES=('behavior_anomaly_model','coappearance_anomaly_model','social_graph_anomaly_model','threat_ranking_model','tabular_regression_model')
+FAMILIES=tuple(os.environ.get('VAS_VALIDATION_FAMILIES', 'behavior_anomaly_model,coappearance_anomaly_model,social_graph_anomaly_model,threat_ranking_model,tabular_regression_model').split(','))
 report=[]
 for family in FAMILIES:
     source=ROOT/'notebooks'/f'{family}.ipynb'
@@ -60,6 +60,18 @@ else:
     print('Stop result:')
     pprint(worker_result['stop'])
 print('PASS: isolated training, artifact reload, deployment scope, actual consumer scoring and stop checks')
+"""))
+    if family == 'social_graph_anomaly_model' and (ROOT/'SYNTHETIC-drift-results.json').exists():
+        book.cells.append(nbformat.v4.new_markdown_cell('## Synthetic drift reporting check\nMonitoring samples are generated only in the disposable database. Current node weights were doubled deliberately.'))
+        book.cells.append(nbformat.v4.new_code_cell("""drift = json.loads((Path('..') / 'SYNTHETIC-drift-results.json').read_text())
+assert drift['synthetic'] is True and drift['model_id'] == model['id']
+assert not drift['data_drift']['insufficient_data']
+assert drift['prediction_drift']['insufficient_data'] is True
+assert drift['prediction_drift']['metrics']['unavailable_reason'] == 'PERSISTED_SCORE_TELEMETRY_UNAVAILABLE_FOR_MODEL_FAMILY'
+assert drift['data_drift']['metrics']['worst_psi'] > 0
+pprint(drift)
+print('PASS: feature drift is assessed; unsupported persistent graph-score monitoring is reported explicitly.')
+print('Offline synthetic score PSI:', drift['offline_score_psi'])
 """))
     headings={};heading='Setup'
     for i,c in enumerate(book.cells):
