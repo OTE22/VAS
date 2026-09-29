@@ -18,8 +18,8 @@ def model(model_type=BEHAVIOR, **changes):
     values = dict(id=uuid.uuid4(), model_type=model_type, stage="validated", version=2,
         artifact_hash="a" * 64, artifact_path="/tmp/test-only-model", dependency_versions={},
         feature_names=["first"], feature_set_version="secintel-features-v2",
-        quality_gates={"passed": True}, evaluation_report={"engineering_gate": {"status": "PASS"}},
-        training_config={}, dataset_id=uuid.uuid4(), created_at=datetime(2026, 1, 1))
+        quality_gates={"passed": True}, evaluation_report={"engineering_gate": {"status": "PASS"}, "splits": {name: {"rows": 40, "positive": 20, "negative": 20} for name in ("train", "val", "test")}},
+        training_config={}, code_version="a"*40, dataset_id=uuid.uuid4(), created_at=datetime(2026, 1, 1))
     values.update(changes)
     return SimpleNamespace(**values)
 
@@ -153,7 +153,8 @@ def test_service_observation_records_exact_version_and_schema():
     assert args["after"]["applied_to_live_result"] is False
 
 
-def test_status_counts_and_next_action_are_service_scoped():
+@patch("backend.ml.workflow_policy.training_readiness", new_callable=AsyncMock, return_value={"ready": True, "blockers": []})
+def test_status_counts_and_next_action_are_service_scoped(_readiness):
     from backend.ml.decision_service import decision_service
     from backend.ml.labeling_service import labeling_service
     candidate = model(RANKING)
@@ -184,7 +185,8 @@ def test_status_counts_and_next_action_are_service_scoped():
     assert by_type["tabular_regression_model"]["next_action"] == "advanced"
 
 
-def test_selected_model_without_artifact_cannot_claim_ready():
+@patch("backend.ml.workflow_policy.training_readiness", new_callable=AsyncMock, return_value={"ready": True, "blockers": []})
+def test_selected_model_without_artifact_cannot_claim_ready(_readiness):
     from backend.ml.decision_service import decision_service
     from backend.ml.labeling_service import labeling_service
     from backend.ml.threshold_service import threshold_service
@@ -241,12 +243,18 @@ def service_database():
     if isolated_engine is None:
         pytest.skip("Disposable PostgreSQL not supplied")
     from sqlalchemy import text
-    from db_models import Base
+    from db_models import Base, MLDataset
+    from conftest import settings
+    settings.ML_GRAPH_MIN_EDGES = 50
+    settings.ML_GRAPH_MIN_NODES = 25
+    settings.ML_GRAPH_MIN_OBSERVATION_DAYS = 14
     async def setup():
         async with isolated_engine.begin() as db:
             await db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await db.run_sync(Base.metadata.create_all)
             await db.execute(text("TRUNCATE ml_audit_log, ml_models, ml_datasets, ml_feature_snapshots CASCADE"))
+        async with isolated_session() as db:
+            db.add(MLDataset(id=uuid.UUID('dddddddd-1111-4111-8111-111111111111'), name='service-contract-fixture', version=1, kind='supervised', feature_set_version='secintel-features-v2', checksum='a'*64))
     run(setup())
 
 
@@ -258,8 +266,8 @@ def db_model(version, *, stage="validated", model_type=RANKING):
         calibration_status="not_calibrated", artifact_name=f"fixture-v{version}.pkl",
         artifact_path=f"/tmp/nonexistent-fixture-v{version}.pkl", artifact_hash="a" * 64,
         dependency_versions={}, feature_set_version="secintel-features-v2", feature_names=["first"],
-        quality_gates={"passed": True}, evaluation_report={"engineering_gate": {"status": "PASS"}},
-        training_config={}, created_at=datetime.utcnow())
+        quality_gates={"passed": True}, evaluation_report={"engineering_gate": {"status": "PASS"}, "splits": {name: {"rows": 40, "positive": 20, "negative": 20} for name in ("train", "val", "test")}},
+        training_config={}, code_version='a'*40, dataset_id=uuid.UUID('dddddddd-1111-4111-8111-111111111111'), created_at=datetime.utcnow())
 
 
 def test_database_approved_selection_replaces_atomically_and_stop_does_not_revive_old(service_database):

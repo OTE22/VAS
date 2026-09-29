@@ -18,8 +18,64 @@ def helper_hashes():
     return {name: hashlib.sha256(source.encode()).hexdigest() for name, source in helper_sources().items()}
 
 
+def data_preview_cell(evidence):
+    """First executable cell: exact immutable extracted dataset, bounded preview."""
+    dataset = evidence.get('dataset') or {}
+    context = {'available': bool(evidence.get('artifact_available')),
+               'artifact_relative': evidence.get('artifact_relative'),
+               'dataset_id': dataset.get('id') or dataset.get('dataset_id'),
+               'dataset_version': dataset.get('version'),
+               'model_id': ((evidence.get('pipeline') or {}).get('model') or {}).get('id'),
+               'parquet_sha256': dataset.get('parquet_sha256')}
+    source = 'data_used = ' + repr(context) + '\n' + r'''# This is the data used: the saved database extraction for this dataset/model.
+from pathlib import Path
+import hashlib, json, html
+from IPython.display import display, HTML
+ARTIFACT_ROOT = Path("/artifacts")
+PREVIEW_ROWS = 20  # Change up to 100; the complete dataset is checked later.
+print("THIS IS THE DATA USED")
+print("Dataset:", data_used['dataset_id'], "Version:", data_used['dataset_version'], "Model:", data_used['model_id'])
+print("Saved extracted feature rows, not a fresh query of the current database.")
+if not data_used['available']:
+    print("No saved dataset is available yet. Prepare a dataset in ML Ops, then open a fresh notebook.")
+else:
+    import pyarrow.parquet as pq
+    preview_path = (ARTIFACT_ROOT / data_used['artifact_relative']).resolve()
+    assert preview_path.is_relative_to(ARTIFACT_ROOT.resolve()), "Dataset is outside the artifacts root"
+    assert preview_path.is_file(), "Saved dataset missing from the read-only artifacts mount"
+    assert data_used['parquet_sha256'], "Dataset hash unavailable; verify this dataset in ML Ops first"
+    preview_digest = hashlib.sha256()
+    with preview_path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            preview_digest.update(chunk)
+    assert preview_digest.hexdigest() == data_used['parquet_sha256'], "Dataset file checksum mismatch"
+    preview_file = pq.ParquetFile(preview_path)
+    assert type(PREVIEW_ROWS) is int and 1 <= PREVIEW_ROWS <= 100, "Preview size must be 1 to 100 rows"
+    preview_batch = next(preview_file.iter_batches(batch_size=PREVIEW_ROWS), None)
+    data_used_rows = [] if preview_batch is None else preview_batch.to_pylist()
+    # Keep raw values in data_used_rows; the table only formats their display.
+    preview_records = []
+    for row in data_used_rows:
+        features = json.loads(row.get('features_json') or '{}')
+        item = {k: row.get(k) for k in ('snapshot_id', 'entity_id', 'as_of', 'label', 'label_event_time')}
+        item['split'] = row.get('split') or 'excluded from training/evaluation'
+        item.update({'feature.' + k: v for k, v in features.items()})
+        preview_records.append(item)
+    columns = list(dict.fromkeys(k for row in preview_records for k in row))
+    def preview_value(value):
+        return html.escape('Missing' if value is None else str(value))
+    header = ''.join('<th style="padding:8px;text-align:left;white-space:nowrap">' + html.escape(k) + '</th>' for k in columns)
+    body = ''.join('<tr>' + ''.join('<td style="padding:8px;border-top:1px solid #999;white-space:nowrap">' + preview_value(row.get(k)) + '</td>' for k in columns) + '</tr>' for row in preview_records)
+    display(HTML('<div style="overflow-x:auto;max-height:480px"><table><thead><tr>' + header + '</tr></thead><tbody>' + body + '</tbody></table></div>'))
+    print(f"Showing {len(data_used_rows)} of {preview_file.metadata.num_rows} saved rows. File checksum verified.")
+    print("Split identifies train, validation (val), test or excluded rows. These are model features, not the original camera images or raw appearance records.")
+    print("Inspect data_used_rows / preview_records for full values. Later cells verify the entire dataset and split assignments.")
+'''
+    return {'cell_type': 'code', 'execution_count': None, 'metadata': {}, 'outputs': [], 'source': source.splitlines(True)}
+
+
 def build_debug_notebook(evidence):
-    cells = []
+    cells = [data_preview_cell(evidence)]
 
     def markdown(text):
         cells.append({'cell_type': 'markdown', 'metadata': {}, 'source': text.splitlines(True)})
@@ -182,7 +238,7 @@ def build_pipeline_debug_notebook(evidence):
     Training, feature extraction and deployment are recorded observations;
     only portable pure preprocessing is rerun against the immutable snapshot.
     """
-    cells = []
+    cells = [data_preview_cell(evidence)]
 
     def markdown(text):
         cells.append({'cell_type': 'markdown', 'metadata': {}, 'source': text.splitlines(True)})

@@ -49,6 +49,13 @@ async def preflight_guided_training(db, *, model_type, dataset_id=None):
         if row.definition_name and row.definition_name != spec.dataset_definition:
             raise GuidedTrainingRefusal('DATASET_SERVICE_MISMATCH', 'This dataset was prepared for another service. Choose compatible data or prepare new data.')
 
+    if not dataset_id and spec.dataset_kind != 'supervised':
+        from backend.ml.workflow_policy import training_readiness
+        readiness = await training_readiness(db, model_type)
+        if not readiness['ready']:
+            blocker = readiness['blockers'][0]
+            raise GuidedTrainingRefusal(blocker['code'], blocker['message'], training_readiness=readiness)
+
 
 async def prepare_training_inputs(job_id, payload):
     """Incremental feature preparation in the leased training child process.

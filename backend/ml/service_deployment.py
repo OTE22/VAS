@@ -40,19 +40,8 @@ def model_summary(row):
 
 
 def deployment_blockers(row, model_type):
-    """Recorded evidence only. Artifact integrity is checked at deployment/load."""
-    spec = get_model_spec(model_type)
-    if spec.serving_mode == "offline_regression":
-        return [{"code": "OFFLINE_ONLY", "message": "Numeric regression is an offline experiment; no live service deployment exists.", "action": "advanced"}]
-    if row is None:
-        return [{"code": "NO_MODEL", "message": "Prepare data and train a model for this service.", "action": "prepare_train"}]
-    out = []
-    summary = model_summary(row)
-    if row.feature_set_version != spec.feature_set_version:
-        out.append({"code": "FEATURE_SCHEMA_MISMATCH", "message": "Train a model using this service's current feature schema.", "action": "prepare_train"})
-    if not summary["quality_passed"] or summary["engineering_gate"] != "PASS":
-        out.append({"code": "ENGINEERING_REVIEW_REQUIRED", "message": "Engineering checks must pass. Open model readiness to review or recompute them.", "action": "review"})
-    return out
+    from backend.ml.workflow_policy import connection_blockers
+    return connection_blockers(row, model_type)
 
 
 def _empty_consumption(note, source):
@@ -136,6 +125,8 @@ async def service_status(db) -> Dict[str, Any]:
         selected = None if spec.serving_mode == "offline_regression" else await registry_service.get_stage_model(db, model_type, stage)
         candidate = await registry_service.get_stage_model(db, model_type, "validated")
         blockers = deployment_blockers(candidate or selected, model_type)
+        from backend.ml.workflow_policy import training_readiness
+        data_readiness = await training_readiness(db, model_type, labels=labels)
         count = snapshot_counts.get((spec.entity_type, spec.feature_set_version), 0)
         if model_type == "threat_ranking_model" and not labels["supervised_gate_open"]:
             blockers.append({"code": "REVIEWED_LABELS_REQUIRED", "message": "Review sufficient positive and negative outcomes before supervised training.", "action": "labels"})
@@ -152,7 +143,9 @@ async def service_status(db) -> Dict[str, Any]:
             state = "ready_for_requests"
             if model_type == "behavior_anomaly_model":
                 state = {"rules": "selected_rules_only", "shadow": "testing_alongside_rules", "ml": "ml_input_enabled"}.get(availability["current_mode"], "mode_gated")
-            if selected_blockers or (consumption.get("fallback_reason") and consumption.get("model_id") == str(selected.id)):
+            if selected_blockers:
+                state = "review_required"
+            if any(b["code"] in ("ARTIFACT_MISSING", "THRESHOLD_UNRESOLVED") for b in selected_blockers) or (consumption.get("fallback_reason") and consumption.get("model_id") == str(selected.id)):
                 state = "falling_back"
         elif candidate:
             state = "review_candidate"
@@ -163,6 +156,7 @@ async def service_status(db) -> Dict[str, Any]:
             "destination": {"name": destination, "url": url, "mode": mode},
             "serving_mode": spec.serving_mode, "scope": "all_pipelines", "state": state,
             "counts": {"snapshots": count, "datasets": dataset_counts.get((spec.dataset_definition, spec.feature_set_version), 0), "models": model_counts.get(model_type, 0)},
+            "training_readiness": data_readiness,
             "counts_note": "Family/schema-matched snapshot counts do not establish usable sample coverage or readiness.",
             "selected_model": model_summary(selected), "candidate": model_summary(candidate),
             "blockers": selected_blockers if selected else blockers,

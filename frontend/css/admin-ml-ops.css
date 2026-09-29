@@ -1910,3 +1910,10 @@
     .mlops-notebook-guide { padding: 15px; }
     .mlops-notebook-buttons { align-items: stretch; flex-direction: column; }
 }
+
+/* Guidance follows the existing service journey and remains usable on mobile. */
+.mlops-workflow-checklist { padding: 1rem; margin: 1rem 0; border: 1px solid var(--border-color, #355069); border-radius: 12px; }
+#service-workflow-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; padding-left: 1.5rem; margin: 1rem 0; }
+.mlops-checklist-item { padding: .5rem; }
+.mlops-checklist-item .mlops-btn { display: block; width: 100%; text-align: left; margin-bottom: .4rem; }
+.mlops-checklist-item > span { display: block; font-size: .9rem; line-height: 1.5; }

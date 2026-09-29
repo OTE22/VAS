@@ -41,3 +41,14 @@ assert.equal(fixture({services: [{model_type: family, selected_model: {id: 'pair
 assert.equal(fixture({selectedService: 'behavior_anomaly_model', services: [{model_type: 'behavior_anomaly_model', selected_model: {id: 'behavior-v1'}, decision_mode: 'rules'}]}).action.dataset.journeyStage, 'activate');
 assert.match(fixture({selectedService: 'tabular_regression_model'}).title, /offline numeric experiment/);
 console.log('19 scoped readiness and dataset compatibility scenarios passed');
+
+const policyFunctions = ['serviceConnectionBlockers', 'serviceTrainingBlocked'].map(extract).join('\n');
+const policy = vm.createContext({}); vm.runInContext(policyFunctions, policy);
+assert.equal(vm.runInContext('serviceConnectionBlockers(null).length', policy), 1);
+assert.equal(vm.runInContext('serviceConnectionBlockers({}).length', policy), 1);
+assert.equal(vm.runInContext('serviceConnectionBlockers({connection_blockers: []}).length', policy), 0);
+assert.equal(vm.runInContext('serviceTrainingBlocked(null, "saved")', policy), true);
+assert.equal(vm.runInContext('serviceTrainingBlocked({training_readiness:{blockers:[{code:"SOURCE_HISTORY_REQUIRED"}]}}, "saved")', policy), false);
+assert.equal(vm.runInContext('serviceTrainingBlocked({training_readiness:{blockers:[{code:"INSUFFICIENT_REVIEWED_LABELS"}]}}, "saved")', policy), true);
+assert.match(fixture({services:[{model_type:family,training_readiness:{blockers:[{code:'SOURCE_HISTORY_REQUIRED',message:'More camera history needed'}]}}]}).title,/data requirements/);
+console.log('7 connection and prerequisite scenarios passed');

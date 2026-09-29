@@ -187,6 +187,7 @@ def validate_artifact(path: str, *, expected_hash: str,
 
 def serialize_model_row(row) -> Dict[str, Any]:
     """Client payload — artifact_path deliberately omitted (path-free)."""
+    from backend.ml.workflow_policy import connection_blockers
     def iso(dt):
         return iso_utc(dt) if dt else None
     return {
@@ -205,6 +206,7 @@ def serialize_model_row(row) -> Dict[str, Any]:
         "hyperparameters": row.hyperparameters, "metrics": row.metrics,
         "quality_gates": row.quality_gates,
         "evaluation_report": row.evaluation_report,
+        "connection_blockers": connection_blockers(row, row.model_type),
         "shadow_approval": row.shadow_approval,
         "shadow_started_at": iso(row.shadow_started_at),
         "validated_at": iso(row.validated_at),
@@ -310,6 +312,14 @@ class RegistryService:
                     "SERVING_MODE_NOT_SUPPORTED",
                     f"{row.model_type} is {get_model_spec(row.model_type).serving_mode}; "
                     "it cannot enter the live shadow loop")
+
+        # All connection paths share the same evidence gate, including the
+        # lower-level registry API. Check under the existing model row lock.
+        if to_stage == "shadow" or (to_stage == "approved" and row.model_type == "threat_ranking_model"):
+            from backend.ml.workflow_policy import connection_blockers
+            blockers = connection_blockers(row, row.model_type)
+            if blockers:
+                raise RegistryError(blockers[0]["code"], blockers[0]["message"])
 
         now = datetime.utcnow()
         before_stage = row.stage

@@ -585,6 +585,56 @@
         if (!service) return 'Status not reported';
         return humanizeToken(service.state || 'unknown');
     }
+    function serviceConnectionBlockers(model) {
+        if (!model) return [{message: 'Prepare and train a candidate first.'}];
+        return Array.isArray(model.connection_blockers) ? model.connection_blockers
+            : [{message: 'Connection evidence is unavailable. Refresh the model list before continuing.'}];
+    }
+    function serviceTrainingBlocked(service, datasetId) {
+        const readiness = service?.training_readiness;
+        if (!readiness) return true;
+        return (readiness.blockers || []).some(item => !datasetId || item.code !== 'SOURCE_HISTORY_REQUIRED');
+    }
+    function renderServiceChecklist(service, model, datasetId) {
+        const root = getElement('service-workflow-checklist');
+        if (!root) return;
+        const selected = service?.selected_model, blockers = serviceConnectionBlockers(model);
+        const trained = !!model && ['validated', 'shadow', 'approved'].includes(model.stage);
+        const dataBlocked = serviceTrainingBlocked(service, datasetId);
+        const connected = !!selected;
+        const used = connected && service?.consumption?.selected_model_used === true;
+        const steps = [
+            ['Check data', trained || !dataBlocked ? 'Ready' : 'Blocked', 'prepare'],
+            ['Prepare dataset', trained ? 'Completed' : datasetId ? 'Saved dataset selected' : 'Pending', 'prepare'],
+            ['Train model', trained ? 'Completed' : state.activeJobs.size ? 'Job in progress' : 'Pending', 'prepare'],
+            ['Review evaluation', !model ? 'Pending' : blockers.length ? 'Blocked' : 'Ready for review', 'test'],
+            ['Connect service', connected ? 'Selected version ' + selected.version : 'Pending', 'activate'],
+            ['Verify service use', used ? 'Verified' : connected ? 'Waiting for a successful request' : 'Pending', 'monitor']
+        ];
+        const focusLabel = root.contains(document.activeElement) ? document.activeElement.textContent : null;
+        root.replaceChildren();
+        for (const [label, status, stage] of steps) {
+            const item = el('li', 'mlops-checklist-item');
+            const button = el('button', 'mlops-btn', label); button.type = 'button';
+            button.addEventListener('click', () => setJourneyStage(stage, true));
+            item.append(button, el('span', null, status)); root.appendChild(item);
+        }
+        if (focusLabel) Array.from(root.querySelectorAll('button')).find(button => button.textContent === focusLabel)?.focus({preventScroll: true});
+        const next = getElement('service-workflow-next');
+        let stage = 'prepare', label = 'Prepare & train';
+        if (service?.serving_mode === 'offline_regression') { label = 'Configure offline experiment'; }
+        else if (selected) { stage = state.selectedService === 'behavior_anomaly_model' && service.decision_mode === 'rules' ? 'activate' : 'monitor'; label = stage === 'activate' ? 'Start observation' : used ? 'Monitor service use' : 'Verify service use'; }
+        else if (trained || model) { stage = 'test'; label = blockers.length ? 'Resolve evaluation requirements' : 'Review trained model'; }
+        else if (dataBlocked) { label = 'Inspect data requirements'; }
+        else if (state.activeJobs.size) { label = 'View training progress'; }
+        next.textContent = label; next.dataset.journeyStage = stage;
+        next.disabled = state.servicesState !== 'ready';
+        getElement('service-workflow-milestone').textContent = connected
+            ? (used ? 'Model connected; successful service use recorded.' : 'Model selected; successful service use still needs verification.')
+            : trained ? 'Model trained. Complete evaluation and connection before application use.'
+            : 'Complete the prerequisites below. Your existing jobs, datasets and model versions are preserved.';
+    }
+
     function renderServiceJourney() {
         const cards = getElement('mlops-service-cards');
         if (!cards) return;
@@ -646,13 +696,19 @@
         getElement('mlops-prepare-copy').textContent = offline
             ? 'Numeric experiments need an explicit target and a saved pipeline. Configure those in Advanced training options; the result remains offline.'
             : 'One durable job collects features, builds and validates a dataset, then trains and evaluates a compatible candidate. This does not activate a model.';
-        getElement('service-train-btn').disabled = offline || !contract || !contract.trainable || state.servicesState !== 'ready' || state.mlWorker?.status !== 'healthy' || state.activeJobs.size > 0 || state.serviceActionBusy;
+        getElement('service-train-btn').disabled = offline || !contract || !contract.trainable || state.servicesState !== 'ready' || state.mlWorker?.status !== 'healthy' || state.activeJobs.size > 0 || state.serviceActionBusy || serviceTrainingBlocked(service, datasetPicker.value);
+        getElement('service-data-requirements').replaceChildren();
+        for (const requirement of service?.training_readiness?.blockers || []) {
+            if (datasetPicker.value && requirement.code === 'SOURCE_HISTORY_REQUIRED') continue;
+            getElement('service-data-requirements').appendChild(el('p', 'mlops-note note-warn', requirement.message));
+        }
         getElement('service-dataset-note').textContent = datasets.length + ' compatible, verified dataset' + (datasets.length === 1 ? '' : 's') + ' available. The default prepares fresh data. All configured cameras are included.';
         const model = serviceModel();
         getElement('service-review-btn').disabled = !model;
         getElement('service-readiness-btn').disabled = !model || state.serviceActionBusy;
-        getElement('service-continue-btn').disabled = !model;
-        getElement('service-deploy-btn').disabled = !model || offline || model.stage !== 'validated' || state.servicesState !== 'ready' || state.serviceActionBusy;
+        const connectionBlocked = serviceConnectionBlockers(model).length > 0;
+        getElement('service-continue-btn').disabled = !model || connectionBlocked || state.servicesState !== 'ready';
+        getElement('service-deploy-btn').disabled = !model || offline || connectionBlocked || model.stage !== 'validated' || state.servicesState !== 'ready' || state.serviceActionBusy;
         getElement('service-connect-title').textContent = offline ? 'Offline experiment — no live service connection' : 'Connect the reviewed model';
         getElement('service-activation-summary').replaceChildren(kvList([
             ['Destination', toText(service?.destination?.name, choice.destination)],
@@ -669,6 +725,7 @@
         shadowButton.hidden = !behavior || !service?.selected_model || service.decision_mode !== 'rules';
         shadowButton.disabled = state.serviceActionBusy || (service?.allowed_modes?.shadow?.available === false);
         getElement('service-mode-advanced').hidden = !behavior;
+        renderServiceChecklist(service, model, datasetPicker.value);
         renderServiceConsumption(service, choice);
         renderServiceJob();
         renderServiceNotebook();
@@ -768,7 +825,7 @@
             ['Held-out rows', formatMetric(report.splits?.test?.rows)],
             ['Feature contract', toText(model.feature_set_version, 'Not recorded')]
         ]));
-        const candidateBlockers = serviceStatus()?.candidate?.id === model.id ? serviceStatus()?.candidate_blockers : [];
+        const candidateBlockers = serviceConnectionBlockers(model);
         if (Array.isArray(candidateBlockers) && candidateBlockers.length) {
             const list = el('ul', 'mlops-service-blocker-list');
             candidateBlockers.forEach(blocker => list.appendChild(el('li', null, toText(blocker.message))));
@@ -780,6 +837,7 @@
         const contract = selectedServiceContract();
         if (!contract || !contract.trainable || state.activeJobs.size || state.serviceActionBusy || state.selectedService === 'tabular_regression_model') return;
         const family = state.selectedService, selection = journeySelection();
+        if (serviceTrainingBlocked(serviceStatus(), getElement('service-dataset-select').value)) return;
         const body = {model_type: family, algorithm: contract.default_algorithm, prepare_features: true};
         const dataset = state.datasets.find(item => item.id === getElement('service-dataset-select').value);
         if (dataset && compatibleDataset(dataset, contract)) body.dataset_id = dataset.id;
@@ -805,7 +863,7 @@
     }
     function connectServiceModel() {
         const model = serviceModel(), service = serviceStatus(), family = state.selectedService;
-        if (!model || !service || state.servicesState !== 'ready') return;
+        if (!model || !service || state.servicesState !== 'ready' || serviceConnectionBlockers(model).length) return;
         openActionPanel('Connect version ' + formatMetric(model.version) + ' to ' + toText(service.destination?.name, friendlyModelType(family)) + ' for ' + toText(service.serving_mode).replaceAll('_', ' '), async reason => {
             state.serviceActionBusy = true; renderServiceJourney();
             try {
@@ -848,8 +906,12 @@
         const family = SERVICE_CHOICES.some(item => item.model_type === stored.service) ? stored.service : 'behavior_anomaly_model';
         document.querySelectorAll('[data-journey-stage]').forEach(button => button.addEventListener('click', () => setJourneyStage(button.dataset.journeyStage, true)));
         on('mlops-service-guide', 'click', () => { setJourneyStage('prepare', true); getElement('mlops-journey-title').scrollIntoView({block: 'start'}); });
-        on('service-dataset-select', 'change', () => { journeySelection().dataset = getElement('service-dataset-select').value; journeySelection().job = ''; persistJourney(); renderServiceNotebook(); });
+        on('service-dataset-select', 'change', () => { journeySelection().dataset = getElement('service-dataset-select').value; journeySelection().job = ''; persistJourney(); renderServiceJourney(); });
         on('service-model-select', 'change', () => { journeySelection().model = getElement('service-model-select').value; state.serviceEvidence = null; persistJourney(); renderServiceJourney(); loadServiceModelEvidence(); });
+        on('service-workflow-next', 'click', () => {
+            if (state.selectedService === 'tabular_regression_model') openAdvanced('prepare', 'workflows');
+            else setJourneyStage(getElement('service-workflow-next').dataset.journeyStage || 'prepare', true);
+        });
         on('service-train-btn', 'click', startServiceTraining);
         on('service-training-advanced', 'click', () => openAdvanced('prepare', 'workflows'));
         on('service-review-btn', 'click', () => { const model = serviceModel(); if (model) { openAdvanced('review', 'model-registry'); loadModelDetail(model.id); } });
@@ -1050,6 +1112,8 @@
                 : {title: 'Verify this service uses its connected model', description: 'Check the version actually used, last successful request and fallback reason.', stage: 'monitor', action: 'Monitor service'};
         } else if (models.some(model => ['validated', 'shadow', 'approved'].includes(model.stage))) {
             next = {title: 'Review this service’s candidate', description: 'Inspect held-out results and current evidence gates before connecting the selected version.', stage: 'test', action: 'Test & review'};
+        } else if (service?.training_readiness?.blockers?.some(item => !datasets.length || item.code !== 'SOURCE_HISTORY_REQUIRED')) {
+            next = {title: 'Complete this service’s data requirements', description: service.training_readiness.blockers.map(item => item.message).join(' '), stage: 'prepare', action: 'Inspect requirements'};
         } else if (datasets.length) {
             next = {title: 'Train on a compatible dataset', description: 'Reuse a verified dataset for this service, or prepare a fresh version from available history.', stage: 'prepare', action: 'Prepare & train'};
         }

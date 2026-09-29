@@ -31,7 +31,8 @@ class PipelineNotebookTests(unittest.TestCase):
         with patch.object(socket, 'socket', side_effect=AssertionError('Notebook attempted network access')), contextlib.redirect_stdout(io.StringIO()):
             for index, cell in enumerate(notebook['cells']):
                 if cell['cell_type'] == 'code':
-                    exec(compile(''.join(cell['source']), f'notebook-{index}', 'exec'), namespace)
+                    source = ''.join(cell['source']).replace('Path("/artifacts")', 'Path(' + repr(str(root)) + ')')
+                    exec(compile(source, f'notebook-{index}', 'exec'), namespace)
                     if 'ARTIFACT_ROOT' in namespace:
                         namespace['ARTIFACT_ROOT'] = root
         return namespace
@@ -63,6 +64,27 @@ class PipelineNotebookTests(unittest.TestCase):
                 'pipeline': {'features': ['count'], 'target': 'target'} if model_type == 'tabular_regression_model' else {'features': ['count']}}},
                 'feature_lineage': {'samples': [{'id': 1, 'features': {'count': 0}}], 'definitions': definitions}}}
         return evidence, artifact
+
+    def test_first_cell_displays_verified_database_extraction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            evidence, artifact = self.fixture(root)
+            book = notebooks.build_pipeline_debug_notebook(evidence)
+            self.assertEqual(book['cells'][0]['cell_type'], 'code')
+            scope = self.execute(book, root)
+            self.assertEqual(len(scope['data_used_rows']), 20)
+            self.assertIn('feature.count', scope['preview_records'][0])
+            self.assertIn('split', scope['preview_records'][0])
+            self.assertIn('THIS IS THE DATA USED', ''.join(book['cells'][0]['source']))
+
+    def test_first_cell_refuses_changed_data_before_preview(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            evidence, artifact = self.fixture(root)
+            artifact.write_bytes(artifact.read_bytes() + b'changed')
+            book = notebooks.build_pipeline_debug_notebook(evidence)
+            with self.assertRaisesRegex(AssertionError, 'checksum mismatch'):
+                self.execute(book, root)
 
     def test_starter_without_data_executes_and_lists_all_steps(self):
         evidence = {'artifact_available': False, 'pipeline': {'model_type': 'behavior_anomaly_model'}}

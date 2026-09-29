@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-20-notebooks">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-21-checklist">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -73,6 +73,13 @@
             <section class="mlops-journey" aria-labelledby="mlops-journey-title">
                 <div class="mlops-service-heading"><div><span class="mlops-guide-label">Selected service</span><h2 id="mlops-journey-title">Behavior assessment</h2><p id="mlops-service-destination">Checking the consuming application…</p></div><span id="mlops-service-state" class="mlops-chip chip-warn">Checking</span></div>
                 <div id="mlops-service-blockers" role="status" aria-live="polite"></div>
+                <section class="mlops-workflow-checklist" aria-labelledby="service-checklist-title">
+                    <h3 id="service-checklist-title">Your progress</h3>
+                    <p id="service-workflow-milestone" role="status" aria-live="polite">Checking saved progress…</p>
+                    <ol id="service-workflow-checklist" aria-label="Pipeline prerequisites"></ol>
+                    <button id="service-workflow-next" type="button" class="mlops-btn mlops-btn-primary" disabled>Checking next action…</button>
+                    <p class="mlops-mode-desc">Inspect any step. Training and connection actions require their prerequisites; the server checks them again.</p>
+                </section>
                 <nav class="mlops-journey-steps" aria-label="Service setup stages">
                     <button type="button" data-journey-stage="prepare" aria-pressed="true"><span>1</span><strong>Prepare &amp; train</strong><small>Create a candidate</small></button>
                     <button type="button" data-journey-stage="test" aria-pressed="false"><span>2</span><strong>Test &amp; review</strong><small>Check evidence</small></button>
@@ -84,6 +91,7 @@
                     <p id="mlops-prepare-copy">One durable job collects features, builds and validates a dataset, then trains and evaluates a compatible candidate. This does not activate a model.</p>
                     <label class="mlops-guided-field" for="service-dataset-select">Training data<select id="service-dataset-select" class="mlops-select"><option value="">Prepare a new dataset from available history</option></select></label>
                     <p id="service-dataset-note" class="mlops-mode-desc">Only compatible, verified datasets appear here.</p>
+                    <div id="service-data-requirements" role="status" aria-live="polite"></div>
                     <div class="mlops-guided-actions"><button type="button" id="service-train-btn" class="mlops-btn mlops-btn-primary" disabled><i class="fas fa-play" aria-hidden="true"></i> Prepare &amp; train</button><button type="button" id="service-training-advanced" class="mlops-btn">Advanced training options</button></div>
                 </div>
                 <div class="mlops-journey-panel" data-journey-panel="test" hidden>
@@ -848,7 +856,7 @@
     <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
     <script src="/frontend/js/mlops-workflow.js?v=workflow-4-notebooks"></script>
     <script src="/frontend/js/mlops-diagnostics.js?v=3-workflow"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-23-notebooks"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-24-checklist"></script>
     <script src="/frontend/js/mlops-tour.js?v=2-notebooks"></script>
     <script src="/frontend/js/mlops-tools.js?v=1"></script>
 </body>
