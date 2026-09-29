@@ -39,7 +39,7 @@ The safe order is: inspect source data → compute deterministic point-in-time f
 - `ML_DRIFT_MONITORING_ENABLED=false`, minimum samples 200; no saved drift reports exist.
 - `XGBOOST_ENABLED=true`, `MLFLOW_ENABLED=true`, `SHAP_ENABLED=false`. These flags alone do not establish integration health or a particular run's use.
 
-These observations cannot establish held-out accuracy, scientific readiness, automatic model maintenance, or 30-camera throughput. The audited fixes have not been deployed into the API/worker by this task.
+These observations cannot establish held-out accuracy, scientific readiness, automatic model maintenance, or 30-camera throughput. At audit time the fixes were not deployed. They were subsequently deployed at the user’s request; see [deployment verification](ML_LIFECYCLE_DEPLOYMENT_20260929.md).
 
 ## Remaining work, in order
 
