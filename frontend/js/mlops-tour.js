@@ -63,6 +63,7 @@
         const evidence = document.getElementById('mlops-evidence-browser');
         evidence.open = id === 'workflow-dataset' || id === 'workflow-model';
         target = document.getElementById(id);
+        if (id === 'service-notebook-actions') document.getElementById('service-debug-details').open = true;
         label.textContent = 'GUIDED WALKTHROUGH · ' + (index + 1) + ' OF ' + steps.length;
         title.textContent = heading; description.textContent = copy;
         back.disabled = index === 0; next.textContent = index === steps.length - 1 ? 'Finish tour' : 'Next →';

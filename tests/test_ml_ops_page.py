@@ -194,8 +194,12 @@ def test_page_groups_the_lifecycle_into_guided_workspaces():
     html = read(HTML)
     js = read(JS)
     expected = {"overview": 3, "prepare": 6, "review": 2, "monitor": 3, "audit": 2}
-    assert 'id="mlops-guide-title"' in html
-    assert 'id="mlops-next-step-title"' in html
+    assert 'id="mlops-service-select"' in html
+    assert 'id="service-workflow-milestone"' in html
+    assert 'id="service-workflow-checklist"' not in html
+    assert 'id="mlops-next-step-title"' not in html
+    for stage in ('prepare', 'test', 'activate', 'monitor'):
+        assert html.count(f'data-journey-stage="{stage}"') == 1
     assert 'id="mlops-workspace-panels"' in html
     for workspace, count in expected.items():
         assert f'data-mlops-view="{workspace}"' in html
@@ -206,23 +210,16 @@ def test_page_groups_the_lifecycle_into_guided_workspaces():
     assert "window.history.replaceState" in js
 
 
-def test_each_workspace_explains_run_verify_and_recovery():
-    html = read(HTML)
-    js = read(JS)
-    for element_id in (
-        "mlops-runbook-position", "mlops-runbook-status", "mlops-runbook-purpose",
-        "mlops-runbook-run", "mlops-runbook-verify", "mlops-runbook-recover",
-        "mlops-runbook-previous", "mlops-runbook-primary", "mlops-runbook-next",
-    ):
-        assert f'id="{element_id}"' in html
-    for workspace in ("overview", "prepare", "review", "monitor", "audit"):
-        block = js.split(f"        '{workspace}': {{", 1)[1].split("\n        }", 1)[0]
-        for field in ("purpose:", "run:", "verify:", "recover:", "primaryTarget:"):
-            assert field in block, f"{workspace} is missing {field} guidance"
-    assert "function workspaceStatus" in js
-    assert "function updateRunbook" in js
+def test_one_journey_keeps_optional_tools_out_of_the_main_path():
+    html, js = read(HTML), read(JS)
+    for removed in ('mlops-runbook-title', 'mlops-next-step-title', 'service-workflow-next'):
+        assert f'id="{removed}"' not in html
+    for present in ('service-data-options', 'service-debug-details', 'mlops-advanced-tools'):
+        assert f'id="{present}"' in html
+    assert 'function updateRunbook' not in js
+    assert 'function latestServiceJob' in js
     assert 'aria-current' in js
-    assert "What the status labels mean" in html
+    assert 'What the status labels mean' in html
 
 
 def test_lifecycle_confirmation_is_accessible_and_never_filtered_out():

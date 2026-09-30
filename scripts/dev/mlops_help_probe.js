@@ -42,19 +42,15 @@ const check = (name, ok, detail) => { results.push({ name, ok }); console.log(` 
         out.push({
           name,
           active: button.getAttribute("aria-pressed") === "true",
-          current: document.querySelector(`.mlops-lifecycle [data-open-mlops-view="${name}"]`).getAttribute("aria-current") === "step",
+          current: document.querySelector(`[data-mlops-view="${name}"]`).getAttribute("aria-pressed") === "true",
           visibleCards: [...document.querySelectorAll(`[data-mlops-panel="${name}"]`)].filter(card => !card.hidden).length,
-          run: document.querySelectorAll("#mlops-runbook-run li").length,
-          verify: document.querySelectorAll("#mlops-runbook-verify li").length,
-          recover: document.querySelectorAll("#mlops-runbook-recover li").length,
-          purpose: document.getElementById("mlops-runbook-purpose").textContent.length,
-          status: document.getElementById("mlops-runbook-status").textContent
+          description: document.getElementById("mlops-workspace-description").textContent.length
         });
       }
       return out;
     });
-    check("all five workspaces expose purpose/run/verify/recover guidance",
-      workspaces.length === 5 && workspaces.every(w => w.active && w.current && w.visibleCards > 0 && w.run > 0 && w.verify > 0 && w.recover > 0 && w.purpose > 30 && w.status),
+    check("all five advanced workspaces retain contextual descriptions",
+      workspaces.length === 5 && workspaces.every(w => w.active && w.current && w.visibleCards > 0 && w.description > 30),
       workspaces.map(w => `${w.name}:${w.visibleCards}`).join(" "));
     check("workspace navigation leaves a clean URL", !(await page.evaluate(() => location.hash)), await page.url());
 

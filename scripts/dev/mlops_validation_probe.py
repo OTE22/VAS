@@ -34,7 +34,7 @@ window.fixtureMode='rules';window.fetch=async(input,options={})=>{
   if(p==='/api/ml/config/mode'){fixtureMode=b.mode;return reply({mode:b.mode});}
   return reply({});
  }
- if(p==='/api/ml/services/status')return fixtureFailServices?reply({detail:{message:'Fixture service failure'}},503):reply({items:fixtureSpecs.map(s=>({model_type:s.model_type,service_id:s.model_type,destination:{name:'Security Intelligence / '+s.model_type,url:'/admin/security-intelligence'},serving_mode:s.serving_mode,state:fixtureSelected[s.model_type]?'observational':'not_configured',selected_model:fixtureSelected[s.model_type]||null,candidate:fixtureModels.find(m=>m.model_type===s.model_type)||null,training_readiness:{ready:true,blockers:[]},blockers:[],decision_mode:fixtureMode,allowed_modes:{shadow:{available:true}},consumption:{available:true,model_version:fixtureSelected[s.model_type]?.version,last_success_at:null,note:'No real requests recorded in this fixture.'},rollback:{available:!!fixtureSelected[s.model_type]}}))});
+ if(p==='/api/ml/services/status')return fixtureFailServices?reply({detail:{message:'Fixture service failure'}},503):reply({items:fixtureSpecs.map(s=>({model_type:s.model_type,service_id:s.model_type,destination:{name:'Security Intelligence / '+s.model_type,url:'/admin/security-intelligence'},serving_mode:s.serving_mode,state:fixtureSelected[s.model_type]?'observational':'not_configured',selected_model:fixtureSelected[s.model_type]||null,candidate:fixtureModels.find(m=>m.model_type===s.model_type)||null,training_readiness:window.fixtureReadiness?.[s.model_type]||{ready:true,blockers:[]},blockers:[],decision_mode:fixtureMode,allowed_modes:{shadow:{available:true}},consumption:{available:true,model_version:fixtureSelected[s.model_type]?.version,last_success_at:null,note:'No real requests recorded in this fixture.'},rollback:{available:!!fixtureSelected[s.model_type]}}))});
  if(p==='/api/ml/overview')return reply({mode:{current_mode:fixtureMode,modes:{}},model_types:fixtureSpecs,data_readiness:{feature_snapshots:764},label_readiness:{counted:{}},optional_capabilities:{}});
  if(p==='/api/ml/models')return reply({items:fixtureModels.filter(m=>!url.searchParams.get('model_type')||m.model_type===url.searchParams.get('model_type')),total:fixtureModels.length});
  if(p.startsWith('/api/ml/models/'))return reply(fixtureModels.find(m=>m.id===p.split('/')[4])||{});
@@ -81,14 +81,14 @@ def wait(code):
     for _ in range(100):
         if js(code): return
         time.sleep(.1)
-    raise AssertionError('Timed out: ' + code + ' errors=' + str(js('return window.fixtureErrors')))
+    raise AssertionError('Timed out: ' + code + ' state=' + str(js('return {errors:window.fixtureErrors,models:mlUiTest.state.models,fixtureModels:fixtureModels,modelError:document.querySelector("#models-table-body").textContent,jobs:fixtureJobs,selection:mlUiTest.state.journey, family:mlUiTest.state.modelsFamily}')))
 def screenshot(name):
     (OUT / name).write_bytes(base64.b64decode(call(path + '/screenshot')))
 try:
     call(path + '/window/rect', {'width': 1440, 'height': 1000})
     call(path + '/url', {'url': f'http://127.0.0.1:{server.server_port}/admin/ml-ops'})
     wait("return window.mlUiTest && mlUiTest.state.servicesState === 'ready'")
-    js("document.querySelector('[data-service-type=social_graph_anomaly_model]').click()")
+    js("document.querySelector('#mlops-service-select').value='social_graph_anomaly_model';document.querySelector('#mlops-service-select').dispatchEvent(new Event('change'))")
     wait("return mlUiTest.state.selectedService === 'social_graph_anomaly_model' && mlUiTest.state.modelsFamily === 'social_graph_anomaly_model'")
     js("""
         window.failedReport = {passed:false,row_count:0,checks:{
@@ -147,10 +147,10 @@ try:
     results = js('return checkResults')
     assert all(results.values()), results
     print('PASS: runtime/cancelled/unknown states, informational missingness, split gates, safe text rendering')
-    js("document.querySelector('[data-service-type=behavior_anomaly_model]').click()")
+    js("document.querySelector('#mlops-service-select').value='behavior_anomaly_model';document.querySelector('#mlops-service-select').dispatchEvent(new Event('change'))")
     wait("return mlUiTest.state.selectedService==='behavior_anomaly_model' && mlUiTest.state.modelsFamily==='behavior_anomaly_model'")
     assert js("return document.querySelector('#service-job-progress').hidden")
-    js("document.querySelector('[data-service-type=social_graph_anomaly_model]').click()")
+    js("document.querySelector('#mlops-service-select').value='social_graph_anomaly_model';document.querySelector('#mlops-service-select').dispatchEvent(new Event('change'))")
     wait("return !document.querySelector('#service-job-progress').hidden")
     call(path+'/window/rect',{'width':390,'height':844})
     js("document.querySelector('#mlops-evidence-browser').open=false;document.querySelector('#service-job-progress').scrollIntoView({block:'start'})")
@@ -159,6 +159,68 @@ try:
     assert js('return fixtureWrites.length') == 0
     assert js('return fixtureErrors') == []
     print('PASS: service isolation, mobile width, zero operational writes and zero JavaScript errors')
+    # Exercise the simplified happy path with fixture APIs only.
+    call(path+'/window/rect', {'width':1440,'height':1000})
+    js("document.querySelector('#mlops-service-select').value='coappearance_anomaly_model';document.querySelector('#mlops-service-select').dispatchEvent(new Event('change'))")
+    wait("return mlUiTest.state.modelsFamily==='coappearance_anomaly_model' && !document.querySelector('#service-train-btn').disabled")
+    js("""
+        document.querySelector('#mlops-advanced-tools').open=false;
+        document.querySelector('[data-journey-stage=prepare]').click();
+        window.primaryActions=()=>[...document.querySelectorAll('.mlops-journey .mlops-btn-primary')].filter(n=>n.checkVisibility()).map(n=>n.id);
+    """)
+    assert js('return primaryActions()') == ['service-train-btn']
+    assert js("return document.querySelectorAll('#service-workflow-next, #service-workflow-checklist, #mlops-next-step-action, #mlops-service-cards').length") == 0
+    js("document.querySelector('.page-header').scrollIntoView({block:'start'})")
+    screenshot('simple-train-desktop.png')
+    call(path+'/window/rect', {'width':500,'height':940})
+    screenshot('simple-train-narrow.png')
+    assert js('return document.documentElement.scrollWidth <= window.innerWidth + 1')
+    call(path+'/window/rect', {'width':1440,'height':1000})
+    js("window.fixtureReadiness={coappearance_anomaly_model:{ready:false,blockers:[{code:'SOURCE_HISTORY_REQUIRED',message:'Collect relationship history: 0/1 edges.'}]}};mlUiTest.refreshConsole()")
+    wait("return document.querySelector('#service-train-btn').disabled && document.querySelector('#service-data-requirements').textContent.includes('0/1 edges')")
+    assert js('return fixtureWrites.length') == 0
+    js("window.fixtureReadiness={};mlUiTest.refreshConsole()")
+    wait("return !document.querySelector('#service-train-btn').disabled")
+    js("document.querySelector('#service-train-btn').click()")
+    wait('return fixtureWrites.length===1')
+    assert js("return fixtureWrites[0].body.prepare_features && fixtureWrites[0].body.model_type==='coappearance_anomaly_model'")
+    wait("return document.querySelector('#service-train-btn').hidden")
+    assert js("return document.querySelector('#service-job-progress').textContent.includes('Cancel this run')")
+    js("""
+        window.fixtureModels=[{id:'simple-candidate',artifact_hash:'fixture-artifact-hash',model_type:'coappearance_anomaly_model',stage:'validated',version:1,
+            algorithm:'isolation_forest',feature_set_version:'coappearance-features-v1',
+            connection_blockers:[{code:'EVALUATION_COVERAGE_REQUIRED',message:'Validation and test rows are missing'}],
+            evaluation_report:{engineering_gate:{status:'PASS'},scientific_gate:{status:'INSUFFICIENT_EVIDENCE'},splits:{test:{rows:20}}}}];
+        fixtureJobs[0].status='completed';fixtureJobs[0].details.stage='completed';fixtureJobs[0].result={model_id:'simple-candidate'};
+        mlUiTest.refreshConsole();
+    """)
+    wait("return !document.querySelector('#service-training-review').hidden")
+    assert js('return primaryActions()') == ['service-training-review']
+    js("document.querySelector('#service-training-review').click()")
+    wait("return document.querySelector('#service-model-evidence').textContent.includes('Validation and test rows are missing')")
+    assert js("return document.querySelector('#service-continue-btn').disabled && document.querySelector('#service-deploy-btn').disabled")
+    assert js('return primaryActions()') == ['service-continue-btn']
+    js("fixtureModels[0].connection_blockers=[];mlUiTest.refreshConsole()")
+    wait("return !document.querySelector('#service-continue-btn').disabled")
+    js("document.querySelector('#service-continue-btn').click()")
+    assert js('return primaryActions()') == ['service-deploy-btn']
+    js("document.querySelector('#service-deploy-btn').click()")
+    wait("return !document.querySelector('#registry-action-panel').hidden")
+    assert js('return fixtureWrites.length') == 1, 'Connection must still require explicit confirmation'
+    js("document.querySelector('#registry-action-reason').value='Reviewed isolated fixture evidence';document.querySelector('#registry-action-confirm').click()")
+    wait('return fixtureWrites.length===2')
+    wait("return mlUiTest.state.services.find(s=>s.model_type==='coappearance_anomaly_model')?.selected_model?.id==='simple-candidate'")
+    assert js("return fixtureWrites[1].path==='/api/ml/services/coappearance_anomaly_model/deploy' && fixtureWrites[1].body.model_id==='simple-candidate'")
+    js("document.querySelector('[data-journey-stage=activate]').click()")
+    assert js('return primaryActions()') == ['service-connection-monitor']
+    js("document.querySelector('#service-connection-monitor').click()")
+    assert js('return primaryActions()') == ['service-open-consumer']
+    js("document.querySelector('[data-journey-stage=prepare]').click();document.querySelector('#service-data-options').open=true;document.querySelector('#service-new-training').click()")
+    assert js('return primaryActions()') == ['service-train-btn']
+    assert js('return fixtureWrites.length') == 2, 'Preparing another version must not submit a job'
+    assert js('return fixtureErrors') == []
+    print('PASS: one primary action per step, training contract, completion-to-review, evaluation gate, explicit connection, monitor and deliberate retraining')
+
 finally:
     call(path, method='DELETE')
     server.shutdown()

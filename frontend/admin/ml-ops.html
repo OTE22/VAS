@@ -13,7 +13,7 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-25-validation">
+    <link rel="stylesheet" href="/frontend/css/admin-ml-ops.css?v=mlops-26-simple">
 </head>
 <body>
     <div id="navbar-placeholder"></div>
@@ -31,22 +31,78 @@
                     <div class="header-text">
                         <div class="mlops-eyebrow">ML control center</div>
                         <h1 class="page-title">ML Services</h1>
-                        <p class="page-description">Choose a service, prepare its data, review a model, and connect it to the application. Follow one guided journey from setup to monitoring.</p>
+                        <p class="page-description">Choose a service. Follow the four steps below to train and use a model.</p>
                     </div>
                 </div>
                 <div class="mlops-page-actions">
-                    <button class="mlops-btn" id="mlops-service-guide" type="button"><i class="fas fa-route" aria-hidden="true"></i> Start here</button>
-                    <span id="notebook-launch"></span>
                     <div class="mlops-live-state" id="console-connection-state" role="status">
                         <span class="mlops-live-dot" aria-hidden="true"></span>
                         <span>Connecting to control plane</span>
                     </div>
-                    <button class="mlops-btn mlops-btn-primary" id="refresh-console-btn" type="button">
-                        <i class="fas fa-sync-alt" aria-hidden="true"></i> Refresh console
+                    <button class="mlops-btn" id="refresh-console-btn" type="button">
+                        <i class="fas fa-sync-alt" aria-hidden="true"></i> Refresh status
                     </button>
                 </div>
             </header>
 
+            <section class="mlops-services mlops-service-picker" aria-label="Choose a service">
+                <label for="mlops-service-select">Service</label>
+                <select id="mlops-service-select" class="mlops-select" aria-describedby="mlops-service-description"></select>
+                <p id="mlops-service-description">Choose the application feature you want to improve.</p>
+            </section>
+            <section class="mlops-journey" aria-labelledby="mlops-journey-title">
+                <div class="mlops-service-heading"><div><span class="mlops-guide-label">Selected service</span><h2 id="mlops-journey-title">Behavior assessment</h2><p id="mlops-service-destination">Checking the consuming application…</p></div><span id="mlops-service-state" class="mlops-chip chip-warn">Checking</span></div>
+                <div id="mlops-service-blockers" role="status" aria-live="polite"></div>
+                <p id="service-workflow-milestone" class="mlops-journey-hint" role="status" aria-live="polite">Checking your saved progress…</p>
+                <nav class="mlops-journey-steps" aria-label="Service setup stages">
+                    <button type="button" data-journey-stage="prepare" aria-pressed="true"><span>1</span><strong>Train</strong><small>Create a candidate</small></button>
+                    <button type="button" data-journey-stage="test" aria-pressed="false"><span>2</span><strong>Review</strong><small>Check the result</small></button>
+                    <button type="button" data-journey-stage="activate" aria-pressed="false"><span>3</span><strong>Connect</strong><small>Choose the version</small></button>
+                    <button type="button" data-journey-stage="monitor" aria-pressed="false"><span>4</span><strong>Monitor</strong><small>Verify actual use</small></button>
+                </nav>
+                <div class="mlops-journey-panel" data-journey-panel="prepare">
+                    <h3>Train a candidate</h3>
+                    <p id="mlops-prepare-copy">One durable job collects features, builds and validates a dataset, then trains and evaluates a compatible candidate. This does not activate a model.</p>
+                    <details id="service-data-options" class="mlops-simple-details">
+                        <summary id="service-data-options-summary">Data options · use available history</summary>
+                    <label class="mlops-guided-field" for="service-dataset-select">Training data<select id="service-dataset-select" class="mlops-select"><option value="">Prepare a new dataset from available history</option></select></label>
+                    <p id="service-dataset-note" class="mlops-mode-desc">Only compatible, verified datasets appear here.</p>
+                        <button type="button" id="service-new-training" class="mlops-btn" hidden>Train another version</button>
+                        <button type="button" id="service-training-advanced" class="mlops-btn">Advanced training options</button>
+                    </details>
+                    <div id="service-data-requirements" role="status" aria-live="polite"></div>
+                    <div class="mlops-guided-actions"><button type="button" id="service-train-btn" class="mlops-btn mlops-btn-primary" disabled><i class="fas fa-play" aria-hidden="true"></i> Prepare &amp; train</button><button type="button" id="service-training-review" class="mlops-btn mlops-btn-primary" hidden>Review candidate</button></div>
+                <div id="service-job-progress" class="mlops-service-job" role="status" aria-live="polite" hidden></div>
+                </div>
+                <div class="mlops-journey-panel" data-journey-panel="test" hidden>
+                    <h3>Review the result</h3><p>Check the evaluation and resolve any requirements before continuing.</p>
+                    <details class="mlops-simple-details"><summary>Choose another candidate</summary>
+                    <label class="mlops-guided-field" for="service-model-select">Candidate for this service<select id="service-model-select" class="mlops-select"><option value="">No candidate yet</option></select></label>
+                    </details>
+                    <div id="service-model-evidence" class="mlops-service-evidence" role="status" aria-live="polite"></div>
+                    <div class="mlops-guided-actions"><button type="button" id="service-continue-btn" class="mlops-btn mlops-btn-primary" disabled>Continue to connection</button></div>
+                    <details class="mlops-simple-details"><summary>Evaluation details &amp; recheck</summary><div class="mlops-guided-actions"><button type="button" id="service-review-btn" class="mlops-btn" disabled>Inspect full evidence</button><button type="button" id="service-readiness-btn" class="mlops-btn" disabled>Recheck readiness</button></div></details>
+                </div>
+                <div class="mlops-journey-panel" data-journey-panel="activate" hidden>
+                    <h3 id="service-connect-title">Connect the reviewed model</h3><div id="service-activation-summary" class="mlops-service-evidence"></div>
+                    <p id="service-activation-note">Connection selects an exact model version for the named service. Current lifecycle and evidence gates are checked by the server.</p>
+                    <div class="mlops-guided-actions"><button type="button" id="service-deploy-btn" class="mlops-btn mlops-btn-primary" disabled>Connect reviewed model</button><button type="button" id="service-shadow-btn" class="mlops-btn mlops-btn-primary" hidden>Start observing alongside rules</button><button type="button" id="service-connection-monitor" class="mlops-btn mlops-btn-primary" hidden>View service usage</button></div><details class="mlops-simple-details"><summary>Decision settings</summary><button type="button" id="service-mode-advanced" class="mlops-btn" hidden>Review live decision gates</button></details>
+                </div>
+                <div class="mlops-journey-panel" data-journey-panel="monitor" hidden>
+                    <h3>Confirm that the application uses your model</h3><div id="service-consumption" class="mlops-service-evidence" role="status" aria-live="polite"></div>
+                    <div class="mlops-guided-actions"><a id="service-open-consumer" class="mlops-btn mlops-btn-primary" href="/admin/security-intelligence">Open consuming service</a></div><details class="mlops-simple-details"><summary>Service controls</summary><div class="mlops-guided-actions"><button type="button" id="service-monitor-refresh" class="mlops-btn">Refresh usage</button><button type="button" id="service-stop-btn" class="mlops-btn" disabled>Stop service model</button></div></details>
+                </div>
+                <details id="service-debug-details" class="mlops-simple-details">
+                    <summary>Inspect data &amp; notebook</summary>
+                    <p>Inspect the exact dataset, validation results and saved execution steps.</p>
+                    <p id="service-notebook-context" class="mlops-notebook-context">Preparing the selected service walkthrough…</p>
+                    <div id="service-notebook-actions"></div>
+                </details>
+                <div id="service-action-note" class="mlops-note" role="status" aria-live="polite"></div>
+            </section>
+            <details class="mlops-advanced-tools" id="mlops-advanced-tools">
+                <summary>Advanced tools &amp; troubleshooting <span>Optional · datasets, algorithms, labels and audit</span></summary>
+                <details class="mlops-simple-details"><summary>System status</summary>
             <section class="mlops-overview-strip" aria-label="ML operations summary">
                 <article class="mlops-summary-card">
                     <div class="mlops-summary-icon"><i class="fas fa-shield-alt" aria-hidden="true"></i></div>
@@ -66,86 +122,9 @@
                 </article>
             </section>
 
-            <section class="mlops-services" aria-labelledby="mlops-services-title">
-                <div class="mlops-service-heading"><div><span class="mlops-guide-label">1 · Choose what you want to improve</span><h2 id="mlops-services-title">Your services</h2><p>Each service has its own data, model, and deployment status.</p></div><span class="mlops-chip chip-info">Scope: all configured cameras</span></div>
-                <div id="mlops-service-cards" class="mlops-service-cards" aria-label="Choose a service"><p class="mlops-loading">Loading service status…</p></div>
-            </section>
-            <section class="mlops-journey" aria-labelledby="mlops-journey-title">
-                <div class="mlops-service-heading"><div><span class="mlops-guide-label">Selected service</span><h2 id="mlops-journey-title">Behavior assessment</h2><p id="mlops-service-destination">Checking the consuming application…</p></div><span id="mlops-service-state" class="mlops-chip chip-warn">Checking</span></div>
-                <div id="mlops-service-blockers" role="status" aria-live="polite"></div>
-                <section class="mlops-workflow-checklist" aria-labelledby="service-checklist-title">
-                    <h3 id="service-checklist-title">Your progress</h3>
-                    <p id="service-workflow-milestone" role="status" aria-live="polite">Checking saved progress…</p>
-                    <ol id="service-workflow-checklist" aria-label="Pipeline prerequisites"></ol>
-                    <button id="service-workflow-next" type="button" class="mlops-btn mlops-btn-primary" disabled>Checking next action…</button>
-                    <p class="mlops-mode-desc">Inspect any step. Training and connection actions require their prerequisites; the server checks them again.</p>
-                </section>
-                <nav class="mlops-journey-steps" aria-label="Service setup stages">
-                    <button type="button" data-journey-stage="prepare" aria-pressed="true"><span>1</span><strong>Prepare &amp; train</strong><small>Create a candidate</small></button>
-                    <button type="button" data-journey-stage="test" aria-pressed="false"><span>2</span><strong>Test &amp; review</strong><small>Check evidence</small></button>
-                    <button type="button" data-journey-stage="activate" aria-pressed="false"><span>3</span><strong>Connect service</strong><small>Review and enable</small></button>
-                    <button type="button" data-journey-stage="monitor" aria-pressed="false"><span>4</span><strong>Monitor</strong><small>Verify actual use</small></button>
-                </nav>
-                <div class="mlops-journey-panel" data-journey-panel="prepare">
-                    <h3>Prepare data and train with recommended settings</h3>
-                    <p id="mlops-prepare-copy">One durable job collects features, builds and validates a dataset, then trains and evaluates a compatible candidate. This does not activate a model.</p>
-                    <label class="mlops-guided-field" for="service-dataset-select">Training data<select id="service-dataset-select" class="mlops-select"><option value="">Prepare a new dataset from available history</option></select></label>
-                    <p id="service-dataset-note" class="mlops-mode-desc">Only compatible, verified datasets appear here.</p>
-                    <div id="service-data-requirements" role="status" aria-live="polite"></div>
-                    <div class="mlops-guided-actions"><button type="button" id="service-train-btn" class="mlops-btn mlops-btn-primary" disabled><i class="fas fa-play" aria-hidden="true"></i> Prepare &amp; train</button><button type="button" id="service-training-advanced" class="mlops-btn">Advanced training options</button></div>
-                </div>
-                <div class="mlops-journey-panel" data-journey-panel="test" hidden>
-                    <h3>Review the candidate before connecting it</h3><p>Check held-out evaluation, data quality and the exact deployment blockers. A completed training job alone does not approve a model.</p>
-                    <label class="mlops-guided-field" for="service-model-select">Candidate for this service<select id="service-model-select" class="mlops-select"><option value="">No candidate yet</option></select></label>
-                    <div id="service-model-evidence" class="mlops-service-evidence" role="status" aria-live="polite"></div>
-                    <div class="mlops-guided-actions"><button type="button" id="service-review-btn" class="mlops-btn" disabled>Inspect full evidence</button><button type="button" id="service-readiness-btn" class="mlops-btn" disabled>Recheck readiness</button><button type="button" id="service-continue-btn" class="mlops-btn mlops-btn-primary" disabled>Continue to connection</button></div>
-                </div>
-                <div class="mlops-journey-panel" data-journey-panel="activate" hidden>
-                    <h3 id="service-connect-title">Connect the reviewed model</h3><div id="service-activation-summary" class="mlops-service-evidence"></div>
-                    <p id="service-activation-note">Connection selects an exact model version for the named service. Current lifecycle and evidence gates are checked by the server.</p>
-                    <div class="mlops-guided-actions"><button type="button" id="service-deploy-btn" class="mlops-btn mlops-btn-primary" disabled>Connect reviewed model</button><button type="button" id="service-shadow-btn" class="mlops-btn" hidden>Start observing alongside rules</button><button type="button" id="service-mode-advanced" class="mlops-btn" hidden>Review live decision gates</button></div>
-                </div>
-                <div class="mlops-journey-panel" data-journey-panel="monitor" hidden>
-                    <h3>Confirm that the application uses your model</h3><div id="service-consumption" class="mlops-service-evidence" role="status" aria-live="polite"></div>
-                    <div class="mlops-guided-actions"><a id="service-open-consumer" class="mlops-btn mlops-btn-primary" href="/admin/security-intelligence">Open consuming service</a><button type="button" id="service-monitor-refresh" class="mlops-btn">Refresh usage</button><button type="button" id="service-stop-btn" class="mlops-btn" disabled>Stop service model</button></div>
-                </div>
-                <aside class="mlops-notebook-guide" aria-labelledby="service-notebook-title">
-                    <div><span class="mlops-guide-label">Understand and debug each step</span><h3 id="service-notebook-title">Follow the pipeline in Jupyter</h3><p>See where the data comes from, how features are extracted, which rows enter the dataset, and how validation, training, evaluation and service use connect.</p></div>
-                    <p id="service-notebook-context" class="mlops-notebook-context">Preparing the selected service walkthrough…</p>
-                    <div id="service-notebook-actions"></div>
-                    <p class="mlops-notebook-scope">The notebook separates saved production evidence from offline snapshot checks. It explains unavailable stages and never starts production training or changes a service model.</p>
-                </aside>
-                <div id="service-action-note" class="mlops-note" role="status" aria-live="polite"></div>
-                <div id="service-job-progress" class="mlops-service-job" role="status" aria-live="polite" hidden></div>
-            </section>
-                <div class="mlops-next-step">
-                    <div class="mlops-next-step-icon"><i class="fas fa-compass" aria-hidden="true"></i></div>
-                    <div role="status" aria-live="polite">
-                        <span>Recommended next step</span>
-                        <strong id="mlops-next-step-title">Checking the system…</strong>
-                        <p id="mlops-next-step-description">Waiting for current mode, worker health, and active jobs.</p>
-                    </div>
-                    <button class="mlops-btn mlops-btn-primary" id="mlops-next-step-action" type="button" data-open-mlops-view="overview">Open overview</button>
-                </div>
-            <details class="mlops-advanced-tools" id="mlops-advanced-tools">
-                <summary>Advanced tools <span>Detailed evidence, algorithms, labels, integrations and audit</span></summary>
+                </details>
+                <span id="notebook-launch"></span>
                 <button class="mlops-btn" id="mlops-tour-start" type="button">Tour the advanced tools</button>
-            <details class="mlops-guide" aria-labelledby="mlops-guide-title">
-                <summary>Workspace guide and recommended actions</summary>
-                <div class="mlops-guide-intro">
-                    <span class="mlops-guide-label">Start here</span>
-                    <h2 id="mlops-guide-title">Follow the model lifecycle from left to right</h2>
-                    <p>You do not need to inspect every screen. Choose the stage that matches your task; each workspace only shows the tools needed for that stage.</p>
-                </div>
-                <ol class="mlops-lifecycle" aria-label="ML model lifecycle">
-                    <li><button type="button" data-open-mlops-view="overview"><span>1</span><strong>Check</strong><small>Health and live activity</small></button></li>
-                    <li><button type="button" data-open-mlops-view="prepare"><span>2</span><strong>Prepare</strong><small>Data, labels, and training</small></button></li>
-                    <li><button type="button" data-open-mlops-view="review"><span>3</span><strong>Review</strong><small>Evidence before approval</small></button></li>
-                    <li><button type="button" data-open-mlops-view="monitor"><span>4</span><strong>Monitor</strong><small>Shadow results and drift</small></button></li>
-                    <li><button type="button" data-open-mlops-view="audit"><span>5</span><strong>Audit</strong><small>Who changed what</small></button></li>
-                </ol>
-            </details>
-
             <nav class="mlops-section-nav" aria-label="Choose an ML operations workspace">
                 <span class="mlops-section-nav-label">Workspace</span>
                 <button type="button" class="is-active" data-mlops-view="overview" aria-pressed="true"><i class="fas fa-gauge-high" aria-hidden="true"></i> Overview</button>
@@ -248,39 +227,6 @@
                     <p id="mlops-workspace-description">Check service health, active work, and which system is making live decisions.</p>
                 </div>
                 <span class="mlops-workspace-count" id="mlops-workspace-count">3 sections</span>
-            </section>
-
-            <section class="mlops-stage-runbook" aria-labelledby="mlops-runbook-title">
-                <div class="mlops-runbook-header">
-                    <div>
-                        <span class="mlops-guide-label" id="mlops-runbook-position">Step 1 of 5</span>
-                        <h2 id="mlops-runbook-title">How to complete this stage</h2>
-                    </div>
-                    <span class="mlops-chip chip-warn" id="mlops-runbook-status" role="status">Checking readiness</span>
-                </div>
-                <p class="mlops-runbook-purpose" id="mlops-runbook-purpose">Begin here before changing anything. Confirm that the control plane and worker can accept work and see which system makes live decisions.</p>
-                <details class="mlops-runbook-details">
-                    <summary>Step-by-step instructions and troubleshooting</summary>
-                <ol class="mlops-runbook-steps">
-                    <li>
-                        <span class="mlops-runbook-number" aria-hidden="true">1</span>
-                        <div><strong>Run it</strong><ul id="mlops-runbook-run"><li>Select Refresh console.</li><li>Review active work, system health, and live decision mode.</li></ul></div>
-                    </li>
-                    <li>
-                        <span class="mlops-runbook-number" aria-hidden="true">2</span>
-                        <div><strong>Verify the result</strong><ul id="mlops-runbook-verify"><li>Console Connected, worker Healthy, and decision authority as expected.</li><li>Active jobs show a stage and progress value.</li></ul></div>
-                    </li>
-                    <li>
-                        <span class="mlops-runbook-number" aria-hidden="true">3</span>
-                        <div><strong>Recover if it fails</strong><ul id="mlops-runbook-recover"><li>Sign in again if the session expired.</li><li>Restore the worker and refresh; queued commands remain recorded and rules stay live.</li></ul></div>
-                    </li>
-                </ol>
-                </details>
-                <div class="mlops-runbook-actions">
-                    <button class="mlops-btn" id="mlops-runbook-previous" type="button"><i class="fas fa-arrow-left" aria-hidden="true"></i> Previous stage</button>
-                    <button class="mlops-btn mlops-btn-primary" id="mlops-runbook-primary" type="button"><i class="fas fa-location-arrow" aria-hidden="true"></i> Go to first task</button>
-                    <button class="mlops-btn" id="mlops-runbook-next" type="button">Next stage <i class="fas fa-arrow-right" aria-hidden="true"></i></button>
-                </div>
             </section>
 
             <details class="mlops-status-legend">
@@ -883,8 +829,8 @@
     <script src="/frontend/js/mlops-platform.js?v=platform-2"></script>
     <script src="/frontend/js/mlops-workflow.js?v=workflow-6-validation"></script>
     <script src="/frontend/js/mlops-diagnostics.js?v=4-validation"></script>
-    <script src="/frontend/js/admin-ml-ops.js?v=mlops-25-validation"></script>
-    <script src="/frontend/js/mlops-tour.js?v=2-notebooks"></script>
+    <script src="/frontend/js/admin-ml-ops.js?v=mlops-26-simple"></script>
+    <script src="/frontend/js/mlops-tour.js?v=3-simple"></script>
     <script src="/frontend/js/mlops-tools.js?v=1"></script>
 </body>
 </html>

@@ -1227,163 +1227,12 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
 }
 
-.mlops-guide-intro {
-    display: grid;
-    grid-template-columns: minmax(14rem, 0.75fr) minmax(20rem, 1.25fr);
-    gap: 0.2rem 2rem;
-    align-items: end;
-    padding: 1.1rem 1.2rem 0.85rem;
-}
-
 .mlops-guide-label,
-.mlops-workspace-heading > div > span,
-.mlops-next-step > div > span {
+.mlops-workspace-heading > div > span{
     color: var(--mlops-accent);
     font-size: 0.72rem;
     font-weight: 700;
     text-transform: uppercase;
-}
-
-.mlops-guide-intro h2 {
-    grid-column: 1;
-    margin: 0;
-    color: var(--mlops-text);
-    font-size: 1.05rem;
-    text-wrap: balance;
-}
-
-.mlops-guide-intro p {
-    grid-column: 2;
-    grid-row: 1 / span 2;
-    margin: 0;
-    color: var(--mlops-text-muted);
-    font-size: 0.82rem;
-    line-height: 1.55;
-    text-wrap: pretty;
-}
-
-.mlops-lifecycle {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 0.55rem;
-    margin: 0;
-    padding: 0.2rem 1.2rem 1.1rem;
-    list-style: none;
-}
-
-.mlops-lifecycle li {
-    position: relative;
-    min-width: 0;
-}
-
-.mlops-lifecycle li:not(:last-child)::after {
-    position: absolute;
-    top: 1.35rem;
-    right: -0.45rem;
-    width: 0.35rem;
-    border-top: 1px solid var(--mlops-border-strong);
-    content: '';
-}
-
-.mlops-lifecycle button {
-    display: grid;
-    grid-template-columns: 1.75rem minmax(0, 1fr);
-    grid-template-rows: auto auto;
-    gap: 0.08rem 0.55rem;
-    width: 100%;
-    min-height: 4.25rem;
-    padding: 0.65rem;
-    border: 1px solid var(--mlops-border);
-    border-radius: 8px;
-    background: var(--mlops-surface-muted);
-    color: var(--mlops-text);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-
-.mlops-lifecycle button:hover,
-.mlops-lifecycle button:focus-visible {
-    border-color: var(--mlops-accent);
-    background: var(--mlops-accent-muted);
-}
-
-.mlops-lifecycle button.is-active {
-    border-color: #4da3ff;
-    background: #17304c;
-    box-shadow: inset 0 0 0 1px rgba(77, 163, 255, 0.25);
-}
-
-.mlops-lifecycle button:focus-visible {
-    outline: 2px solid var(--mlops-accent);
-    outline-offset: 2px;
-}
-
-.mlops-lifecycle button > span {
-    grid-row: 1 / span 2;
-    display: grid;
-    place-items: center;
-    align-self: center;
-    width: 1.75rem;
-    height: 1.75rem;
-    border: 1px solid #3c82ca;
-    border-radius: 50%;
-    background: var(--mlops-accent-muted);
-    color: #a9d3ff;
-    font-size: 0.78rem;
-    font-variant-numeric: tabular-nums;
-    font-weight: 700;
-}
-
-.mlops-lifecycle strong {
-    align-self: end;
-    min-width: 0;
-    font-size: 0.82rem;
-}
-
-.mlops-lifecycle small {
-    align-self: start;
-    overflow: hidden;
-    color: var(--mlops-text-muted);
-    font-size: 0.7rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.mlops-next-step {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 0.85rem;
-    padding: 0.85rem 1.2rem;
-    border-top: 1px solid var(--mlops-border);
-    background: #132033;
-}
-
-.mlops-next-step-icon {
-    display: grid;
-    place-items: center;
-    width: 2.4rem;
-    height: 2.4rem;
-    border-radius: 8px;
-    background: var(--mlops-accent-muted);
-    color: var(--mlops-accent);
-}
-
-.mlops-next-step strong {
-    display: block;
-    margin-top: 0.08rem;
-    color: var(--mlops-text);
-    font-size: 0.9rem;
-    text-wrap: balance;
-}
-
-.mlops-next-step p {
-    margin: 0.14rem 0 0;
-    color: var(--mlops-text-muted);
-    font-size: 0.75rem;
-    line-height: 1.45;
-    text-wrap: pretty;
 }
 
 .mlops-section-nav {
@@ -1466,87 +1315,6 @@
     font-size: 0.74rem;
     font-variant-numeric: tabular-nums;
 }
-
-.mlops-stage-runbook {
-    margin: 0 0 0.75rem;
-    padding: 1rem;
-    border: 1px solid var(--mlops-border-strong);
-    border-radius: 12px;
-    background: var(--mlops-surface);
-    color: var(--mlops-text);
-}
-
-.mlops-runbook-header,
-.mlops-runbook-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-}
-
-.mlops-runbook-header h2 {
-    margin: 0.15rem 0 0;
-    font-size: 1rem;
-    text-wrap: balance;
-}
-
-.mlops-runbook-purpose {
-    margin: 0.65rem 0 0.85rem;
-    color: var(--mlops-text-muted);
-    font-size: 0.82rem;
-    line-height: 1.5;
-    text-wrap: pretty;
-}
-
-.mlops-runbook-steps {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.7rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.mlops-runbook-steps > li {
-    display: grid;
-    grid-template-columns: 1.6rem minmax(0, 1fr);
-    gap: 0.55rem;
-    padding: 0.75rem;
-    border: 1px solid var(--mlops-border);
-    border-radius: 8px;
-    background: var(--mlops-surface-muted);
-}
-
-.mlops-runbook-number {
-    display: grid;
-    place-items: center;
-    width: 1.55rem;
-    height: 1.55rem;
-    border-radius: 50%;
-    background: var(--mlops-accent-muted);
-    color: var(--mlops-accent);
-    font-size: 0.72rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-}
-
-.mlops-runbook-steps strong { font-size: 0.8rem; }
-.mlops-runbook-steps ul {
-    display: grid;
-    gap: 0.35rem;
-    margin: 0.45rem 0 0;
-    padding-left: 1rem;
-    color: var(--mlops-text-muted);
-    font-size: 0.74rem;
-    line-height: 1.45;
-}
-
-.mlops-runbook-actions {
-    justify-content: flex-end;
-    margin-top: 0.8rem;
-}
-
-.mlops-runbook-actions #mlops-runbook-previous { margin-right: auto; }
 
 .mlops-status-legend {
     margin: 0 0 1rem;
@@ -1672,40 +1440,10 @@
 }
 
 @media (max-width: 900px) {
-    .mlops-guide-intro {
-        grid-template-columns: 1fr;
-    }
-    .mlops-guide-intro p {
-        grid-column: 1;
-        grid-row: auto;
-        margin-top: 0.35rem;
-    }
-    .mlops-lifecycle {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .mlops-lifecycle li:not(:last-child)::after { display: none; }
-    .mlops-runbook-steps { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {
-    .mlops-guide-intro,
-    .mlops-lifecycle,
-    .mlops-next-step {
-        padding-inline: 0.85rem;
-    }
-    .mlops-lifecycle { grid-template-columns: 1fr; }
-    .mlops-next-step {
-        grid-template-columns: auto minmax(0, 1fr);
-    }
-    .mlops-next-step .mlops-btn {
-        grid-column: 1 / -1;
-        width: 100%;
-    }
     .mlops-section-nav-label { display: none; }
-    .mlops-runbook-header { align-items: flex-start; }
-    .mlops-runbook-actions { display: grid; grid-template-columns: 1fr 1fr; }
-    .mlops-runbook-actions #mlops-runbook-previous { margin-right: 0; }
-    .mlops-runbook-actions #mlops-runbook-primary { grid-column: 1 / -1; grid-row: 1; }
     .mlops-workspace-heading { align-items: flex-start; }
     .mlops-workspace-count { padding-top: 0.25rem; }
     .mlops-form-row {
@@ -1781,24 +1519,14 @@
 .mlops-diagnostic-status { margin-left: auto; font-size: .75rem; color: #c1d1dd; }
 .mlops-diagnostic-stages small { flex-basis: 100%; color: #a8bdcd; overflow-wrap: anywhere; }
 .mlops-diagnostic-trace { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #101a26; color: #efbec3; border-radius: 6px; }
-
-/* Keep the first action visible; reference material opens only when needed. */
-.mlops-next-step { margin: 0 0 16px; }
 .mlops-guide, .mlops-evidence-browser, .mlops-warnings, .mlops-status-legend { margin: 8px 0; }
 .mlops-evidence-browser { border: 1px solid var(--border-color, #34465b); border-radius: 10px; background: var(--bg-secondary, #132435); }
-.mlops-evidence-browser > summary, .mlops-runbook-details > summary { padding: 12px 16px; cursor: pointer; font-weight: 600; color: #c7dced; }
+.mlops-evidence-browser > summary{ padding: 12px 16px; cursor: pointer; font-weight: 600; color: #c7dced; }
 .mlops-evidence-browser > summary span { margin-left: 12px; font-size: .8rem; font-weight: 400; color: #9db2c8; }
 .mlops-evidence-browser .mlops-workflow { margin: 0; border: 0; }
-.mlops-runbook-details { border-top: 1px solid #34465b; }
-.mlops-runbook-details > summary { padding-left: 0; }
-.mlops-stage-runbook { padding: 16px 20px; }
-.mlops-runbook-purpose { margin: 8px 0; }
-.mlops-runbook-actions { margin-top: 12px; }
-.mlops-evidence-browser > summary:focus-visible, .mlops-runbook-details > summary:focus-visible { outline: 2px solid #7dd3fc; outline-offset: 3px; }
+.mlops-evidence-browser > summary:focus-visible{ outline: 2px solid #7dd3fc; outline-offset: 3px; }
 @media (max-width: 640px) {
     .mlops-evidence-browser > summary span { display: block; margin: 6px 0 0; }
-    .mlops-next-step { flex-wrap: wrap; }
-    .mlops-next-step > button { width: 100%; }
 }
 
 /* Native modal keeps guided navigation separate from operational actions. */
@@ -1840,14 +1568,6 @@
 .mlops-service-heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 14px; margin-bottom: 18px; }
 .mlops-service-heading h2 { color: #f1f6fc; font-size: 1.3rem; margin: 5px 0 7px; letter-spacing: 0; text-transform: none; }
 .mlops-service-heading p { color: #b8c9dd; margin: 0; line-height: 1.6; }
-.mlops-service-cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
-.mlops-service-card { text-align: left; display: flex; flex-direction: column; align-items: flex-start; gap: 11px; background: #152335; color: #e9f1fb; border: 1px solid #3c526c; border-radius: 10px; padding: 17px; font: inherit; cursor: pointer; min-width: 0; }
-.mlops-service-card:hover { background: #1b3046; border-color: #82b6d3; }
-.mlops-service-card.is-active { border: 2px solid #2ce3b0; padding: 16px; background: #10342f; }
-.mlops-service-card > i { color: #5ce1c1; font-size: 1.1rem; }
-.mlops-service-card > strong { font-size: 1rem; line-height: 1.4; }
-.mlops-service-card > span:not(.mlops-chip) { color: #bdcddd; font-size: .86rem; line-height: 1.5; }
-.mlops-service-card > .mlops-chip { margin-top: auto; white-space: normal; text-align: left; }
 .mlops-journey-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 22px 0; }
 .mlops-journey-steps button { display: grid; grid-template-columns: 28px 1fr; text-align: left; column-gap: 10px; row-gap: 4px; border: 1px solid #3b506b; border-radius: 8px; padding: 13px; background: #172538; color: #c4d4e8; font: inherit; cursor: pointer; }
 .mlops-journey-steps button > span { grid-row: 1 / 3; border: 1px solid #52738d; align-self: center; border-radius: 50%; width: 28px; height: 28px; display: grid; place-items: center; font-size: .82rem; }
@@ -1874,18 +1594,13 @@
 .mlops-advanced-tools { margin: 20px 0; border-top: 1px solid #334d67; padding-top: 12px; }
 .mlops-advanced-tools > summary { cursor: pointer; color: #dce9f9; padding: 14px 5px; font-weight: 600; font-size: 1rem; }
 .mlops-advanced-tools > summary span { font-weight: 400; font-size: .85rem; color: #9fb5cd; padding-left: 12px; }
-.mlops-advanced-tools[open] > summary { margin-bottom: 16px; }
-.mlops-service-card:focus-visible, .mlops-journey-steps button:focus-visible, .mlops-guided-actions a:focus-visible, .mlops-guided-actions button:focus-visible { outline: 3px solid #76c9ff; outline-offset: 3px; }
+.mlops-advanced-tools[open] > summary { margin-bottom: 16px; } .mlops-journey-steps button:focus-visible, .mlops-guided-actions a:focus-visible, .mlops-guided-actions button:focus-visible { outline: 3px solid #76c9ff; outline-offset: 3px; }
 @media (max-width: 1150px) {
-    .mlops-service-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .mlops-journey-steps button { grid-template-columns: 1fr; }
     .mlops-journey-steps button > span { grid-row: auto; }
 }
 @media (max-width: 700px) {
     .mlops-services, .mlops-journey { padding: 15px; border-radius: 10px; }
-    .mlops-service-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .mlops-service-card { padding: 13px; }
-    .mlops-service-card.is-active { padding: 12px; }
     .mlops-journey-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .mlops-journey-panel { padding: 15px; }
     .mlops-guided-actions { align-items: stretch; flex-direction: column; }
@@ -1910,13 +1625,6 @@
     .mlops-notebook-guide { padding: 15px; }
     .mlops-notebook-buttons { align-items: stretch; flex-direction: column; }
 }
-
-/* Guidance follows the existing service journey and remains usable on mobile. */
-.mlops-workflow-checklist { padding: 1rem; margin: 1rem 0; border: 1px solid var(--border-color, #355069); border-radius: 12px; }
-#service-workflow-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; padding-left: 1.5rem; margin: 1rem 0; }
-.mlops-checklist-item { padding: .5rem; }
-.mlops-checklist-item .mlops-btn { display: block; width: 100%; text-align: left; margin-bottom: .4rem; }
-.mlops-checklist-item > span { display: block; font-size: .9rem; line-height: 1.5; }
 
 /* Existing-data inspector shares the ML Ops forms and table components. */
 #existing-data-inspector [hidden] { display: none !important; }
@@ -1968,4 +1676,22 @@
     .mlops-validation-table td, .mlops-validation-table td:last-child { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 10px; min-width: 0; }
     .mlops-validation-table td::before { content: attr(data-label); font-weight: 600; color: #b5c8d8; }
     .mlops-validation-table tr + tr { border-top: 2px solid #607990; }
+}
+
+/* One service, one journey. Optional controls are disclosed in place. */
+.mlops-service-picker { display: grid; grid-template-columns: auto minmax(220px, 480px) 1fr; align-items: center; gap: 16px; }
+.mlops-service-picker label { font-weight: 700; color: #e5eef5; }
+.mlops-service-picker select { width: 100%; min-height: 46px; background: #102332; color: #f0f6ff; }
+.mlops-service-picker p { margin: 0; color: #b5c8d8; line-height: 1.5; }
+.mlops-journey-hint { color: #b5c8d8; margin: 8px 0 16px; line-height: 1.5; }
+.mlops-simple-details { margin: 14px 0; padding: 12px 0; border-top: 1px solid #34495f; }
+.mlops-simple-details > summary { cursor: pointer; font-weight: 500; color: #bcd2e4; line-height: 1.6; }
+.mlops-simple-details[open] > summary { margin-bottom: 14px; }
+.mlops-journey [hidden] { display: none !important; }
+.mlops-journey .mlops-journey-steps { margin: 16px 0; }
+.mlops-journey .mlops-journey-steps button { padding: 10px 12px; background: transparent; border-color: transparent; border-bottom: 2px solid #40566c; border-radius: 0; }
+.mlops-journey .mlops-journey-steps button.is-active { border-bottom-color: #2ce3b0; background: #14382f; }
+@media (max-width: 800px) {
+    .mlops-service-picker { grid-template-columns: 1fr; gap: 8px; }
+    .mlops-service-picker p { font-size: .9rem; }
 }
