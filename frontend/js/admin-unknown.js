@@ -1394,9 +1394,10 @@ function createIdentityCard(identity) {
 
     card.innerHTML = `
         <div class="identity-media face-media">
-            <img class="identity-img face-preview" alt="Unknown identity snapshot" decoding="async" hidden>
+            <img class="identity-img face-preview" alt="Latest camera sighting" decoding="async" hidden>
             <div class="face-placeholder">No image available</div>
         </div>
+        <div class="identity-photo-caption" title="The photo belongs to the camera event below; open details for the representative portrait.">${identity.pipeline_evidence_only ? 'Representative portrait' : 'Latest sighting'}</div>
         <div class="identity-meta">
             <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${identity.pipeline_evidence_only ? 'No recorded sighting' : lastSeen.toLocaleString()}</span>
             <div class="identity-badge" data-appearances-count="${sightings}" title="${sightings} sighting${sightings === 1 ? '' : 's'}">
@@ -1513,13 +1514,14 @@ async function viewIdentityDetails(identityId) {
         
         content.innerHTML = `
             <div class="detail-header">
-                <div class="detail-image">
+                <div class="detail-image" aria-label="Representative portrait">
                     ${identity.snapshot_url ? 
                         `<img src="${identity.snapshot_url}" alt="Identity" data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'%3E%3Crect fill=\'%23333\' width=\'100\' height=\'100\'/%3E%3Ctext fill=\'%23999\' x=\'50\' y=\'50\' text-anchor=\'middle\' dominant-baseline=\'middle\' font-size=\'40\'%3E%3F%3C/text%3E%3C/svg%3E">` :
                         `<div class="no-image"><i class="fas fa-user"></i></div>`
                     }
                 </div>
                 <div class="detail-info">
+                    <p class="portrait-description"><strong>Representative portrait</strong> · Best available photo selected for this identity. Camera cards and the timeline show individual sightings.</p>
                     <h3>${identity.display_name || 'Unknown Identity'}</h3>
                     <div style="margin: 1rem 0; padding: 0.75rem; background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px;">
                         <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #999;">Identity ID:</p>

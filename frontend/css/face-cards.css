@@ -76,3 +76,13 @@
     .unknown-page .header-actions .intelligence-admin-btn { width: 100%; min-width: 0; padding: 0.5rem; }
     .unknown-page #unknown-grid { max-height: none; overflow: visible; }
 }
+
+/* Captions sit outside the photograph, preserving all visible face pixels. */
+.unknown-page .identity-photo-caption {
+    padding: .35rem .5rem 0;
+    color: #bfd0da;
+    font-size: .7rem;
+    line-height: 1.35;
+}
+.unknown-page .portrait-description { color: #bfd0da; font-size: .85rem; line-height: 1.5; }
+.unknown-page #identity-detail-modal .detail-image img { object-fit: contain; background: #0a0f0d; }

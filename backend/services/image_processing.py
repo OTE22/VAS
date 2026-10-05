@@ -481,9 +481,19 @@ async def process_image_async(
                 crop_result, pipeline_id=pipeline_id, capture_id=capture_id,
                 captured_at=captured_at, bbox=(x1, y1, x2, y2)))
             continue
-        landmarks = kpss[0]
-        aligned_face = crop_result["aligned_face"]
         embedding = crop_result["embedding"]
+        # Map SCRFD's crop-local box back to the original frame. Recognition
+        # and admission keep their aligned input; only viewing/storage use this.
+        from backend.core.detection_storage import portrait_from_frame
+        fx1, fy1, fx2, fy2 = crop_result["face_bbox"]
+        try:
+            portrait = await loop.run_in_executor(
+                INFERENCE_POOL, portrait_from_frame, frame,
+                (x1 + fx1, y1 + fy1, x1 + fx2, y1 + fy2))
+        except ValueError:
+            report("failed")
+            logger.warning("[PROCESS] Invalid portrait bounds for prediction %s", pred_idx)
+            continue
         logger.debug(f"[PROCESS] Crop {pred_idx}: detect+align+embed done in {infer_ms:.1f}ms (norm={np.linalg.norm(embedding):.4f})")
 
         # =====================================================
@@ -733,7 +743,7 @@ async def process_image_async(
         try:
             from backend.core.detection_storage import save_camera_crop
             face_filename = await save_camera_crop(
-                aligned_face, pipeline_id=pipeline_id, capture_id=capture_id,
+                portrait, pipeline_id=pipeline_id, capture_id=capture_id,
                 face_id=face_event_id, captured_at=captured_at,
                 identity_id=identity.id if identity else None, name=name,
                 similarity=similarity,
@@ -744,9 +754,9 @@ async def process_image_async(
         except Exception:
             logger.exception("[PROCESS] Camera crop save failed for %s; no image path recorded", name)
 
-        # Encode aligned face for database/frontend (off-loop JPEG encode)
+        # Encode the same natural portrait for the live frontend (off-loop).
         try:
-            ok, buf = await loop.run_in_executor(INFERENCE_POOL, cv2.imencode, ".jpg", aligned_face)
+            ok, buf = await loop.run_in_executor(INFERENCE_POOL, cv2.imencode, ".jpg", portrait)
             if not ok:
                 report("failed")
                 logger.warning(f"[PROCESS] Failed to encode face image")

@@ -728,6 +728,25 @@ class IdentityService:
             logger.warning(f"[ENRICH] Enrichment failed for {identity.display_name}: {e}")
         return None
     
+    async def _camera_snapshot_quality(self, db, identity_id, snapshot_path, scorer_version):
+        """Compare the existing photo's evidence, never the identity-wide max.
+
+        The incoming embedding is committed before create_appearance runs.
+        Looking up all embeddings includes the candidate itself and makes a
+        strict improvement impossible. Join to the OLD photo and same scorer.
+        Unlinked/retained legacy images have no comparable score.
+        """
+        result = await db.execute(
+            select(func.max(IdentityEmbedding.quality))
+            .select_from(IdentityEmbedding)
+            .join(Face, (Face.detection_id == IdentityEmbedding.detection_id)
+                  & (Face.identity_id == IdentityEmbedding.identity_id))
+            .where(Face.identity_id == identity_id,
+                   Face.face_image_path == snapshot_path,
+                   IdentityEmbedding.quality.isnot(None),
+                   IdentityEmbedding.quality_scorer_version == scorer_version))
+        return result.scalar_one_or_none()
+
     async def create_appearance(
         self,
         identity: Identity,
@@ -765,22 +784,9 @@ class IdentityService:
                     if not existing.best_snapshot_path:
                         should_update = True
                     elif quality_score is not None:
-                        # Get best quality embedding for this identity (simpler approach)
-                        best_quality_result = await db.execute(
-                            select(func.max(IdentityEmbedding.quality)).where(
-                                IdentityEmbedding.identity_id == identity.id,
-                                IdentityEmbedding.quality.isnot(None),
-                                # Same scorer only. Values from the legacy
-                                # scorer sat near 0.5 by construction, so
-                                # comparing a new-scale score against them would
-                                # make EVERY new frame win and the best snapshot
-                                # thrash to whatever arrived last.
-                                IdentityEmbedding.quality_scorer_version
-                                == quality_scorer_version,
-                            )
-                        )
-                        best_quality = best_quality_result.scalar_one_or_none()
-                        
+                        best_quality = await self._camera_snapshot_quality(
+                            db, identity.id, existing.best_snapshot_path, quality_scorer_version)
+
                         # Compare quality scores - update if new quality is better
                         if best_quality is None or quality_score > best_quality:
                             should_update = True
@@ -823,7 +829,7 @@ class IdentityService:
         #
         # CONTRACT: identities.best_snapshot_path is the REPRESENTATIVE FACE
         # CROP — the gallery primary for an enrolled person, else the best
-        # observed aligned crop. Per-sighting evidence lives in
+        # observed portrait. Per-sighting evidence lives in
         # faces.face_image_path / identity_appearances.best_snapshot_path and
         # is never affected by this block. Full frames are never persisted.
         if best_snapshot_path:
@@ -875,14 +881,8 @@ class IdentityService:
                     f"[IDENTITY]   ⏭️ KNOWN gate: candidate quality "
                     f"{quality_score} below IDENTITY_QUALITY_THRESHOLD_KNOWN - keeping snapshot")
             elif quality_score is not None:
-                # Get best quality embedding for this identity (simpler approach)
-                best_quality_result = await db.execute(
-                    select(func.max(IdentityEmbedding.quality)).where(
-                        IdentityEmbedding.identity_id == identity.id,
-                        IdentityEmbedding.quality.isnot(None)
-                    )
-                )
-                best_quality = best_quality_result.scalar_one_or_none()
+                best_quality = await self._camera_snapshot_quality(
+                    db, identity.id, identity.best_snapshot_path, quality_scorer_version)
 
                 # Compare quality scores - update if new quality is better
                 if best_quality is None or quality_score > best_quality:

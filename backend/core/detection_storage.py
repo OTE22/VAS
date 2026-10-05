@@ -17,6 +17,37 @@ from config import settings
 from db_models import Face, Detection, IdentityAppearance
 
 
+def portrait_from_frame(frame, face_bbox):
+    """Natural, padded portrait for viewing; never an input to recognition.
+
+    Coordinates are in the original frame. Preserve source pixels up to a
+    640px long edge, never upscale, rotate, synthesize detail or pad with black.
+    The bound keeps camera storage and live payloads predictable.
+    """
+    import math
+    if frame is None or frame.ndim != 3 or len(face_bbox) != 4:
+        raise ValueError('Invalid portrait source')
+    x1, y1, x2, y2 = map(float, face_bbox)
+    if not all(math.isfinite(v) for v in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+        raise ValueError('Invalid face box')
+    height, width = frame.shape[:2]
+    if x2 <= 0 or y2 <= 0 or x1 >= width or y1 >= height:
+        raise ValueError('Face outside source frame')
+    pad_x, pad_y = (x2 - x1) * .2, (y2 - y1) * .2
+    left, top = max(0, math.floor(x1 - pad_x)), max(0, math.floor(y1 - pad_y))
+    right, bottom = min(width, math.ceil(x2 + pad_x)), min(height, math.ceil(y2 + pad_y))
+    portrait = frame[top:bottom, left:right]
+    if not portrait.size:
+        raise ValueError('Empty portrait')
+    longest = max(portrait.shape[:2])
+    if longest > 640:
+        scale = 640 / longest
+        return cv2.resize(portrait, (max(1, round(portrait.shape[1] * scale)),
+                                    max(1, round(portrait.shape[0] * scale))),
+                          interpolation=cv2.INTER_AREA)
+    return portrait.copy()
+
+
 def camera_key(pipeline_id):
     try:
         return str(UUID(str(pipeline_id)))
