@@ -146,8 +146,8 @@ services:
       POSTGRES_USER: fr_migrator
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password_migrator
       REDIS_URL_FILE: /run/secrets/redis_url
-      CORS_ORIGINS: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal}
-      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
+      CORS_ORIGINS: ${PUBLIC_ORIGINS:-${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN e.g. https://face-detector.internal}}
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGINS:-${PUBLIC_ORIGIN}}
       AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
       AUTH_COOKIE_SECURE: "true"
       ENABLE_API_DOCS: "false"
@@ -233,9 +233,9 @@ services:
       AUTH_COOKIE_SAMESITE: strict
       AUTH_COOKIE_HOST_PREFIX: "true"
       # Browser identity follows the stable DNS name, independently of the server IP.
-      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN}
+      AUTH_ALLOWED_ORIGINS: ${PUBLIC_ORIGINS:-${PUBLIC_ORIGIN}}
       AUTH_SAME_HOST_ORIGIN_TRUSTED: "false"
-      CORS_ORIGINS: ${PUBLIC_ORIGIN}
+      CORS_ORIGINS: ${PUBLIC_ORIGINS:-${PUBLIC_ORIGIN}}
       ENABLE_API_DOCS: "false"
 
       # LLM-generated SQL runs as a SELECT-only role, never as fr_app. The AST
