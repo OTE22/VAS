@@ -1963,7 +1963,13 @@ function closeFaceDetectionAlert() {
 // Quick Search is read-only; only its separate Promote action can enroll a person.
 let quickSearchSequence = 0;
 let quickSearchController = null;
+let quickSearchReference = null;
+function releaseQuickSearchReference() {
+    quickSearchReference?.release();
+    quickSearchReference = null;
+}
 function cancelQuickSearch() {
+    releaseQuickSearchReference();
     ++quickSearchSequence;
     quickSearchController?.abort();
     quickSearchController = null;
@@ -1987,6 +1993,7 @@ async function searchByImage() {
     form.append('top_k', '10');
     document.getElementById('search-results').style.display = 'block';
     grid.textContent = 'Searching...';
+    releaseQuickSearchReference();
     try {
         const response = await fetch('/api/search/by-image', {
             method:'POST', credentials:'include', body:form, signal:controller.signal
@@ -2007,7 +2014,8 @@ async function searchByImage() {
             note.textContent = 'No matches met the configured threshold in the selected scope.';
             grid.appendChild(note);
         }
-        data.forEach(result => grid.appendChild(createSearchResultCard(result)));
+        if (data.length) quickSearchReference = SearchImage.createReference(file);
+        data.forEach(result => grid.appendChild(createSearchResultCard(result, quickSearchReference)));
     } catch (error) {
         if (sequence !== quickSearchSequence || error.name === 'AbortError') return;
         grid.textContent = error.message || 'Search failed.';
@@ -2019,10 +2027,10 @@ async function searchByImage() {
         }
     }
 }
-function createSearchResultCard(result) {
+function createSearchResultCard(result, reference) {
     const card = document.createElement('div');
     card.className = 'identity-card';
-    card.innerHTML = `<div class="card-image"><div class="no-image">Image unavailable — history retained</div><div class="similarity-badge"></div></div>
+    card.innerHTML = `<div class="card-image"><div class="similarity-badge"></div></div>
         <div class="card-content"><div class="card-header"><h3></h3><span class="card-badge"></span></div>
         <div class="card-info"><p class="search-appearances"></p><p class="search-last-seen"></p></div><div class="card-actions"></div></div>`;
     card.querySelector('h3').textContent = result.display_name || 'Unknown';
@@ -2032,18 +2040,15 @@ function createSearchResultCard(result) {
     const stamp = result.last_seen_at ? new Date(result.last_seen_at) : null;
     card.querySelector('.search-last-seen').textContent = stamp && !isNaN(stamp) ? `Last seen: ${stamp.toLocaleString()}` : 'Last seen: unavailable';
     const raw = result.snapshot_url || (result.best_snapshot_path ? '/' + result.best_snapshot_path.replace(/^\/+/, '') : null);
-    if (raw) {
-        try {
-            const url = new URL(raw, window.location.origin);
-            if (url.origin === window.location.origin && ['http:', 'https:'].includes(url.protocol)) {
-                const image = document.createElement('img');
-                image.alt = 'Match'; image.src = url.href; image.style.objectFit = 'contain';
-                image.addEventListener('error', () => image.remove());
-                image.addEventListener('load', () => card.querySelector('.no-image')?.remove());
-                card.querySelector('.card-image').prepend(image);
-            }
-        } catch { /* Keep the placeholder for an invalid URL. */ }
-    }
+    const image = document.createElement('img');
+    image.alt = 'Stored match image';
+    image.style.objectFit = 'contain';
+    const caption = document.createElement('p');
+    caption.className = 'search-image-caption';
+    caption.style.cssText = 'font-size: 0.8rem; margin: 0.4rem 0;';
+    card.querySelector('.card-image').prepend(image);
+    card.querySelector('.card-info').prepend(caption);
+    SearchImage.render(image, caption, raw, reference);
     for (const [label, action] of [['VIEW','viewIdentityDetails'], ...(result.type === 'unknown' ? [['PROMOTE','promoteIdentityModal']] : [])]) {
         const button = document.createElement('button');
         button.type = 'button'; button.className = 'intelligence-admin-btn small';

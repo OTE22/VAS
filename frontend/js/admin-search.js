@@ -17,6 +17,7 @@
         isSearching: false,
         currentResults: null,
         resultContext: null,
+        resultReferences: [],
         activeTab: 'matches',
         pipelines: [],
         // Upload limits. These are only the fallbacks used before
@@ -199,8 +200,8 @@
     // export additionally supports 'pdf'.
     const BATCH_EXPORT_FORMATS = ['csv', 'json'];
 
-    // Inline placeholder shown when an identity has no usable snapshot, and as
-    // the data-fallback-src actions.js swaps in when a snapshot 404s.
+    // Final placeholder when neither a stored snapshot nor a usable uploaded
+    // search reference is available.
     //
     // It contains raw double quotes (xmlns="..."), so it MUST be escaped at
     // every attribute interpolation — unescaped, the attribute value ended at
@@ -665,6 +666,8 @@
 
         const controller = beginRequest('search');
         const context = captureSearchContext();
+        const files = state.isBatchMode ? [...state.batchFiles] : [state.selectedFile];
+        context.referenceNames = files.map(file => file?.name);
         const feedback = document.getElementById('search-feedback');
         if (feedback) { feedback.hidden = false; feedback.textContent = 'Searching… Results below, if present, belong to your previous search.'; }
         state.isSearching = true;
@@ -677,6 +680,8 @@
                 : await performSingleSearch(controller.signal);
 
             if (controller.signal.aborted) return;
+            releaseResultReferences();
+            state.resultReferences = files.map(file => SearchImage.createReference(file));
             state.currentResults = results;
             state.resultContext = context;
             if (feedback) feedback.hidden = true;
@@ -980,6 +985,19 @@
         switchTab('matches');
     }
 
+    function batchReferenceIndex(group, results) {
+        const names = state.resultContext?.referenceNames || [];
+        const index = group.image_index;
+        // The batch route skips undecodable uploads before numbering results.
+        // Indices are trustworthy only when no uploaded image was omitted.
+        if (results.results?.length === names.length && Number.isInteger(index)
+            && index >= 0 && index < names.length && names[index] === group.image_name) return index;
+        // Otherwise a unique submitted filename can still identify its image.
+        // Duplicate names after an omission are ambiguous: keep the placeholder.
+        const candidates = names.flatMap((name, i) => name === group.image_name ? [i] : []);
+        return candidates.length === 1 ? candidates[0] : -1;
+    }
+
     function renderMatchesTab(results) {
         let html = '';
 
@@ -1022,7 +1040,7 @@
                             </div>
                         </div>
                         <div class="matches-list">
-                            ${renderMatches(imgResult.matches || [])}
+                            ${renderMatches(imgResult.matches || [], batchReferenceIndex(imgResult, results))}
                         </div>
                     </div>
                 `;
@@ -1066,7 +1084,7 @@
                             </div>
                         </div>
                         <div class="matches-list">
-                            ${renderMatches(face.matches || [])}
+                            ${renderMatches(face.matches || [], 0)}
                         </div>
                     </div>
                 `;
@@ -1075,9 +1093,14 @@
         }
 
         elements.matchesTab.innerHTML = html || '<div class="empty-state"><p>No matches found</p></div>';
+        elements.matchesTab.querySelectorAll('.match-card').forEach(card => {
+            const img = card.querySelector('.match-snapshot');
+            SearchImage.render(img, card.querySelector('.search-image-caption'), img.dataset.storedSrc,
+                state.resultReferences[Number(card.dataset.referenceIndex)], PLACEHOLDER_AVATAR);
+        });
     }
 
-    function renderMatches(matches) {
+    function renderMatches(matches, referenceIndex) {
         if (!matches || matches.length === 0) {
             return '<div style="color: rgba(255,255,255,0.5); font-size: 0.85rem; padding: 0.5rem;">No matches found</div>';
         }
@@ -1098,15 +1121,8 @@
                     snapshotUrl = path;
                 }
             }
-            // snapshot_url arrives from the API unvalidated and went straight
-            // into an img src. Anything not same-origin-relative is dropped so
-            // the built-in placeholder is used instead.
+            // Keep server URLs separate from trusted browser-created reference URLs.
             snapshotUrl = safeImageUrl(snapshotUrl);
-
-            // Final fallback: the built-in placeholder.
-            if (!snapshotUrl) {
-                snapshotUrl = PLACEHOLDER_AVATAR;
-            }
 
             const similarity = Number(match.similarity);
             const scoreText = Number.isFinite(similarity) ? `${Math.round(similarity * 100)}%` : 'Unavailable';
@@ -1122,9 +1138,8 @@
                      aria-label="${escapeHtml(cardLabel)}"
                      data-action="viewIdentity" data-action-keydown="viewIdentityKey"
                      data-arg="${escapeHtml(match.identity_id)}"
-                     data-identity-type="${escapeHtml(match.type)}">
-                    <img class="match-snapshot" src="${escapeHtml(snapshotUrl)}" alt="${escapeHtml(match.display_name || 'Match')}"
-                         data-fallback-src="${escapeHtml(PLACEHOLDER_AVATAR)}"
+                     data-identity-type="${escapeHtml(match.type)}" data-reference-index="${referenceIndex}">
+                    <img class="match-snapshot" data-stored-src="${escapeHtml(snapshotUrl)}" alt="${escapeHtml(match.display_name || 'Match')}"
                          style="display: block; width: 50px; height: 50px; object-fit: cover; border-radius: 6px;">
                     <div class="match-details">
                         <div class="match-name">${escapeHtml(match.display_name || 'Unknown')}</div>
@@ -1132,7 +1147,7 @@
                             <span><i class="fas fa-${match.type === 'known' ? 'user-check' : 'user-secret'}"></i> ${escapeHtml(match.type)}</span>
                             <span><i class="fas fa-eye" aria-hidden="true"></i> ${escapeHtml(match.appearances_count || 0)} detections</span>
                         </div>
-                        ${snapshotUrl === PLACEHOLDER_AVATAR ? '<div class="match-meta">Image unavailable — history retained</div>' : ''}
+                        <div class="match-meta search-image-caption" hidden></div>
                         <div class="match-last-seen">Last seen ${escapeHtml(formatDateTime(match.last_seen_at))}</div>
                         ${match.watchlist_match ? `
                             <div class="watchlist-badge ${escapeHtml(match.watchlist_match.alert_level)}" style="margin-top: 0.3rem;">
@@ -1439,10 +1454,13 @@
      * Handles both response shapes: single (faces[].matches) and batch
      * (results[].matches).
      */
-    function findMatchContext(identityId) {
+    function findMatchContext(identityId, referenceIndex) {
         const results = state.currentResults;
         if (!results) return null;
-        const groups = results.faces || results.results || [];
+        let groups = results.faces || results.results || [];
+        if (results.results && Number.isInteger(referenceIndex)) {
+            groups = groups.filter(group => batchReferenceIndex(group, results) === referenceIndex);
+        }
         for (const group of groups) {
             for (const match of (group.matches || [])) {
                 if (match && match.identity_id === identityId) return match;
@@ -1505,14 +1523,14 @@
         return row;
     }
 
-    function buildIdentityHeader(identity) {
+    function buildIdentityHeader(identity, reference) {
         const header = buildEl('div', 'identity-header');
 
         const img = document.createElement('img');
         img.className = 'identity-snapshot';
         img.alt = identity.display_name || 'Identity snapshot';
-        img.src = safeImageUrl(identity.snapshot_url) || PLACEHOLDER_AVATAR;
-        img.dataset.fallbackSrc = PLACEHOLDER_AVATAR;
+        const caption = buildEl('p', 'identity-score-explainer search-image-caption');
+        SearchImage.render(img, caption, safeImageUrl(identity.snapshot_url), reference, PLACEHOLDER_AVATAR);
         header.appendChild(img);
 
         const summary = buildEl('div', 'identity-summary');
@@ -1531,6 +1549,7 @@
                 String(identity.status).toUpperCase()));
         }
         summary.appendChild(badges);
+        summary.appendChild(caption);
         header.appendChild(summary);
         return header;
     }
@@ -1619,7 +1638,7 @@
         return section;
     }
 
-    function renderIdentityPanel(identity, watchlists, matchContext) {
+    function renderIdentityPanel(identity, watchlists, matchContext, reference) {
         const body = document.getElementById('identity-modal-body');
         const title = document.getElementById('identity-modal-title');
         if (!body) return;
@@ -1630,7 +1649,7 @@
 
         const sightings = Array.isArray(identity.appearances) ? identity.appearances : [];
         const children = [
-            buildIdentityHeader(identity),
+            buildIdentityHeader(identity, reference),
             buildIdentityFacts(identity, sightings)
         ];
         if (matchContext) {
@@ -1687,7 +1706,9 @@
     // Scoped, not window.viewIdentity: dispatch goes through the Actions
     // registry alone, so there is no reason to offer this as a global — and a
     // global is one more thing an injected script could replace.
-    async function viewIdentity(identityId) {
+    async function viewIdentity(identityId, referenceIndex) {
+        const matchContext = findMatchContext(identityId, referenceIndex);
+        const reference = matchContext ? state.resultReferences[referenceIndex] : null;
         if (!identityId) return;
         ['identity-full-profile', 'identity-analyze'].forEach(id => { const link = document.getElementById(id); if (link) link.hidden = true; });
 
@@ -1745,7 +1766,7 @@
             }
 
             if (inflight.identity !== controller) return;
-            renderIdentityPanel(identity, watchlists, findMatchContext(identityId));
+            renderIdentityPanel(identity, watchlists, matchContext, reference);
 
         } catch (error) {
             if (isAbort(error)) return;
@@ -1766,14 +1787,14 @@
     // not a window global. actions.js is script #1 on this page, so the
     // registry exists by the time this runs.
     Actions.register({
-        viewIdentity: (el) => viewIdentity(el.dataset.arg),
+        viewIdentity: (el) => viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex)),
         // Keyboard activation for the result cards (role="button" divs).
         // Delegated through the data-action-keydown binding actions.js already
         // has; Space is preventDefault'ed so the page does not scroll.
         viewIdentityKey: (el, event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
             event.preventDefault();
-            viewIdentity(el.dataset.arg);
+            viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex));
         },
     });
 
@@ -1838,7 +1859,13 @@
     // ============================================
     // Clear Results
     // ============================================
+    function releaseResultReferences() {
+        state.resultReferences.forEach(reference => reference?.release());
+        state.resultReferences = [];
+    }
+
     function clearResults() {
+        releaseResultReferences();
         // Backend logic: centralized clearing of all results
         state.currentResults = null;
         state.resultContext = null;

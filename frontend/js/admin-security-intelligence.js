@@ -910,7 +910,7 @@
                 }, [
                     el('div', { className: 'identity-item-thumbnail' },
                         config.mode === 'identity'
-                            ? (item.snapshotUrl ? safeImg(item.snapshotUrl, item.displayName) : faIcon('fas fa-user'))
+                            ? (item.searchReference ? document.createElement('img') : item.snapshotUrl ? safeImg(item.snapshotUrl, item.displayName) : faIcon('fas fa-user'))
                             : faIcon('fas fa-video')),
                     el('div', { className: 'identity-item-info' }, [
                         el('div', { className: 'identity-item-name', text: item.displayName }),
@@ -918,6 +918,13 @@
                     ]),
                     el('div', { className: 'identity-item-check' }, faIcon('fas fa-check'))
                 ]);
+                if (item.searchReference) {
+                    const image = node.querySelector('.identity-item-thumbnail img');
+                    image.alt = item.displayName;
+                    const caption = el('div', { className: 'identity-item-meta search-image-caption' });
+                    node.querySelector('.identity-item-info').append(caption);
+                    SearchImage.render(image, caption, item.snapshotUrl, item.searchReference);
+                }
                 node.dataset.itemId = item.id;
                 node.addEventListener('click', function () { choose(item); });
                 resultsContainer.append(node);
@@ -988,6 +995,10 @@
 
         function exitPhotoMode(rerun) {
             component.photoMode = false;
+            component.searchReference?.release();
+            component.searchReference = null;
+            resultsContainer.replaceChildren();
+            component.items = [];
             if (photoClearBtn) photoClearBtn.style.display = 'none';
             if (photoInput) photoInput.value = '';
             if (rerun) refresh(true);
@@ -1030,6 +1041,8 @@
                     method: 'POST', body: formData, signal: req.signal, timeout: 60000
                 });
                 if (!req.isCurrent() || !component.photoMode) return;
+                component.searchReference?.release();
+                component.searchReference = Array.isArray(matches) && matches.length ? SearchImage.createReference(file) : null;
                 // Normalise through the SAME normalizeIdentity the text flow
                 // uses (one shape, one renderer); backend type preserved.
                 const items = (Array.isArray(matches) ? matches : []).map(function (m) {
@@ -1038,8 +1051,9 @@
                         display_name: m.display_name,
                         type: m.type,
                         last_seen_at: m.last_seen_at,
-                        snapshot_url: snapshotUrlFromPath(m.best_snapshot_path)
+                        snapshot_url: m.snapshot_url || snapshotUrlFromPath(m.best_snapshot_path)
                     });
+                    if (norm) norm.searchReference = component.searchReference;
                     if (norm && typeof m.similarity === 'number') norm.similarity = m.similarity;
                     return norm;
                 }).filter(Boolean);

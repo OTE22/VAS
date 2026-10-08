@@ -3,7 +3,7 @@ const source=fs.readFileSync('frontend/js/admin-unknown.js','utf8');
 const code=source.slice(source.indexOf('let quickSearchSequence ='),source.indexOf('function createSearchResultCard('));
 const elements=new Map(),pending=[];
 function node(id){if(!elements.has(id)) elements.set(id,{files:[{}],value:'both',disabled:false,style:{},children:[],textContent:'',replaceChildren(){this.children=[];this.textContent='';},appendChild(child){this.children.push(child);}});return elements.get(id);}
-const context={AbortController,FormData:class{append(){}},document:{getElementById:node,querySelector:node,createElement:()=>({textContent:''})},showNotification(){},createSearchResultCard:r=>r,fetch:(url,options)=>new Promise(resolve=>pending.push({resolve,options}))};
+const context={SearchImage:{createReference:()=>({release(){}})},AbortController,FormData:class{append(){}},document:{getElementById:node,querySelector:node,createElement:()=>({textContent:''})},showNotification(){},createSearchResultCard:r=>r,fetch:(url,options)=>new Promise(resolve=>pending.push({resolve,options}))};
 vm.createContext(context);vm.runInContext(code,context);
 const run=c=>vm.runInContext(c,context);
 const response=id=>({ok:true,headers:{get:()=> '2'},json:async()=>[{identity_id:id}]});

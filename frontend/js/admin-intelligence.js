@@ -409,6 +409,8 @@
     const picker = { wrapper: null, cleanups: [], searchTimer: null, page: 1, totalPages: 1, activeIndex: -1, items: [] };
 
     function destroyIdentityPicker() {
+        picker.searchReference?.release();
+        picker.searchReference = null;
         for (const fn of picker.cleanups.splice(0)) {
             try { fn(); } catch (_) { /* noop */ }
         }
@@ -641,7 +643,7 @@
                     attrs: { role: 'option', id: 'identity-option-' + (baseIndex + i), 'aria-selected': 'false', tabindex: '-1' }
                 }, [
                     el('div', { className: 'identity-item-thumbnail' },
-                        identity.snapshot_url ? safeImg(identity.snapshot_url, displayName) : faIcon('fas fa-user')),
+                        identity.searchReference ? document.createElement('img') : identity.snapshot_url ? safeImg(identity.snapshot_url, displayName) : faIcon('fas fa-user')),
                     el('div', { className: 'identity-item-info' }, [
                         el('div', { className: 'identity-item-name', text: displayName }),
                         el('div', { className: 'identity-item-meta' }, [
@@ -660,6 +662,13 @@
                     ]),
                     el('div', { className: 'identity-item-check' }, faIcon('fas fa-check'))
                 ]);
+                if (identity.searchReference) {
+                    const image = item.querySelector('.identity-item-thumbnail img');
+                    image.alt = displayName;
+                    const caption = el('div', { className: 'identity-item-meta search-image-caption' });
+                    item.querySelector('.identity-item-info').append(caption);
+                    SearchImage.render(image, caption, identity.snapshot_url, identity.searchReference);
+                }
                 item.addEventListener('click', function () { chooseIdentity(identity); });
                 resultsContainer.append(item);
             });
@@ -738,6 +747,10 @@
 
         function exitPhotoMode(rerun) {
             picker.photoMode = false;
+            picker.searchReference?.release();
+            picker.searchReference = null;
+            resultsContainer.replaceChildren();
+            picker.items = [];
             photoClearBtn.style.display = 'none';
             photoInput.value = '';
             if (rerun) runSearch(true);
@@ -780,6 +793,8 @@
                     method: 'POST', body: formData, signal: req.signal, timeout: 60000
                 });
                 if (!req.isCurrent() || !picker.photoMode) return;
+                picker.searchReference?.release();
+                picker.searchReference = Array.isArray(matches) && matches.length ? SearchImage.createReference(file) : null;
                 // Normalise into the EXACT shape the text flow renders, then
                 // reuse the same renderer -- one card path, never two. The
                 // backend type is preserved verbatim (unknown stays unknown).
@@ -789,7 +804,8 @@
                         display_name: m.display_name,
                         type: m.type,
                         last_seen_at: m.last_seen_at,
-                        snapshot_url: snapshotUrlFromPath(m.best_snapshot_path),
+                        snapshot_url: m.snapshot_url || snapshotUrlFromPath(m.best_snapshot_path),
+                        searchReference: picker.searchReference,
                         similarity: (typeof m.similarity === 'number') ? m.similarity : null
                     };
                 });

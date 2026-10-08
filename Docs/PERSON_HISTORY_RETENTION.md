@@ -24,10 +24,22 @@ shared files beyond this age. A representative portrait's existing eligibility
 is based on the identity's last-seen time. This is not a strict 90-day TTL for
 every image file. Older sightings do not acquire newer timestamps during cleanup.
 
-Missing images use placeholders. The UI says “Image unavailable — history
-retained”, because a missing image may have expired or may never have been saved.
-No replacement image is synthesized. Image expiry does not recover already
-removed vectors or make a face match certain.
+Historical views use “Image unavailable — history retained” when a stored image
+is unavailable. In current image-search results, an available uploaded reference
+is shown instead, labelled **Uploaded search image**. This applies to Quick
+Search, Advanced Search (including its match-details panel), and the Identity
+Intelligence and Security Intelligence photo pickers. Stored photos are preferred;
+missing or failed images fall back to the reference, then to the unavailable state.
+
+The reference is a browser-only display fallback, never saved as a portrait or
+substituted for historical sighting evidence, and does not change exported API
+results. References are released when results are cleared/replaced, pickers close,
+or the page unloads. A failed Advanced Search rerun preserves the previous
+successful search's reference. Batch matches use their own submitted image; if
+decode failures omit uploads, unique filenames can remap the reference. Duplicate
+filenames in such a shortened response are ambiguous, so those matches retain the
+unavailable state rather than show a potentially incorrect photo. Image expiry
+does not recover removed vectors or make a face match certain.
 
 ## Search
 
@@ -84,3 +96,13 @@ and temporary files, with no production volumes or network attached.
 
 Production settings, data, images and running services were not modified during
 implementation or testing.
+
+## Search-reference display verification
+
+The display change is frontend-only; no database migration or cleanup is required.
+DOM regression tests cover existing/absent/failed images, batch indexing and
+omissions, failed reruns, cancellation, selector cleanup, and untrusted URLs.
+Firefox checks use a loopback-only staged frontend with synthetic PNG references
+and mocked search responses to verify actual decoding, HTTP 404 fallbacks, CSP,
+and visible labels at desktop and mobile widths. They do not validate face-match
+accuracy or substitute for backend integration/load testing.
