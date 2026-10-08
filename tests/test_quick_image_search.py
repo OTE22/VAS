@@ -48,7 +48,7 @@ def test_filters_before_limit_duplicates_and_model_isolation():
             assert len(rows) == 3 and {p.id for p,_ in rows} == {p.id for p in people[:3]}
             people[1].status = m.IdentityStatus.INACTIVE; await db.flush()
             rows = await rank_people(db,vector(0),model,'both',3,pipeline_id=camera.pipeline_id)
-            assert [p.id for p,_ in rows] == [people[2].id]
+            assert [p.id for p,_ in rows] == [people[1].id, people[2].id]
     asyncio.run(run())
 
 

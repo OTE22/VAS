@@ -20,7 +20,7 @@ from config import settings
 from backend.core.metrics import metrics_cleanup_operations
 from db_connection import db_manager
 from db_models import Detection, Face
-from sqlalchemy import select, delete as sa_delete, func, text as sa_text
+from sqlalchemy import select, delete as sa_delete, func, text as sa_text, false
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ class DataRetentionManager:
             await background_task_notifier.notify_task_starting(
                 task_type=TaskType.DATA_RETENTION,
                 task_name="Data Retention Cleanup",
-                description=f"Deletes detections and face images older than {self.retention_days} days. Scheduled every {self.cleanup_interval_hours} hours; affects all users.",
+                description=("Person history is preserved; cleaning expired logs and temporary data." if settings.PRESERVE_PERSON_HISTORY else f"Deletes detections older than {self.retention_days} days and cleans expired logs and temporary data."),
                 estimated_duration="5-15 minutes",
                 scheduled_time=next_run_time,
                 notify_all_users=True
@@ -207,6 +207,7 @@ class DataRetentionManager:
             return {"status": "skipped", "reason": "already_running", "dry_run": dry_run, "job_id": job_id}
 
         async with self._run_lock:
+            preserve_history = bool(settings.PRESERVE_PERSON_HISTORY)
             retention_days = self.retention_days  # read ONCE at run start
             cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
             # Safety floor: regardless of configuration, never touch records
@@ -214,7 +215,10 @@ class DataRetentionManager:
             safety_floor = datetime.utcnow() - timedelta(days=1)
             effective_cutoff = min(cutoff_date, safety_floor)
 
+            expired_detections = false() if preserve_history else Detection.timestamp < effective_cutoff
+
             result = {
+                "preserve_person_history": preserve_history,
                 "status": "completed", "dry_run": dry_run, "job_id": job_id,
                 "retention_days": retention_days,
                 "cutoff": effective_cutoff.isoformat(),
@@ -263,7 +267,7 @@ class DataRetentionManager:
                     try:
                         total = (await db.execute(select(func.count(Detection.id)))).scalar() or 0
                         candidates = (await db.execute(
-                            select(func.count(Detection.id)).where(Detection.timestamp < effective_cutoff)
+                            select(func.count(Detection.id)).where(expired_detections)
                         )).scalar() or 0
                         result["rows_scanned"] = total
                         result["candidate_rows"] = candidates
@@ -273,7 +277,7 @@ class DataRetentionManager:
                             path_rows = await db.execute(
                                 select(Face.face_image_path)
                                 .join(Detection, Face.detection_id == Detection.id)
-                                .where(Detection.timestamp < effective_cutoff,
+                                .where(expired_detections,
                                        Face.face_image_path.isnot(None))
                                 .limit(5000)  # bounded scan for the estimate
                             )
@@ -281,14 +285,14 @@ class DataRetentionManager:
                             from backend.core.storage_references import unreferenced_files
                             paths = await unreferenced_files(db, paths, {
                                 'faces': Face.detection_id.in_(select(Detection.id).where(
-                                    Detection.timestamp < effective_cutoff)),
+                                    expired_detections)),
                             })
                             existing, missing, est_bytes = await loop.run_in_executor(
                                 None, _stat_files_sync, paths
                             )
                             sample_rows = await db.execute(
                                 select(Detection.id)
-                                .where(Detection.timestamp < effective_cutoff)
+                                .where(expired_detections)
                                 .order_by(Detection.id).limit(10)
                             )
                             result["candidate_files"] = len(paths)
@@ -306,7 +310,7 @@ class DataRetentionManager:
 
                                 id_rows = await db.execute(
                                     select(Detection.id)
-                                    .where(Detection.timestamp < effective_cutoff)
+                                    .where(expired_detections)
                                     .limit(batch_size)
                                 )
                                 ids = [r[0] for r in id_rows.all()]
@@ -416,6 +420,7 @@ class DataRetentionManager:
                             details={
                                 "failures": result["failures"],
                                 "extra": result["extra"],
+                                "preserve_person_history": preserve_history,
                                 "deleted_detections": result["rows_deleted"],
                                 "deleted_files": result["files_deleted"],
                                 "freed_space_mb": round(result["bytes_freed"] / (1024 * 1024), 2),
@@ -615,12 +620,9 @@ class DataRetentionManager:
     async def _cleanup_agent_artifacts(self, db, dry_run: bool) -> dict:
         """Expire generated documents — the ROW and the FILE together.
 
-        Artifacts are rendered FROM detection data, so they inherit that data's
-        window: DATA_RETENTION_DAYS. Letting a report outlive the detections it
-        reports on would be a retention hole disguised as a convenience, and
-        the file is the leak — `source_content` on the row holds the same
-        narrative, which is why the row goes with it rather than being kept as
-        a tombstone.
+        Generated reports keep their existing DATA_RETENTION_DAYS window even
+        when person history is preserved. The preservation switch protects
+        source sightings and matching vectors, not temporary generated reports.
 
         Order is file-then-row, the reverse of registration. A file whose row
         is already gone is unreachable by every route (the download path is

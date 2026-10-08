@@ -257,7 +257,8 @@ class IdentityIndexPgVector:
         embedding: np.ndarray, 
         db: AsyncSession,
         top_k: int = 1,
-        threshold: float = None
+        threshold: float = None,
+        include_inactive: bool = False
     ) -> List[Tuple[str, float]]:
         """
         Search KNOWN people, using each person's highest embedding similarity.
@@ -361,7 +362,8 @@ class IdentityIndexPgVector:
                     WHERE
                         ie.embedding IS NOT NULL
                         AND i.type::text = UPPER(:identity_type)
-                        AND i.status::text IN ('ACTIVE', 'PROMOTED')
+                        AND (i.status::text IN ('ACTIVE', 'PROMOTED') OR (:include_inactive AND i.status::text = 'INACTIVE'))
+                        AND i.merged_into_id IS NULL
                         AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
                     ORDER BY ie.identity_id, ie.embedding <=> qv.vec, ie.id
                     )
@@ -371,6 +373,7 @@ class IdentityIndexPgVector:
                     LIMIT :top_k
                 """),
                 {
+                    "include_inactive": include_inactive,
                     "identity_type": IdentityType.KNOWN.value,  # Use enum value: "known"
                     "threshold": threshold,
                     "top_k": top_k
@@ -394,11 +397,12 @@ class IdentityIndexPgVector:
                             JOIN identities i ON ie.identity_id = i.id
                             WHERE ie.embedding IS NOT NULL
                               AND i.type::text = UPPER(:identity_type)
-                              AND i.status::text IN ('ACTIVE', 'PROMOTED')
+                              AND (i.status::text IN ('ACTIVE', 'PROMOTED') OR (:include_inactive AND i.status::text = 'INACTIVE'))
+                              AND i.merged_into_id IS NULL
                             ORDER BY ie.embedding <=> '{embedding_array_str}'::vector
                             LIMIT 1
                         """),
-                        {"identity_type": IdentityType.KNOWN.value}
+                        {"identity_type": IdentityType.KNOWN.value, "include_inactive": include_inactive}
                     )
                     best = diag.fetchone()
                     if best:
@@ -489,7 +493,8 @@ class IdentityIndexPgVector:
         embedding: np.ndarray, 
         db: AsyncSession,
         top_k: int = 1,
-        threshold: float = None
+        threshold: float = None,
+        include_inactive: bool = False
     ) -> List[Tuple[str, float]]:
         """
         Search for similar embeddings in UNKNOWN identities.
@@ -498,7 +503,7 @@ class IdentityIndexPgVector:
         Args:
             embedding: Query embedding (will be L2-normalized)
             db: Database session
-            top_k: Number of results to return
+            top_k: Number of distinct identities to return
             threshold: Minimum similarity. None resolves to
                 settings.UNKNOWN_SIMILARITY_THRESHOLD.
 
@@ -543,12 +548,14 @@ class IdentityIndexPgVector:
                 await db.execute(text(
                     f"SET LOCAL hnsw.ef_search = {self._effective_ef_search(top_k)}"))
             
+            # Historical search ranks people across retained vectors. Keep the
+            # live-camera ANN query shape unchanged for recognition throughput.
             result = await db.execute(
                 text(f"""
                     WITH query_vector AS (
                         SELECT '{embedding_array_str}'::vector AS vec
-                    )
-                    SELECT 
+                    ) {", best_per_person AS (" if include_inactive else ""}
+                    SELECT {"DISTINCT ON (ie.identity_id)" if include_inactive else ""}
                         ie.identity_id::text as identity_id,
                         1 - (ie.embedding <=> qv.vec) as similarity,
                         ie.quality
@@ -558,12 +565,15 @@ class IdentityIndexPgVector:
                     WHERE 
                         ie.embedding IS NOT NULL
                         AND i.type::text = UPPER(:identity_type)
-                        AND i.status::text = UPPER(:identity_status)
+                        AND (i.status::text = UPPER(:identity_status) OR (:include_inactive AND i.status::text = 'INACTIVE'))
+                        AND i.merged_into_id IS NULL
                         AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
-                    ORDER BY ie.embedding <=> qv.vec
+                    ORDER BY {"ie.identity_id," if include_inactive else ""} ie.embedding <=> qv.vec {", ie.id" if include_inactive else ""}
+                    {") SELECT identity_id, similarity, quality FROM best_per_person ORDER BY similarity DESC, identity_id" if include_inactive else ""}
                     LIMIT :top_k
                 """),
                 {
+                    "include_inactive": include_inactive,
                     "identity_type": IdentityType.UNKNOWN.value,  # Use enum value: "unknown"
                     "identity_status": IdentityStatus.ACTIVE.value,  # Use enum value: "active"
                     "threshold": threshold,

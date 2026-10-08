@@ -59,26 +59,44 @@ async def unreferenced_files(db, values, excluding=None):
     return sorted(str(p) for p in set(candidates.values()) - protected)
 
 
-async def retire_snapshot(db, record):
-    """Clear an expired snapshot reference; delete only if it is the last one."""
-    value = record.best_snapshot_path
-    if not value:
-        return 0
-    try:
-        path = local_path(value)
-    except (ValueError, OSError):
-        return 0
-    if path.is_relative_to(Path(settings.FACES_DIR).resolve()):
-        return 0
-    table = record.__table__
-    eligible = await unreferenced_files(db, [value], {table.name: table.c.id == record.id})
-    deleted = 0
-    if eligible:
+async def retire_image_references(db, records, field="best_snapshot_path"):
+    """Expire one batch of image references, preserving every database row.
+
+    The batch must contain one table/field. Enrollment files and invalid paths
+    are left untouched. References from other tables (including evidence) keep
+    the physical file; only this batch's expired references are cleared.
+    """
+    eligible_records = []
+    for record in records:
+        value = getattr(record, field)
+        if not value:
+            continue
         try:
-            await asyncio.to_thread(path.unlink)
-            deleted = 1
+            path = local_path(value)
+        except (ValueError, OSError):
+            continue
+        if path.is_relative_to(Path(settings.FACES_DIR).resolve()):
+            continue
+        eligible_records.append(record)
+    if not eligible_records:
+        return 0
+    table = eligible_records[0].__table__
+    paths = await unreferenced_files(db, [getattr(r, field) for r in eligible_records], {
+        table.name: table.c.id.in_([r.id for r in eligible_records]),
+    })
+    deleted = 0
+    for value in paths:
+        try:
+            await asyncio.to_thread(Path(value).unlink)
+            deleted += 1
         except FileNotFoundError:
             pass
-    record.best_snapshot_path = None
+    for record in eligible_records:
+        setattr(record, field, None)
     await db.flush()
     return deleted
+
+
+async def retire_snapshot(db, record):
+    """Compatibility entry point for a single expired snapshot."""
+    return await retire_image_references(db, [record])

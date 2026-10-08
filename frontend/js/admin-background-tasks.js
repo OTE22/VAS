@@ -703,7 +703,8 @@
         const effective = s.effective_retention_days;
         grid.replaceChildren(
             retentionStat('Stored retention', stored !== null && stored !== undefined ? `${stored} days` : '-'),
-            retentionStat('Effective retention', effective !== null && effective !== undefined ? `${effective} days` : '-'),
+            retentionStat('Person history', s.preserve_person_history ? 'Until explicit deletion' : `${effective} days for detections`),
+            retentionStat('Routine images', s.snapshot_retention_days ? `${s.snapshot_retention_days} days (separate job; evidence protected)` : '-'),
             retentionStat('Source', s.source),
             retentionStat('Apply mode', s.apply_mode),
             retentionStat('Cleanup interval', s.cleanup_interval_seconds ? fmtDuration(s.cleanup_interval_seconds) : '-'),

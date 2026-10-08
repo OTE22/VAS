@@ -282,6 +282,7 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "MULTI_CAMERA_MIN_CO_APPEARANCES": SettingMeta("integer", "count", 1, 100, None, _DYN),
 
     # --- Retention (jobs re-read at each run start after the rework) ---
+    "PRESERVE_PERSON_HISTORY": SettingMeta("boolean", "on/off", apply_mode=_JOB),
     "DATA_RETENTION_DAYS": SettingMeta("integer", "days", 1, 3650, None, _JOB),
     "CLEANUP_INTERVAL_HOURS": SettingMeta("integer", "hours", 1, 168, None, _JOB),
     "LOGS_LIFE_TIME_HOURS": SettingMeta("integer", "hours", 1, 8760, None, _JOB),

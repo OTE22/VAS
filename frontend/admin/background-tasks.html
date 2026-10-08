@@ -91,7 +91,7 @@
                         </button>
                     </div>
                 </div>
-                <p class="monitor-help retention-explainer">Retention removes records older than the configured age. The cleanup interval controls how often eligibility is checked; it does not delete all records each cycle. A dry test previews eligible data without deleting it.</p>
+                <p class="monitor-help retention-explainer">With Preserve person history enabled, detection records and search embeddings are kept until explicit deletion. Logs and temporary data still expire. Routine camera images expire in the separate Identity Retention job; enrollment and referenced evidence are protected. This dry test previews the data cleanup job only.</p>
                 <div class="retention-status-grid" id="retention-status-grid">
                     <!-- Populated by JavaScript -->
                 </div>
@@ -262,7 +262,7 @@
             <div class="bt-modal-body">
                 <p>
                     This will <strong>permanently delete</strong> all detection records and face images
-                    older than the effective retention period. This cannot be undone.
+                    older than the effective retention period only when person-history preservation is OFF. Logs and temporary data still expire. This cannot be undone.
                 </p>
                 <p>Run a <em>Dry Test</em> first to see exactly what would be removed.</p>
                 <label for="retention-confirm-input">

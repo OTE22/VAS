@@ -19,10 +19,10 @@ if parent_dir not in sys.path:
 from config import settings
 from db_connection import db_manager
 from db_models import (
-    Identity, IdentityAppearance, IdentityEmbedding, Face,
+    Identity, IdentityAppearance, IdentityEmbedding, Face, Detection,
     IdentityType, IdentityStatus
 )
-from sqlalchemy import select, func, and_, delete as sql_delete, text
+from sqlalchemy import select, func, and_, delete as sql_delete, text, exists
 from backend.core.vector_index.access import remove_embedding_keys
 
 # A camera-origin embedding (pipeline_id IS NOT NULL) is written and committed
@@ -43,7 +43,7 @@ class IdentityRetentionManager:
     Manages retention and cleanup for identity data:
     - Delete old snapshots based on retention policy
     - Mark inactive identities
-    - Keep only top-K best embeddings per identity
+    - Keep recorded embeddings, or enforce top-K when preservation is disabled
     - Clean up merged/inactive identities
     """
     
@@ -129,7 +129,7 @@ class IdentityRetentionManager:
             await background_task_notifier.notify_task_starting(
                 task_type=TaskType.IDENTITY_RETENTION,
                 task_name="Identity Retention Cleanup",
-                description=f"Cleaning up old identity snapshots (older than {self.snapshot_retention_days} days), marking inactive identities, and removing excess embeddings. This affects unknown faces that users can access.",
+                description=f"Expiring routine camera images older than {self.snapshot_retention_days} days and marking inactive identities. " + ("Person records and embeddings are preserved." if settings.PRESERVE_PERSON_HISTORY else "Embedding cleanup is enabled."),
                 estimated_duration="3-10 minutes",
                 scheduled_time=next_run_time,
                 notify_all_users=True  # Notify all users since this affects unknown faces they can see
@@ -181,6 +181,7 @@ class IdentityRetentionManager:
                     success=True,
                     duration_seconds=duration,
                     details={
+                        "preserve_person_history": bool(settings.PRESERVE_PERSON_HISTORY),
                         "deleted_snapshots": deleted_snapshots,
                         "marked_inactive": marked_inactive,
                         "cleaned_embeddings": cleaned_embeddings,
@@ -208,7 +209,8 @@ class IdentityRetentionManager:
         (worker died between the embedding commit and persist_detection).
 
         Candidates: pipeline_id IS NOT NULL AND detection_id IS NULL AND
-        created_at < now - grace. Removal uses the canonical path — vector-index
+        created_at < now - grace. With history preservation enabled, identities
+        with recorded appearances or faces are excluded. Removal uses the canonical path — vector-index
         keys first (remove_embedding_keys), then the rows — so FAISS/pgvector
         state and the table stay consistent. Then an UNKNOWN identity that this
         left with zero embeddings, images, appearances and faces (i.e. it existed
@@ -224,13 +226,22 @@ class IdentityRetentionManager:
         removed = {"embeddings": 0, "identities": 0, "boundary": boundary.isoformat() + "Z"}
         try:
             async with db_manager.get_session() as db:
-                rows = (await db.execute(
-                    select(IdentityEmbedding.id, IdentityEmbedding.identity_id).where(
+                query = select(IdentityEmbedding.id, IdentityEmbedding.identity_id).where(
                         IdentityEmbedding.pipeline_id.isnot(None),
                         IdentityEmbedding.detection_id.is_(None),
                         IdentityEmbedding.created_at < boundary,
-                    ).order_by(IdentityEmbedding.id)
-                )).all()
+                    )
+                if settings.PRESERVE_PERSON_HISTORY:
+                    # A missing detection link can be legacy retention, not a
+                    # failed frame. Keep vectors whenever recorded history exists.
+                    # Crash-only rows with no recorded sighting remain recoverable.
+                    query = query.where(
+                        ~exists(select(IdentityAppearance.id).where(
+                            IdentityAppearance.identity_id == IdentityEmbedding.identity_id)),
+                        ~exists(select(Face.id).where(
+                            Face.identity_id == IdentityEmbedding.identity_id)),
+                    )
+                rows = (await db.execute(query.order_by(IdentityEmbedding.id))).all()
                 if not rows:
                     return removed
                 from backend.core.detection_spool import protected_embedding_ids
@@ -266,46 +277,37 @@ class IdentityRetentionManager:
         return removed
 
     async def _cleanup_old_snapshots(self) -> int:
-        """Delete snapshots older than retention policy"""
-        cutoff_date = datetime.utcnow() - timedelta(days=self.snapshot_retention_days)
-        deleted_count = 0
-        
-        try:
-            async with db_manager.get_session() as db:
-                # Get old appearances
-                result = await db.execute(
-                    select(IdentityAppearance).where(
-                        IdentityAppearance.start_time < cutoff_date
-                    )
-                )
-                old_appearances = result.scalars().all()
-                
-                from backend.core.storage_references import retire_snapshot
-                for appearance in old_appearances:
-                    deleted_count += await retire_snapshot(db, appearance)
-                
-                # Also clean up identity best_snapshot_path if it's old
-                identity_result = await db.execute(
-                    select(Identity).where(
-                        and_(
-                            Identity.best_snapshot_path.isnot(None),
-                            Identity.last_seen_at < cutoff_date
-                        )
-                    )
-                )
-                old_identities = identity_result.scalars().all()
-                
-                for identity in old_identities:
-                    deleted_count += await retire_snapshot(db, identity)
-                
-                await db.commit()
-        
-        except Exception as e:
-            logger.error(f"Error cleaning up old snapshots: {e}", exc_info=True)
-            raise
-        
-        return deleted_count
-    
+        """Expire image references independently of person rows and vectors.
+
+        Clear expired face references first, then appearance/portrait references.
+        Other evidence, enrollment and pending writes still protect their files.
+        Keyset batches bound memory and skip protected gallery references without
+        looping forever. Commits retain retryable references on file I/O failure.
+        """
+        from backend.core.storage_references import retire_image_references
+        cutoff = datetime.utcnow() - timedelta(days=self.snapshot_retention_days)
+        queries = (
+            (Face, "face_image_path", select(Face).join(Detection).where(
+                Detection.timestamp < cutoff, Face.face_image_path.isnot(None))),
+            (IdentityAppearance, "best_snapshot_path", select(IdentityAppearance).where(
+                IdentityAppearance.start_time < cutoff, IdentityAppearance.best_snapshot_path.isnot(None))),
+            (Identity, "best_snapshot_path", select(Identity).where(
+                Identity.last_seen_at < cutoff, Identity.best_snapshot_path.isnot(None))),
+        )
+        deleted = 0
+        async with db_manager.get_session() as db:
+            for model, field, query in queries:
+                last_id = None
+                while True:
+                    batch_query = query if last_id is None else query.where(model.id > last_id)
+                    records = (await db.execute(batch_query.order_by(model.id).limit(250))).scalars().all()
+                    if not records:
+                        break
+                    last_id = records[-1].id
+                    deleted += await retire_image_references(db, records, field)
+                    await db.commit()
+        return deleted
+
     async def _mark_inactive_identities(self) -> int:
         """Mark identities as inactive if not seen in threshold days"""
         cutoff_date = datetime.utcnow() - timedelta(days=self.inactive_threshold_days)
@@ -381,6 +383,8 @@ class IdentityRetentionManager:
         malformed row carrying both, is left alone: for a cap, failing toward
         "keep" is the only safe direction.
         """
+        if settings.PRESERVE_PERSON_HISTORY:
+            return 0
         removed_count = 0
 
         try:

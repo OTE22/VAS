@@ -494,7 +494,7 @@ async def sync_settings_from_config(db: AsyncSession):
         # separate `backup` service in docker-compose.prod.yml. They are
         # registered container_recreate below, because an edit made here
         # mutates THIS process and can never reach that container.
-        "retention": ["DATA_RETENTION_DAYS", "CLEANUP_INTERVAL_HOURS", "AUDIT_LOG_RETENTION_DAYS",
+        "retention": ["PRESERVE_PERSON_HISTORY", "DATA_RETENTION_DAYS", "CLEANUP_INTERVAL_HOURS", "AUDIT_LOG_RETENTION_DAYS",
                      "TASK_HISTORY_RETENTION_DAYS",
                      "BACKUP_RETENTION_DAYS", "BACKUP_INTERVAL_SECONDS",
                      "BATCH_WRITE_SIZE", "BATCH_WRITE_INTERVAL"],

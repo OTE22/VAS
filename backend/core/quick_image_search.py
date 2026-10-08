@@ -54,7 +54,7 @@ async def rank_people(db, embedding, model_version, scope, top_k, start=None, en
         raise HTTPException(503, 'The current recognition model is not ready for search.')
     distance = IdentityEmbedding.embedding.cosine_distance(vector)
     filters = [Identity.merged_into_id.is_(None),
-               Identity.status.in_([IdentityStatus.ACTIVE, IdentityStatus.PROMOTED]),
+               Identity.status.in_([IdentityStatus.ACTIVE, IdentityStatus.PROMOTED, IdentityStatus.INACTIVE]),
                IdentityEmbedding.embedding_model_version == model_version,
                IdentityEmbedding.embedding.isnot(None)]
     thresholds = []

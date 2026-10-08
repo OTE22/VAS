@@ -100,7 +100,8 @@
         cfg.alertWindowMs = parseDurationMs(config.alert_notification_window_ms, cfg.alertWindowMs,
             { minimum: 0, maximum: 365 * 24 * 3600 * 1000 });
         const retention = Number(config.database_retention_days);
-        cfg.databaseRetentionDays = (Number.isFinite(retention) && retention > 0) ? retention : cfg.databaseRetentionDays;
+        cfg.databaseRetentionDays = config.preserve_person_history === true ? null
+            : ((Number.isFinite(retention) && retention > 0) ? retention : null);
         console.log(`[CONFIG] Applied (${source}): display=${cfg.faceDisplayMs}ms alertWindow=${cfg.alertWindowMs}ms retentionDays=${cfg.databaseRetentionDays ?? 'unknown'}`);
         updateAlertBadge();
         return true;
@@ -676,7 +677,10 @@
         const seenEl = item.querySelector('.last-seen-line');
         if (seenEl) { seenEl.textContent = 'Seen ' + formatAge(entry.last_seen_at); seenEl.title = formatBeirut(entry.last_seen_at) + ' (Beirut)'; }
         const storedEl = item.querySelector('.stored-until-line');
-        if (storedEl && cfg.databaseRetentionDays !== null) {
+        if (storedEl && cfg.databaseRetentionDays === null) {
+            storedEl.parentElement.hidden = true;
+        } else if (storedEl) {
+            storedEl.parentElement.hidden = false;
             // Backend-provided retention only — this file never invents a policy
             const storedUntil = new Date(entry.latest_detection_at.getTime()
                 + cfg.databaseRetentionDays * 24 * 3600 * 1000);

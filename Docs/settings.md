@@ -38,3 +38,10 @@ Saved does not always mean active immediately: settings can require a future job
 ## Source
 
 [frontend/admin/settings.html](../frontend/admin/settings.html), [frontend/js/admin-settings.js](../frontend/js/admin-settings.js). Page access: [dashboard routes](../backend/routes/dashboard.py).
+
+## Person history and image retention
+
+**Preserve person history until explicit deletion** keeps recorded identities,
+detections, appearances and matching embeddings during scheduled cleanup. Images
+expire independently under **Snapshot retention**; logs and temporary data still
+expire. See [retention behavior, exceptions and deployment checks](PERSON_HISTORY_RETENTION.md).

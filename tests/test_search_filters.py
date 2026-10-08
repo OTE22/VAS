@@ -92,12 +92,12 @@ class FakeVectorIndex:
         self.requested_top_k = []
         self.requested_threshold = []
 
-    async def search_known(self, embedding, top_k, threshold, db=None):
+    async def search_known(self, embedding, top_k, threshold, db=None, include_inactive=False):
         self.requested_top_k.append(top_k)
         self.requested_threshold.append(threshold)
         return list(self.rows)
 
-    async def search_unknown(self, embedding, top_k, threshold, db=None):
+    async def search_unknown(self, embedding, top_k, threshold, db=None, include_inactive=False):
         self.requested_top_k.append(top_k)
         self.requested_threshold.append(threshold)
         return []

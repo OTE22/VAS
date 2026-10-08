@@ -17,7 +17,8 @@ const BASIC_SETTING_LABELS = new Map([
     ['UNKNOWN_SIMILARITY_THRESHOLD', 'Unknown face match threshold'],
     ['SAVE_IMAGES', 'Save detection images'],
     ['SAVE_UNKNOWN_FACES', 'Save unknown faces'],
-    ['DATA_RETENTION_DAYS', 'Delete detections older than'],
+    ['PRESERVE_PERSON_HISTORY', 'Preserve person history until explicit deletion'],
+    ['DATA_RETENTION_DAYS', 'Detection expiry when history preservation is off'],
     ['CLEANUP_INTERVAL_HOURS', 'Run data cleanup every'],
     ['SNAPSHOT_RETENTION_DAYS', 'Snapshot retention'],
     ['SEARCH_HISTORY_RETENTION_DAYS', 'Search history retention'],
@@ -629,18 +630,18 @@ function bindRetentionTools() {
         try {
             const r = await apiFetch('/api/admin/retention/run?dry_run=true', { method: 'POST' });
             show(r);
-            showNotice(`Dry run: ${r.candidate_rows ?? 0} candidate rows, nothing deleted`, 'info');
+            showNotice(`Dry run scheduled (${r.job_id}). Follow progress in Background Tasks.`, 'info');
         } catch (e) { showNotice(`Dry run failed: ${e.message}`, 'error'); }
         finally { busy(dryBtn, false); }
     });
 
     if (runBtn) runBtn.addEventListener('click', async () => {
-        if (!window.confirm('Run retention NOW? Expired detections and their images will be permanently deleted.')) return;
+        if (!window.confirm('Run cleanup now? Logs and temporary data expire. Person records are deleted only when Preserve person history is OFF. Camera images have a separate cleanup schedule.')) return;
         busy(runBtn, true);
         try {
-            const r = await apiFetch('/api/admin/retention/run?dry_run=false', { method: 'POST' });
+            const r = await apiFetch('/api/admin/retention/run', { method: 'POST', body: JSON.stringify({ dry_run: false, confirmation: 'DELETE_EXPIRED_DATA' }), headers: { 'Content-Type': 'application/json' } });
             show(r);
-            showNotice(`Retention executed: ${r.rows_deleted ?? 0} rows, ${r.files_deleted ?? 0} files deleted`, 'success');
+            showNotice(`Cleanup scheduled (${r.job_id}). Follow progress in Background Tasks.`, 'info');
             await loadAuditLog();
         } catch (e) { showNotice(`Retention run failed: ${e.message}`, 'error'); }
         finally { busy(runBtn, false); }

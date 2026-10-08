@@ -24,12 +24,12 @@ async def _exercise():
                 # PostgreSQL resolves these private temporary tables before
                 # public tables. No real people are read or modified.
                 await connection.execute(text('CREATE TEMP TABLE identities '
-                    '(id uuid PRIMARY KEY, type text, status text, display_name text) ON COMMIT DROP'))
+                    '(id uuid PRIMARY KEY, type text, status text, display_name text, merged_into_id uuid) ON COMMIT DROP'))
                 await connection.execute(text('CREATE TEMP TABLE identity_embeddings '
                     '(id bigserial PRIMARY KEY, identity_id uuid, embedding vector(512), quality real) ON COMMIT DROP'))
                 people = [str(UUID(int=i)) for i in range(1, 8)]
                 for i, person in enumerate(people):
-                    await connection.execute(text('INSERT INTO identities VALUES (:id, :type, :status, :name)'),
+                    await connection.execute(text('INSERT INTO identities (id, type, status, display_name) VALUES (:id, :type, :status, :name)'),
                         {'id': person, 'type': 'UNKNOWN' if i == 4 else 'KNOWN',
                          'status': ['ACTIVE', 'PROMOTED', 'ACTIVE', 'INACTIVE', 'ACTIVE', 'MERGED', 'ACTIVE'][i],
                          'name': f'Person {i}'})

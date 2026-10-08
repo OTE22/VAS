@@ -688,7 +688,8 @@ class AdvancedSearchService:
                     embedding=embedding,
                     top_k=fetch_k,
                     threshold=self.candidate_threshold,
-                    db=db
+                    db=db,
+                    include_inactive=True
                 )
                 # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
                 for identity_id, score in known_results:
@@ -701,7 +702,8 @@ class AdvancedSearchService:
                     embedding=embedding,
                     top_k=fetch_k,
                     threshold=self.candidate_threshold,
-                    db=db
+                    db=db,
+                    include_inactive=True
                 )
                 # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
                 for identity_id, score in unknown_results:
@@ -722,7 +724,7 @@ class AdvancedSearchService:
                     continue
                 hits = await search_similar_embeddings(
                     db, embedding, top_k=fetch_k,
-                    threshold=self.candidate_threshold, identity_type=wanted)
+                    threshold=self.candidate_threshold, identity_type=wanted, include_inactive=True)
                 if not hits:
                     logger.debug(f"[ADVANCED_SEARCH] no {wanted} candidates")
                 for hit in hits:

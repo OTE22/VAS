@@ -76,7 +76,8 @@ wizard_default_settings() {
     printf '\nStep 5 of 8 — Default configuration\n'
     printf 'Press Enter to keep the existing configuration, or use the shipped defaults on a new server.\n'
     printf '  LOG_LEVEL: INFO records normal operations; WARNING/ERROR produce fewer messages.\n'
-    printf '  DATA_RETENTION_DAYS: detections/events become eligible for cleanup after this many days.\n'
+    printf '  PRESERVE_PERSON_HISTORY defaults to true: person records stay until explicit deletion (editable in Settings).\n'
+    printf '  DATA_RETENTION_DAYS applies only when history preservation is OFF. SNAPSHOT_RETENTION_DAYS controls routine images separately (default 90).\n'
     printf '  BACKUP_RETENTION_DAYS: older automatic backups become eligible for deletion.\n'
     printf '  MAX_STORAGE_GB: dashboard reporting capacity only; it does not reserve space or enforce a disk quota.\n'
     for key in "${WIZARD_SETTING_KEYS[@]}"; do

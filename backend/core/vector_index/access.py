@@ -91,7 +91,8 @@ async def load_vector(session, embedding_id) -> Optional[np.ndarray]:
 async def search_similar_embeddings(session, vector: np.ndarray, *,
                                     top_k: int = 20,
                                     threshold: float = 0.0,
-                                    identity_type: Optional[str] = None
+                                    identity_type: Optional[str] = None,
+                                    include_inactive: bool = False
                                     ) -> List[Dict[str, Any]]:
     """Nearest embeddings, resolved to identities through the database.
 
@@ -100,7 +101,11 @@ async def search_similar_embeddings(session, vector: np.ndarray, *,
     resolved through `identity_embeddings`, so a key with no live row cannot
     surface — the stale-vector-wins-top-k failure the old index had.
     """
-    index = get_vector_index()
+    # Live FAISS indexes intentionally omit inactive identities. Historical
+    # searches use the authoritative database so those vectors are not missed.
+    status_sql = ("i.status::text IN ('ACTIVE', 'PROMOTED', 'INACTIVE') AND i.merged_into_id IS NULL"
+                  if include_inactive else SEARCHABLE_STATUS_SQL)
+    index = None if include_inactive else get_vector_index()
     hits: List[tuple] = []
     # Distinguish "the index answered, with nothing" from "the index could not
     # answer". Only the second justifies a database scan; treating an honest
@@ -125,21 +130,36 @@ async def search_similar_embeddings(session, vector: np.ndarray, *,
             text("SELECT e.id, e.identity_id, i.type "
                  "FROM identity_embeddings e "
                  "JOIN identities i ON i.id = e.identity_id "
-                 f"WHERE e.id = ANY(:keys) AND {SEARCHABLE_STATUS_SQL}"),
+                 f"WHERE e.id = ANY(:keys) AND {status_sql}"),
             {"keys": keys})).all()
         found = [{"embedding_id": int(r[0]), "identity_id": str(r[1]),
                   "identity_type": str(r[2]).lower(),
                   "similarity": scores.get(int(r[0]), 0.0)} for r in rows]
     else:
         literal = "[" + ",".join(f"{float(x):.8f}" for x in np.asarray(vector).ravel()) + "]"
-        rows = (await session.execute(
-            text("SELECT e.id, e.identity_id, i.type, "
-                 "       1 - (e.embedding <=> CAST(:q AS vector)) AS similarity "
-                 "FROM identity_embeddings e "
-                 "JOIN identities i ON i.id = e.identity_id "
-                 f"WHERE e.embedding IS NOT NULL AND {SEARCHABLE_STATUS_SQL} "
-                 "ORDER BY e.embedding <=> CAST(:q AS vector) LIMIT :k"),
-            {"q": literal, "k": max(1, int(top_k) * 5)})).all()
+        if include_inactive:
+            # Bound results by people, not stored vectors: one frequent visitor
+            # must not occupy every historical-search candidate slot.
+            statement = text(
+                "WITH best AS (SELECT DISTINCT ON (e.identity_id) e.id, e.identity_id, i.type, "
+                "1 - (e.embedding <=> CAST(:q AS vector)) AS similarity "
+                "FROM identity_embeddings e JOIN identities i ON i.id = e.identity_id "
+                f"WHERE e.embedding IS NOT NULL AND {status_sql} "
+                "AND (CAST(:wanted AS text) IS NULL OR LOWER(i.type::text) = CAST(:wanted AS text)) "
+                "ORDER BY e.identity_id, e.embedding <=> CAST(:q AS vector), e.id) "
+                "SELECT id, identity_id, type, similarity FROM best "
+                "ORDER BY similarity DESC, identity_id LIMIT :k")
+            rows = (await session.execute(statement, {
+                "q": literal, "wanted": str(identity_type).lower() if identity_type is not None else None, "k": max(1, int(top_k))})).all()
+        else:
+            rows = (await session.execute(
+                text("SELECT e.id, e.identity_id, i.type, "
+                     "       1 - (e.embedding <=> CAST(:q AS vector)) AS similarity "
+                     "FROM identity_embeddings e "
+                     "JOIN identities i ON i.id = e.identity_id "
+                     f"WHERE e.embedding IS NOT NULL AND {status_sql} "
+                     "ORDER BY e.embedding <=> CAST(:q AS vector) LIMIT :k"),
+                {"q": literal, "k": max(1, int(top_k) * 5)})).all()
         found = [{"embedding_id": int(r[0]), "identity_id": str(r[1]),
                   "identity_type": str(r[2]).lower(),
                   "similarity": float(r[3])} for r in rows]

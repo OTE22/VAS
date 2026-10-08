@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin/retention", tags=["Retention"])
 
 RETENTION_KEYS = (
-    "DATA_RETENTION_DAYS", "CLEANUP_INTERVAL_HOURS", "MAX_STORAGE_GB",
+    "PRESERVE_PERSON_HISTORY", "DATA_RETENTION_DAYS", "CLEANUP_INTERVAL_HOURS", "MAX_STORAGE_GB",
     "LOGS_LIFE_TIME_HOURS", "SNAPSHOT_RETENTION_DAYS", "INACTIVE_THRESHOLD_DAYS",
     "IDENTITY_CLEANUP_INTERVAL_HOURS", "MAX_EMBEDDINGS_PER_IDENTITY",
     "SEARCH_HISTORY_RETENTION_DAYS", "SEARCH_HISTORY_MAX_PER_USER",
@@ -108,6 +108,8 @@ async def retention_status(
     return {
         # Flattened summary (stable contract for the monitor page)
         "enabled": True,
+        "preserve_person_history": bool(settings.PRESERVE_PERSON_HISTORY),
+        "snapshot_retention_days": int(settings.SNAPSHOT_RETENTION_DAYS),
         "stored_retention_days": dr.get("stored_value"),
         "effective_retention_days": dr.get("effective_value"),
         "source": dr.get("source"),

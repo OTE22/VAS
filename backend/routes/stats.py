@@ -40,12 +40,14 @@ def _retention_policy() -> dict:
     the Settings page applies next_job_run changes there in place, so these
     are the values the cleanup jobs will actually use, never a cached copy."""
     return {
-        "data_days": int(settings.DATA_RETENTION_DAYS),
+        "preserve_person_history": bool(settings.PRESERVE_PERSON_HISTORY),
+        "data_days": None if settings.PRESERVE_PERSON_HISTORY else int(settings.DATA_RETENTION_DAYS),
         "task_history_days": int(settings.TASK_HISTORY_RETENTION_DAYS),
         "search_history_days": int(settings.SEARCH_HISTORY_RETENTION_DAYS),
         "audit_log_days": int(settings.AUDIT_LOG_RETENTION_DAYS),
         "identity_snapshot_days": int(settings.SNAPSHOT_RETENTION_DAYS),
-        "identity_embedding_months": int(settings.EMBEDDING_RETENTION_MONTHS),
+        "identity_embedding_months": None,  # no age-based embedding deletion is implemented
+        "embedding_cap": None if settings.PRESERVE_PERSON_HISTORY else int(settings.MAX_EMBEDDINGS_PER_IDENTITY),
         "logs_hours": int(settings.LOGS_LIFE_TIME_HOURS),
         "backup_days": int(settings.BACKUP_RETENTION_DAYS),
         "cleanup_interval_hours": int(settings.CLEANUP_INTERVAL_HOURS),
@@ -190,7 +192,8 @@ async def get_stats(
                     "database": {},
                     "cache": {"enabled": CACHE_ENABLED, "healthy": False},
                     "tracker": {"enabled": FACE_TRACKING_ENABLED},
-                    "retention_days": settings.DATA_RETENTION_DAYS,
+                    "retention_days": None if settings.PRESERVE_PERSON_HISTORY else settings.DATA_RETENTION_DAYS,
+                    "preserve_person_history": bool(settings.PRESERVE_PERSON_HISTORY),
                 }
         
         # Execute queries
@@ -248,7 +251,8 @@ async def get_stats(
             "database": db_stats,
             "cache": cache_stats,
             "tracker": tracker_stats,
-            "retention_days": settings.DATA_RETENTION_DAYS,
+            "retention_days": None if settings.PRESERVE_PERSON_HISTORY else settings.DATA_RETENTION_DAYS,
+            "preserve_person_history": bool(settings.PRESERVE_PERSON_HISTORY),
             "retention": _retention_policy(),
         }
 
@@ -303,7 +307,8 @@ async def get_dashboard_config(response: Response):
 
                 # DATABASE/file retention (owned by the backend retention job —
                 # the frontend must NEVER hard-code or invent this)
-                "database_retention_days": int(settings.DATA_RETENTION_DAYS),
+                "database_retention_days": None if settings.PRESERVE_PERSON_HISTORY else int(settings.DATA_RETENTION_DAYS),
+                "preserve_person_history": bool(settings.PRESERVE_PERSON_HISTORY),
                 "retention_source": "settings",
 
                 # Cleanup interval for frontend expiry sweeps (in milliseconds)

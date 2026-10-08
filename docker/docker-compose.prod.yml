@@ -285,7 +285,9 @@ services:
       # var that folds into the key set above. `off` is refused in production.
       WEBHOOK_AUTH_MODE: enforce
       WEBHOOK_API_KEYS_FILE: /run/secrets/webhook_api_keys
-      DATA_RETENTION_DAYS: ${DATA_RETENTION_DAYS:-365}          # keep detections/events one year (was 30); next_job_run setting
+      PRESERVE_PERSON_HISTORY: ${PRESERVE_PERSON_HISTORY:-true}
+      SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:-90}
+      DATA_RETENTION_DAYS: ${DATA_RETENTION_DAYS:-365}          # applies only when PRESERVE_PERSON_HISTORY=false
       TASK_HISTORY_RETENTION_DAYS: 365  # keep the background-task log as long as the data
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}   # same value the backup service gets, so /api/stats reports it truthfully
       # Reporting only: the denominator behind storage usage_percent in

@@ -1132,6 +1132,7 @@
                             <span><i class="fas fa-${match.type === 'known' ? 'user-check' : 'user-secret'}"></i> ${escapeHtml(match.type)}</span>
                             <span><i class="fas fa-eye" aria-hidden="true"></i> ${escapeHtml(match.appearances_count || 0)} detections</span>
                         </div>
+                        ${snapshotUrl === PLACEHOLDER_AVATAR ? '<div class="match-meta">Image unavailable — history retained</div>' : ''}
                         <div class="match-last-seen">Last seen ${escapeHtml(formatDateTime(match.last_seen_at))}</div>
                         ${match.watchlist_match ? `
                             <div class="watchlist-badge ${escapeHtml(match.watchlist_match.alert_level)}" style="margin-top: 0.3rem;">

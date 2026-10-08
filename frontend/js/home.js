@@ -543,7 +543,7 @@ function renderStorage(stats) {
     setText('st-files', formatInt(files));
     setText('st-used-gb', formatGB(gb));
     setText('st-budget', maxGb === null ? EM_DASH : budgetText);
-    setText('st-retention', retention === null ? EM_DASH : plural(retention, 'day'));
+    setText('st-retention', stats.preserve_person_history === true ? 'Until explicit deletion' : (retention === null ? EM_DASH : plural(retention, 'day')));
 
     let status;
     let label;
@@ -635,9 +635,19 @@ function renderRetention(stats) {
     setText('rt-snapshots-note', identityEvery === null
         ? 'Face snapshots of unknown identities'
         : 'Face snapshots of unknown identities · cleanup runs every ' + plural(identityEvery, 'hour'));
-    setText('rt-embeddings-note', identityEvery === null
-        ? 'Face vectors of identities not seen since'
-        : 'Face vectors of identities not seen since · cleanup runs every ' + plural(identityEvery, 'hour'));
+    if (stats.retention && stats.retention.preserve_person_history === true) {
+        setText('rt-data', 'Until explicit deletion');
+        setText('rt-data-unit', '');
+        setText('rt-data-note', 'Person records remain; logs and temporary data have separate policies');
+        setText('rt-embeddings', 'Preserved');
+        setText('rt-embeddings-unit', '');
+        setText('rt-embeddings-note', 'Historical search includes retained inactive identities');
+    } else if (stats.retention && stats.retention.embedding_cap != null) {
+        setText('rt-embeddings', String(stats.retention.embedding_cap));
+        setText('rt-embeddings-unit', 'per active identity');
+        setText('rt-embeddings-note', 'Camera-vector cap; enrollment vectors protected; no age-based expiry');
+    }
+    setText('rt-snapshots-note', 'Routine camera images; enrollment and referenced evidence protected');
     const backupEvery = safeNumber(stats, 'retention.backup_interval_hours');
     setText('rt-backups-note', backupEvery === null
         ? 'Database dumps on the backup volume'

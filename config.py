@@ -814,7 +814,13 @@ class Settings(BaseSettings):
     # =====================================================
     # Data Retention & Cleanup
     # =====================================================
-    DATA_RETENTION_DAYS: int = Field(default=30)
+    PRESERVE_PERSON_HISTORY: bool = Field(
+        default=True,
+        description="Preserve recorded person history and embeddings during automatic cleanup. "
+                    "Images expire separately; logs and temporary data still expire. "
+                    "Disable only to resume age-based detection deletion and embedding cleanup.",
+    )
+    DATA_RETENTION_DAYS: int = Field(default=30, description="Expiry for detections when PRESERVE_PERSON_HISTORY is off; also the independent expiry for generated reports.")
     CLEANUP_INTERVAL_HOURS: int = Field(default=24)
 
     # =====================================================
