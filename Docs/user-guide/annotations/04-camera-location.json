@@ -1,0 +1,17 @@
+{
+  "name": "04-camera-location",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 2,
+      "selector": "#location-name-input",
+      "rect": [
+        91,
+        186.6999969482422,
+        1126,
+        42
+      ]
+    }
+  ]
+}

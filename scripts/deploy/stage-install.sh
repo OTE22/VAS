@@ -3,13 +3,8 @@
 # Stage 02 — host prerequisites: Docker Engine, the compose v2 plugin and the
 # NVIDIA Container Toolkit.
 #
-# detect -> validate -> apply -> verify. "Apply" only ever installs userspace
-# packages, and only when the host is online and is a real Linux distribution.
-#
-# The NVIDIA KERNEL DRIVER is deliberately never installed or upgraded here: it
-# needs a reboot, it can leave a machine without a display, and the correct
-# branch is a site decision. It is detected, and the operator is told exactly
-# what to run.
+# Host driver changes require explicit GPU install/repair selection. CUDA and cuDNN
+# remain in the image. gpu-setup.sh owns compatibility, reboot and runtime checks.
 
 # Minimum compose version: the generated GPU overlay uses the `!override` tag
 # to replace (not append to) the base file's device reservations.
@@ -63,22 +58,24 @@ install_nvidia_toolkit_online() {
     local mgr; mgr="$(detect_pkg_manager)"
     case "$mgr" in
         apt)
-            run bash -c 'export DEBIAN_FRONTEND=noninteractive
+            run bash -e -o pipefail -c 'export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                apt-get install -y -qq ca-certificates curl gnupg
                 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-                  | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+                  | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
                 curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
                   | sed "s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g" \
                   > /etc/apt/sources.list.d/nvidia-container-toolkit.list
                 apt-get update -qq && apt-get install -y -qq nvidia-container-toolkit' ;;
         dnf|yum)
-            run bash -c "curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+            run bash -e -o pipefail -c "$mgr install -y curl ca-certificates
+                curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
                   -o /etc/yum.repos.d/nvidia-container-toolkit.repo
                 $mgr install -y nvidia-container-toolkit" ;;
         *)
             return 1 ;;
     esac
-    run nvidia-ctk runtime configure --runtime=docker || return 1
-    run systemctl restart docker 2>/dev/null || true
+    return $?
 }
 
 stage_sys_install() {
@@ -87,9 +84,8 @@ stage_sys_install() {
     explain "WRITES" "system packages, ONLY on a real Linux host that is online:"
     explain_cont "/etc/apt/keyrings/docker.asc, /etc/apt/sources.list.d/docker.list,"
     explain_cont "nvidia-container-toolkit, then nvidia-ctk runtime configure."
-    explain "NEVER" "installs or upgrades the NVIDIA KERNEL DRIVER. It needs a reboot and"
-    explain_cont "can leave a machine with no display, so it stays your decision: this"
-    explain_cont "stage detects it and prints exactly what to install."
+    explain "GPU" "Verify existing prerequisites, or install/repair only when selected."
+    explain_cont "Driver changes stop for a manual reboot; Toolkit setup may restart Docker."
     explain "FAIL" "Docker missing and not installable here, or compose older than 2.24"
     explain_cont "(the generated GPU overlay needs the !override tag)."
 
@@ -132,7 +128,7 @@ stage_sys_install() {
         fi
     fi
 
-    if ! compose_version_ok || ! docker buildx version >/dev/null 2>&1; then
+    if ! compose_version_ok || { [ "${IMAGE_MODE:-build}" = build ] && ! docker buildx version >/dev/null 2>&1; }; then
         if [ "$may_install" = 1 ]; then
             info "repairing Docker Compose and Buildx plugins"
             case "$(detect_pkg_manager)" in
@@ -143,24 +139,13 @@ stage_sys_install() {
             esac
         fi
         compose_version_ok || stage_fail "Docker Compose >= 2.24.4 is required; install docker-compose-plugin"
-        docker buildx version >/dev/null 2>&1 || stage_fail "Buildx is required by the Dockerfiles; install docker-buildx-plugin (or import it on offline hosts)"
+        if [ "${IMAGE_MODE:-build}" = build ]; then
+            docker buildx version >/dev/null 2>&1 || stage_fail "Buildx is required by the Dockerfiles; install docker-buildx-plugin (or import it on offline hosts)"
+        fi
     fi
 
-    # ---- GPU userspace ----------------------------------------------------
-    if [ "$FORCE_CPU" = "1" ]; then
-        info "--cpu: GPU prerequisites not required"
-    elif [ "$driver_present" = 1 ] && [ "$toolkit_present" != 1 ]; then
-        if [ "$may_install" = 1 ]; then
-            info "installing the NVIDIA Container Toolkit (userspace only — the kernel driver is never touched)"
-            install_nvidia_toolkit_online || stage_fail "NVIDIA Container Toolkit installation failed — install nvidia-container-toolkit and run 'nvidia-ctk runtime configure --runtime=docker'"
-            toolkit_present=1
-        else
-            stage_warn "NVIDIA driver present but the container toolkit is missing — GPU mode is unavailable until 'nvidia-container-toolkit' is installed"
-        fi
-    elif [ "$driver_present" != 1 ]; then
-        # Deliberate: never install or upgrade the kernel driver.
-        info "no NVIDIA driver detected — CPU deployment. To enable GPU: install the driver for your card (>= 525), reboot, then re-run 'sudo ./deploy.sh gpu-test'."
-    fi
+    # Driver compatibility, explicit installation, reboot handoff and runtime checks.
+    stage_gpu_host_setup "$may_install"
 
     # ---- verify -----------------------------------------------------------
     docker info >/dev/null 2>&1 || stage_fail "docker daemon is not reachable"

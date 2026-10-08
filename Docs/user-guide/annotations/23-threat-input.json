@@ -1,0 +1,27 @@
+{
+  "name": "23-threat-input",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "[data-original-id=threat-identity-id] .identity-selector-trigger",
+      "rect": [
+        45,
+        357.29998779296875,
+        813.86669921875,
+        50
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#threat-assess-btn",
+      "rect": [
+        877.2666625976562,
+        357.2166748046875,
+        397.73333740234375,
+        50
+      ]
+    }
+  ]
+}

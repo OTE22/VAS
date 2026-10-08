@@ -1,0 +1,17 @@
+{
+  "name": "35-settings-saved",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 6,
+      "selector": "#refresh-settings-btn",
+      "rect": [
+        1152.61669921875,
+        313.5,
+        122.38333129882812,
+        39
+      ]
+    }
+  ]
+}

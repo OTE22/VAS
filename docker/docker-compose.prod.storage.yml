@@ -1,0 +1,99 @@
+# Optional host storage. deploy.sh includes this only when VAS_DATA_ROOT is set.
+# Configure before first deployment; existing volumes require a planned migration.
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/postgres_data"
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/redis_data"
+  storage_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/storage_data"
+  logs_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/logs_data"
+  face_database_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/face_database_data"
+  ml_artifacts_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/ml_artifacts_data"
+  chromadb_cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/chromadb_cache"
+  hf_cache_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/hf_cache_data"
+  vllm_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/vllm_models"
+  milvus_etcd:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/milvus_etcd"
+  milvus_minio:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/milvus_minio"
+  milvus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/milvus_data"
+  ollama_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/ollama_models"
+  backup_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/backup_data"
+  prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/prometheus_data"
+  grafana_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: "${VAS_DATA_ROOT:?set an absolute storage directory}/grafana_data"

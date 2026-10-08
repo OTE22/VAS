@@ -241,10 +241,15 @@ compose_files() {
         files+=(-f "$ROOT/docker/docker-compose.prod.gpu.yml")
         [ -f "$GPU_OVERLAY" ] && files+=(-f "$GPU_OVERLAY")
     fi
+    if [ -n "$(storage_root)" ]; then
+        files+=(-f "$ROOT/docker/docker-compose.prod.storage.yml")
+    fi
     printf '%s\n' "${files[@]}"
 }
 
 compose() {
+    local selected_storage; selected_storage="$(storage_root)"
+    local VAS_DATA_ROOT="$selected_storage"; export VAS_DATA_ROOT
     local -a files=()
     while IFS= read -r line; do files+=("$line"); done < <(compose_files)
     docker compose --project-directory "$ROOT/docker" "${files[@]}" "$@"
@@ -252,9 +257,16 @@ compose() {
 
 # compose_mutate: compose calls that change container state go through run().
 compose_mutate() {
+    local selected_storage; selected_storage="$(storage_root)"
+    local VAS_DATA_ROOT="$selected_storage"; export VAS_DATA_ROOT
     local -a files=()
     while IFS= read -r line; do files+=("$line"); done < <(compose_files)
-    run docker compose --project-directory "$ROOT/docker" "${files[@]}" "$@"
+    if [ "${IMAGE_MODE:-build}" = load ] && [ "${1:-}" = up ]; then
+        shift
+        run docker compose --project-directory "$ROOT/docker" "${files[@]}" up --no-build --pull never "$@"
+    else
+        run docker compose --project-directory "$ROOT/docker" "${files[@]}" "$@"
+    fi
 }
 
 # merged_env_value <rendered-config> <service> <KEY>
@@ -417,6 +429,7 @@ config_fingerprint() {
         for f in "$ROOT/docker/docker-compose.prod.yml" \
                  "$ROOT/docker/docker-compose.prod.gpu.yml" \
                  "$GPU_OVERLAY" \
+                 "$ROOT/docker/docker-compose.prod.storage.yml" \
                  "$ROOT/weights/WEIGHTS_MANIFEST.json"; do
             [ -f "$f" ] && sha256_of "$f"
         done

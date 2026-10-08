@@ -1,0 +1,17 @@
+{
+  "name": "22-anomaly-result",
+  "width": 1280,
+  "height": 297,
+  "marks": [
+    {
+      "number": 5,
+      "selector": "#anomalies-container",
+      "rect": [
+        25,
+        25.29998779296875,
+        1230,
+        247.59999084472656
+      ]
+    }
+  ]
+}

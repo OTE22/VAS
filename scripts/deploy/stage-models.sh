@@ -258,13 +258,9 @@ import_deploy_package() {
         info "imported $MANIFEST_PATH_REL"
     fi
 
-    # Pre-built images for an air-gapped host.
-    local tar
-    for tar in "$DEPLOY_PACKAGE"/images/*.tar; do
-        [ -f "$tar" ] || continue
-        info "docker load < $(basename "$tar")"
-        run bash -c "docker load -i '$tar' >/dev/null" || return 1
-    done
+    # Load archives once per invocation; direct argv preserves spaces/quotes in paths.
+    load_deployment_images || return 1
+
     return 0
 }
 
@@ -284,14 +280,16 @@ stage_ollama_models() {
         return 0
     fi
 
-    local wanted present missing=""
-    wanted="$(tr -d '\n' < "$(manifest_path)" 2>/dev/null \
-             | sed -n 's/.*"ollama_models"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' \
-             | tr ',' '\n' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$')"
-    [ -n "$wanted" ] || { stage_skip "manifest lists no LLM models"; return 0; }
+    local wanted present missing="" rendered model
+    rendered="$(compose config)" || { stage_warn 'Cannot read configured language models'; return 0; }
+    wanted="$(
+        merged_env_value "$rendered" face_recognition OLLAMA_MODEL
+        merged_env_value "$rendered" face_recognition OLLAMA_SQL_MODEL
+    )"
+    wanted="$(printf '%s\n' "$wanted" | sed '/^$/d' | sort -u)"
+    [ -n "$wanted" ] || { stage_warn 'No configured language models found'; return 0; }
 
     present="$(compose exec -T ollama ollama list 2>/dev/null | tail -n +2 | awk '{print $1}')"
-    local model
     while IFS= read -r model; do
         [ -n "$model" ] || continue
         if printf '%s\n' "$present" | grep -qx "$model"; then
@@ -302,7 +300,7 @@ stage_ollama_models() {
     done <<<"$wanted"
 
     if [ -z "$missing" ]; then
-        stage_pass "every LLM model in the manifest is present"
+        stage_pass "every configured LLM model is present"
         return 0
     fi
 

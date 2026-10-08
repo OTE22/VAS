@@ -1,0 +1,27 @@
+{
+  "name": "15-known-directory",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#known-query",
+      "rect": [
+        61,
+        303,
+        723,
+        43
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "[data-guide-target=\"g1791372886389763854\"]",
+      "rect": [
+        59,
+        764.7999877929688,
+        257,
+        42
+      ]
+    }
+  ]
+}

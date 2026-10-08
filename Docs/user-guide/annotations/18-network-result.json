@@ -1,0 +1,17 @@
+{
+  "name": "18-network-result",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 3,
+      "selector": "#network-graph",
+      "rect": [
+        45,
+        367.29998779296875,
+        1224,
+        410.95001220703125
+      ]
+    }
+  ]
+}

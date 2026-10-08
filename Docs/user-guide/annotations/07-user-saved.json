@@ -1,0 +1,17 @@
+{
+  "name": "07-user-saved",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 8,
+      "selector": "tbody tr:first-child",
+      "rect": [
+        33,
+        408.8833312988281,
+        1490.38330078125,
+        75
+      ]
+    }
+  ]
+}

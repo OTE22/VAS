@@ -1,0 +1,27 @@
+{
+  "name": "29-ml-service",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#mlops-service-select",
+      "rect": [
+        128.9499969482422,
+        229.26666259765625,
+        480,
+        46
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#service-train-btn",
+      "rect": [
+        79,
+        795.36669921875,
+        141.23333740234375,
+        44
+      ]
+    }
+  ]
+}

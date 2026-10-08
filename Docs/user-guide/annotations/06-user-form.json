@@ -1,0 +1,67 @@
+{
+  "name": "06-user-form",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 2,
+      "selector": "#modal-username",
+      "rect": [
+        235,
+        300.20001220703125,
+        413,
+        42
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#modal-email",
+      "rect": [
+        235,
+        400.20001220703125,
+        413,
+        42
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#modal-password",
+      "rect": [
+        235,
+        500.20001220703125,
+        413,
+        42
+      ]
+    },
+    {
+      "number": 5,
+      "selector": "#modal-role",
+      "rect": [
+        672,
+        300.20001220703125,
+        413,
+        42
+      ]
+    },
+    {
+      "number": 6,
+      "selector": "input[type=checkbox][value=demo-camera-1]",
+      "rect": [
+        689,
+        598.2000122070312,
+        17.033340454101562,
+        18
+      ]
+    },
+    {
+      "number": 7,
+      "selector": "[data-guide-target=\"g1791372656962102911\"]",
+      "rect": [
+        985.5,
+        792.7833251953125,
+        99.5,
+        38
+      ]
+    }
+  ]
+}

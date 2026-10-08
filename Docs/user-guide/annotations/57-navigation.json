@@ -1,0 +1,27 @@
+{
+  "name": "57-navigation",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "[data-guide-target=\"g1791373517568293659\"]",
+      "rect": [
+        383,
+        10.5,
+        150.48333740234375,
+        38
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "a[href=\"/admin/known\"]",
+      "rect": [
+        390,
+        100.10000610351562,
+        206,
+        38.59999084472656
+      ]
+    }
+  ]
+}

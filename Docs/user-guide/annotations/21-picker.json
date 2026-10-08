@@ -1,0 +1,27 @@
+{
+  "name": "21-picker",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#anomaly-identity-id-picker .filter-search",
+      "rect": [
+        275,
+        191.88333129882812,
+        572.7999877929688,
+        42.19999694824219
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#anomaly-identity-id-listbox .identity-selector-item",
+      "rect": [
+        267,
+        341.2833251953125,
+        786,
+        98
+      ]
+    }
+  ]
+}

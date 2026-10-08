@@ -1,0 +1,27 @@
+{
+  "name": "31-retention",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#retention-status-btn",
+      "rect": [
+        781.2999877929688,
+        458.75,
+        168.6999969482422,
+        38
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#retention-dryrun-btn",
+      "rect": [
+        958,
+        458.75,
+        157.8000030517578,
+        38
+      ]
+    }
+  ]
+}

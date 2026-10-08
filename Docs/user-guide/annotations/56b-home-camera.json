@@ -1,0 +1,17 @@
+{
+  "name": "56b-home-camera",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 2,
+      "selector": "#pipeline-select",
+      "rect": [
+        57,
+        445.2166748046875,
+        1194,
+        44
+      ]
+    }
+  ]
+}

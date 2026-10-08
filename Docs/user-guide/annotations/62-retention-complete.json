@@ -1,0 +1,23 @@
+{
+  "name": "62-retention-complete",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 3,
+      "selector": "#task-search",
+      "rect": [
+        309.01666259765625,
+        162.98333740234375,
+        194,
+        40
+      ]
+    }
+  ],
+  "crop_override": [
+    20,
+    70,
+    1295,
+    920
+  ]
+}

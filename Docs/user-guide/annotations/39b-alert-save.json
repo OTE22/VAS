@@ -1,0 +1,17 @@
+{
+  "name": "39b-alert-save",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 5,
+      "selector": "#create-live-alert-form button[type=submit]",
+      "rect": [
+        414,
+        838.2999877929688,
+        93.36666870117188,
+        23
+      ]
+    }
+  ]
+}

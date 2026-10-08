@@ -1,0 +1,27 @@
+{
+  "name": "52-history-export",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 5,
+      "selector": "#export-format",
+      "rect": [
+        435,
+        392,
+        450,
+        49
+      ]
+    },
+    {
+      "number": 6,
+      "selector": "#confirm-export-btn",
+      "rect": [
+        740.0499877929688,
+        609,
+        144.9499969482422,
+        50
+      ]
+    }
+  ]
+}

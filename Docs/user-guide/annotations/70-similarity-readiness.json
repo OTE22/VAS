@@ -1,0 +1,17 @@
+{
+  "name": "70-similarity-readiness",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#refresh-status-btn",
+      "rect": [
+        525,
+        463.73333740234375,
+        92,
+        40
+      ]
+    }
+  ]
+}

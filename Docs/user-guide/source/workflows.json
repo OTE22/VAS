@@ -1,0 +1,738 @@
+[
+  {
+    "id": "W01",
+    "section": 2,
+    "title": "Sign in securely",
+    "role": "An active VAS account",
+    "start": "/signin",
+    "goal": "Open your permitted VAS workspace.",
+    "steps": [
+      "Enter your issued Username. The demonstration account shown is not a production login.",
+      "Enter your Password. It is case sensitive.",
+      "Select Continue securely. Follow Change Password if your account requires rotation."
+    ],
+    "expected": "An authenticated workspace or the required password-change screen opens. The test administrator reached Change Password.",
+    "recovery": "For a security block, ask the administrator to check the allowed HTTPS origin and account status. Use the approved server address; do not disable browser security.",
+    "status": "Tested",
+    "figures": [
+      "01-signin"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W02",
+    "section": 2,
+    "title": "Complete first-login password rotation",
+    "role": "Authenticated account requiring rotation",
+    "start": "/change-password",
+    "goal": "Replace the administrator-issued password before continuing.",
+    "steps": [
+      "Enter CURRENT PASSWORD: the password just used to sign in.",
+      "Enter NEW PASSWORD. The screen requires at least 12 characters and at least 6 different characters.",
+      "Re-enter it in CONFIRM NEW PASSWORD.",
+      "Select CHANGE PASSWORD. If a success message appears, acknowledge it."
+    ],
+    "expected": "The workspace opens; the new password works on the next login. Both the synthetic administrator and standard user completed rotation.",
+    "recovery": "If confirmation does not match, correct both new-password fields. Rotation signs out other sessions; sign back in there.",
+    "status": "Tested",
+    "figures": [
+      "02-password"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W03",
+    "section": 3,
+    "title": "Find the correct workspace",
+    "role": "Administrator; standard users see fewer links",
+    "start": "/home, with the shared navigation visible",
+    "goal": "Use the actual navigation instead of guessing page addresses.",
+    "steps": [
+      "Open MANAGEMENT to reveal its menu.",
+      "Select Known Faces to open the people directory. Use the equivalent entries under SEARCH & INTELLIGENCE or SYSTEM for their workspaces."
+    ],
+    "expected": "The selected page opens and the active navigation changes. HOME is administrator-only; LIVE FEEDS is the operator detection view.",
+    "recovery": "Missing menu items can reflect permissions. A direct administrator URL redirected the tested standard user to Live Pipeline Feeds.",
+    "status": "Tested",
+    "figures": [
+      "57-navigation"
+    ],
+    "limit": "LAF-AI is a separate application link. Its SSO launch was not tested."
+  },
+  {
+    "id": "W04",
+    "section": 3,
+    "title": "Read Home and camera summaries",
+    "role": "Administrator",
+    "start": "/home",
+    "goal": "Check the overview and focus on a registered camera.",
+    "steps": [
+      "Select Refresh to reload the summary.",
+      "Choose a camera in the pipeline selector further down the page."
+    ],
+    "expected": "Counts and the selected camera context are displayed. Synthetic cameras and observations were visible in the overview.",
+    "recovery": "If a camera is absent, check that its sender has registered it through ingestion and that data falls within the visible scope.",
+    "status": "Tested",
+    "figures": [
+      "56-home",
+      "56b-home-camera"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W05",
+    "section": 5,
+    "title": "Review live detection feeds",
+    "role": "Active account; permitted pipelines for non-administrators",
+    "start": "/dashboard",
+    "goal": "Review the latest stored detections for accessible cameras.",
+    "steps": [
+      "Select Open recent detections to expand the recent-detection area."
+    ],
+    "expected": "Detection cards show snapshots, names or unknown status, similarity and timing. The restricted user saw only the assigned demonstration camera.",
+    "recovery": "CONNECTED describes the page connection, not camera/model health. If cards are stale, check upstream VMS publishing and ingest health before changing recognition thresholds.",
+    "status": "Tested \u2014 stored display",
+    "figures": [
+      "71-live-feeds",
+      "72-recent-detections"
+    ],
+    "limit": "No physical camera stream or newly recognized face was used. This page is a detection/snapshot feed, not a verified continuous-video player. Sound controls were observed; audio and notification delivery were not tested."
+  },
+  {
+    "id": "W06",
+    "section": 5,
+    "title": "Filter unknown identities and open evidence",
+    "role": "Administrator or permitted pipeline user",
+    "start": "/admin/unknown",
+    "goal": "Find an unknown record in the correct camera scope.",
+    "steps": [
+      "Choose Pipeline. The example uses the demonstration entrance camera.",
+      "Set Min Appearances. Leave 1 to include records with at least one appearance.",
+      "Select Apply filters.",
+      "Select VIEW & ALERT on the desired identity card."
+    ],
+    "expected": "The list is restricted to the chosen camera and Identity Details opens. Date From/Date To further narrow the scope; Reset filters restores the form.",
+    "recovery": "Check the date range, pipeline and minimum count before concluding that data is missing. SHOW ALL (>24h hidden) broadens the normal recent listing.",
+    "status": "Tested",
+    "figures": [
+      "12-unknown-filter",
+      "13-unknown-open"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W07",
+    "section": 5,
+    "title": "Follow a recorded movement journey",
+    "role": "Account permitted to view the identity",
+    "start": "Identity Details or /admin/identity/{identity_id}",
+    "goal": "Connect camera visits to the corresponding saved photos.",
+    "steps": [
+      "Select Journey overview to see visit groups and time gaps.",
+      "Select Every sighting \u00b7 camera lanes to switch to individual observations.",
+      "Select a numbered sighting to update the linked photo and timestamp.",
+      "Use Next sighting (the right-arrow control) to advance one observation.",
+      "Select Enlarge on the photo.",
+      "Use Next \u2192 in the photo viewer to review another stored appearance.",
+      "Select Close \u00d7 to return to the journey."
+    ],
+    "expected": "The selected number, camera, time and photo change together. Fifteen seeded sightings across three cameras were navigated in the test.",
+    "recovery": "A gap is time without a recorded sighting. It does not show where the person was. A missing image should be checked against storage and retention.",
+    "status": "Tested",
+    "figures": [
+      "48-journey-overview",
+      "49-journey-lanes",
+      "50-photo-viewer"
+    ],
+    "limit": "This is recorded-sighting review, not recorded-video playback, continuous GPS tracking or evidence of motion between cameras. Review sequence advances still images."
+  },
+  {
+    "id": "W08",
+    "section": 5,
+    "title": "Find and rename a known-person record",
+    "role": "Administrator",
+    "start": "/admin/known",
+    "goal": "Update a display name and verify the identity profile.",
+    "steps": [
+      "Enter the name or person ID in Search directory.",
+      "Select Manage person on the matching card.",
+      "Edit the name field.",
+      "Select Save name and acknowledge any success message.",
+      "Select Open full profile to verify the saved name and identity details."
+    ],
+    "expected": "The profile showed Demo Person 01 - Training after saving. The identity UUID and history remain associated with the same record.",
+    "recovery": "Use the stable identity ID when names are similar. Add photo, Deactivate person and Permanently delete are separate operations; renaming does not perform them.",
+    "status": "Tested",
+    "figures": [
+      "15-known-directory",
+      "16-known-profile"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W09",
+    "section": 5,
+    "title": "Prepare enrollment or identity review",
+    "role": "Administrator",
+    "start": "Known faces \u2192 Add person; or an unknown identity\u2019s detail dialog",
+    "goal": "Understand the available review controls before an identity-changing action.",
+    "steps": [
+      "From an unknown detail dialog, open PROMOTE TO KNOWN to inspect the review form.",
+      "Use MERGE only when reviewing records already confirmed to represent the same person; review the proposed source and survivor before any submission."
+    ],
+    "expected": "Promotion review was opened. Add person was also observed. Successful photo enrollment, promotion and merge were not executed for this guide.",
+    "recovery": "Use approved face images for enrollment. A matching score or similar-looking card is not identity confirmation. Cancel an uncertain decision.",
+    "status": "Observed; completion untested",
+    "figures": [
+      "66-review-actions",
+      "67-promote-review"
+    ],
+    "limit": "The demonstration avatars are deliberately not face photographs. No real person was identified. Merge suggestions, bulk merge, image replacement, deactivation and permanent deletion remain unexecuted."
+  },
+  {
+    "id": "W09E",
+    "section": 5,
+    "title": "Prepare a photo enrollment",
+    "role": "Administrator; approved face image",
+    "start": "Known faces \u2192 Add person",
+    "goal": "Understand the required enrollment inputs without bypassing review.",
+    "steps": [
+      "Enter PERSON NAME.",
+      "Choose PHOTO or drag an approved image onto the upload area. The dialog accepts JPEG, JPG, PNG and WEBP up to 10 MB.",
+      "Use THIS IS A FACE IMAGE (ALREADY CROPPED) only for a genuine cropped face; otherwise leave it unchecked.",
+      "Select UPLOAD PERSON only after validating the inputs and authorization."
+    ],
+    "expected": "A successful enrollment should complete its review and appear in Known faces with a usable photo. This guide did not submit an enrollment or claim that success.",
+    "recovery": "For no-face or quality errors, provide a suitable approved photo. Do not use the cropped-face option to bypass an invalid image.",
+    "status": "Observed \u2014 enrollment not executed",
+    "figures": [
+      "65-enrollment"
+    ],
+    "limit": "The synthetic avatars are unsuitable biometric enrollment images. Final candidate/duplicate review and recognition were not verified."
+  },
+  {
+    "id": "W10",
+    "section": 5,
+    "title": "Submit an image search and handle a quality failure",
+    "role": "Administrator; approved reference photo",
+    "start": "/admin/search",
+    "goal": "Set image-search scope and distinguish invalid input from no matches.",
+    "steps": [
+      "Choose the reference image using the upload area.",
+      "Select Search Scope.",
+      "Set Max Results Per Face.",
+      "Select Quality Check to inspect whether the image is usable.",
+      "Select Search only with a usable approved image."
+    ],
+    "expected": "The synthetic avatar produced \u201cQuality check failed: No face was detected in the image.\u201d A search completed with zero detected faces and zero results, and appeared in Search History.",
+    "recovery": "Replace a no-face image with an approved, clear face photo. Broaden overly restrictive camera/date filters only when appropriate. Do not interpret invalid input as proof that a person is absent.",
+    "status": "Tested \u2014 negative input",
+    "figures": [
+      "41-search",
+      "41b-search-settings",
+      "42-search-quality"
+    ],
+    "limit": "Positive biometric matching, batch success, result-image export and recognition accuracy were not validated."
+  },
+  {
+    "id": "W11",
+    "section": 5,
+    "title": "Filter search history and export CSV",
+    "role": "Administrator; authorization to export the selected records",
+    "start": "/admin/search-history",
+    "goal": "Review prior searches and download an authorized history file.",
+    "steps": [
+      "Choose Search Type.",
+      "Select the Days Back range.",
+      "Select APPLY FILTERS.",
+      "Select EXPORT to open Export Search History.",
+      "Choose CSV under EXPORT FORMAT and review DATE RANGE.",
+      "Select EXPORT in the dialog."
+    ],
+    "expected": "The browser downloaded a CSV and VAS displayed \u201cHistory exported successfully!\u201d The test file contained synthetic search history only.",
+    "recovery": "Check the browser download area if no file appears. Verify format, date range and row content before sharing. Clear history changes stored history and was not used.",
+    "status": "Tested",
+    "figures": [
+      "51-search-history",
+      "52-history-export"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W12",
+    "section": 5,
+    "title": "Create a watchlist",
+    "role": "Administrator",
+    "start": "Watchlist Management \u2192 Create New Watchlist",
+    "goal": "Create a named monitoring list.",
+    "steps": [
+      "Enter Name, for example Demo Review List.",
+      "Enter a Description explaining its approved purpose.",
+      "Select Alert Level. The example uses Info (Low Priority).",
+      "Select Save Watchlist."
+    ],
+    "expected": "The list appeared with its name and active state. Search, level, status and sort controls help find it later.",
+    "recovery": "A name alone does not enroll members. Use the identity\u2019s Add to Watchlist workflow. Alert level expresses urgency, not a probability of wrongdoing.",
+    "status": "Tested",
+    "figures": [
+      "10-watchlist-form",
+      "11-watchlist-saved"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W13",
+    "section": 5,
+    "title": "Add an identity to a watchlist and check membership",
+    "role": "Administrator; existing identity and watchlist",
+    "start": "Identity profile \u2192 ADD TO WATCHLIST",
+    "goal": "Save membership with review context.",
+    "steps": [
+      "Choose Select Watchlist.",
+      "Select Priority.",
+      "Enter Notes.",
+      "Enter Action Instructions, if appropriate.",
+      "Select Add to Watchlist.",
+      "Reload the profile and inspect WATCHLISTS; also verify the member inside the named watchlist\u2019s View panel."
+    ],
+    "expected": "The membership save returned success and the named list\u2019s member view contained the synthetic identity. The profile chip displayed \u201cUntitled watchlist\u201d in this build.",
+    "recovery": "If the chip is untitled, verify the member in Watchlist Management instead of repeatedly adding it. Report the display issue with the identity/list IDs.",
+    "status": "Tested \u2014 display limitation",
+    "figures": [
+      "37-membership",
+      "37b-membership-save",
+      "38-membership-saved",
+      "61-watchlist-members"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W14",
+    "section": 5,
+    "title": "Create, inspect and pause a live-alert rule",
+    "role": "Administrator for this tested workflow; permitted identity",
+    "start": "Identity profile \u2192 CREATE LIVE ALERT",
+    "goal": "Save a rule, inspect readiness, and pause it without sending a test notification.",
+    "steps": [
+      "Enter Alert Name.",
+      "Select Alert severity.",
+      "Set Minimum Similarity for the approved use case.",
+      "Review Notify on dashboard, Sound alert and Auto-capture snapshot. Sound was disabled in the demonstration.",
+      "Select Create Alert.",
+      "Open Live Alerts and select Health on the saved rule.",
+      "Select Pause when the demonstration is complete."
+    ],
+    "expected": "The rule was created; Health showed channel and identity checks; Pause changed the saved state to PAUSED and offered Resume.",
+    "recovery": "Health reported SNAPSHOT EXISTS: PROBLEM in the isolated fixture, although the profile photo rendered. Investigate that check before relying on delivery. Test can send notifications and was not used.",
+    "status": "Tested \u2014 rule lifecycle only",
+    "figures": [
+      "39-alert-form",
+      "39b-alert-save",
+      "40-alert-saved",
+      "63-alert-health",
+      "64-alert-paused"
+    ],
+    "limit": "No alert trigger, browser audio, acknowledgement, email or SMS delivery was tested. Cameras displayed All in this form\u2019s saved rule; do not assume a camera selector exists here."
+  },
+  {
+    "id": "W15",
+    "section": 6,
+    "title": "Save a camera\u2019s display location",
+    "role": "Administrator; camera already registered by ingestion",
+    "start": "/admin/pipelines",
+    "goal": "Maintain the location used in investigation and map views.",
+    "steps": [
+      "Select Edit Location on the intended pipeline.",
+      "Enter Location Name.",
+      "Enter Latitude between -90 and 90.",
+      "Enter Longitude between -180 and 180.",
+      "Select Save Location.",
+      "Select Refresh and verify the same location remains."
+    ],
+    "expected": "The demonstration name persisted after refresh. Coordinates can be entered even when the basemap is unavailable.",
+    "recovery": "VAS pipelines are registered by ingestion; this page is not an RTSP camera-discovery wizard. Rename changes the pipeline identifier and keeps an alias; that operation was not exercised.",
+    "status": "Tested",
+    "figures": [
+      "03-camera-list",
+      "04-camera-location",
+      "04c-camera-save",
+      "04b-camera-saved"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W16",
+    "section": 6,
+    "title": "Create a camera-scoped user",
+    "role": "Administrator",
+    "start": "/admin/users",
+    "goal": "Create a standard account with explicitly assigned camera access.",
+    "steps": [
+      "Select Create New User.",
+      "Enter Username.",
+      "Enter Email address; the demonstration uses the reserved example.test domain.",
+      "Enter a temporary Password that meets policy.",
+      "Select Role. USER - Standard Access was tested.",
+      "Select only the required Pipeline access checkboxes. Keep the account active; grant Chatbot access only when needed.",
+      "Select Save user and acknowledge the confirmation.",
+      "Check the saved row, role, pipeline count and MUST CHANGE PASSWORD indicator."
+    ],
+    "expected": "The synthetic user logged in, rotated its password and saw only its assigned camera. Opening /admin/users as that user returned it to Live Pipeline Feeds.",
+    "recovery": "Administrator assignment was disabled in this form. Observer and Analyzer options were visible but their full permission boundaries were not tested. The system account is protected and non-login.",
+    "status": "Tested \u2014 standard user",
+    "figures": [
+      "05-users",
+      "06-user-form",
+      "07-user-saved",
+      "08-operator",
+      "09-access-denied"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W17",
+    "section": 6,
+    "title": "Issue an ingest credential for an authorized sender",
+    "role": "Administrator; approved sender configuration",
+    "start": "/admin/ingest-credentials",
+    "goal": "Create a sender-specific credential and preserve it securely.",
+    "steps": [
+      "Enter the sender name in the credential-name field.",
+      "Select Issue token.",
+      "Use Copy token to transfer the one-time token to the authorized sender\u2019s secret store. The token is permanently redacted in this guide.",
+      "Dismiss the token dialog only after securing it.",
+      "Check the sender\u2019s row in Issued credentials."
+    ],
+    "expected": "A synthetic sender credential was issued and appeared in the list. The full token is shown once; the guide does not contain it.",
+    "recovery": "If the token is lost, follow the administrator\u2019s replacement/revocation procedure. Last-used timestamps can lag; absence of a recent time is not immediate proof of failure.",
+    "status": "Tested \u2014 issuance; clipboard transfer untested",
+    "figures": [
+      "43-credential-issue",
+      "44-credential-once",
+      "45-credential-saved"
+    ],
+    "limit": "No real sender was configured; webhook delivery and revocation were not tested. Static legacy ingest keys and sender-specific bearer tokens are different authentication methods."
+  },
+  {
+    "id": "W18",
+    "section": 6,
+    "title": "Edit a setting and verify its application timing",
+    "role": "Administrator",
+    "start": "/admin/settings",
+    "goal": "Change one permitted value and verify the reported result.",
+    "steps": [
+      "Search for Search history retention.",
+      "Select Edit on the matching setting.",
+      "Enter NEW VALUE. The example extends the period from 90 to 120 days in the isolated instance.",
+      "Enter CHANGE REASON.",
+      "Select Save Changes.",
+      "Select REFRESH and check the value and application hint."
+    ],
+    "expected": "The setting showed 120 days after refresh. The editor states that this setting applies at the next scheduled job run.",
+    "recovery": "Saved does not always mean immediately effective. Read In use, saved-value differences and restart/next-job hints. Security-critical settings may be read-only.",
+    "status": "Tested",
+    "figures": [
+      "33-settings-search",
+      "34-settings-edit",
+      "35-settings-saved"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W19",
+    "section": 6,
+    "title": "Preview retention cleanup without deleting data",
+    "role": "Administrator",
+    "start": "/admin/background-tasks \u2192 Retention Management",
+    "goal": "Estimate eligible cleanup and verify job completion.",
+    "steps": [
+      "Select Refresh Retention Status.",
+      "Select Run Retention Dry Test.",
+      "Filter Execution history with \u201cretention\u201d and open the completed dry-run task if further detail is needed."
+    ],
+    "expected": "Data Retention Dry Run reached COMPLETED. It counts what would be deleted and does not delete records.",
+    "recovery": "A submitted job is not a completed job: wait for its final state. Do not choose Run Retention Now for a preview. Retention age and cleanup interval mean different things.",
+    "status": "Tested",
+    "figures": [
+      "31-retention",
+      "62-retention-complete"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W20",
+    "section": 6,
+    "title": "Review chatbot query audit",
+    "role": "Administrator",
+    "start": "/admin/audit, then /admin/logs",
+    "goal": "Narrow investigation evidence without clearing it.",
+    "steps": [
+      "Choose USERNAME in Refine activity.",
+      "Choose STATUS.",
+      "Select Apply filters.",
+      "Choose Rows per page at the bottom of the table.",
+      "Select Next only when another page is available."
+    ],
+    "expected": "The page displayed Chatbot audit log and no query records in the isolated run. This page audits chatbot queries and responses, not every administrative action.",
+    "recovery": "Check user, date and status filters. An empty query log is expected when no assistant query has completed.",
+    "status": "Tested \u2014 navigation and filtering",
+    "figures": [
+      "46-audit",
+      "46b-audit-pages"
+    ],
+    "limit": "Query-detail and response inspection could not be verified without completed assistant queries."
+  },
+  {
+    "id": "W20L",
+    "section": 6,
+    "title": "Filter application logs",
+    "role": "Administrator",
+    "start": "/admin/logs",
+    "goal": "Narrow the loaded log records without clearing them.",
+    "steps": [
+      "Choose LOG LEVEL, for example ERROR.",
+      "Select Apply Filters.",
+      "Use Find on this page to narrow the loaded records."
+    ],
+    "expected": "The ERROR query returned No logs found in the scanned scope. Source, dates and Per Page change that scope.",
+    "recovery": "Reset overly narrow filters and select Refresh. An empty filtered page does not prove the absence of errors. Do not clear logs needed for investigation.",
+    "status": "Tested \u2014 filtering",
+    "figures": [
+      "47-logs"
+    ],
+    "limit": "Sensitive log export and log clearing were not performed."
+  },
+  {
+    "id": "W21",
+    "section": 6,
+    "title": "Build a social relationship graph",
+    "role": "Administrator; observations for the selected scope",
+    "start": "/admin/security-intelligence \u2192 Social Network",
+    "goal": "Inspect coappearance connections and their provenance.",
+    "steps": [
+      "Set DAYS BACK; leave identities empty only when analysis of every accessible identity is intended.",
+      "Select ANALYZE NETWORK.",
+      "Inspect the graph, node/connection counts and provenance."
+    ],
+    "expected": "The synthetic dataset returned 14 nodes, 91 connections and one cluster. The result identified the rules/co-occurrence engine.",
+    "recovery": "Open Select Identities to restrict the analysis. A connection means observed coappearance under the selected rules, not proof of a personal relationship or coordination.",
+    "status": "Tested",
+    "figures": [
+      "17-security-network",
+      "18-network-result"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W22",
+    "section": 6,
+    "title": "Review suspicious-pattern output",
+    "role": "Administrator; relevant camera history",
+    "start": "/admin/security-intelligence \u2192 Suspicious Patterns",
+    "goal": "Scope pattern detection and inspect the returned evidence.",
+    "steps": [
+      "Choose the pipeline scope.",
+      "Set DAYS BACK; review MIN GROUP SIZE.",
+      "Select DETECT PATTERNS.",
+      "Review the returned cards and use VIEW DETAILS when investigating a specific result."
+    ],
+    "expected": "The synthetic history produced group-activity cards with locations, times and identity counts.",
+    "recovery": "Large groups in demonstration data are manufactured examples. Empty output, scores and \u201cconfidence\u201d labels require evidence review; they are not validated probabilities of misconduct.",
+    "status": "Tested \u2014 result generation; detail review limited",
+    "figures": [
+      "19-pattern-input",
+      "20-pattern-result"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W23",
+    "section": 6,
+    "title": "Check anomalies and recover from insufficient history",
+    "role": "Administrator; identity observations",
+    "start": "/admin/security-intelligence \u2192 Anomalies \u2192 Select Identity",
+    "goal": "Choose a subject and test whether a usable baseline exists.",
+    "steps": [
+      "In the picker, search by name or ID.",
+      "Select the intended result.",
+      "Set DAYS BACK.",
+      "Select DETECT ANOMALIES.",
+      "Read the baseline/evidence message before interpreting the output."
+    ],
+    "expected": "The test returned \u201cInsufficient baseline\u201d: all 15 appearances were inside the 90-day window, leaving zero earlier appearances; at least five were required.",
+    "recovery": "Use a shorter window only when it leaves sufficient earlier observations, or collect more history. Do not treat a baseline failure as \u201cno anomalies\u201d.",
+    "status": "Tested \u2014 readiness failure",
+    "figures": [
+      "21-picker",
+      "21b-anomaly-input",
+      "22-anomaly-result"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W24",
+    "section": 6,
+    "title": "Assess threat evidence and provenance",
+    "role": "Administrator; selected demonstration identity",
+    "start": "/admin/security-intelligence \u2192 Threat Assessment",
+    "goal": "Read a persisted rules-based assessment with its limitations.",
+    "steps": [
+      "Choose the intended identity.",
+      "Select ASSESS THREAT.",
+      "Review risk factors, baseline warnings, Requested mode, Executed mode and Final scoring."
+    ],
+    "expected": "The test returned a moderate score of 25.0 from connection count, with an insufficient-anomaly-baseline warning and rules provenance.",
+    "recovery": "The interface explicitly describes risk-engine-v1 as a heuristic score, not a probability. Record outcome creates a consequential review label and was not used.",
+    "status": "Tested",
+    "figures": [
+      "23-threat-input",
+      "24-threat-result"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W25",
+    "section": 6,
+    "title": "Check advanced analytics readiness",
+    "role": "Administrator",
+    "start": "/admin/security-intelligence \u2192 Advanced Features",
+    "goal": "Distinguish enabled controls from working dependencies and sufficient evidence.",
+    "steps": [
+      "Use Review saved thresholds to inspect existing candidates rather than learning or activating new ones.",
+      "Select CHECK FEATURE STATUS.",
+      "Read the per-feature readiness details."
+    ],
+    "expected": "The report showed ready network/pattern/anomaly/threat functions, threshold learning with a worker unavailable, and unavailable security zones/maps. Trajectory and correlation were available subject to per-case evidence.",
+    "recovery": "Enabled does not mean usable for every identity. Trajectory requires at least three outgoing sessions; correlation is heuristic association. Threshold candidates need separate review and activation.",
+    "status": "Tested \u2014 status and threshold review",
+    "figures": [
+      "25-advanced",
+      "25b-status-control",
+      "26-feature-status"
+    ],
+    "limit": "Learning/activating thresholds, trajectory execution, correlation execution and Learn All Camera Thresholds were not completed."
+  },
+  {
+    "id": "W26",
+    "section": 6,
+    "title": "Diagnose a missing map",
+    "role": "Administrator; identity and camera locations",
+    "start": "/admin/security-intelligence \u2192 Map View",
+    "goal": "Load spatial evidence or identify the missing basemap dependency.",
+    "steps": [
+      "Select the identity.",
+      "Choose MAP STYLE from the available styles.",
+      "Select LOAD MAP."
+    ],
+    "expected": "The isolated instance reported missing/unavailable basemap support. Camera coordinates could still be saved separately.",
+    "recovery": "Ask the administrator to verify installed offline map archives, content checks and the map service. No coordinates should be invented to make an empty map look populated.",
+    "status": "Tested \u2014 unavailable dependency",
+    "figures": [
+      "27-map-input",
+      "28-map-unavailable"
+    ],
+    "limit": "Basemap rendering, terrain/satellite layers, zones, heatmaps and continuous route accuracy were not verified."
+  },
+  {
+    "id": "W27",
+    "section": 6,
+    "title": "Follow the ML service lifecycle and readiness gate",
+    "role": "Administrator; healthy worker and suitable data for actual training",
+    "start": "/admin/ml-ops",
+    "goal": "Use the current four-stage service workflow.",
+    "steps": [
+      "Choose Service: Behavior assessment, Pair relationships, Social network, Analyst review queue or Numeric experiments.",
+      "Inspect Prepare & train and the readiness message before submitting a run.",
+      "Expand Inspect data & notebook to locate the service\u2019s inspection controls. Availability of a control does not prove a notebook was executed."
+    ],
+    "expected": "The interface exposes Train \u2192 Review \u2192 Connect \u2192 Monitor. In this isolated instance the worker was unavailable and training remained disabled.",
+    "recovery": "Use Refresh status and Advanced tools & troubleshooting to diagnose worker/data requirements. A prepared dataset or candidate is not an active production decision model.",
+    "status": "Observed \u2014 training blocked",
+    "figures": [
+      "29-ml-service",
+      "30-ml-readiness",
+      "53-ml-inspect"
+    ],
+    "limit": "Training, metrics, tuning, model connection, drift and notebook execution were not completed. Current visible provenance says rules make live decisions; model observations must not be described as autonomous threat decisions."
+  },
+  {
+    "id": "W28",
+    "section": 6,
+    "title": "Locate database and notebook inspection tools",
+    "role": "Administrator",
+    "start": "ML Operations \u2192 Advanced tools & troubleshooting \u2192 Inspect a dataset or model \u2192 Inspect existing database data",
+    "goal": "Locate evidence-inspection controls and understand the current gap.",
+    "steps": [
+      "Choose Data, such as Recognition observations or Identity sightings.",
+      "Enter Start (UTC).",
+      "Enter End (UTC), keeping the interval at most seven days; select the intended cameras when available.",
+      "Select Preview existing data."
+    ],
+    "expected": "Expected in a working inspector: source rows/counts and an inspection-notebook download. In this run camera choices and default dates did not populate and Preview returned no visible result.",
+    "recovery": "Report the initialization/dependency issue; do not claim that extraction or training succeeded. Inspect data & notebook for the selected ML service also requires actual dataset/run evidence.",
+    "status": "Observed \u2014 preview unavailable",
+    "figures": [
+      "54-data-preview"
+    ],
+    "limit": "The guide does not supply a fabricated executed notebook or label synthetic fixture counts as an extracted training dataset."
+  },
+  {
+    "id": "W29",
+    "section": 6,
+    "title": "Check similarity-model readiness",
+    "role": "Administrator",
+    "start": "/admin/ml-model",
+    "goal": "Read the supervised merge-feedback requirements.",
+    "steps": [
+      "Select Refresh.",
+      "Read the disabled training control and Dataset Readiness checks."
+    ],
+    "expected": "The test showed Not Trained, Runtime Loaded: No, 0/50 samples, 0/5 approved, 0/5 rejected and 0/10 unique pairs.",
+    "recovery": "Collect and review legitimate feedback in the approved process. Do not approve/reject pairs just to fill training counts. The page describes a heuristic or legacy fallback until a candidate is activated.",
+    "status": "Tested \u2014 readiness display",
+    "figures": [
+      "70-similarity-readiness",
+      "70b-similarity-training"
+    ],
+    "limit": ""
+  },
+  {
+    "id": "W30",
+    "section": 6,
+    "title": "Use assistant help and recognize degraded mode",
+    "role": "Account with Chatbot access",
+    "start": "/tracking-people",
+    "goal": "Locate the conversational interface and verify service readiness.",
+    "steps": [
+      "Enter a question in Message Surveillance AI only when the assistant is ready.",
+      "Use Send message to submit an approved query; this was not exercised against an available language model.",
+      "Select Help for the built-in instructions."
+    ],
+    "expected": "The interface and Help opened, but the test displayed Assistant degraded. No model answer was represented as verified.",
+    "recovery": "Ask the administrator to check configured model availability and read-only query dependencies. Review factual answers against underlying records before acting.",
+    "status": "Observed \u2014 model response unavailable",
+    "figures": [
+      "58-assistant",
+      "59-assistant-help"
+    ],
+    "limit": "Conversation generation, branching, feedback and generated report artifacts were not completed. No external assistant service was contacted."
+  },
+  {
+    "id": "W31",
+    "section": 6,
+    "title": "Read the in-app tutorial",
+    "role": "Administrator",
+    "start": "/admin/tutorial",
+    "goal": "Find guidance delivered by the running build.",
+    "steps": [
+      "Select SYSTEM WORKFLOW or the relevant tutorial topic."
+    ],
+    "expected": "The tutorial opened and reported application version 5.0.0. Topic navigation is available in the running interface.",
+    "recovery": "Some Further reading entries refer to legacy document filenames. Use this guide\u2019s verified workflow and current documentation index if a referenced file is absent.",
+    "status": "Tested \u2014 navigation",
+    "figures": [
+      "60-tutorial"
+    ],
+    "limit": ""
+  }
+]

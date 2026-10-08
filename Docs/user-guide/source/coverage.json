@@ -1,0 +1,712 @@
+[
+  {
+    "feature": "Sign in / logout",
+    "purpose": "Authenticate and end a session",
+    "location": "/signin; LOGOUT",
+    "permissions": "Active account",
+    "verification_status": "Tested",
+    "guide_section": "2 / W01",
+    "evidence": "01-signin",
+    "limitations": "Synthetic administrator and standard user only."
+  },
+  {
+    "feature": "Required password rotation",
+    "purpose": "Replace a temporary password",
+    "location": "/change-password",
+    "permissions": "Account requiring rotation",
+    "verification_status": "Tested",
+    "guide_section": "2 / W02",
+    "evidence": "02-password",
+    "limitations": ""
+  },
+  {
+    "feature": "Role-scoped navigation and cameras",
+    "purpose": "Restrict access to assigned sources",
+    "location": "Navigation; /dashboard; /admin/unknown",
+    "permissions": "Role and pipeline assignment",
+    "verification_status": "Tested",
+    "guide_section": "2; W16",
+    "evidence": "08-operator; 09-access-denied",
+    "limitations": "Standard user verified; not an exhaustive authorization audit."
+  },
+  {
+    "feature": "Observer and Analyzer roles",
+    "purpose": "Choose additional assignable roles",
+    "location": "Users role selector",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "2; W16",
+    "evidence": "06-user-form",
+    "limitations": "Options observed; their complete privilege boundaries were not exercised."
+  },
+  {
+    "feature": "Administrator assignment",
+    "purpose": "Assign a full-access administrator",
+    "location": "Users role selector",
+    "permissions": "Administrator",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "2; W16",
+    "evidence": "06-user-form",
+    "limitations": "Administrator option shown as not assignable here."
+  },
+  {
+    "feature": "Protected system account",
+    "purpose": "Attribute automated actions",
+    "location": "/admin/users",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "2; W16",
+    "evidence": "07-user-saved",
+    "limitations": "Non-login protected principal; not a normal human account."
+  },
+  {
+    "feature": "Home overview / camera selector",
+    "purpose": "Read overview and source summaries",
+    "location": "/home",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "3 / W04",
+    "evidence": "56-home; 56b-home-camera",
+    "limitations": ""
+  },
+  {
+    "feature": "Shared navigation / open menus",
+    "purpose": "Find feature workspaces",
+    "location": "Header menus",
+    "permissions": "Role-dependent",
+    "verification_status": "Tested",
+    "guide_section": "3 / W03",
+    "evidence": "57-navigation",
+    "limitations": ""
+  },
+  {
+    "feature": "Live detection cards",
+    "purpose": "Review recent snapshots and timing",
+    "location": "/dashboard",
+    "permissions": "Active account with permitted pipelines",
+    "verification_status": "Tested",
+    "guide_section": "5 / W05",
+    "evidence": "71-live-feeds; 09-access-denied",
+    "limitations": "Stored synthetic observations; no real-time camera ingest measured."
+  },
+  {
+    "feature": "Recent detections drawer",
+    "purpose": "Inspect recent records",
+    "location": "/dashboard",
+    "permissions": "Active account with permitted pipelines",
+    "verification_status": "Tested",
+    "guide_section": "5 / W05",
+    "evidence": "72-recent-detections",
+    "limitations": ""
+  },
+  {
+    "feature": "WebSocket updates",
+    "purpose": "Receive new application events",
+    "location": "CONNECTED badges",
+    "permissions": "Authenticated session",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W05",
+    "evidence": "71-live-feeds",
+    "limitations": "Connection observed; new camera detection delivery was not tested."
+  },
+  {
+    "feature": "Alert sound / browser notifications",
+    "purpose": "Notify an operator",
+    "location": "Dashboard; Live Alerts; Background Tasks",
+    "permissions": "Browser permission and permitted events",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W05, W14",
+    "evidence": "40-alert-saved",
+    "limitations": "Audio permission and delivery not exercised."
+  },
+  {
+    "feature": "Unknown identity filters",
+    "purpose": "Find records by camera/count/date",
+    "location": "/admin/unknown",
+    "permissions": "Administrator or assigned-pipeline user",
+    "verification_status": "Tested",
+    "guide_section": "5 / W06",
+    "evidence": "12-unknown-filter",
+    "limitations": "Camera/count flow tested; every date/SHOW ALL combination was not tested."
+  },
+  {
+    "feature": "Unknown identity detail",
+    "purpose": "Inspect appearance evidence",
+    "location": "VIEW & ALERT",
+    "permissions": "Permission to view identity",
+    "verification_status": "Tested",
+    "guide_section": "5 / W06",
+    "evidence": "13-unknown-open; 14-journey",
+    "limitations": ""
+  },
+  {
+    "feature": "Journey overview / camera lanes",
+    "purpose": "Review recorded movement",
+    "location": "Identity detail / profile",
+    "permissions": "Permission to view identity",
+    "verification_status": "Tested",
+    "guide_section": "5 / W07",
+    "evidence": "48-journey-overview; 49-journey-lanes",
+    "limitations": "Observation order, not measured continuous movement."
+  },
+  {
+    "feature": "Linked photo viewer",
+    "purpose": "Navigate appearance images",
+    "location": "Identity movement timeline",
+    "permissions": "Permission to view identity",
+    "verification_status": "Tested",
+    "guide_section": "5 / W07",
+    "evidence": "50-photo-viewer",
+    "limitations": "Synthetic placeholder photos."
+  },
+  {
+    "feature": "Review sequence animation",
+    "purpose": "Advance still sightings automatically",
+    "location": "Movement explorer",
+    "permissions": "Permission to view identity",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W07",
+    "evidence": "49-journey-lanes",
+    "limitations": "Control observed; still-image review, not video playback."
+  },
+  {
+    "feature": "Known directory search / profile",
+    "purpose": "Find registered records",
+    "location": "/admin/known",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W08",
+    "evidence": "15-known-directory; 36-full-profile",
+    "limitations": ""
+  },
+  {
+    "feature": "Rename known person",
+    "purpose": "Save a display name",
+    "location": "Manage person \u2192 Save name",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W08",
+    "evidence": "16-known-profile; 36-full-profile",
+    "limitations": ""
+  },
+  {
+    "feature": "Enrollment / Add photo",
+    "purpose": "Create or extend an enrollment",
+    "location": "Known faces \u2192 Add person / Manage person",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W09E",
+    "evidence": "65-enrollment",
+    "limitations": "No approved face photograph used; successful enrollment not verified."
+  },
+  {
+    "feature": "Deactivate / delete known person",
+    "purpose": "Manage person lifecycle",
+    "location": "Manage person",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W09",
+    "evidence": "16-known-profile",
+    "limitations": "No records deactivated or permanently deleted."
+  },
+  {
+    "feature": "Promotion review",
+    "purpose": "Review an unknown-to-known change",
+    "location": "Unknown detail \u2192 PROMOTE TO KNOWN",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W09",
+    "evidence": "66-review-actions; 67-promote-review",
+    "limitations": "Final promotion not submitted."
+  },
+  {
+    "feature": "Manual / bulk identity merge",
+    "purpose": "Consolidate confirmed duplicates",
+    "location": "Unknown detail / MULTI-SELECT",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W09",
+    "evidence": "66-review-actions; P04-unknown",
+    "limitations": "No merge executed; preview/survivor confirmation not certified."
+  },
+  {
+    "feature": "Merge suggestions and feedback",
+    "purpose": "Review proposed duplicate pairs",
+    "location": "MERGE SUGGESTIONS",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W09; W29",
+    "evidence": "P04-unknown",
+    "limitations": "Approval/rejection changes evidence; neither submitted."
+  },
+  {
+    "feature": "Image quality check",
+    "purpose": "Validate a reference image",
+    "location": "/admin/search",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W10",
+    "evidence": "42-search-quality",
+    "limitations": "Negative test: synthetic avatar produced no-face error."
+  },
+  {
+    "feature": "Image search and history creation",
+    "purpose": "Search identities from a reference",
+    "location": "/admin/search",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W10",
+    "evidence": "41b-search-settings; 51-search-history",
+    "limitations": "Zero-face/zero-result run only; positive matching unverified."
+  },
+  {
+    "feature": "Batch / quick / photo-picker search",
+    "purpose": "Use alternate search entry points",
+    "location": "Search Batch Mode; QUICK SEARCH; picker photo button",
+    "permissions": "Feature-specific access",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W10; gaps",
+    "evidence": "P05-search; P04-unknown; 21-picker",
+    "limitations": "Positive searches and batch completion not exercised."
+  },
+  {
+    "feature": "Search scope / exclusions / date-location filters",
+    "purpose": "Narrow candidate matching",
+    "location": "Advanced search preferences",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W10",
+    "evidence": "41b-search-settings",
+    "limitations": "Controls observed; filter matrix not comprehensively exercised."
+  },
+  {
+    "feature": "Search history filters",
+    "purpose": "Review prior runs",
+    "location": "/admin/search-history",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W11",
+    "evidence": "51-search-history",
+    "limitations": ""
+  },
+  {
+    "feature": "CSV history export",
+    "purpose": "Download authorized history",
+    "location": "Search History \u2192 EXPORT",
+    "permissions": "Administrator and data-export authority",
+    "verification_status": "Tested",
+    "guide_section": "5 / W11",
+    "evidence": "52-history-export",
+    "limitations": "Two synthetic rows and nine columns verified in download."
+  },
+  {
+    "feature": "Result export / reports",
+    "purpose": "Export matching-result evidence",
+    "location": "Search results; assistant artifacts",
+    "permissions": "Feature-specific access",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "5 / W10; gaps",
+    "evidence": "P05-search; 58-assistant",
+    "limitations": "No positive matches or available language model; result PDF/JSON and generated reports not verified."
+  },
+  {
+    "feature": "Watchlist creation",
+    "purpose": "Create a monitoring list",
+    "location": "/admin/watchlists",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W12",
+    "evidence": "10-watchlist-form; 11-watchlist-saved",
+    "limitations": ""
+  },
+  {
+    "feature": "Watchlist membership / detail",
+    "purpose": "Save and inspect membership",
+    "location": "Profile ADD TO WATCHLIST; list View",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "5 / W13",
+    "evidence": "37-membership; 61-watchlist-members",
+    "limitations": "Profile chip showed Untitled watchlist; list member view verified the save."
+  },
+  {
+    "feature": "Watchlist pause / restore / expiry / removal",
+    "purpose": "Manage monitoring lifecycle",
+    "location": "Watchlist cards and detail",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W12\u2013W13; gaps",
+    "evidence": "61-watchlist-members",
+    "limitations": "No list/member deletion or restoration was performed."
+  },
+  {
+    "feature": "Live alert creation / health / pause",
+    "purpose": "Manage a saved person rule",
+    "location": "Profile \u2192 CREATE LIVE ALERT; /admin/live-alerts",
+    "permissions": "Administrator in this run",
+    "verification_status": "Tested",
+    "guide_section": "5 / W14",
+    "evidence": "39-alert-form; 63-alert-health; 64-alert-paused",
+    "limitations": "Snapshot readiness problem in fixture; no notification sent."
+  },
+  {
+    "feature": "Trigger history and acknowledgements",
+    "purpose": "Review and acknowledge alerts",
+    "location": "Live Alerts \u2192 Triggers",
+    "permissions": "Permitted alert owner/scope",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "5 / W14; gaps",
+    "evidence": "40-alert-saved",
+    "limitations": "No trigger generated, so acknowledgement completion not verified."
+  },
+  {
+    "feature": "Email/SMS/Test delivery",
+    "purpose": "Send notifications",
+    "location": "Alert Health / Test",
+    "permissions": "Configured channels and authorized operator",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "5 / W14; gaps",
+    "evidence": "63-alert-health",
+    "limitations": "Email/SMS not configured; Test deliberately not clicked."
+  },
+  {
+    "feature": "Pipeline status / location editing",
+    "purpose": "Maintain camera metadata",
+    "location": "/admin/pipelines",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W15",
+    "evidence": "03-camera-list; 04b-camera-saved",
+    "limitations": ""
+  },
+  {
+    "feature": "Pipeline rename / alias",
+    "purpose": "Change pipeline identifier",
+    "location": "Pipeline Management \u2192 Rename",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W15",
+    "evidence": "03-camera-list",
+    "limitations": "Identifier change not executed."
+  },
+  {
+    "feature": "User creation / pipeline assignment",
+    "purpose": "Provision scoped access",
+    "location": "/admin/users",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W16",
+    "evidence": "05-users; 06-user-form; 07-user-saved",
+    "limitations": ""
+  },
+  {
+    "feature": "User reset / block / delete",
+    "purpose": "Manage account lifecycle",
+    "location": "User rows; Blocked users",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W16; gaps",
+    "evidence": "07-user-saved",
+    "limitations": "Reset, unblock, disable and delete were not exercised."
+  },
+  {
+    "feature": "Sender credential issuance",
+    "purpose": "Create a scoped sender secret",
+    "location": "/admin/ingest-credentials",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W17",
+    "evidence": "43-credential-issue; 44-credential-once; 45-credential-saved",
+    "limitations": "Secret permanently redacted; sender use and revocation untested."
+  },
+  {
+    "feature": "Settings search / save / history",
+    "purpose": "Manage allowed runtime values",
+    "location": "/admin/settings",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W18",
+    "evidence": "33-settings-search; 35-settings-saved",
+    "limitations": "One retention value tested; not every setting or restart-dependent consumer."
+  },
+  {
+    "feature": "Retention status / dry run",
+    "purpose": "Preview cleanup eligibility",
+    "location": "Settings / Background Tasks",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W19",
+    "evidence": "31-retention; 62-retention-complete",
+    "limitations": "Dry-run completion verified; no manual destructive cleanup."
+  },
+  {
+    "feature": "Retention Run now",
+    "purpose": "Perform eligible cleanup",
+    "location": "Run Retention Now",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W19; gaps",
+    "evidence": "31-retention",
+    "limitations": "Not executed."
+  },
+  {
+    "feature": "Background job monitor",
+    "purpose": "Inspect status and history",
+    "location": "/admin/background-tasks",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W19",
+    "evidence": "62-retention-complete",
+    "limitations": "Dry-run completed; monitoring does not prove unrelated jobs succeeded."
+  },
+  {
+    "feature": "Chatbot audit log",
+    "purpose": "Inspect stored query/response activity",
+    "location": "/admin/audit",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W20",
+    "evidence": "46-audit",
+    "limitations": "Zero query rows; this page is not an all-actions security audit."
+  },
+  {
+    "feature": "Application log filters",
+    "purpose": "Narrow available log records",
+    "location": "/admin/logs",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W20L",
+    "evidence": "47-logs",
+    "limitations": "ERROR filter returned no records in the scanned scope."
+  },
+  {
+    "feature": "Intelligence related/temporal/cross-camera analysis",
+    "purpose": "Investigate an identity",
+    "location": "/admin/intelligence",
+    "permissions": "Administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6; gaps",
+    "evidence": "P16-intelligence",
+    "limitations": "Workspace observed; tab/selector walkthrough not completed. Profile journey verified separately."
+  },
+  {
+    "feature": "Social network analysis",
+    "purpose": "Compute coappearance graph",
+    "location": "Security Intelligence \u2192 Social Network",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W21",
+    "evidence": "17-security-network; 18-network-result",
+    "limitations": ""
+  },
+  {
+    "feature": "Suspicious patterns",
+    "purpose": "Review derived pattern cards",
+    "location": "Security Intelligence \u2192 Suspicious Patterns",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W22",
+    "evidence": "19-pattern-input; 20-pattern-result",
+    "limitations": "Result generation verified; patterns are synthetic."
+  },
+  {
+    "feature": "Behavioral anomalies",
+    "purpose": "Compare against an earlier baseline",
+    "location": "Security Intelligence \u2192 Anomalies",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W23",
+    "evidence": "22-anomaly-result",
+    "limitations": "Insufficient-baseline behavior verified; positive anomaly validation untested."
+  },
+  {
+    "feature": "Threat assessment / persisted provenance",
+    "purpose": "Read rules and risk factors",
+    "location": "Security Intelligence \u2192 Threat Assessment",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W24",
+    "evidence": "24-threat-result",
+    "limitations": "Heuristic, not calibrated probability. Manual outcome labels not submitted."
+  },
+  {
+    "feature": "Saved threshold review / feature status",
+    "purpose": "Check evidence and dependencies",
+    "location": "Advanced Features",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W25",
+    "evidence": "25-advanced; 26-feature-status",
+    "limitations": "No threshold activation or learning."
+  },
+  {
+    "feature": "Threshold learning / activation",
+    "purpose": "Create and approve learned thresholds",
+    "location": "Advanced Features",
+    "permissions": "Administrator and healthy worker",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "6 / W25; gaps",
+    "evidence": "26-feature-status",
+    "limitations": "Worker unavailable in the isolated instance."
+  },
+  {
+    "feature": "Trajectory / activity correlation",
+    "purpose": "Estimate next-camera associations",
+    "location": "Advanced Features",
+    "permissions": "Administrator and sufficient evidence",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W25",
+    "evidence": "26-feature-status",
+    "limitations": "Status available; computation and calibration not verified."
+  },
+  {
+    "feature": "Offline maps / spatial layers",
+    "purpose": "Display camera-linked spatial evidence",
+    "location": "Map View and location picker",
+    "permissions": "Administrator and verified map assets",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "6 / W26",
+    "evidence": "28-map-unavailable",
+    "limitations": "No map service/assets in the isolated instance; not a finding about production map availability."
+  },
+  {
+    "feature": "Security-zone geometry",
+    "purpose": "Define spatial security zones",
+    "location": "Feature Availability",
+    "permissions": "Administrator",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "6 / W25; gaps",
+    "evidence": "26-feature-status",
+    "limitations": "Runtime reported no stored zone geometry; camera points are not zones."
+  },
+  {
+    "feature": "ML service lifecycle",
+    "purpose": "Train, review, connect, monitor a model",
+    "location": "/admin/ml-ops",
+    "permissions": "Administrator and healthy ML worker",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W27",
+    "evidence": "29-ml-service",
+    "limitations": "Five services shown; training disabled in this run."
+  },
+  {
+    "feature": "ML dataset inspection / notebook",
+    "purpose": "Preview actual source/training evidence",
+    "location": "Inspect data & notebook; Advanced tools",
+    "permissions": "Administrator",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "6 / W28",
+    "evidence": "54-data-preview",
+    "limitations": "No camera population or preview output in advanced inspector; notebook download/execution not verified."
+  },
+  {
+    "feature": "ML tuning, metrics, drift, deployment audit",
+    "purpose": "Evaluate and operate candidates",
+    "location": "Advanced ML tools",
+    "permissions": "Administrator and prerequisites",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W27; gaps",
+    "evidence": "P19-ml-ops",
+    "limitations": "No trained candidate, live connection or drift measurement produced."
+  },
+  {
+    "feature": "Merge-feedback similarity model",
+    "purpose": "Train a similarity model from reviewed pairs",
+    "location": "/admin/ml-model",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W29",
+    "evidence": "70-similarity-readiness",
+    "limitations": "Readiness display verified; no training or activation."
+  },
+  {
+    "feature": "Assistant UI / help",
+    "purpose": "Ask about workspace evidence",
+    "location": "/tracking-people",
+    "permissions": "Chatbot access",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 / W30",
+    "evidence": "58-assistant; 59-assistant-help",
+    "limitations": "Assistant degraded; no model answer validated."
+  },
+  {
+    "feature": "Assistant conversations / generated artifacts",
+    "purpose": "Manage chat history and outputs",
+    "location": "Assistant workspace",
+    "permissions": "Chatbot access",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "6 / W30; gaps",
+    "evidence": "58-assistant",
+    "limitations": "No available language model in isolated run."
+  },
+  {
+    "feature": "Tutorial topics",
+    "purpose": "Read build-provided help",
+    "location": "/admin/tutorial",
+    "permissions": "Administrator",
+    "verification_status": "Tested",
+    "guide_section": "6 / W31",
+    "evidence": "60-tutorial",
+    "limitations": "Some Further reading links refer to legacy filenames."
+  },
+  {
+    "feature": "Storage configuration / backup and restore",
+    "purpose": "Persist and recover application data",
+    "location": "Deployment configuration; Settings storage/retention",
+    "permissions": "System administrator",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "6 operational notes; gaps",
+    "evidence": "P15-settings",
+    "limitations": "No restore drill or storage migration performed; installation guide is a separate deliverable."
+  },
+  {
+    "feature": "Recorded video playback / video archive",
+    "purpose": "Review video recordings",
+    "location": "No dedicated VAS workflow observed",
+    "permissions": "Not established",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "8 exclusions",
+    "evidence": "Navigation and repository review",
+    "limitations": "Sighting/photo history is available; continuous recording/playback belongs to separate source systems if configured."
+  },
+  {
+    "feature": "Vehicle / license-plate analytics",
+    "purpose": "Vehicle or plate recognition",
+    "location": "No VAS interface observed",
+    "permissions": "Not established",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "8 exclusions",
+    "evidence": "Navigation and repository review",
+    "limitations": "No user workflow invented; upstream VMS is separate."
+  },
+  {
+    "feature": "Dedicated multi-site management",
+    "purpose": "Manage site hierarchies",
+    "location": "No site-administration workflow observed",
+    "permissions": "Not established",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "8 exclusions",
+    "evidence": "Camera location UI",
+    "limitations": "Camera locations are present; multi-site orchestration was not established."
+  },
+  {
+    "feature": "LAF-AI SSO / external integrations",
+    "purpose": "Open a separate connected application",
+    "location": "MANAGEMENT menu",
+    "permissions": "Integration configuration",
+    "verification_status": "Observed, untested completion",
+    "guide_section": "3; gaps",
+    "evidence": "57-navigation",
+    "limitations": "No external launch or cross-application workflow exercised."
+  },
+  {
+    "feature": "API explorer",
+    "purpose": "Browse generated API documentation",
+    "location": "/docs link",
+    "permissions": "Deployment configuration",
+    "verification_status": "Inaccessible or unavailable in this run",
+    "guide_section": "8 exclusions",
+    "evidence": "Test ENABLE_API_DOCS=false",
+    "limitations": "Explorer intentionally disabled in test settings; no API guide inferred from a visible link."
+  }
+]

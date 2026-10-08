@@ -1,0 +1,47 @@
+{
+  "name": "51-search-history",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#filter-type",
+      "rect": [
+        57,
+        288,
+        150,
+        49
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#days-back",
+      "rect": [
+        223,
+        288,
+        150,
+        49
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#apply-filters-btn",
+      "rect": [
+        389,
+        287,
+        205.86666870117188,
+        50
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#export-history-btn",
+      "rect": [
+        1005.0999755859375,
+        124.5,
+        137.6999969482422,
+        48
+      ]
+    }
+  ]
+}

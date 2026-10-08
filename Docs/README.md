@@ -1,5 +1,10 @@
 # VAS operator documentation
 
+[Illustrated VAS user guide](user-guide/README.md) — Word/PDF, genuine annotated screenshots, and a verified capability checklist (isolated synthetic test, 7 October 2026).
+
+[Guided installation](GUIDED_INSTALLATION.md) — load Docker images or build a fresh VAS installation.
+
+
 Start with [Offline deployment — move this same server](offline-deployment.md).
 
 These guides replace the old numbered/topic Markdown collection. Reviewed against

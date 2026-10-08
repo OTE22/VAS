@@ -57,6 +57,7 @@ cmd_stop() {
 }
 
 cmd_restart() {
+    stage_storage
     stage_preflight
     stage_gpu_detect
     stage_compose_validate
@@ -181,12 +182,14 @@ cmd_restore() {
 cmd_upgrade() {
     stage_preflight
     stage_sys_install
+    stage_storage
     stage_workspace
     stage_secrets
     stage_tls
     stage_offline_policy
     stage_gpu_detect
     stage_compose_validate
+    if [ "$IMAGE_MODE" = load ]; then stage_prebuilt_images; fi
 
     # ---- 1. do not upgrade a broken stack unless told to ------------------
     stage_begin "upgrade preflight"
@@ -224,7 +227,7 @@ cmd_upgrade() {
         info "DRY: would write $snap"
     else
         run mkdir -p "$ROOT/backups"
-        local members=(docker/.env docker/docker-compose.prod.yml docker/docker-compose.prod.gpu.yml)
+        local members=(docker/.env docker/docker-compose.prod.yml docker/docker-compose.prod.gpu.yml docker/docker-compose.prod.storage.yml)
         [ -f "$GPU_OVERLAY" ] && members+=(docker/gpu-allocation.generated.yml)
         [ -d "$ROOT/secrets" ] && members+=(secrets)
         [ -d "$ROOT/certs" ] && members+=(certs)
@@ -265,6 +268,14 @@ cmd_upgrade() {
     state_set rollback_version "${old_version:-unknown}"
     state_set rollback_head "${old_head:-unset}"
     stage_pass "$tagged image(s) tagged :rollback; head $old_head recorded"
+
+    # Apply guided defaults only after the existing configuration has been backed up.
+    deployment_apply_network || stage_fail "Could not save network configuration"
+    wizard_apply_defaults
+    wizard_apply_services
+    wizard_apply_storage
+    wizard_asset_readiness
+    if [ "${WIZARD_DEFAULTS_READY:-0}" = 1 ]; then stage_compose_validate; fi
 
     # ---- 6. build the new version ----------------------------------------
     stage_build

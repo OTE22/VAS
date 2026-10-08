@@ -1,0 +1,47 @@
+{
+  "name": "10-watchlist-form",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#watchlist-name",
+      "rect": [
+        443,
+        314,
+        434,
+        47
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#watchlist-description",
+      "rect": [
+        443,
+        415,
+        434,
+        62
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#watchlist-alert-level",
+      "rect": [
+        443,
+        529,
+        434,
+        47
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "[data-guide-target=\"g1791372824867654422\"]",
+      "rect": [
+        443,
+        676,
+        434,
+        59
+      ]
+    }
+  ]
+}

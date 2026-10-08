@@ -1,0 +1,47 @@
+{
+  "name": "65-enrollment",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#globalPersonName",
+      "rect": [
+        444,
+        249.60000610351562,
+        432,
+        47
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#globalFileUploadArea",
+      "rect": [
+        444,
+        382.6000061035156,
+        432,
+        167
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#globalIsFaceImage",
+      "rect": [
+        444,
+        613.5999755859375,
+        18,
+        18
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#globalUploadSubmitBtn",
+      "rect": [
+        444,
+        752.4000244140625,
+        432,
+        47
+      ]
+    }
+  ]
+}

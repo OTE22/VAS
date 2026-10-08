@@ -285,15 +285,15 @@ services:
       # var that folds into the key set above. `off` is refused in production.
       WEBHOOK_AUTH_MODE: enforce
       WEBHOOK_API_KEYS_FILE: /run/secrets/webhook_api_keys
-      DATA_RETENTION_DAYS: 365          # keep detections/events one year (was 30); next_job_run setting
+      DATA_RETENTION_DAYS: ${DATA_RETENTION_DAYS:-365}          # keep detections/events one year (was 30); next_job_run setting
       TASK_HISTORY_RETENTION_DAYS: 365  # keep the background-task log as long as the data
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}   # same value the backup service gets, so /api/stats reports it truthfully
       # Reporting only: the denominator behind storage usage_percent in
       # /api/stats. It deletes nothing. Set here so the production dashboard
       # measures against the same ceiling as every other stack, which was not
       # the case while prod inherited config.py's 500.
-      MAX_STORAGE_GB: 5000
-      LOG_LEVEL: INFO
+      MAX_STORAGE_GB: ${MAX_STORAGE_GB:-5000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_DIR: /var/log/face-recognition
       # Sentence-transformer / HuggingFace model cache. Declared here so the
       # location is configuration rather than a library default nobody can
@@ -313,8 +313,8 @@ services:
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
       OLLAMA_BASE_URL: http://ollama:11434
       # Use the downloaded GPT-OSS model for chat, interpretation, and SQL.
-      OLLAMA_MODEL: gpt-oss:20b
-      OLLAMA_SQL_MODEL: gpt-oss:20b
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:20b}
+      OLLAMA_SQL_MODEL: ${OLLAMA_SQL_MODEL:-gpt-oss:20b}
       CHROMADB_PATH: /app/database/chromadb
     secrets:
       - jwt_secret
@@ -428,7 +428,7 @@ services:
       # stable identity so container replacements update one heartbeat row.
       ML_WORKER_ID: ml-worker-production-primary
       ML_ARTIFACT_DIR: /app/models/ml
-      LOG_LEVEL: INFO
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_DIR: /var/log/face-recognition
       HF_HOME: /home/appuser/.cache/huggingface
       # Offline policy: the model libraries must never try the hub.
@@ -807,6 +807,9 @@ secrets:
   backup_db_password:
     file: ../secrets/backup_db_password
 
+# Default: Docker-managed persistent volumes. Optional dedicated host storage is
+# configured by VAS_DATA_ROOT + docker-compose.prod.storage.yml (deploy.sh handles
+# inclusion and checks existing volumes). See Docs/GUIDED_INSTALLATION.md.
 volumes:
   postgres_data: { driver: local }
   redis_data: { driver: local }

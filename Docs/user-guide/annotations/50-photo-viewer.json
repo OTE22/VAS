@@ -1,0 +1,33 @@
+{
+  "name": "50-photo-viewer",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 6,
+      "selector": "[data-movement-next]",
+      "rect": [
+        1080.933349609375,
+        792.2000122070312,
+        80.06666564941406,
+        42
+      ]
+    },
+    {
+      "number": 7,
+      "selector": "[data-movement-close]",
+      "rect": [
+        1079.8333740234375,
+        99.80000305175781,
+        81.16667175292969,
+        42
+      ]
+    }
+  ],
+  "crop_override": [
+    100,
+    60,
+    1230,
+    900
+  ]
+}

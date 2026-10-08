@@ -1,0 +1,37 @@
+{
+  "name": "12-unknown-filter",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#pipeline-filter",
+      "rect": [
+        404.316650390625,
+        326,
+        160.64999389648438,
+        42
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#min-appearances",
+      "rect": [
+        578.9666748046875,
+        326,
+        160.6666717529297,
+        42
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#apply-filters-btn",
+      "rect": [
+        753.63330078125,
+        316,
+        132.88333129882812,
+        52
+      ]
+    }
+  ]
+}

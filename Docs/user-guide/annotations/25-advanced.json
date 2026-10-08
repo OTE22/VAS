@@ -1,0 +1,17 @@
+{
+  "name": "25-advanced",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#threshold-review-btn",
+      "rect": [
+        66,
+        547.8333129882812,
+        282.33331298828125,
+        50
+      ]
+    }
+  ]
+}

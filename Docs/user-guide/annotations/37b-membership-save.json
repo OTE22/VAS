@@ -1,0 +1,17 @@
+{
+  "name": "37b-membership-save",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 5,
+      "selector": "#add-to-watchlist-form button[type=submit]",
+      "rect": [
+        414,
+        806,
+        121,
+        23
+      ]
+    }
+  ]
+}

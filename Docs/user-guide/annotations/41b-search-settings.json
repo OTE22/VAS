@@ -1,0 +1,47 @@
+{
+  "name": "41b-search-settings",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 2,
+      "selector": "#search-scope",
+      "rect": [
+        55,
+        487.04998779296875,
+        294,
+        40
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#top-k",
+      "rect": [
+        55,
+        573.4500122070312,
+        294,
+        40
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#quality-check-btn",
+      "rect": [
+        55,
+        881.4500122070312,
+        119.93333435058594,
+        31.800003051757812
+      ]
+    },
+    {
+      "number": 5,
+      "selector": "#search-btn",
+      "rect": [
+        55,
+        822.4500122070312,
+        294,
+        49
+      ]
+    }
+  ]
+}

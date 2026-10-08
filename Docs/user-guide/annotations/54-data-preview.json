@@ -1,0 +1,47 @@
+{
+  "name": "54-data-preview",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#existing-data-kind",
+      "rect": [
+        74,
+        476.6333312988281,
+        242.56666564941406,
+        41
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#existing-data-start",
+      "rect": [
+        326.16668701171875,
+        478.6333312988281,
+        238.66665649414062,
+        39
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#existing-data-end",
+      "rect": [
+        574.433349609375,
+        478.6333312988281,
+        238.6666717529297,
+        39
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#existing-data-load",
+      "rect": [
+        74,
+        598.2333374023438,
+        167.81666564941406,
+        44
+      ]
+    }
+  ]
+}

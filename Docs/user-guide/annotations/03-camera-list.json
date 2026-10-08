@@ -1,0 +1,17 @@
+{
+  "name": "03-camera-list",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "button[data-action=openCoordinatesModal][data-arg=demo-camera-1]",
+      "rect": [
+        1036.0333251953125,
+        355.8833312988281,
+        110.73332214355469,
+        40.40000915527344
+      ]
+    }
+  ]
+}

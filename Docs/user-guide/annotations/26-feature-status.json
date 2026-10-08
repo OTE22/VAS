@@ -1,0 +1,17 @@
+{
+  "name": "26-feature-status",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 3,
+      "selector": ".sec-modal-dialog",
+      "rect": [
+        380,
+        143.39999389648438,
+        560,
+        647.2000122070312
+      ]
+    }
+  ]
+}

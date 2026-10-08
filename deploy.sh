@@ -2,12 +2,14 @@
 #
 # FACE_DETECTOR — one-command production deployment.
 #
-#   sudo ./deploy.sh                    PRODUCTION: install -> validate -> start -> health
+#        ./deploy.sh                    guided production installation (no arguments)
+#        ./deploy.sh wizard             explicit alias for the same guide
 #        ./deploy.sh dev                DEVELOPMENT: guided dev-stack bring-up
 #        ./deploy.sh dev stop|status|logs [service]
 #   sudo ./deploy.sh install            provision host, secrets, TLS, GPU, models
 #        ./deploy.sh validate           read-only: is this host ready? (no mutation)
 #   sudo ./deploy.sh start | stop | restart
+#        sudo ./deploy.sh storage       Show saved-data paths and ONNX/map destinations
 #        ./deploy.sh status | health | logs [service]
 #        ./deploy.sh gpu-test | model-check | model-manifest
 #   sudo ./deploy.sh backup | restore <stamp> | upgrade
@@ -70,8 +72,8 @@
 #   * Never overwrites an existing secret, certificate, verified model weight,
 #     database or persistent volume. Data survives restart, redeploy, upgrade,
 #     rollback and uninstall.
-#   * Never installs or upgrades the NVIDIA kernel driver (needs a reboot and
-#     an operator decision) — it detects and instructs.
+#   * Kernel-driver installation is opt-in (--gpu-setup=install), Ubuntu x86_64
+#     only. It stops for a MANUAL reboot and never disables Secure Boot.
 #   * A mandatory stage failure stops the run at that stage, names it, and
 #     preserves the log.
 #   * GPU readiness means REAL SCRFD + ArcFace inference on CUDA. nvidia-smi
@@ -113,9 +115,8 @@
 # comparability with every embedding already in the database — which is why the
 # manifest gate exists and why it is fail-closed.
 #
-# If the NVIDIA kernel driver is missing, stage 02 prints what to install and
-# stops; install it, reboot, then re-run. That is deliberate — see the rule
-# above.
+# GPU setup verifies compatibility or installs missing prerequisites when explicitly
+# selected. A driver installation stops with exit 75 for a manual reboot and rerun.
 #
 # EXPECT THIS, IT IS NOT A BUG: on a GPU host the run FAILS if SCRFD or ArcFace
 # end up on CPUExecutionProvider instead of CUDA. A deployment that quietly
@@ -141,6 +142,9 @@
 
 set -uo pipefail
 
+# Retain the invocation for a privilege handoff before asking setup questions.
+ORIGINAL_ARGS=("$@")
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 1
 
@@ -153,14 +157,22 @@ QUIET=0               # --quiet: drop the per-stage explanation, keep the report
 ASSUME_YES=0
 FORCE_OFFLINE=0
 FORCE_CPU=0
+REQUIRE_GPU=0
+GPU_SETUP_POLICY=verify
+NVIDIA_DRIVER_PACKAGE=auto
 GPU_IDS_FLAG=""
 PUBLIC_ORIGIN_FLAG=""
+SERVER_IP_FLAG=""
 DEPLOY_PACKAGE="${DEPLOY_PACKAGE:-}"
 REMOVE_IMAGES=0
 PURGE_DATA=0
 I_UNDERSTAND_DATA_LOSS=0
 RESTORE_FORCE=0
 SELF_TEST=0
+IMAGE_MODE=build
+IMAGE_ARCHIVES=()
+GUIDED_INSTALL=0
+IMAGES_IMPORTED=0
 POSITIONAL=()
 
 GPU_OVERLAY="$ROOT/docker/gpu-allocation.generated.yml"
@@ -171,10 +183,48 @@ CURRENT_STAGE="startup"
 . "$ROOT/scripts/deploy/lib.sh"
 
 usage() {
-    # The header comment block IS the help text, printed to its end rather than
-    # to a hardcoded line number — a section added up there shows up here.
-    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
-        "$ROOT/deploy.sh"
+    cat <<'HELP'
+VAS deployment
+
+  ./deploy.sh                  Guided installation (recommended; no arguments)
+    1. Load saved Docker images: configure and start without rebuilding.
+    2. Fresh build: configure the server and build from this release checkout.
+
+  The guide requests sudo access when needed, then walks through configuration,
+  installation and health checks. Run it in an interactive terminal.
+  ./deploy.sh wizard           Explicit alias for the same guide.
+  ./deploy.sh validate          Check an existing installation without changing it.
+  sudo ./deploy.sh storage       Show saved-data paths and ONNX/map destinations
+  ./deploy.sh status | health | logs [service]
+  sudo ./deploy.sh install | start | stop | restart | upgrade
+  ./deploy.sh dev [up|stop|status|logs]    Separate development stack
+  ./deploy.sh --self-test        Isolated installer tests
+
+Automation (no guide):
+  sudo ./deploy.sh deploy --yes --image-mode=build --public-origin=https://vas.example
+  sudo ./deploy.sh deploy --yes --image-mode=load --image-archive=/media/vas-images.tar \
+    --deploy-package=/media/vas-release --public-origin=https://10.21.5.22
+
+Options:
+  --image-mode=load|build     load requires every Compose image locally; never builds/pulls
+  --image-archive=PATH        docker save archive; repeat for multiple archives (implies load)
+  --deploy-package=DIR       Package containing weights/ and optionally images/*.tar[.gz]
+  --server-ip=IP             Server-network IPv4 address; added to TLS and allowed origins
+  --public-origin=HTTPS_URL  Client-facing DNS name or server IP (HTTPS port 443)
+  --cpu                     CPU-only installation
+  --gpu                     Require NVIDIA GPU; never silently use CPU
+  --gpu-setup=verify|install Check only (default), or install/repair GPU prerequisites
+  --nvidia-driver=auto|PKG   Ubuntu-recommended driver or explicit supported package
+  --gpu-ids=0,1             Explicit GPU selection
+  --offline                 No network installation; prerequisites must be present
+  --dry-run                 Show/check the plan without making installation changes
+  --yes                     Noninteractive operation; does not answer wizard questions
+  --quiet                   Reduce per-stage explanations
+
+Keep the matching release checkout, model weights and manifest with exported images.
+Fresh installation preserves existing volumes; it is never a database reset.
+Detailed procedure: Docs/GUIDED_INSTALLATION.md
+HELP
     exit "${1:-0}"
 }
 
@@ -191,13 +241,24 @@ while [ $# -gt 0 ]; do
         --quiet|-q)               QUIET=1 ;;
         --yes|-y)                 ASSUME_YES=1 ;;
         --offline)                FORCE_OFFLINE=1 ;;
-        --cpu)                    FORCE_CPU=1 ;;
+        --cpu)                    FORCE_CPU=1; REQUIRE_GPU=0 ;;
+        --gpu)                    FORCE_CPU=0; REQUIRE_GPU=1 ;;
+        --gpu-setup=*)            GPU_SETUP_POLICY="${1#*=}"; REQUIRE_GPU=1; FORCE_CPU=0 ;;
+        --gpu-setup)              shift; GPU_SETUP_POLICY="${1:-}"; REQUIRE_GPU=1; FORCE_CPU=0 ;;
+        --nvidia-driver=*)        NVIDIA_DRIVER_PACKAGE="${1#*=}" ;;
+        --nvidia-driver)          shift; NVIDIA_DRIVER_PACKAGE="${1:-}" ;;
         --gpu-ids=*)              GPU_IDS_FLAG="${1#*=}" ;;
         --gpu-ids)                shift; GPU_IDS_FLAG="${1:-}" ;;
+        --server-ip=*)            SERVER_IP_FLAG="${1#*=}" ;;
+        --server-ip)              shift; SERVER_IP_FLAG="${1:-}" ;;
         --public-origin=*)        PUBLIC_ORIGIN_FLAG="${1#*=}" ;;
         --public-origin)          shift; PUBLIC_ORIGIN_FLAG="${1:-}" ;;
         --deploy-package=*)       DEPLOY_PACKAGE="${1#*=}" ;;
         --deploy-package)         shift; DEPLOY_PACKAGE="${1:-}" ;;
+        --image-mode=*)           IMAGE_MODE="${1#*=}" ;;
+        --image-mode)             shift; IMAGE_MODE="${1:-}" ;;
+        --image-archive=*)        IMAGE_ARCHIVES+=("${1#*=}"); IMAGE_MODE=load ;;
+        --image-archive)          shift; IMAGE_ARCHIVES+=("${1:-}"); IMAGE_MODE=load ;;
         --remove-images)          REMOVE_IMAGES=1 ;;
         --purge-data)             PURGE_DATA=1 ;;
         --i-understand-data-loss) I_UNDERSTAND_DATA_LOSS=1 ;;
@@ -211,6 +272,13 @@ while [ $# -gt 0 ]; do
 done
 set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 SUBCOMMAND="${1:-}"
+# A bare launch always means the guide, never unattended deployment.
+[ "${#ORIGINAL_ARGS[@]}" -ne 0 ] || SUBCOMMAND=wizard
+case "$GPU_SETUP_POLICY" in verify|install) ;; *) echo "--gpu-setup must be verify or install" >&2; exit 2 ;; esac
+case "$IMAGE_MODE" in load|build) ;; *) echo '--image-mode must be load or build' >&2; exit 2 ;; esac
+if [ "$IMAGE_MODE" = build ] && [ "${#IMAGE_ARCHIVES[@]}" -gt 0 ]; then
+    echo '--image-archive cannot be combined with --image-mode=build' >&2; exit 2
+fi
 export DRY_RUN QUIET ASSUME_YES FORCE_OFFLINE I_UNDERSTAND_DATA_LOSS
 
 # ---------------------------------------------------------------------------
@@ -246,6 +314,15 @@ done
 . "$ROOT/scripts/deploy/paths.sh"
 # shellcheck source=scripts/deploy/doctor.sh
 . "$ROOT/scripts/deploy/doctor.sh"
+# shellcheck source=scripts/deploy/wizard.sh
+. "$ROOT/scripts/deploy/wizard.sh"
+# shellcheck source=scripts/deploy/network-guide.sh
+. "$ROOT/scripts/deploy/network-guide.sh"
+# shellcheck source=scripts/deploy/gpu-setup.sh
+. "$ROOT/scripts/deploy/gpu-setup.sh"
+# shellcheck source=scripts/deploy/storage-guide.sh
+. "$ROOT/scripts/deploy/storage-guide.sh"
+gpu_driver_package_valid "$NVIDIA_DRIVER_PACKAGE" || die "Invalid --nvidia-driver package"
 
 # ---------------------------------------------------------------------------
 # Stage 01 — preflight
@@ -444,22 +521,22 @@ stage_tls() {
     explain "FAIL" "the existing certificate does not cover PUBLIC_ORIGIN. Re-issue as"
     explain_cont "above; do not change the hostname to match the certificate."
 
+    have openssl || stage_fail "Install OpenSSL before configuring HTTPS certificates"
     local origin host
     origin="$(resolve_public_origin)" || stage_fail "PUBLIC_ORIGIN is required (pass --public-origin=https://host)"
     host="$(origin_host "$origin")"
+    local tls_origins
+    tls_origins="$(deployment_browser_origins)" || stage_fail "Invalid server IP or browser origins"
 
     if [ -s "$ROOT/certs/server.crt" ] && [ -s "$ROOT/certs/server.key" ]; then
         info "certificate exists — not regenerating"
         if have openssl; then
-            local subject sans expiry
+            local subject expiry
             subject="$(openssl x509 -in "$ROOT/certs/server.crt" -noout -subject 2>/dev/null)"
-            sans="$(openssl x509 -in "$ROOT/certs/server.crt" -noout -ext subjectAltName 2>/dev/null | tr -d ' ')"
             expiry="$(openssl x509 -in "$ROOT/certs/server.crt" -noout -enddate 2>/dev/null | cut -d= -f2)"
             info "subject: ${subject#subject=}"
             info "expires: ${expiry:-unknown}"
-            if ! printf '%s %s' "$subject" "$sans" | grep -q "$host"; then
-                stage_fail "certificate does not cover '$host' (PUBLIC_ORIGIN=$origin). Re-issue deliberately: bash scripts/tls/make-internal-ca.sh $host <lan-ip>, then re-run. deploy.sh never replaces a certificate clients may already trust."
-            fi
+            verify_deployment_certificate "$tls_origins" || stage_fail 'Certificate does not cover all browser origins; existing certificates are never overwritten.'
             if ! openssl x509 -in "$ROOT/certs/server.crt" -noout -checkend 2592000 >/dev/null 2>&1; then
                 stage_warn "certificate expires within 30 days — plan a re-issue"
             fi
@@ -473,9 +550,13 @@ stage_tls() {
     fi
 
     info "issuing an internal CA and server certificate for $host"
-    run bash "$ROOT/scripts/tls/make-internal-ca.sh" "$host" || stage_fail "certificate generation failed"
+    local extra_ip="${SERVER_IP_FLAG:-$(deployment_env_value SERVER_IP)}"
+    if [ -z "$extra_ip" ] && valid_server_ip "$host"; then extra_ip="$host"; fi
+    [ -z "$extra_ip" ] || valid_server_ip "$extra_ip" || stage_fail "Invalid SERVER_IP"
+    run bash "$ROOT/scripts/tls/make-internal-ca.sh" "$host" "$extra_ip" || stage_fail "certificate generation failed"
     [ "$DRY_RUN" = "1" ] || [ -s "$ROOT/certs/server.crt" ] || stage_fail "certificate was not written"
     if [ "$DRY_RUN" != "1" ]; then
+        verify_deployment_certificate "$tls_origins" || stage_fail "New certificate needs to cover every configured origin before startup"
         warn "distribute certs/internal-ca.crt to every client, and move certs/internal-ca.key OFFLINE"
     fi
     stage_pass "internal CA + server certificate for $host"
@@ -489,7 +570,7 @@ resolve_public_origin() {
     if [ -n "$PUBLIC_ORIGIN_FLAG" ]; then
         origin="$PUBLIC_ORIGIN_FLAG"
     else
-        origin="$(read_env_kv PUBLIC_ORIGIN 2>/dev/null)"
+        origin="$(deployment_env_value PUBLIC_ORIGIN)"
     fi
     if [ -z "$origin" ] && [ -t 0 ] && [ "$ASSUME_YES" != "1" ]; then
         printf '\nPUBLIC_ORIGIN is the exact URL clients will use (it goes in the certificate\n'
@@ -540,6 +621,7 @@ stage_env_config() {
     fi
 
     upsert_env_kv PUBLIC_ORIGIN "$origin"
+    deployment_apply_network || stage_fail "Could not save server network configuration"
     if [ -n "$current_head" ] && [ "$current_head" != "$head" ]; then
         info "migration head pin $current_head -> $head"
     fi
@@ -686,6 +768,7 @@ stage_compose_validate() {
 # Stage 10 — build
 # ---------------------------------------------------------------------------
 stage_build() {
+    if [ "$IMAGE_MODE" = load ]; then stage_prebuilt_images; return; fi
     stage_begin "10 build"
     explain "WHAT" "Builds the application image, tagged from git describe."
     explain "READS" "Dockerfile / Dockerfile.gpu and the repository contents."
@@ -722,14 +805,19 @@ cmd_install() {
     require_root install
     stage_preflight
     stage_sys_install
+    stage_storage
     stage_workspace
     stage_secrets
     stage_tls
     stage_env_config
+    wizard_apply_defaults
+    wizard_apply_services
+    wizard_apply_storage
     stage_offline_policy
     stage_gpu_detect
     stage_model_check
     stage_compose_validate
+    wizard_asset_readiness
     state_set last_install_at "$(timestamp)"
     state_set config_fingerprint "$(config_fingerprint)"
 }
@@ -740,9 +828,13 @@ cmd_validate() {
     export DRY_RUN
     stage_preflight
     stage_sys_install
+    stage_storage
     stage_secrets
     stage_tls
     stage_env_config
+    wizard_apply_defaults
+    wizard_apply_services
+    wizard_apply_storage
     stage_offline_policy
     stage_gpu_detect
     stage_model_check
@@ -752,10 +844,17 @@ cmd_validate() {
 cmd_start() {
     require_root start
     stage_preflight
+    stage_sys_install
+    stage_storage
     stage_offline_policy
     stage_gpu_detect
     stage_model_check
     stage_compose_validate
+    cmd_start_prepared
+}
+
+# Fresh install already validated the host/configuration; do not repeat those stages.
+cmd_start_prepared() {
     stage_build
     stage_db_init
     backup_existing_database
@@ -779,7 +878,7 @@ main() {
                 cmd_upgrade
             else
                 cmd_install
-                cmd_start
+                cmd_start_prepared
                 stage_health
             fi
             finish_report ;;
@@ -791,6 +890,7 @@ main() {
         status)       cmd_status ;;
         health)       open_log "$@"; cmd_health_only; finish_report ;;
         doctor)       doctor_run ;;
+        storage)      storage_tool report ;;
         paths)        echo "Deployment paths — reality vs scripts/deploy/paths.sh"; echo
                       verify_deployment_paths ;;
         gpu-test)     open_log "$@"; stage_preflight; stage_gpu_detect; stage_gpu_test; finish_report ;;
@@ -833,6 +933,7 @@ finish_report() {
         state_set config_fingerprint "$(config_fingerprint)"
     fi
     [ "$result" = "PASS" ] || exit 1
+    wizard_next_steps
 }
 
 # --self-test runs before anything else and never touches the host.
@@ -841,6 +942,14 @@ if [ "$SELF_TEST" = "1" ]; then
     . "$ROOT/scripts/deploy/self-test.sh"
     run_self_tests
     exit $?
+fi
+
+# Collect choices before logs/locks or any installation writes. CLI automation is unchanged.
+if [ "$SUBCOMMAND" = wizard ] || { [ -z "$SUBCOMMAND" ] && [ -t 0 ] && [ "$ASSUME_YES" != 1 ]; }; then
+    [ -t 0 ] || die 'The wizard requires a terminal. Use deploy --yes --image-mode=load|build with explicit flags.'
+    wizard_require_privileges "${ORIGINAL_ARGS[@]}"
+    have python3 || die 'Install python3, then rerun ./deploy.sh.'
+    wizard_collect
 fi
 
 # Serialize production mutations, including install and upgrade, across processes.

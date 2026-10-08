@@ -1,0 +1,17 @@
+{
+  "name": "70b-similarity-training",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 2,
+      "selector": "#train-btn",
+      "rect": [
+        691,
+        477.1499938964844,
+        175.60000610351562,
+        42.40000915527344
+      ]
+    }
+  ]
+}

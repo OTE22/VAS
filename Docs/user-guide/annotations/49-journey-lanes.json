@@ -1,0 +1,37 @@
+{
+  "name": "49-journey-lanes",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 3,
+      "selector": "[data-graph-select=\"0\"]",
+      "rect": [
+        387,
+        301.1000061035156,
+        46,
+        46
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "[data-graph-step=\"1\"]",
+      "rect": [
+        385.7166748046875,
+        681.0999755859375,
+        36.05000305175781,
+        37
+      ]
+    },
+    {
+      "number": 5,
+      "selector": "[data-graph-enlarge]",
+      "rect": [
+        856,
+        143.39999389648438,
+        253,
+        210
+      ]
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "name": "37-membership",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 1,
+      "selector": "#watchlist-select",
+      "rect": [
+        414,
+        309,
+        492,
+        47
+      ]
+    },
+    {
+      "number": 2,
+      "selector": "#watchlist-priority",
+      "rect": [
+        414,
+        418,
+        492,
+        47
+      ]
+    },
+    {
+      "number": 3,
+      "selector": "#watchlist-notes",
+      "rect": [
+        414,
+        527,
+        492,
+        85
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#watchlist-action-instructions",
+      "rect": [
+        414,
+        674,
+        492,
+        85
+      ]
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "34-settings-edit",
+  "width": 1320,
+  "height": 934,
+  "marks": [
+    {
+      "number": 3,
+      "selector": "#setting-new-value",
+      "rect": [
+        246,
+        536.5,
+        828,
+        45
+      ]
+    },
+    {
+      "number": 4,
+      "selector": "#change-reason",
+      "rect": [
+        246,
+        631.5,
+        160.6666717529297,
+        49
+      ]
+    },
+    {
+      "number": 5,
+      "selector": "[data-guide-target=\"g1791373251491435618\"]",
+      "rect": [
+        309.3999938964844,
+        680.5,
+        106.15000915527344,
+        23
+      ]
+    }
+  ]
+}

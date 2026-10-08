@@ -1,0 +1,17 @@
+{
+  "name": "24-threat-result",
+  "width": 1274,
+  "height": 865,
+  "marks": [
+    {
+      "number": 3,
+      "selector": "#threat-container",
+      "rect": [
+        25,
+        25.616668701171875,
+        1224,
+        956.5166625976562
+      ]
+    }
+  ]
+}

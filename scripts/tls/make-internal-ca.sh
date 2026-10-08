@@ -81,7 +81,11 @@ fi
 
 # --- Server certificate ----------------------------------------------------
 # SANs, not CN: every current browser ignores CN entirely.
-SAN="DNS:${HOSTNAME_ARG},DNS:localhost,IP:127.0.0.1"
+if [[ "$HOSTNAME_ARG" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    SAN="IP:${HOSTNAME_ARG},DNS:localhost,IP:127.0.0.1"
+else
+    SAN="DNS:${HOSTNAME_ARG},DNS:localhost,IP:127.0.0.1"
+fi
 if [ -n "$EXTRA_IP" ]; then
     SAN="${SAN},IP:${EXTRA_IP}"
 fi

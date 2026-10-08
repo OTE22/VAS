@@ -126,6 +126,7 @@ stage_gpu_detect() {
     [ -n "$inventory" ] || count=0
 
     if [ "$count" -eq 0 ]; then
+        [ "${REQUIRE_GPU:-0}" != 1 ] || stage_fail "NVIDIA GPU was requested but no usable GPU is visible. Complete driver setup/reboot; CPU fallback is not accepted."
         GPU_MODE=0; export GPU_MODE
         state_set gpu_assignment "cpu (no NVIDIA GPU detected)"
         # Not a failure: a CPU deployment is fully supported and the base
@@ -265,24 +266,22 @@ stage_gpu_test() {
     # 1. host driver
     "$NVIDIA_SMI" >/dev/null 2>&1 || stage_fail "nvidia-smi does not answer on the host"
     local driver; driver="$("$NVIDIA_SMI" --query-gpu=driver_version --format=csv,noheader | head -1)"
+    gpu_cuda_contract
+    gpu_driver_version_ok "$driver" "$GPU_DRIVER_MIN" || stage_fail "Host driver $driver does not meet this image compatibility policy ($GPU_DRIVER_MIN)"
     ok "host driver $driver"
 
-    # 2+3. container toolkit and CUDA inside a container, on the CUDA
-    # generation this stack actually builds against (12.4).
-    if [ "$DRY_RUN" = "1" ]; then
-        info "DRY: docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi"
-    elif docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-        ok "container toolkit: CUDA 12.4 container sees the GPU"
-    else
-        stage_fail "docker cannot expose the GPU to a container (nvidia-container-toolkit / 'nvidia-ctk runtime configure --runtime=docker' then restart docker)"
-    fi
-
-    # 4+5+6. onnxruntime CUDA provider AND a real inference with the deployed
-    # SCRFD + ArcFace weights, inside the running API container.
+    # Test the deployed application container, not a separate CUDA image that
+    # might need pulling on an offline host or differ from the loaded release.
     if ! compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -q '^face_recognition$'; then
-        stage_warn "API container is not running — start the stack to complete the GPU acceptance (driver and toolkit verified)"
+        stage_warn "API container is not running; start the stack to complete GPU acceptance"
         return 0
     fi
+    if [ "$DRY_RUN" = 1 ]; then
+        info 'DRY: would verify nvidia-smi and real inference in the application container'
+        stage_skip 'GPU inference has not been executed during this preview'
+        return 0
+    fi
+    compose exec -T face_recognition nvidia-smi >/dev/null 2>&1 || stage_fail 'The deployed API container cannot access the NVIDIA driver'
     real_inference_test gpu || stage_fail "real GPU inference failed — see the output above"
     stage_pass "driver -> toolkit -> CUDA -> onnxruntime -> SCRFD + ArcFace inference on CUDA"
 }
