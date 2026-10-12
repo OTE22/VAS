@@ -150,49 +150,6 @@ def test_explicit_image_repair_is_idempotent_and_keeps_observations(isolated, mo
     run(exercise())
 
 
-def test_future_promotion_uses_only_selected_photo_and_preserves_cluster(isolated, monkeypatch):
-    sessions, folder=isolated
-    prepare_stub(monkeypatch)
-    async def exercise():
-        svc=service()
-        async with sessions() as db:
-            user=User(username='synthetic-admin', email='synthetic@example.invalid', password_hash='not-a-login', role='admin')
-            db.add(user); await db.flush()
-            path=folder/'selected.jpg'; path.write_bytes(b'synthetic selected photo')
-            person=Identity(type=IdentityType.UNKNOWN, status=IdentityStatus.ACTIVE,
-                            best_snapshot_path=str(path))
-            db.add(person); await db.flush()
-            for angle in [0,45,90]:
-                db.add(IdentityEmbedding(identity_id=person.id, embedding=vector(angle),
-                    embedding_model_version=svc.embedding_model_version, faiss_index_type='unknown'))
-            await db.flush()
-            promoted=await svc.promote_unknown_to_known(person.id,'Synthetic promoted',user.id,db,copied_files=[])
-            assert promoted.id == person.id and promoted.type == IdentityType.KNOWN
-            assert await db.scalar(select(func.count(IdentityEmbedding.id))) == 4
-            assert await db.scalar(select(func.count(IdentityEmbedding.id)).where(IdentityEmbedding.image_id.isnot(None))) == 1
-            assert await svc.search_vector_index(db, vector(90), threshold=.8) == []
-            assert await svc.search_vector_index(db, vector(0), threshold=.8)
-            await db.rollback()
-    run(exercise())
-
-
-def test_promotion_without_usable_photo_refuses_before_renaming(isolated):
-    sessions, _ = isolated
-    async def exercise():
-        from backend.core.promotion_review import PromotionError
-        svc=service()
-        async with sessions() as db:
-            person=Identity(type=IdentityType.UNKNOWN, status=IdentityStatus.ACTIVE)
-            db.add(person); await db.flush()
-            db.add(IdentityEmbedding(identity_id=person.id, embedding=vector(0),
-                                    embedding_model_version=svc.embedding_model_version))
-            await db.flush()
-            with pytest.raises(PromotionError, match='no saved photo'):
-                await svc.promote_unknown_to_known(person.id,'Synthetic',0,db)
-            assert person.type == IdentityType.UNKNOWN and person.display_name is None
-    run(exercise())
-
-
 def test_live_ingest_and_enrollment_review_ignore_contaminated_history(isolated, monkeypatch):
     sessions, folder = isolated
     monkeypatch.setattr(settings, 'SIMILARITY_THRESHOLD', .8)

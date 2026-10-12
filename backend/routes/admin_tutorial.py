@@ -508,12 +508,13 @@ When you open the **Unknown Faces** page, you'll see:
 - A form will appear asking for:
   - **Display Name** (required): Enter the person's name (e.g., "John Doe")
   - **Person Code** (optional): Employee ID, badge number, etc.
-- Click **"PROMOTE"** to confirm
+- Verify the selected photo, camera and sighting number in the preview.
+- Click **"PROMOTE"** to confirm only that sighting.
 
 **Step 4: What Happens Next**
-- ✅ The face disappears from Unknown Faces page
+- ✅ Only the selected sighting moves to a new Known profile; other sightings remain Unknown
 - ✅ The person now has a name in the system
-- ✅ Future detections will show their name
+- ✅ Future detections that match the approved photo can show the name
 - ✅ They appear in the dashboard (if enabled)
 
 ## Tips for Success
@@ -534,15 +535,16 @@ When you open the **Unknown Faces** page, you'll see:
                             "3. Click on the face card to open details",
                             "4. Click 'Promote to Known' button",
                             "5. Enter the person's name (e.g., 'John Doe')",
-                            "6. Click 'Confirm'",
-                            "7. The identity is now known and will appear in dashboard"
+                            "6. Verify the exact selected photo and click 'PROMOTE'",
+                            "7. Open Known Faces to verify the new profile; other sightings stay Unknown"
                         ],
                         "api_example": {
                             "method": "POST",
                             "url": "/api/admin/unknown/{identity_id}/promote",
                             "body": {
                                 "display_name": "John Doe",
-                                "notes": "Employee ID: 12345",
+                                "appearance_id": 123,
+                                "photo_sha256": "<checksum from the selected sighting preview>",
                                 "decision": "create_new"
                             },
                             "response": {
@@ -564,13 +566,15 @@ When you open the **Unknown Faces** page, you'll see:
   -H "Content-Type: application/json" \\
   -d '{
     "display_name": "John Doe",
-    "notes": "Employee ID: 12345"
+    "decision": "create_new",
+    "appearance_id": 123,
+    "photo_sha256": "<checksum from GET match-candidates?appearance_id=123>"
   }'"""
                     },
                     {
                         "title": "Promote via JavaScript",
                         "description": "Example using fetch API",
-                        "code": """async function promoteIdentity(identityId, displayName) {
+                        "code": """async function promoteIdentity(identityId, displayName, appearanceId, photoSha256) {
   const response = await fetch(`/api/admin/unknown/${identityId}/promote`, {
     method: 'POST',
     headers: {
@@ -579,7 +583,9 @@ When you open the **Unknown Faces** page, you'll see:
     },
     body: JSON.stringify({
       display_name: displayName,
-      notes: 'Promoted via admin interface',
+      appearance_id: appearanceId,
+      photo_sha256: photoSha256, // from GET match-candidates?appearance_id=...
+
       decision: 'create_new'
     })
   });
@@ -598,18 +604,20 @@ When you open the **Unknown Faces** page, you'll see:
                     {
                         "method": "POST",
                         "path": "/api/admin/unknown/{identity_id}/promote",
-                        "description": "Promote an unknown identity to known status",
+                        "description": "Preview GET match-candidates?appearance_id=... first, then move only that sighting to a new Known profile",
                         "parameters": {
                             "identity_id": "UUID of the unknown identity"
                         },
                         "body": {
                             "display_name": "string (required) - Name to assign",
-                            "notes": "string (optional) - Additional notes",
+                            "appearance_id": "integer (required) - Selected saved sighting",
+                            "photo_sha256": "string (required) - Exact checksum from the preview",
+                            "person_code": "string (optional) - Employee or badge code",
                             "decision": "string (required) - must be 'create_new'"
                         },
                         "response": {
                             "success": "boolean",
-                            "identity": "Identity object with updated type and status"
+                            "identity": "New Known profile; its ID differs from the source Unknown group"
                         }
                     }
                 ]
@@ -4041,11 +4049,13 @@ curl -fsS http://localhost/health/detailed''',
             {
                 "task": "Promote Unknown to Known",
                 "endpoint": "POST /api/admin/unknown/{identity_id}/promote",
-                "description": "Convert unknown identity to known with display name",
+                "description": "Move the selected sighting to a new Known profile; keep other sightings Unknown",
                 "authentication": "Required - Admin role",
                 "example_request": {
                     "display_name": "John Doe",
-                    "notes": "Optional notes"
+                    "appearance_id": 123,
+                    "photo_sha256": "<checksum from selected sighting preview>",
+                    "decision": "create_new"
                 }
             },
             {
@@ -4249,9 +4259,11 @@ async def get_api_examples(
   -H "Content-Type: application/json" \\
   -d '{
     "display_name": "John Doe",
-    "notes": "Employee ID: 12345"
+    "decision": "create_new",
+    "appearance_id": 123,
+    "photo_sha256": "<checksum from GET match-candidates?appearance_id=123>"
   }'""",
-            "javascript": """async function promoteIdentity(identityId, displayName) {
+            "javascript": """async function promoteIdentity(identityId, displayName, appearanceId, photoSha256) {
   const response = await fetch(`/api/admin/unknown/${identityId}/promote`, {
     method: 'POST',
     headers: {
@@ -4260,7 +4272,9 @@ async def get_api_examples(
     },
     body: JSON.stringify({
       display_name: displayName,
-      notes: 'Promoted via admin interface',
+      appearance_id: appearanceId,
+      photo_sha256: photoSha256, // from GET match-candidates?appearance_id=...
+
       decision: 'create_new'
     })
   });
@@ -4268,7 +4282,7 @@ async def get_api_examples(
 }""",
             "python": """import requests
 
-def promote_identity(identity_id, display_name, token):
+def promote_identity(identity_id, display_name, appearance_id, photo_sha256, token):
     url = f"https://your-domain.com/api/admin/unknown/{identity_id}/promote"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -4276,7 +4290,9 @@ def promote_identity(identity_id, display_name, token):
     }
     data = {
         "display_name": display_name,
-        "notes": "Promoted via API"
+        "appearance_id": appearance_id,
+        "photo_sha256": photo_sha256,  # from the selected sighting preview
+        "decision": "create_new"
     }
     response = requests.post(url, headers=headers, json=data)
     return response.json()"""

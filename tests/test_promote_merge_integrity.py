@@ -226,77 +226,10 @@ UNKNOWN_LIST = "/api/admin/unknown?page=1&page_size=100"
 # PROMOTE
 # ---------------------------------------------------------------------------
 
-def test_successful_promote_writes_an_audit_row(token):
-    """Proof 1 (+ person_code metadata). log_promote() existed and was called
-    from NOWHERE — a successful promotion left no audit trace at all."""
-    unknown_id = _make_unknown(TEST_PREFIX + "audit-probe", usable_embedding=True)
-    status, body = _http(
-        "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
-        body={"display_name": TEST_PREFIX + "Promoted One",
-              "person_code": "QA-CODE-77", "decision": "create_new"})
-    assert status == 200 and body.get("success"), body
-
-    rows = _sql(
-        "SELECT action_type, success, username, action_details, after_state "
-        "FROM identity_audit_log WHERE identity_id = :i AND action_type='promote'",
-        {"i": unknown_id})
-    assert rows, "successful promotion wrote no audit row"
-    action_type, success, username, details, after_state = rows[0]
-    assert success is True
-    assert username == "admin"
-    details = details if isinstance(details, dict) else json.loads(details or "{}")
-    assert details.get("display_name") == TEST_PREFIX + "Promoted One"
-    after_state = after_state if isinstance(after_state, dict) else json.loads(after_state or "{}")
-    assert after_state["person_code"] == "QA-CODE-77"
-
-
-def test_promoted_identity_disappears_from_the_unknown_list(token):
-    """Proof 3. The list is cached for 30 HOURS; without post-commit
-    invalidation the stale page keeps showing the promoted face."""
-    unknown_id = _make_unknown(TEST_PREFIX + "vanish-probe", usable_embedding=True)
-
-    status, body = _http("GET", UNKNOWN_LIST, token=token)
-    assert status == 200
-    assert unknown_id in json.dumps(body), \
-        "seeded unknown identity should appear in the list (cache now warm)"
-
-    status, body = _http(
-        "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
-        body={"display_name": TEST_PREFIX + "Promoted Vanish",
-              "decision": "create_new"})
-    assert status == 200, body
-
-    status, body = _http("GET", UNKNOWN_LIST, token=token)
-    assert status == 200
-    assert unknown_id not in json.dumps(body), \
-        "promoted identity still served from the stale Unknown cache"
-
-
-def test_repromoting_a_known_identity_is_refused_and_audited(token):
-    """Proofs 2 + 16 (promote half). The refusal is the controlled response —
-    and it must leave an audit row, which it previously did not."""
-    unknown_id = _make_unknown(TEST_PREFIX + "repromote-probe", usable_embedding=True)
-    status, _body = _http(
-        "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
-        body={"display_name": TEST_PREFIX + "Promoted Twice",
-              "decision": "create_new"})
-    assert status == 200
-
-    status, body = _http(
-        "POST", f"/api/admin/unknown/{unknown_id}/promote", token=token,
-        body={"display_name": TEST_PREFIX + "Promoted Again",
-              "decision": "create_new"})
-    assert status == 409 and body["code"] == "IDENTITY_NOT_ACTIVE", body
-    detail = json.dumps(body)
-    assert "no longer an active unknown" in detail.lower()
-
-    rows = _sql(
-        "SELECT success, error_message FROM identity_audit_log "
-        "WHERE identity_id = :i AND action_type='promote' AND success = false",
-        {"i": unknown_id})
-    assert rows, "refused promotion left no audit row"
-    assert "no longer an active unknown" in (rows[0][1] or "").lower()
-
+# Selected-sighting promotion coverage (including audits, list/cache refresh,
+# repeated requests and untouched source events) is maintained in the isolated
+# test_promotion_reliability.py and selected_sighting_promotion.test.cjs suites.
+# Whole-group promotion is no longer an API operation.
 
 # ---------------------------------------------------------------------------
 # MERGE — ownership, files, provenance

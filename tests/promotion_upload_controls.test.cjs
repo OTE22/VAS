@@ -38,14 +38,10 @@ for (const order of [['admin-unknown.js', 'upload-modal.js'], ['upload-modal.js'
         const h = harness(order);
         h.context.candidate = candidate;
         const promote = h.run('buildPromoteCandidateRow(candidate)');
-        const button = descendants(promote).find(node => node.tag === 'button');
-        assert.equal(button.dataset.action, 'mergeIntoKnownCandidate');
-        assert.equal(button.dataset.arg, candidate.identity_id);
-        assert.equal(button.type, 'button');
-        let mergeArgs;
-        h.context.mergeIntoKnownCandidate = (...args) => { mergeArgs = args; };
-        h.handlers[button.dataset.action](button);
-        assert.deepEqual(mergeArgs, [candidate.identity_id, candidate.display_name]);
+        const link = descendants(promote).find(node => node.tag === 'a');
+        assert.equal(link.href, '/admin/identity/' + candidate.identity_id + '?from=/admin/unknown');
+        assert.equal(descendants(promote).some(node => node.tag === 'button'), false,
+            'promotion candidates must not offer a whole-group merge');
 
         const upload = h.run('buildCandidateRow(candidate, true, false)');
         const add = descendants(upload).find(node => node.tag === 'button');
@@ -91,30 +87,6 @@ test('upload create and cancel controls act on the pending upload only', () => {
     assert.equal(cancelled, 'upload-token');
     assert.equal(closed, true);
     assert.equal(h.run('pendingDecision'), null);
-});
-
-test('promotion candidate confirms and sends the unknown into the selected known identity', async () => {
-    const h = harness(['admin-unknown.js', 'upload-modal.js']);
-    h.nodes.set('promote-modal', h.element());
-    h.run("currentIdentityId = 'unknown-456'");
-    let confirmed = false, requests = [], closed = 0, refreshed = 0;
-    h.context.AppConfirm = {confirm: async () => confirmed};
-    h.context.postMergeWithRiskGate = async (url, payload) => { requests.push({url, payload}); return {message:'Merged'}; };
-    h.context.ModalStack = {close() { closed++; }};
-    h.context.showNotification = () => {};
-    h.context.loadUnknownFaces = () => { refreshed++; };
-    await h.run("mergeIntoKnownCandidate('known-123', 'Existing person')");
-    assert.equal(requests.length, 0, 'cancel must not merge');
-    confirmed = true;
-    await h.run("mergeIntoKnownCandidate('known-123', 'Existing person')");
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, '/api/admin/identities/merge');
-    assert.equal(requests[0].payload.from_identity_id, 'unknown-456');
-    assert.equal(requests[0].payload.to_identity_id, 'known-123');
-    assert.equal(requests[0].payload.decision, 'merge_existing');
-    assert.equal(closed, 1);
-    assert.equal(refreshed, 1);
-    assert.equal(h.run('mergeSubmitInFlight'), false);
 });
 
 for (const flow of ['upload', 'review']) {

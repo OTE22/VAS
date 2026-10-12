@@ -25,7 +25,7 @@ async def publish_merge(db, source_ids, target_id):
         logging.getLogger(__name__).exception('Committed merge notification failed')
 
 
-async def publish_promotion(db, identity_id):
+async def publish_promotion(db, identity_id, *, source_identity_id=None, appearance_id=None, source_status=None):
     try:
         from backend.core.redis_cache import redis_cache_service
         await redis_cache_service.invalidate_unknown_cache()
@@ -35,9 +35,11 @@ async def publish_promotion(db, identity_id):
     try:
         from backend.core.identity_pipelines import pipelines_for
         from backend.core.websocket_manager import ws_manager
-        membership = await pipelines_for(db, [identity_id])
-        pipelines = membership.get(identity_id, set())
-        event = {'type': 'identity_promoted', 'data': {'identity_id': str(identity_id)}}
+        membership = await pipelines_for(db, [identity_id] + ([source_identity_id] if source_identity_id else []))
+        pipelines = set().union(*membership.values()) if membership else set()
+        event = {'type': 'identity_promoted', 'data': {'identity_id': str(identity_id),
+            'source_identity_id': str(source_identity_id) if source_identity_id else None,
+            'appearance_id': appearance_id, 'source_status': source_status}}
         for pipeline_id in pipelines:
             await ws_manager.broadcast(event, pipeline_id=pipeline_id)
         if not pipelines:

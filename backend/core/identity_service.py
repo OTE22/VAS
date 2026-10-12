@@ -1227,121 +1227,96 @@ class IdentityService:
 
 
     async def promote_unknown_to_known(
-        self,
-        identity_id: uuid.UUID,
-        display_name: str,
-        user_id: int,
-        db: AsyncSession,
-        *,
-        confirm_create_new: bool = False,
-        copied_files: Optional[list] = None,
+        self, identity_id: uuid.UUID, display_name: str, user_id: int, db: AsyncSession,
+        *, appearance_id: Optional[int] = None, photo_sha256: Optional[str] = None,
+        confirm_create_new: bool = False, copied_files: Optional[list] = None,
         review_result: Optional[dict] = None
     ) -> Identity:
-        """
-        Promote an unknown identity to known.
-        
-        On both backends, the reviewed photo becomes a reference and previous
-        camera embeddings remain historical observations.
+        """Move exactly one reviewed sighting to a new Known profile; never commit.
+
+        The caller owns commit/rollback and the copied-file journal. Unselected
+        events keep their IDs, labels, photos and embeddings in the Unknown group.
         """
         from backend.core.identity_merge_lock import lock_identity_mutation
-        from backend.core.promotion_review import PromotionError, review_promotion
+        from backend.core.promotion_review import (PromotionError, review_promotion,
+                                                   selected_sighting, prepare_selected_photo)
+        from backend.core.enrollment_service import adopt_existing_file, ensure_image_reference
         await lock_identity_mutation(db, exclusive=True)
-        # Get identity
-        result = await db.execute(
-            select(Identity).where(Identity.id == identity_id).with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        identity = result.scalar_one_or_none()
-        
-        if not identity:
-            raise PromotionError('IDENTITY_NOT_FOUND', f'Identity {identity_id} not found', 404)
-
-        if identity.status != IdentityStatus.ACTIVE or identity.merged_into_id is not None:
-            raise PromotionError('IDENTITY_NOT_ACTIVE', 'This identity is no longer an active unknown. Refresh and open the surviving person.')
-        
-        if identity.type != IdentityType.UNKNOWN:
-            raise PromotionError('IDENTITY_NOT_UNKNOWN', 'This person is already known. Refresh the page.')
-
+        source = (await db.execute(select(Identity).where(Identity.id == identity_id)
+            .with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+        if source is None:
+            raise PromotionError('IDENTITY_NOT_FOUND', 'Identity not found.', 404)
+        if not appearance_id or not photo_sha256:
+            raise PromotionError('PROMOTION_SELECTION_REQUIRED', 'Preview the selected sighting before promoting.', 400)
         if not display_name or not display_name.strip():
             raise PromotionError('DISPLAY_NAME_REQUIRED', 'Display name is required.', 400)
-        review = await review_promotion(db, identity, display_name, self.embedding_model_version)
+        selection = await selected_sighting(db, source, appearance_id, photo_sha256=photo_sha256, lock=True)
+        prepared = await prepare_selected_photo(selection)
+        review = await review_promotion(db, source, display_name, self.embedding_model_version,
+                                        selected_vector=prepared.embedding_normalized)
         if review['candidates'] and not confirm_create_new:
             raise PromotionError('PROMOTION_REVIEW_REQUIRED',
-                'An existing person may match this identity. Review before creating a separate known person.', review=review)
-        if review_result is not None:
-            review_result.update(review, confirmed_create_new=bool(review['candidates'] and confirm_create_new))
-        
-        backend_name = 'pgvector' if self.use_pgvector else 'faiss'
-        logger.info(f"[IDENTITY_PROMOTE] ===== Starting promotion (backend={backend_name}): identity_id={identity_id}, display_name={display_name} =====")
-        logger.info(f"[IDENTITY_PROMOTE] Current state: type={identity.type.value}, status={identity.status.value}")
-        
-        # ONE path, both backends: promotion is a database fact.
-        #
-        # `search_vector_index` reads `identities.type` out of PostgreSQL when
-        # it resolves keys, so the index is already correct the moment this
-        # transaction commits and every embedding key stays where it was. The
-        # old FAISS branch instead reconstructed each vector out of the UNKNOWN
-        # index, added it to the KNOWN index and deleted the original — 380
-        # lines that could lose a vector outright if the process died mid-move,
-        # because the index was then the only copy.
-        return await self._promote_identity_in_db(
-            identity, identity_id, display_name.strip(), user_id, db, copied_files=copied_files)
-
-    async def _promote_identity_in_db(
-        self,
-        identity: Identity,
-        identity_id: uuid.UUID,
-        display_name: str,
-        user_id: int,
-        db: AsyncSession,
-        copied_files: Optional[list] = None
-    ) -> Identity:
-        """Promote the reviewed photo, preserving the cluster as history only."""
-        from backend.core.enrollment_service import (adopt_existing_file,
-                                                      ensure_image_reference,
-                                                      pending_absolute_path)
-        from backend.core.promotion_review import PromotionError
-        from backend.utils.path_utils import normalize_storage_path
-        best_image_path = identity.best_snapshot_path
-        if not best_image_path:
-            raise PromotionError('PROMOTION_IMAGE_REQUIRED',
-                'This person has no saved photo. Add a clear reference photo through Known Faces.', 400)
+                'An existing Known person may match this selected photo. Review before creating a separate person.', review=review)
+        appearance, face = selection.appearance, selection.face
+        target = Identity(type=IdentityType.KNOWN, status=IdentityStatus.PROMOTED,
+            display_name=display_name.strip(), first_seen_at=appearance.start_time,
+            last_seen_at=appearance.end_time or appearance.start_time, appearances_count=1)
+        db.add(target)
+        await db.flush()
         try:
-            absolute = pending_absolute_path(normalize_storage_path(best_image_path))
-            adopted = await adopt_existing_file(db, identity, absolute,
-                source_type="promotion", actor_user_id=user_id, copied_files=copied_files)
-            if adopted is None:
-                raise ValueError('Selected photo is unavailable')
-            # Extraction uses the exact photo shown for promotion. No vector
-            # from the unknown cluster is implicitly approved by this action.
-            await ensure_image_reference(db, identity, adopted, self)
+            adopted = await adopt_existing_file(db, target, selection.path,
+                source_type='promotion', actor_user_id=user_id, copied_files=copied_files)
+            if adopted is None or adopted.file_checksum != photo_sha256:
+                raise ValueError('Selected photo changed while copying')
+            await ensure_image_reference(db, target, adopted, self)
         except Exception as exc:
             raise PromotionError('PROMOTION_REFERENCE_INVALID',
-                'The selected photo cannot be used for recognition. Add a clear single-face photo through Known Faces.', 400) from exc
-
-        identity.type = IdentityType.KNOWN
-        identity.status = IdentityStatus.PROMOTED
-        identity.display_name = display_name
-        identity.updated_at = datetime.utcnow()
-        identity.best_snapshot_path = adopted.storage_path
-        await db.execute(update(IdentityEmbedding).where(
-            IdentityEmbedding.identity_id == identity_id,
-            IdentityEmbedding.image_id.is_(None),
-            IdentityEmbedding.faiss_index_type == 'unknown'
-        ).values(faiss_index_type='known_observation'))
-        await db.execute(update(IdentityAppearance).where(
-            IdentityAppearance.identity_id == identity_id,
-            IdentityAppearance.best_snapshot_path == best_image_path
-        ).values(best_snapshot_path=adopted.storage_path))
-        # Preserve prior workflow labels; these remain historical operator
-        # assignments, not evidence that every vector was an enrolled reference.
-        await db.execute(update(Face).where(Face.identity_id == identity_id)
-                         .values(name=display_name, label_state=LabelState.MANUAL_LABELED))
+                'The selected photo could not be saved as a recognition reference. Nothing was promoted; preview it again.', 400) from exc
+        target.best_snapshot_path = adopted.storage_path
+        # A unique Face and appearance for this detection were required above.
+        # Only this event's camera vectors move; they remain observations.
+        moved = (await db.execute(select(IdentityEmbedding).where(
+            IdentityEmbedding.identity_id == source.id,
+            IdentityEmbedding.detection_id == appearance.detection_id,
+            IdentityEmbedding.pipeline_id == appearance.pipeline_id,
+            IdentityEmbedding.image_id.is_(None)).with_for_update())).scalars().all()
+        for embedding in moved:
+            embedding.identity_id = target.id
+            embedding.faiss_index_type = 'known_observation'
+            embedding.vector_index_sync_state = 'pending'
+        appearance.identity_id = target.id
+        face.identity_id = target.id
+        face.name = target.display_name
+        face.label_state = LabelState.MANUAL_LABELED
         await db.flush()
-        logger.info("[IDENTITY_PROMOTE] Promoted %s with approved image %s; camera history retained",
-                    identity_id, adopted.id)
-        _count_identity_op("promote")
-        return identity
+        count, first_seen, last_seen = (await db.execute(select(func.count(IdentityAppearance.id),
+            func.min(IdentityAppearance.start_time),
+            func.max(func.coalesce(IdentityAppearance.end_time, IdentityAppearance.start_time)))
+            .where(IdentityAppearance.identity_id == source.id))).one()
+        source.appearances_count = count
+        if count:
+            source.first_seen_at, source.last_seen_at = first_seen, last_seen
+        # Pick only a remaining source-owned photograph. Never leave the moved
+        # sighting displayed on an Unknown card after the transfer.
+        source.best_snapshot_path = (await db.execute(select(Face.face_image_path)
+            .join(Detection, Detection.id == Face.detection_id)
+            .where(Face.identity_id == source.id, Face.face_image_path.isnot(None))
+            .order_by(Detection.timestamp.desc(), Face.id.desc()).limit(1))).scalar_one_or_none()
+        remaining_faces = (await db.execute(select(func.count(Face.id)).where(Face.identity_id == source.id))).scalar()
+        if not count and not remaining_faces:
+            source.status = IdentityStatus.INACTIVE
+        source.updated_at = datetime.utcnow()
+        await invalidate_merge_suggestions(db, [source.id], reason='selected_sighting_promoted')
+        await db.flush()
+        if review_result is not None:
+            review_result.update(review, confirmed_create_new=bool(review['candidates'] and confirm_create_new),
+                scope='selected_sighting', source_identity_id=str(source.id), appearance_id=appearance.id,
+                face_id=face.id, detection_id=appearance.detection_id, pipeline_id=appearance.pipeline_id,
+                photo_sha256=selection.checksum, reference_image_id=adopted.id,
+                transferred_embedding_ids=[row.id for row in moved],
+                source_remaining_appearances=count, source_status=source.status.value)
+        _count_identity_op('promote')
+        return target
 
     async def measured_snapshot_quality(self, db, person):
         from backend.core.enrollment_service import pending_absolute_path

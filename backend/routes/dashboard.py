@@ -983,13 +983,15 @@ async def api_overview():
                     {
                         "method": "POST",
                         "path": "/api/admin/unknown/{identity_id}/promote",
-                        "description": "Promote an unknown identity to known status",
+                        "description": "Move one selected sighting into a new Known profile; other sightings remain Unknown",
                         "auth_required": True,
                         "admin_only": False,
                         "access_note": "Admin: can promote any. Regular users: only identities from their assigned pipelines",
                         "body": {
                             "display_name": "string (required)",
                             "person_code": "string (optional)",
+                            "appearance_id": "integer (required) - Selected saved sighting",
+                            "photo_sha256": "string (required) - Checksum from GET match-candidates?appearance_id=...",
                             "decision": "string (required) - 'create_new'"
                         }
                     },
@@ -1508,13 +1510,16 @@ async def api_overview():
   -H "Authorization: Bearer <admin_token>" """
                 },
                 "promote_identity": {
-                    "description": "Promote unknown identity to known",
+                    "description": "Preview GET /api/admin/unknown/{identity_id}/match-candidates?appearance_id=123 first; promote only that sighting",
                     "curl": """curl -X POST "http://localhost:8000/api/admin/unknown/{identity_id}/promote" \\
   -H "Authorization: Bearer <admin_token>" \\
   -H "Content-Type: application/json" \\
   -d '{
     "display_name": "John Doe",
-    "person_code": "JD001"
+    "person_code": "JD001",
+    "appearance_id": 123,
+    "photo_sha256": "<checksum from preview>",
+    "decision": "create_new"
   }'"""
                 },
                 "search_by_image": {

@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -270,7 +270,9 @@ def _validated_decision(value):
 
 
 class PromoteRequest(BaseModel):
-    display_name: str
+    appearance_id: int = Field(gt=0)
+    photo_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    display_name: str = Field(min_length=1, max_length=255)
     person_code: Optional[str] = None
     confirm_create_new: bool = False
     # MANDATORY. Promoting is one of two mutually exclusive answers to "who is
@@ -1300,183 +1302,67 @@ async def get_identity_details(
 # Promote — who might this unknown face already be?
 # =====================================================
 
-def _resolve_snapshot_absolute(stored_path: str) -> str:
-    """Absolute, containment-checked path for a stored snapshot.
-
-    Two shapes live in `identities.best_snapshot_path`: an ABSOLUTE
-    `/app/storage/<pipeline>/unknown/unknown_*.jpg` written by the detection
-    pipeline, and a RELATIVE `storage/faces/<uuid>/image_001.jpg` written by
-    enrollment. `pending_absolute_path` alone mishandles the first — the string
-    does not start with "storage/", so os.path.join drops the base and it only
-    lands correctly by accident under Docker.
-
-    normalize_storage_path folds both shapes into the relative form;
-    pending_absolute_path then applies the commonpath guard that actually
-    refuses an escape. Chained, so the guard is always the last word — unlike
-    the ad-hoc `if not os.path.isabs(...)` joins elsewhere in this module,
-    which have no containment check at all.
-    """
-    from backend.core.enrollment_service import pending_absolute_path
-    from backend.utils.path_utils import normalize_storage_path
-
-    relative = normalize_storage_path(stored_path) or str(stored_path or "")
-    return pending_absolute_path(relative)
+async def _authorize_promote_sighting(db, current_user, identity_id, appearance_id):
+    """An identity shared with one camera does not grant access to its other cameras."""
+    if current_user.role == 'admin':
+        return
+    from backend.auth.auth_service import AuthService
+    allowed = await AuthService.get_user_pipelines(current_user.id, db)
+    pipeline = (await db.execute(select(IdentityAppearance.pipeline_id).where(
+        IdentityAppearance.id == appearance_id, IdentityAppearance.identity_id == identity_id))).scalar_one_or_none()
+    if pipeline not in allowed:
+        raise HTTPException(403, 'Access denied to the selected sighting')
 
 
-async def _last_seen_by_identity(db: AsyncSession, identity_ids: List[str]) -> dict:
-    """Most recent appearance per identity: {identity_id: (pipeline_id, start_time)}.
-
-    build_candidate_rows returns `last_seen_at` but no PLACE, and the unknown
-    list response carries only an unordered `pipeline_ids` set with no
-    timestamps. One grouped query over at most ENROLL_MAX_CANDIDATES ids is
-    cheaper than hydrating each candidate's full appearance list.
-    """
-    from sqlalchemy import text as sa_text
-
-    if not identity_ids:
-        return {}
-    rows = (await db.execute(sa_text("""
-        SELECT DISTINCT ON (identity_id) identity_id, pipeline_id, start_time
-        FROM identity_appearances
-        WHERE identity_id = ANY(CAST(:ids AS uuid[]))
-        ORDER BY identity_id, start_time DESC NULLS LAST
-    """), {"ids": [str(i) for i in identity_ids]})).all()
-    return {str(r[0]): (r[1], r[2]) for r in rows}
-
-
-@router.get("/admin/unknown/{identity_id}/match-candidates",
-            summary="Known identities this unknown face may already be",
-            description="Read-only. Ranks KNOWN identities against the unknown identity's "
-                        "stored snapshot so an administrator can merge instead of "
-                        "creating a duplicate person. Never writes.")
+@router.get('/admin/unknown/{identity_id}/match-candidates',
+            summary='Preview a selected sighting before promotion')
 async def unknown_match_candidates(
     identity_id: str,
+    appearance_id: int = Query(..., gt=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Suggestions for the promote modal. Looking must never change anything.
-
-    Deliberately NOT built on AdvancedSearchService.search_multi_face: that
-    writes a SearchHistory row and calls db.commit() twice on the session handed
-    to it, plus WatchlistAlert rows. A suggestion lookup that commits would turn
-    opening a modal into a mutation. find_similar_identities reuses the same
-    decode -> detect -> embed -> vector-search -> collapse chain with none of
-    the side effects.
-
-    Every failure is a 200 with a warning rather than an error status: the
-    administrator must still be able to promote the face as a new person when
-    its snapshot is missing, corrupt or faceless. A 4xx here would strand them.
-    """
-    def _thresholds() -> dict:
-        return {
-            "candidate_min": float(settings.ENROLL_CANDIDATE_MIN),
-            "strong_min": float(settings.ENROLL_STRONG_MATCH_MIN),
-            "max_candidates": int(settings.ENROLL_MAX_CANDIDATES),
-            "candidate_pool": int(settings.ENROLL_CANDIDATE_POOL),
-        }
-
-    def _answer(candidates, band, warning=None):
-        return {
-            "success": True,
-            "identity_id": identity_id,
-            "candidates": candidates,
-            "match_band": band,
-            "warning": warning,
-            "thresholds": _thresholds(),
-        }
-
+    """Read-only preview and duplicate suggestions for the exact selected photo."""
+    from backend.core.promotion_review import PromotionError, selected_sighting, prepare_selected_photo
+    from backend.core.enrollment_service import build_candidate_rows, classify_match, find_similar_identities
+    from backend.utils.path_utils import path_to_url
+    from backend.utils.time_utils import iso_utc
     try:
-        identity_uuid = uuid.UUID(identity_id)
+        identifier = uuid.UUID(identity_id)
     except (ValueError, TypeError):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Invalid identity ID: {identity_id}")
-
-    # Same gate as promote itself: a user who may not promote this identity may
-    # not enumerate who it resembles either — the candidate list is a list of
-    # real people's names and photos.
-    if current_user.role != "admin":
-        from backend.auth.auth_service import check_identity_access
-        if not await check_identity_access(identity_id, current_user, db):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Access denied to this identity")
-
-    identity = (await db.execute(
-        select(Identity).where(Identity.id == identity_uuid))).scalar_one_or_none()
-    if identity is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"Identity {identity_id} not found")
-
-    if not identity.best_snapshot_path:
-        return _answer([], "none",
-                       "This face has no stored snapshot, so it cannot be compared "
-                       "against known people. You can still promote it as a new person.")
-
+        raise HTTPException(400, 'Invalid identity ID')
+    await _authorize_promote_sighting(db, current_user, identifier, appearance_id)
+    person = (await db.execute(select(Identity).where(Identity.id == identifier))).scalar_one_or_none()
+    if person is None:
+        raise HTTPException(404, 'Identity not found')
     try:
-        absolute = _resolve_snapshot_absolute(identity.best_snapshot_path)
-        with open(absolute, "rb") as handle:
-            image_bytes = handle.read()
-    except FileNotFoundError:
-        return _answer([], "none",
-                       "The snapshot image file is missing from storage, so this face "
-                       "cannot be compared. You can still promote it as a new person.")
-    except Exception as exc:                                   # noqa: BLE001
-        logger.warning("[MATCH] could not read snapshot for %s: %s", identity_id, exc)
-        return _answer([], "none",
-                       "The snapshot image could not be read, so this face cannot be "
-                       "compared. You can still promote it as a new person.")
-
-    try:
-        from backend.core.enrollment_service import (
-            build_candidate_rows, classify_match, find_similar_identities,
-            prepare_upload)
-
-        # is_face_image=True selects the detector's padded-retry branch. Pipeline
-        # snapshots are already tight crops, and a 112x112 crop is invisible to
-        # the plain detector — the same reason the enrollment path exposes this flag.
-        prepared = prepare_upload(image_bytes, is_face_image=True)
-    except Exception as exc:                                   # noqa: BLE001
-        # EnrollmentError and FaceExtractionError both land here. "No face in
-        # this crop" is an ordinary outcome for a camera snapshot, not a fault.
-        logger.info("[MATCH] no usable face in snapshot for %s: %s", identity_id, exc)
-        return _answer([], "none",
-                       "No face could be detected in this snapshot, so it cannot be "
-                       "compared against known people. You can still promote it as a "
-                       "new person.")
-
-    try:
-        # exclude_identity_ids keeps the face out of its own result list, and
-        # find_similar_identities applies it BEFORE collapsing, so the exclusion
-        # cannot consume a candidate slot.
-        ranked = await find_similar_identities(
-            db, prepared.embedding_normalized,
-            exclude_identity_ids=[str(identity_uuid)])
-    except Exception as exc:                                   # noqa: BLE001
-        logger.warning("[MATCH] vector search failed for %s: %s", identity_id, exc)
-        return _answer([], "none",
-                       "The similarity search could not be completed. You can still "
-                       "promote this face as a new person.")
-
-    band = classify_match(ranked[0][1] if ranked else None)
+        selection = await selected_sighting(db, person, appearance_id)
+        prepared = await prepare_selected_photo(selection)
+    except PromotionError as exc:
+        return JSONResponse(status_code=exc.status_code, content={'code': exc.code, 'detail': str(exc)})
+    # Query failures must not be presented as "no existing person".
+    ranked = await find_similar_identities(db, prepared.embedding_normalized,
+                                         exclude_identity_ids=[str(identifier)])
     candidates = await build_candidate_rows(db, ranked)
-
-    places = await _last_seen_by_identity(db, [c["identity_id"] for c in candidates])
-    for candidate in candidates:
-        pipeline_id, seen_at = places.get(str(candidate["identity_id"]), (None, None))
-        candidate["last_seen_pipeline_id"] = pipeline_id
-        # iso_utc keeps the Z suffix the timestamp contract pins.
-        from backend.utils.time_utils import iso_utc
-        candidate["last_seen_location_at"] = iso_utc(seen_at) if seen_at else None
-
-    logger.info("[MATCH] %s -> %d candidate(s), band=%s",
-                identity_id, len(candidates), band)
-    return _answer(candidates, band)
+    if current_user.role != 'admin':
+        from backend.auth.auth_service import check_identity_access
+        candidates = [candidate for candidate in candidates
+                      if await check_identity_access(candidate['identity_id'], current_user, db)]
+    appearance = selection.appearance
+    return {'success': True, 'identity_id': identity_id, 'candidates': candidates,
+        'match_band': classify_match(ranked[0][1] if ranked else None),
+        'selection': {'appearance_id': appearance.id, 'photo_sha256': selection.checksum,
+            'preview_image': path_to_url(appearance.best_snapshot_path, settings.STORAGE_DIR),
+            'pipeline_id': appearance.pipeline_id, 'camera_name': selection.camera,
+            'seen_at': iso_utc(appearance.start_time)},
+        'scope': 'selected_sighting'}
 
 
 # =====================================================
 # Promote Unknown to Known
 # =====================================================
 
-@router.post("/admin/unknown/{identity_id}/promote", summary="Promote Unknown to Known", description="Promote an unknown identity to known status with a display name (Admin or users with pipeline access)")
+@router.post("/admin/unknown/{identity_id}/promote", summary="Promote Unknown to Known", description="Move only the selected sighting into a new Known profile using its exact photo (Admin or users with access to that camera)")
 async def promote_unknown_to_known(
     identity_id: str,
     request: PromoteRequest,
@@ -1507,6 +1393,7 @@ async def promote_unknown_to_known(
             if not await check_identity_access(identity_id, current_user, db):
                 raise HTTPException(403, "Access denied to this identity")
         await lock_identity_mutation(db, exclusive=True)
+        await _authorize_promote_sighting(db, current_user, identifier, request.appearance_id)
         person = (await db.execute(select(Identity).where(Identity.id == identifier)
                    .with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
         if person is None:
@@ -1515,30 +1402,42 @@ async def promote_unknown_to_known(
                   "display_name": person.display_name, "person_code": person.person_code}
         code, key = normalize_person_code(request.person_code)
         if key and (await db.execute(select(Identity.id).where(
-                Identity.person_code_key == key, Identity.id != identifier))).first():
+                Identity.person_code_key == key))).first():
             raise HTTPException(409, "This person code is already assigned. Select the existing person or use a different code.")
         review = {}
         person = await service.promote_unknown_to_known(
             identifier, name, current_user.id, db,
+            appearance_id=request.appearance_id, photo_sha256=request.photo_sha256,
             confirm_create_new=request.confirm_create_new,
             copied_files=copied_files, review_result=review)
         person.person_code, person.person_code_key = code, key
         ip_address, user_agent = get_client_info(http_request)
         await IdentityAuditLogger.log_promote(
             db=db, user_id=actor_id, username=actor_username,
-            identity_id=identifier, display_name=name, before_state=before,
+            identity_id=person.id, display_name=name, before_state=before,
             after_state={"type": person.type.value, "status": person.status.value,
                          "display_name": person.display_name, "person_code": person.person_code},
             ip_address=ip_address, user_agent=user_agent, decision=request.decision,
             review=review)
-        response = {"success": True, "message": f"Identity promoted to known with name: {name}",
-                    "identity": {"id": str(person.id), "type": person.type.value,
-                                 "display_name": person.display_name, "person_code": person.person_code,
-                                 "status": person.status.value}}
+        await IdentityAuditLogger.log_action(db=db, user_id=actor_id, username=actor_username,
+            action_type='promote_sighting', identity_id=identifier, related_identity_id=person.id,
+            action_details=review, before_state=before,
+            after_state={'type': 'unknown', 'status': review['source_status'],
+                         'appearances_count': review['source_remaining_appearances']},
+            ip_address=ip_address, user_agent=user_agent, strict=True)
+        target_id = person.id
+        response = {'success': True, 'message': 'Selected sighting promoted. Other sightings remain Unknown.',
+            'source_identity_id': str(identifier), 'appearance_id': request.appearance_id,
+            'source_remaining_appearances': review['source_remaining_appearances'],
+            'source_status': review['source_status'],
+            'identity': {'id': str(target_id), 'type': person.type.value,
+                         'display_name': person.display_name, 'person_code': person.person_code,
+                         'status': person.status.value}}
         await db.commit()
         copied_files.clear()
         from backend.core.merge_notifications import publish_promotion
-        await publish_promotion(db, identifier)
+        await publish_promotion(db, target_id, source_identity_id=identifier,
+                                appearance_id=request.appearance_id, source_status=review['source_status'])
         try:
             await request_snapshot(trigger="promote")
         except Exception:
