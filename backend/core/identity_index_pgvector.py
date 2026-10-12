@@ -533,6 +533,11 @@ class IdentityIndexPgVector:
                 logger.debug(f"[PGVECTOR] [SEARCH_KNOWN] Transaction rolled back after error")
             except Exception as rollback_error:
                 logger.error(f"[PGVECTOR] [SEARCH_KNOWN] Failed to rollback transaction: {rollback_error}", exc_info=True)
+            if recognition_only:
+                # Unavailable reference validation is not proof of no match.
+                # In particular, enrollment must not accept a new person from
+                # an empty result caused by a database failure.
+                raise
             return []
     
     @_timed_vector_search
