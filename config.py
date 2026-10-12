@@ -352,7 +352,7 @@ class Settings(BaseSettings):
     DETECTION_MODEL: str = Field(default="/app/weights/det_10g.onnx")  # Docker path
     RECOGNITION_MODEL: str = Field(default="/app/weights/w600k_r50.onnx")  # Docker path
     SIMILARITY_THRESHOLD: float = Field(default=0.4)
-    UNKNOWN_SIMILARITY_THRESHOLD: float = Field(default=0.35, description="Cosine similarity to match an existing UNKNOWN identity (below SIMILARITY_THRESHOLD creates fewer duplicate unknowns)")
+    UNKNOWN_SIMILARITY_THRESHOLD: float = Field(default=0.35, description="Minimum direct cosine similarity to the first current-model reference of an UNKNOWN identity; separate from the Known threshold")
 
     # --- Performance / concurrency ------------------------------------------
     # Threads dedicated to CPU-bound inference (ONNX + OpenCV release the GIL,

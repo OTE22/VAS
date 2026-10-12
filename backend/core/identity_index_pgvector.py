@@ -547,11 +547,16 @@ class IdentityIndexPgVector:
         db: AsyncSession,
         top_k: int = 1,
         threshold: float = None,
-        include_inactive: bool = False
+        include_inactive: bool = False,
+        *,
+        recognition_only: bool = True,
+        model_version: Optional[str] = None
     ) -> List[Tuple[str, float]]:
         """
-        Search for similar embeddings in UNKNOWN identities.
-        Uses slightly looser threshold than known search.
+        Match UNKNOWN identities directly to their first stored current-model vector.
+
+        Later observations remain searchable via recognition_only=False, but
+        cannot become live references and chain an identity away from its origin.
 
         Args:
             embedding: Query embedding (will be L2-normalized)
@@ -569,10 +574,27 @@ class IdentityIndexPgVector:
         if threshold is None:
             threshold = float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
 
+        if recognition_only and model_version is None:
+            path = settings.RECOGNITION_MODEL
+            model_version = os.path.splitext(os.path.basename(str(path)))[0][:64] if path else None
+        if recognition_only and not model_version:
+            return []
+        # Compute IDs before reading vector payloads: one stable reference per
+        # identity/model, irrespective of how many camera observations it has.
+        anchor_cte = """, unknown_anchors AS MATERIALIZED (
+            SELECT identity_id, MIN(id) AS id FROM identity_embeddings
+            WHERE embedding IS NOT NULL AND embedding_model_version = :model_version
+            GROUP BY identity_id
+        )""" if recognition_only else ""
+        anchor_join = "JOIN unknown_anchors anchor ON anchor.id = ie.id" if recognition_only else ""
+
         logger.debug(f"[PGVECTOR] [SEARCH_UNKNOWN] Starting search: top_k={top_k}, threshold={threshold}")
         
         try:
             # L2 normalize embedding
+            embedding = np.asarray(embedding, dtype=np.float32)
+            if embedding.shape != (512,) or not np.isfinite(embedding).all():
+                return []
             norm = np.linalg.norm(embedding)
             if norm > 0:
                 normalized = (embedding / norm).astype(np.float32)
@@ -582,7 +604,6 @@ class IdentityIndexPgVector:
             
             embedding_list = normalized.tolist()
             
-            logger.debug(f"[PGVECTOR] [SEARCH_UNKNOWN] Normalized embedding (first 5 values): {embedding_list[:5]}")
             
             # Format embedding as PostgreSQL array literal for pgvector
             # pgvector expects: '[0.1, 0.2, ...]'::vector
@@ -597,22 +618,23 @@ class IdentityIndexPgVector:
             from db_models import Identity, IdentityType, IdentityStatus
             
             # Set HNSW ef_search parameter for better accuracy (if using HNSW index)
-            if self.index_type == 'hnsw' and self.hnsw_ef_search:
+            if not recognition_only and self.index_type == 'hnsw' and self.hnsw_ef_search:
                 await db.execute(text(
                     f"SET LOCAL hnsw.ef_search = {self._effective_ef_search(top_k)}"))
             
-            # Historical search ranks people across retained vectors. Keep the
-            # live-camera ANN query shape unchanged for recognition throughput.
+            # History ranks all observations; live recognition ranks only anchors.
+            # Both paths return distinct identities.
             result = await db.execute(
                 text(f"""
                     WITH query_vector AS (
-                        SELECT '{embedding_array_str}'::vector AS vec
-                    ) {", best_per_person AS (" if include_inactive else ""}
-                    SELECT {"DISTINCT ON (ie.identity_id)" if include_inactive else ""}
+                        SELECT CAST(:query_vector AS vector) AS vec
+                    ) {anchor_cte}, best_per_person AS (
+                    SELECT DISTINCT ON (ie.identity_id)
                         ie.identity_id::text as identity_id,
                         1 - (ie.embedding <=> qv.vec) as similarity,
                         ie.quality
                     FROM identity_embeddings ie
+                    {anchor_join}
                     JOIN identities i ON ie.identity_id = i.id
                     CROSS JOIN query_vector qv
                     WHERE 
@@ -621,11 +643,13 @@ class IdentityIndexPgVector:
                         AND (i.status::text = UPPER(:identity_status) OR (:include_inactive AND i.status::text = 'INACTIVE'))
                         AND i.merged_into_id IS NULL
                         AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
-                    ORDER BY {"ie.identity_id," if include_inactive else ""} ie.embedding <=> qv.vec {", ie.id" if include_inactive else ""}
-                    {") SELECT identity_id, similarity, quality FROM best_per_person ORDER BY similarity DESC, identity_id" if include_inactive else ""}
+                    ORDER BY ie.identity_id, ie.embedding <=> qv.vec, ie.id
+                    ) SELECT identity_id, similarity, quality FROM best_per_person ORDER BY similarity DESC, identity_id
                     LIMIT :top_k
                 """),
                 {
+                    "query_vector": embedding_array_str,
+                    "model_version": model_version,
                     "include_inactive": include_inactive,
                     "identity_type": IdentityType.UNKNOWN.value,  # Use enum value: "unknown"
                     "identity_status": IdentityStatus.ACTIVE.value,  # Use enum value: "active"
@@ -678,6 +702,8 @@ class IdentityIndexPgVector:
                 logger.debug(f"[PGVECTOR] [SEARCH_UNKNOWN] Transaction rolled back after error")
             except Exception as rollback_error:
                 logger.error(f"[PGVECTOR] [SEARCH_UNKNOWN] Failed to rollback transaction: {rollback_error}", exc_info=True)
+            if recognition_only:
+                raise  # A failed lookup must not create a new identity.
             return []
     
     @_timed_vector_search

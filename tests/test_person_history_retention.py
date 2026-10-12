@@ -94,7 +94,7 @@ def test_expire_image_preserve_history_and_search_after_inactivation(isolated):
         assert result['rows_deleted'] == 0
         from backend.core.identity_index_pgvector import IdentityIndexPgVector
         async with sessions() as db:
-            live = await IdentityIndexPgVector().search_unknown(vector, db, threshold=.8)
+            live = await IdentityIndexPgVector().search_unknown(vector, db, threshold=.8, model_version='synthetic-v1')
             assert live and live[0][0] == str(iid)
         retention = IdentityRetentionManager()
         assert await retention._cleanup_old_snapshots() == 1
@@ -114,8 +114,8 @@ def test_expire_image_preserve_history_and_search_after_inactivation(isolated):
             assert appearance.best_snapshot_path is None and appearance.detection_id == did
             from backend.core.identity_index_pgvector import IdentityIndexPgVector
             index = IdentityIndexPgVector()
-            assert await index.search_unknown(vector, db, threshold=.8) == []
-            historical = await index.search_unknown(vector, db, threshold=.8, include_inactive=True)
+            assert await index.search_unknown(vector, db, threshold=.8, model_version='synthetic-v1') == []
+            historical = await index.search_unknown(vector, db, threshold=.8, include_inactive=True, recognition_only=False)
             assert historical and historical[0][0] == str(iid)
             from backend.core.quick_image_search import rank_people
             assert (await rank_people(db, vector, 'synthetic-v1', 'both', 10))[0][0].id == iid
@@ -250,7 +250,7 @@ def test_historical_search_returns_distinct_people_and_excludes_merges(isolated,
             method = index.search_known if kind == IdentityType.KNOWN else index.search_unknown
             assert await method(vector, db, top_k=2, threshold=.8) == []
             rows = await method(vector, db, top_k=2, threshold=.8, include_inactive=True,
-                                **({'recognition_only': False} if kind == IdentityType.KNOWN else {}))
+                                recognition_only=False)
             assert [r[0] for r in rows] == [str(iid), str(second.id)]
             rows = await search_similar_embeddings(db, vector, top_k=2, threshold=.8,
                                                    identity_type=kind.value.lower(), include_inactive=True)

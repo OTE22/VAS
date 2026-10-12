@@ -514,7 +514,7 @@ class IdentityClusteringService:
                         text(f"identity_ids::jsonb @> '[\"{identity1.id}\"]'::jsonb"),
                         text(f"identity_ids::jsonb @> '[\"{identity2.id}\"]'::jsonb")
                     )
-                )
+                ).limit(1)  # Existence only: several groups can contain this pair.
             )
             existing = existing_result.scalar_one_or_none()
             
@@ -1246,7 +1246,7 @@ class IdentityClusteringService:
                                     text(f"identity_ids::jsonb @> '[\"{identity1.id}\"]'::jsonb"),
                                     text(f"identity_ids::jsonb @> '[\"{identity2.id}\"]'::jsonb")
                                 )
-                            )
+                            ).limit(1)  # Existence, not uniqueness of a pair.
                         )
                         existing = existing_result.scalar_one_or_none()
                         

@@ -245,3 +245,29 @@ def test_loader_links_only_registered_approved_uploads(isolated):
             await loader._link_loaded_reference(db, person, row.id, str(folder/'approved.jpg'))
             assert row.image_id == image.id
     run(exercise())
+
+
+def test_clustering_tolerates_multiple_existing_group_suggestions(isolated, monkeypatch):
+    sessions, folder = isolated
+    async def exercise():
+        from datetime import datetime
+        from unittest.mock import AsyncMock
+        from backend.core.identity_clustering import IdentityClusteringService
+        from db_models import IdentityAppearance, MergeSuggestion, MergeSuggestionStatus
+        async with sessions() as db:
+            db.add(Pipeline(pipeline_id='synthetic-camera'))
+            people = [Identity(type=IdentityType.UNKNOWN, status=IdentityStatus.ACTIVE,
+                               appearances_count=2) for _ in range(3)]
+            db.add_all(people); await db.flush()
+            for person in people[:2]:
+                db.add(IdentityAppearance(identity_id=person.id, pipeline_id='synthetic-camera',
+                                           start_time=datetime.utcnow()))
+            for members in [people[:2], people]:
+                db.add(MergeSuggestion(identity_ids=[str(p.id) for p in members],
+                    status=MergeSuggestionStatus.PENDING, confidence=.9))
+            await db.flush()
+            cluster=IdentityClusteringService()
+            monkeypatch.setattr(cluster, '_verify_face_similarity', AsyncMock(return_value=(True,.99)))
+            await cluster._create_hybrid_suggestions(people[:2],db)
+            assert await db.scalar(select(func.count(MergeSuggestion.id))) == 2
+    run(exercise())

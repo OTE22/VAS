@@ -495,6 +495,9 @@ class IdentityService:
                     detection_id=detection_id,
                     pipeline_id=pipeline_id,
                     faiss_index_type='unknown',
+                    embedding=self._normalize_for_storage(embedding).tolist(),
+                    embedding_model_version=self.embedding_model_version,
+                    vector_index_sync_state=SYNC_PENDING,
                     quality=quality_score,
                     quality_scorer_version=quality_scorer_version,
                     created_at=now
@@ -586,7 +589,8 @@ class IdentityService:
             embedding=embedding,
             db=db,
             top_k=1,
-            threshold=self.unknown_threshold
+            threshold=self.unknown_threshold,
+            model_version=self.embedding_model_version
         )
         
         if unknown_matches:
@@ -622,8 +626,8 @@ class IdentityService:
                 # reconcile duplicate UNKNOWNs after the fact, with a human.
 
                 # Check for type mismatch (shouldn't happen with pgvector since query filters by type)
-                if identity.type == IdentityType.KNOWN:
-                    logger.warning(f"[IDENTITY_SEARCH] [PGVECTOR] ⚠️ Identity {identity_id} is KNOWN but found in UNKNOWN search - returning anyway")
+                if identity.type != IdentityType.UNKNOWN or identity.status != IdentityStatus.ACTIVE or identity.merged_into_id:
+                    raise RuntimeError("Unknown reference ownership changed during recognition; retry")
                 
                 await self._update_identity_seen(identity, db)
                 return IdentityResolution(identity, False, similarity, None, False)
@@ -949,58 +953,22 @@ class IdentityService:
         """
         if index_type == 'known':
             # A global FAISS top-k can be crowded out by retained observations.
-            # Rank the small approved gallery exactly in PostgreSQL on both
-            # backends. FAISS remains the index for unknown/history vectors.
+            # Rank references in PostgreSQL on both backends.
+            # FAISS remains available for historical observation searches.
             reference_index = self.pgvector_index or IdentityIndexPgVector()
             return await reference_index.search_known(
                 embedding, db, top_k=top_k, threshold=threshold,
                 recognition_only=True, model_version=self.embedding_model_version,
                 allow_enriched=self.auto_enrich_enabled)
 
-        index = getattr(self, 'vector_index', None)
-        if index is None:
-            return []
-
-        # Over-fetch: several keys can belong to one identity, so top_k
-        # identities needs more than top_k keys.
-        fetch_k = max(int(top_k) * 5, int(top_k))
-        try:
-            if hasattr(index, 'search_async'):
-                hits = await index.search_async(db, embedding, top_k=fetch_k,
-                                                threshold=threshold)
-            else:
-                hits = index.search(embedding, top_k=fetch_k, threshold=threshold)
-        except Exception as exc:
-            logger.error("[IDENTITY] vector index search failed: %s", exc, exc_info=True)
-            return []
-        if not hits:
-            return []
-
-        keys = [key for key, _score in hits]
-        rows = (await db.execute(
-            sa_text(
-                "SELECT e.id, e.identity_id, i.type "
-                "FROM identity_embeddings e JOIN identities i ON i.id = e.identity_id "
-                "WHERE e.id = ANY(:keys) AND i.status::text IN ('ACTIVE', 'PROMOTED')"),
-            {"keys": keys})).all()
-        owner = {int(r[0]): (str(r[1]), str(r[2]).lower()) for r in rows}
-
-        wanted = 'known' if index_type == 'known' else 'unknown'
-        best: Dict[str, float] = {}
-        for key, score in hits:
-            entry = owner.get(int(key))
-            if entry is None:
-                # Indexed key with no ACTIVE row: stale. Reconciliation removes
-                # it; skipping here means it can never win a match meanwhile.
-                continue
-            identity_id, identity_type = entry
-            if identity_type != wanted:
-                continue
-            if score > best.get(identity_id, float('-inf')):
-                best[identity_id] = float(score)
-
-        ranked = sorted(best.items(), key=lambda item: item[1], reverse=True)
-        return ranked[:int(top_k)]
+        if index_type != 'unknown':
+            raise ValueError('Unsupported identity reference type')
+        # The same reference contract on pgvector and FAISS. Searching the
+        # global FAISS observation index here reintroduces transitive matches.
+        reference_index = self.pgvector_index or IdentityIndexPgVector()
+        return await reference_index.search_unknown(
+            embedding, db, top_k=top_k, threshold=threshold,
+            model_version=self.embedding_model_version)
 
     async def remove_from_vector_index(self, db: AsyncSession, identity_id) -> int:
         """Drop every indexed vector belonging to an identity."""

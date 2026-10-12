@@ -704,7 +704,8 @@ class AdvancedSearchService:
                     top_k=fetch_k,
                     threshold=self.candidate_threshold,
                     db=db,
-                    include_inactive=True
+                    include_inactive=True,
+                    recognition_only=False
                 )
                 # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
                 for identity_id, score in unknown_results:

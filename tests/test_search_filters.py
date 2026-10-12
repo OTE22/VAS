@@ -98,7 +98,8 @@ class FakeVectorIndex:
         self.requested_threshold.append(threshold)
         return list(self.rows)
 
-    async def search_unknown(self, embedding, top_k, threshold, db=None, include_inactive=False):
+    async def search_unknown(self, embedding, top_k, threshold, db=None, include_inactive=False, recognition_only=True):
+        assert recognition_only is False, "Unknown history must retain later observations"
         self.requested_top_k.append(top_k)
         self.requested_threshold.append(threshold)
         return []
@@ -113,7 +114,8 @@ def make_service(rows):
 
 
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    from conftest import run_on_shared_loop
+    return run_on_shared_loop(coro)
 
 
 def uid(n):

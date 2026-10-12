@@ -44,8 +44,7 @@ from config import settings
 # Helper function to find best image from storage/pipeline_id/person_name/ structure
 async def _find_best_image_from_storage_for_identity(identity: Identity, storage_dir: str, db: AsyncSession) -> Optional[str]:
     """
-    Find the best quality image from storage/pipeline_id/person_name/ structure.
-    Searches all pipelines for this identity's name and returns the best quality image.
+    Return an existing photo explicitly linked to this identity in Face records.
     """
     try:
         from db_models import Face, Detection, IdentityEmbedding
@@ -110,57 +109,9 @@ async def _find_best_image_from_storage_for_identity(identity: Identity, storage
             else:
                 logger.warning(f"[IDENTITIES] ⚠️ File does not exist: {face_path}")
         
-        # If no path found in database, try to find in storage structure directly
-        if not best_path:
-            logger.info(f"[IDENTITIES] No valid paths found in database. Searching storage directory structure...")
-            if not os.path.exists(storage_dir):
-                logger.warning(f"[IDENTITIES] ⚠️ Storage directory does not exist: {storage_dir}")
-                return None
-            
-            from db_models import IdentityType
-            is_known = identity.type == IdentityType.KNOWN
-            
-            pipeline_dirs = [d for d in os.listdir(storage_dir) if os.path.isdir(os.path.join(storage_dir, d))]
-            logger.info(f"[IDENTITIES] Found {len(pipeline_dirs)} pipeline directories in storage")
-            
-            # Search all pipeline directories
-            for pipeline_dir_name in pipeline_dirs:
-                pipeline_path = os.path.join(storage_dir, pipeline_dir_name)
-                
-                if is_known:
-                    # Known identities: storage/pipeline_id/person_name/image.jpg
-                    person_dir = os.path.join(pipeline_path, safe_name)
-                    logger.debug(f"[IDENTITIES] Checking known identity directory: {person_dir}")
-                    
-                    if os.path.exists(person_dir) and os.path.isdir(person_dir):
-                        logger.info(f"[IDENTITIES] ✅ Found person directory: {person_dir}")
-                        image_files = [
-                            f for f in os.listdir(person_dir)
-                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-                        ]
-                        if image_files:
-                            image_files.sort(reverse=True)
-                            best_path = os.path.join(person_dir, image_files[0])
-                            logger.info(f"[IDENTITIES] ✅ Selected image from storage/{pipeline_dir_name}/{safe_name}/: {best_path}")
-                            break
-                else:
-                    # Unknown identities: storage/pipeline_id/unknown/image.jpg
-                    unknown_dir = os.path.join(pipeline_path, "unknown")
-                    logger.debug(f"[IDENTITIES] Checking unknown identity directory: {unknown_dir}")
-                    
-                    if os.path.exists(unknown_dir) and os.path.isdir(unknown_dir):
-                        logger.info(f"[IDENTITIES] ✅ Found unknown directory: {unknown_dir}")
-                        image_files = [
-                            f for f in os.listdir(unknown_dir)
-                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-                        ]
-                        if image_files:
-                            # Sort by filename (most recent first)
-                            image_files.sort(reverse=True)
-                            best_path = os.path.join(unknown_dir, image_files[0])
-                            logger.info(f"[IDENTITIES] ✅ Selected image from storage/{pipeline_dir_name}/unknown/: {best_path}")
-                            break
-        
+        # A shared camera/unknown folder (or display-name folder) is not
+        # ownership evidence. Missing recorded photos remain unavailable.
+
         # Convert to relative path if found
         if best_path:
             logger.info(f"[IDENTITIES] Converting path to relative format: {best_path}")
@@ -301,6 +252,7 @@ class IdentityDetail(IdentityListItem):
     appearances: List[dict]
     embeddings_count: int
     faces_count: int
+    association_review: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -1173,7 +1125,8 @@ async def list_unknown_identities(
 async def get_identity_details(
     identity_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    appearance_id: Optional[int] = None
 ):
     """
     Get detailed information about an identity including timeline (admin only).
@@ -1212,6 +1165,15 @@ async def get_identity_details(
         )
         appearances = appearances_result.scalars().all()
         
+        if appearance_id is not None and not any(app.id == appearance_id for app in appearances):
+            raise HTTPException(status_code=404, detail="Sighting does not belong to this identity")
+        association_review = None
+        associations = {}
+        if identity.type == IdentityType.UNKNOWN:
+            from backend.core.appearance_events import review_unknown_associations
+            associations, association_review = await review_unknown_associations(
+                db, identity_uuid, appearances, appearance_id)
+
         # Get embeddings count
         embeddings_result = await db.execute(
             select(func.count(IdentityEmbedding.id)).where(
@@ -1260,9 +1222,6 @@ async def get_identity_details(
             if best_snapshot_path:
                 logger.info(f"[IDENTITIES] ✅ Found image from database Face records: {best_snapshot_path}")
         
-        # Priority 3: Search storage directories (already done in _find_best_image_from_storage_for_identity)
-        # This is handled inside the helper function as a fallback
-        
         # Convert path to URL - handles both database paths and storage paths
         if best_snapshot_path:
             # Use path_to_url utility to normalize and convert to URL
@@ -1295,7 +1254,8 @@ async def get_identity_details(
                 "start_time": _identity_iso_z(app.start_time),
                 "end_time": _identity_iso_z(app.end_time) if app.end_time else None,
                 "best_snapshot_path": app.best_snapshot_path if app.best_snapshot_path and os.path.exists(app.best_snapshot_path) else None,  # Keep for reference
-                "snapshot_url": app_snapshot_url  # Backend provides ready-to-use URL
+                "snapshot_url": app_snapshot_url,
+                **associations.get(app.id, {})
             })
         
         return {
@@ -1306,11 +1266,12 @@ async def get_identity_details(
             "status": identity.status.value,
             "first_seen_at": _identity_iso_z(identity.first_seen_at),
             "last_seen_at": _identity_iso_z(identity.last_seen_at),
-            "appearances_count": identity.appearances_count,
+            "appearances_count": len(appearances),
             "best_snapshot_path": best_snapshot_path,  # Keep original path for reference
             "snapshot_url": snapshot_url,  # Backend provides ready-to-use URL
             "pipeline_ids": pipeline_ids,  # List of pipeline IDs where this identity was seen
             "appearances": appearances_data,
+            "association_review": association_review,
             "embeddings_count": embeddings_count,
             "faces_count": faces_count
         }
