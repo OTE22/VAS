@@ -17,7 +17,7 @@ from typing import List, Tuple, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from db_models import Identity, IdentityType, IdentityStatus, IdentityEmbedding
+from db_models import Identity, IdentityType, IdentityStatus, IdentityEmbedding, IdentityImage
 from config import settings
 
 # Check vector backend
@@ -265,6 +265,10 @@ class IdentityLoader:
                                             f"[IDENTITY_LOADER] [STEP-BY-STEP]    ✅ Embedding saved: "
                                             f"id={emb_record.id} state={emb_record.vector_index_sync_state}")
                                     
+                                    await self._link_loaded_reference(
+                                        db, existing, emb_id if (USE_PGVECTOR and self.identity_service.use_pgvector)
+                                        else emb_record.id, image_path)
+
                                     # Also check and update best_snapshot_path if missing
                                     if not existing.best_snapshot_path:
                                         logger.info(f"[IDENTITY_LOADER] Identity {person_name} missing best_snapshot_path. Searching for images...")
@@ -391,12 +395,10 @@ class IdentityLoader:
             # as wrong. A face whose real landmarks cannot be found is now
             # skipped and logged instead.
             #
-            # on_multiple="best" is required, not preferred: this used to be
-            # max_num=1, so a folder containing a group photo silently loaded
-            # the largest face. Rejecting here would empty that identity's
-            # gallery slot at startup.
+            # A reference must represent exactly one face. Ambiguous group
+            # photos require an explicit crop through the enrollment workflow.
             try:
-                face = extract_single_face(image, on_multiple="best",
+                face = extract_single_face(image, on_multiple="reject",
                                            manager=self.model_manager)
             except FaceExtractionError as exc:
                 h, w = image.shape[:2]
@@ -485,12 +487,36 @@ class IdentityLoader:
                     f"identity_embeddings (id={embedding_record.id}, "
                     f"state={embedding_record.vector_index_sync_state})")
             
+            await self._link_loaded_reference(
+                db, identity, emb_id if (USE_PGVECTOR and self.identity_service.use_pgvector)
+                else embedding_record.id, image_path)
             return True, identity
             
         except Exception as e:
             logger.error(f"Error loading face from {image_path}: {e}", exc_info=True)
             return False, None
     
+    async def _link_loaded_reference(self, db, identity, embedding_id, image_path):
+        """Reload only an existing approved upload; never approve legacy snapshots."""
+        if embedding_id is None:
+            return
+        from backend.core.enrollment_service import sha256_of
+        with open(image_path, 'rb') as handle:
+            checksum = sha256_of(handle.read())
+        image = (await db.execute(select(IdentityImage).where(
+            IdentityImage.identity_id == identity.id,
+            IdentityImage.file_checksum == checksum,
+            IdentityImage.processing_status == 'completed',
+            IdentityImage.source_type.in_(['upload', 'cropped_face'])
+        ))).scalar_one_or_none()
+        if image is not None:
+            record = await db.get(IdentityEmbedding, embedding_id)
+            if record is not None and record.identity_id == identity.id:
+                record.image_id = image.id
+                await db.flush()
+        else:
+            logger.warning('[IDENTITY_LOADER] No approved upload for image; retained vector is history only')
+
     async def _extract_embedding(self, image_path: str) -> Optional[np.ndarray]:
         """Extract embedding from image file (for training purposes)"""
         try:
@@ -503,7 +529,7 @@ class IdentityLoader:
             # face is there. Returning None is the existing "skip this image"
             # signal for both callers.
             try:
-                face = extract_single_face(image, on_multiple="best",
+                face = extract_single_face(image, on_multiple="reject",
                                            manager=self.model_manager)
             except FaceExtractionError as exc:
                 logger.warning("[IDENTITY_LOADER] No usable face in %s: %s (%s)",

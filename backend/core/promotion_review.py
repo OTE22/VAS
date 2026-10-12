@@ -1,7 +1,7 @@
 """Server-side admission checks for promoting a stored unknown identity."""
 from sqlalchemy import select, func
 from config import settings
-from db_models import Identity, IdentityEmbedding, IdentityStatus, IdentityType
+from db_models import Identity, IdentityEmbedding, IdentityImage, IdentityStatus, IdentityType
 from backend.core.merge_compatibility import _load_valid_embeddings
 
 
@@ -26,6 +26,9 @@ async def review_promotion(db, person, display_name, model_version):
         distance = IdentityEmbedding.embedding.cosine_distance(vector)
         nearest = (await db.execute(select(Identity.id, func.min(distance).label('distance'))
             .join(IdentityEmbedding, IdentityEmbedding.identity_id == Identity.id)
+            .join(IdentityImage, (IdentityImage.id == IdentityEmbedding.image_id)
+                  & (IdentityImage.identity_id == Identity.id)
+                  & (IdentityImage.processing_status == 'completed'))
             .where(Identity.type == IdentityType.KNOWN,
                    Identity.status.in_([IdentityStatus.ACTIVE, IdentityStatus.PROMOTED]),
                    Identity.merged_into_id.is_(None), Identity.id != person.id,

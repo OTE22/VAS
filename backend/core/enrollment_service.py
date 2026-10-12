@@ -791,46 +791,18 @@ async def find_similar_identities(
     *,
     exclude_identity_ids: Sequence[Any] = (),
 ) -> List[Tuple[str, float]]:
-    """(identity_id, best similarity) for the people this face could already be.
-
-    Ordered best first, at most ENROLL_MAX_CANDIDATES long.
-
-    Uses vector_index.access.search_similar_embeddings because it is the only
-    search entry point that answers on BOTH backends — identity_service's
-    wrapper returns [] under pgvector, and the pgvector index's own
-    search_known does not exist under faiss — and because it routes its status
-    predicate through the shared SEARCHABLE_STATUS_SQL, so enrollment searches
-    exactly the ACTIVE + PROMOTED set that recognition does. PROMOTED
-    identities are type=KNOWN, so `identity_type="known"` keeps raw unknowns out
-    without a second filter.
-
-    It returns one row per EMBEDDING, so a pool much larger than the display
-    count is retrieved and then collapsed per identity: a person with eight
-    photos would otherwise occupy every slot and hide everyone else. The guard
-    at startup enforces pool > displayed for the same reason.
-    """
-    from backend.core.vector_index.access import search_similar_embeddings
-
-    floor = float(settings.ENROLL_CANDIDATE_MIN)
-    pool = int(settings.ENROLL_CANDIDATE_POOL)
-    limit = int(settings.ENROLL_MAX_CANDIDATES)
-
-    hits = await search_similar_embeddings(db, embedding, top_k=pool,
-                                           threshold=floor, identity_type="known")
-
-    # Excluded BEFORE collapsing, so an excluded identity cannot consume a slot.
+    """Review enrollment against approved references, never camera history."""
+    from backend.core.identity_index_pgvector import IdentityIndexPgVector
     excluded = {str(value) for value in exclude_identity_ids}
-    best: Dict[str, float] = {}
-    for hit in hits:
-        identity_id = str(hit.get("identity_id"))
-        if not identity_id or identity_id in excluded:
-            continue
-        score = float(hit.get("similarity") or 0.0)
-        if score > best.get(identity_id, float("-inf")):
-            best[identity_id] = score
-
-    ranked = sorted(best.items(), key=lambda item: item[1], reverse=True)
-    return ranked[:limit]
+    limit = int(settings.ENROLL_MAX_CANDIDATES)
+    # Rank distinct people before limiting; retained history or many images of
+    # one person cannot crowd out other enrolled candidates on either backend.
+    hits = await IdentityIndexPgVector().search_known(
+        embedding, db, top_k=limit + len(excluded),
+        threshold=float(settings.ENROLL_CANDIDATE_MIN),
+        recognition_only=True, model_version=embedding_model_version())
+    return [(identity_id, score) for identity_id, score in hits
+            if identity_id not in excluded][:limit]
 
 
 def classify_match(top_similarity: Optional[float]) -> str:

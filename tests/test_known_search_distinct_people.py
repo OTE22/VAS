@@ -48,15 +48,15 @@ async def _exercise():
                 query[0] = 1
                 index = IdentityIndexPgVector()
                 async with AsyncSession(bind=connection, join_transaction_mode='create_savepoint') as db:
-                    hits = await index.search_known(query, db, top_k=2, threshold=.5)
+                    hits = await index.search_known(query, db, recognition_only=False, top_k=2, threshold=.5)
                     assert [p for p, _ in hits] == people[:2]
                     assert [s for _, s in hits] == pytest.approx([.99, .90], abs=1e-6)
-                    hits = await index.search_known(query, db, top_k=10, threshold=.5)
+                    hits = await index.search_known(query, db, recognition_only=False, top_k=10, threshold=.5)
                     assert [p for p, _ in hits] == [people[0], people[1], people[6], people[2]]
                     assert len({p for p, _ in hits}) == len(hits)
-                    hits = await index.search_known(query, db, top_k=10, threshold=.95)
+                    hits = await index.search_known(query, db, recognition_only=False, top_k=10, threshold=.95)
                     assert [p for p, _ in hits] == [people[0]]
-                    assert await index.search_known(query, db, top_k=10, threshold=.999) == []
+                    assert await index.search_known(query, db, recognition_only=False, top_k=10, threshold=.999) == []
             finally:
                 await transaction.rollback()
     finally:

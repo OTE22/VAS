@@ -485,23 +485,18 @@ class Settings(BaseSettings):
 
     # --- Identity auto-enrichment: confidently-matched runtime embeddings are added
     # to the identity so it learns the person's appearance range over time.
-    # Auto-enrichment writes a RUNTIME observation permanently into an enrolled
-    # person. Off by default: the upstream admission bar is SIMILARITY_THRESHOLD
-    # (0.4), so one wrong attribution becomes a stored vector, and every later
-    # photo of that wrong person then matches the identity at ~1.0. No column
-    # distinguishes an auto-learned vector from an operator-enrolled one, so the
-    # mistake is invisible afterwards. Turn on only with review in place.
+    # Extending recognition references requires explicit opt-in. Learned views remain anchored to an approved
+    # image; ordinary observations are historical data and never expand trust.
     IDENTITY_AUTO_ENRICH_ENABLED: bool = Field(
         default=False,
-        description=("Let recognition add high-confidence runtime embeddings to an "
-                     "enrolled identity. Off by default: a single mis-attribution "
-                     "becomes permanent and self-reinforcing. Default: false")
+        description=("Allow high-quality camera views to supplement approved photos. "
+                     "Each view must match an approved current-model reference. "
+                     "Disabling excludes learned views immediately. Default: false")
     )
     IDENTITY_ENRICH_MIN_SIMILARITY: float = Field(
         default=0.75,
-        description=("Similarity an auto-enrichment candidate must clear. Raised to "
-                     "match CONFIDENCE_HIGH_MIN: at the old 0.55 this sat only 0.15 "
-                     "above the match threshold itself. Default: 0.75")
+        description=("Minimum similarity to an approved photo for an enriched view. "
+                     "The live Known threshold also applies. Default: 0.75")
     )
     IDENTITY_ENRICH_MIN_QUALITY: float = Field(default=0.5)
     IDENTITY_INGEST_TOP_K: int = Field(

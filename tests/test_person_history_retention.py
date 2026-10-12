@@ -249,7 +249,8 @@ def test_historical_search_returns_distinct_people_and_excludes_merges(isolated,
             index = IdentityIndexPgVector()
             method = index.search_known if kind == IdentityType.KNOWN else index.search_unknown
             assert await method(vector, db, top_k=2, threshold=.8) == []
-            rows = await method(vector, db, top_k=2, threshold=.8, include_inactive=True)
+            rows = await method(vector, db, top_k=2, threshold=.8, include_inactive=True,
+                                **({'recognition_only': False} if kind == IdentityType.KNOWN else {}))
             assert [r[0] for r in rows] == [str(iid), str(second.id)]
             rows = await search_similar_embeddings(db, vector, top_k=2, threshold=.8,
                                                    identity_type=kind.value.lower(), include_inactive=True)

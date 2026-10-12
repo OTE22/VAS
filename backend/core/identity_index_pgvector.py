@@ -285,15 +285,15 @@ class IdentityIndexPgVector:
         threshold: float = None,
         include_inactive: bool = False,
         *,
-        recognition_only: bool = False,
+        recognition_only: bool = True,
         model_version: Optional[str] = None,
         allow_enriched: bool = False
     ) -> List[Tuple[str, float]]:
         """
         Search KNOWN people, using each person's highest embedding similarity.
 
-        Live recognition MUST pass recognition_only=True and its model version.
-        Historical search intentionally retains all camera observations.
+        Defaults to approved references in the current model space. Historical
+        search explicitly passes recognition_only=False to include observations.
 
         Args:
             embedding: Query embedding (will be L2-normalized)
@@ -313,6 +313,9 @@ class IdentityIndexPgVector:
         if threshold is None:
             threshold = float(settings.SIMILARITY_THRESHOLD)
 
+        if recognition_only and model_version is None:
+            path = settings.RECOGNITION_MODEL
+            model_version = os.path.splitext(os.path.basename(str(path)))[0][:64] if path else None
         if recognition_only and not model_version:
             return []  # Unknown model provenance cannot establish an identity.
         reference_filter = KNOWN_REFERENCE_SQL if recognition_only else "TRUE"

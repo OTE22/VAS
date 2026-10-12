@@ -1291,8 +1291,8 @@ class IdentityService:
         """
         Promote an unknown identity to known.
         
-        With FAISS: Moves embeddings from UNKNOWN to KNOWN index (complex).
-        With pgvector: Just updates the database record (simple!).
+        On both backends, the reviewed photo becomes a reference and previous
+        camera embeddings remain historical observations.
         """
         from backend.core.identity_merge_lock import lock_identity_mutation
         from backend.core.promotion_review import PromotionError, review_promotion

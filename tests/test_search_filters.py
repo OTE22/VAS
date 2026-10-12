@@ -92,7 +92,8 @@ class FakeVectorIndex:
         self.requested_top_k = []
         self.requested_threshold = []
 
-    async def search_known(self, embedding, top_k, threshold, db=None, include_inactive=False):
+    async def search_known(self, embedding, top_k, threshold, db=None, include_inactive=False, recognition_only=True):
+        assert recognition_only is False, "Historical search must retain camera observations"
         self.requested_top_k.append(top_k)
         self.requested_threshold.append(threshold)
         return list(self.rows)

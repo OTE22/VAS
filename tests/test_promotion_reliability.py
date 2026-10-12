@@ -5,6 +5,7 @@ import json
 import uuid
 from datetime import datetime
 from types import SimpleNamespace as NS
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,9 +16,22 @@ from backend.core.promotion_review import PromotionError
 from test_merge_reliability import sandbox, vector
 
 
+@pytest.fixture(autouse=True)
+def synthetic_promotion_photos(monkeypatch, tmp_path):
+    # These tests exercise database/audit atomicity, not face inference.
+    # Promotion now requires a usable selected photo; provide deterministic
+    # extraction while running the real adoption and reference transaction.
+    from backend.core import enrollment_service
+    monkeypatch.setattr(settings, 'STORAGE_DIR', str(tmp_path))
+    monkeypatch.setattr(enrollment_service, 'prepare_upload', lambda *a, **kw: NS(
+        embedding_normalized=vector(0), quality=.9, quality_scorer_version='synthetic'))
+
+
 async def unknown(db, service, *, embedding=True, status=m.IdentityStatus.ACTIVE):
     service.embedding_model_version = 'promotion-qa-' + uuid.uuid4().hex[:12]
-    person = m.Identity(type=m.IdentityType.UNKNOWN, status=status)
+    photo = Path(settings.STORAGE_DIR) / (uuid.uuid4().hex + '.jpg')
+    photo.write_bytes(b'synthetic-promotion-photo')
+    person = m.Identity(type=m.IdentityType.UNKNOWN, status=status, best_snapshot_path=str(photo))
     db.add(person); await db.flush()
     if embedding:
         db.add(m.IdentityEmbedding(identity_id=person.id, embedding=vector(0),
