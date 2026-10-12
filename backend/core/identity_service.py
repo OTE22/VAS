@@ -322,13 +322,10 @@ class IdentityService:
 
     @property
     def auto_enrich_enabled(self) -> bool:
-        """Whether a recognised face may be written back as a new embedding.
+        """Whether anchored camera views may supplement approved references.
 
-        Off by default. When on, it silently teaches an identity new faces:
-        anything admitted by the KNOWN threshold and clearing the enrich bar is
-        stored permanently under that identity, with no provenance flag telling
-        an operator-enrolled vector from an auto-learned one. One wrong match
-        then makes every subsequent photo of the wrong person a ~1.0 hit.
+        Ordinary observations are always historical data, never implicit consent
+        to learn. Turning enrichment off immediately excludes learned views.
         """
         return bool(settings.IDENTITY_AUTO_ENRICH_ENABLED)
 
@@ -540,7 +537,10 @@ class IdentityService:
             embedding=embedding,
             db=db,
             top_k=int(settings.IDENTITY_INGEST_TOP_K),
-            threshold=self.known_threshold
+            threshold=self.known_threshold,
+            recognition_only=True,
+            model_version=self.embedding_model_version,
+            allow_enriched=self.auto_enrich_enabled
         )
         
         logger.info(f"[IDENTITY_SEARCH] [PGVECTOR] KNOWN search returned {len(known_matches)} matches")
@@ -665,48 +665,48 @@ class IdentityService:
         skip, and a hard cap per identity. Never raises - enrichment is best-effort.
         """
         try:
-            # OFF BY DEFAULT. Enrichment writes a runtime observation into an
-            # enrolled person permanently, and the admission bar upstream is
-            # SIMILARITY_THRESHOLD (0.4). One wrong attribution therefore does
-            # not stay a single wrong frame — it becomes a stored vector, and
-            # every later photo of that wrong person then matches the identity
-            # at ~1.0. There is no provenance column distinguishing an
-            # auto-learned vector from an operator-enrolled one, so the mistake
-            # is also invisible afterwards. Opt in deliberately.
             if not self.auto_enrich_enabled:
-                return
-
-            min_sim = float(settings.IDENTITY_ENRICH_MIN_SIMILARITY)
+                return None
+            min_sim = max(float(settings.IDENTITY_ENRICH_MIN_SIMILARITY), self.known_threshold)
             min_quality = float(settings.IDENTITY_ENRICH_MIN_QUALITY)
-            # Same cap the retention job prunes to. Growing past it here just
-            # queued work for the nightly sweep to undo.
-            max_embeddings = int(settings.MAX_EMBEDDINGS_PER_IDENTITY)
-
-            if similarity < min_sim:
-                return
-            if quality_score is not None and quality_score < min_quality:
-                logger.debug(f"[ENRICH] Skip {identity.display_name}: quality {quality_score:.2f} < {min_quality}")
-                return
-
+            if (not np.isfinite(similarity) or similarity < min_sim
+                    or quality_score is None or not np.isfinite(quality_score)
+                    or quality_score < min_quality):
+                return None
+            from backend.core.identity_index_pgvector import KNOWN_REFERENCE_SQL
+            # Admission is measured against an approved image, NEVER a previously
+            # enriched vector. History size must not consume the enrichment cap.
+            vector = self._normalize_for_storage(embedding)
+            params = {"identity": str(identity.id),
+                      "vector": '[' + ','.join(map(str, vector)) + ']',
+                      "reference_model_version": self.embedding_model_version,
+                      "allow_enriched": False, "reference_min_similarity": min_sim}
+            anchor_sim = await db.scalar(sa_text(f"""
+                SELECT max(1 - (ie.embedding <=> CAST(:vector AS vector)))
+                FROM identity_embeddings ie
+                WHERE ie.identity_id = :identity AND ({KNOWN_REFERENCE_SQL})
+            """), params)
+            if anchor_sim is None or not np.isfinite(anchor_sim) or anchor_sim < min_sim:
+                return None
+            count, max_sim = (await db.execute(sa_text("""
+                SELECT count(*), max(1 - (embedding <=> CAST(:vector AS vector)))
+                FROM identity_embeddings
+                WHERE identity_id = :identity AND faiss_index_type = 'known_enriched'
+                  AND embedding_model_version = :reference_model_version
+            """), params)).one()
+            if count >= int(settings.MAX_EMBEDDINGS_PER_IDENTITY):
+                return None
+            max_sim = max(float(anchor_sim), float(max_sim or 0))
+            if max_sim >= float(settings.IDENTITY_NEAR_DUPLICATE_MIN):
+                return None
             identity_id_str = str(identity.id)
-
-            count = await self.pgvector_index.count_identity_embeddings(identity_id_str, db)
-            if count >= max_embeddings:
-                logger.debug(f"[ENRICH] Skip {identity.display_name}: already has {count} embeddings (cap {max_embeddings})")
-                return
-
-            max_sim = await self.pgvector_index.max_similarity_to_identity(identity_id_str, embedding, db)
-            if max_sim is not None and max_sim >= float(settings.IDENTITY_NEAR_DUPLICATE_MIN):
-                logger.debug(f"[ENRICH] Skip {identity.display_name}: near-duplicate of existing view (sim {max_sim:.3f})")
-                return
-
             emb_id = await self.pgvector_index.add_embedding(
                 identity_id=identity_id_str,
                 embedding=embedding,
                 detection_id=detection_id,
                 pipeline_id=pipeline_id,
                 quality_score=quality_score,
-                index_type='known',
+                index_type='known_enriched',
                 db=db
             )
             if emb_id:
@@ -947,6 +947,16 @@ class IdentityService:
 
         Returns [(identity_id, similarity)] — the shape callers already expect.
         """
+        if index_type == 'known':
+            # A global FAISS top-k can be crowded out by retained observations.
+            # Rank the small approved gallery exactly in PostgreSQL on both
+            # backends. FAISS remains the index for unknown/history vectors.
+            reference_index = self.pgvector_index or IdentityIndexPgVector()
+            return await reference_index.search_known(
+                embedding, db, top_k=top_k, threshold=threshold,
+                recognition_only=True, model_version=self.embedding_model_version,
+                allow_enriched=self.auto_enrich_enabled)
+
         index = getattr(self, 'vector_index', None)
         if index is None:
             return []
@@ -1092,7 +1102,13 @@ class IdentityService:
             return None
         
         # Determine which index to use
-        index_type = 'known' if identity.type == IdentityType.KNOWN else 'unknown'
+        index_type = 'unknown'
+        if identity.type == IdentityType.KNOWN:
+            # Keep the observation for historical searches, but never promote a
+            # camera match into an enrolled reference. Enrollment links image_id
+            # in the same transaction; that link is the source of trust.
+            index_type = ('known_observation' if pipeline_id is not None or detection_id is not None
+                          else 'known')
         
         if self.use_pgvector and self.pgvector_index:
             # pgvector backend - store embedding directly in PostgreSQL.
@@ -1331,164 +1347,53 @@ class IdentityService:
         db: AsyncSession,
         copied_files: Optional[list] = None
     ) -> Identity:
-        """
-        Promote unknown identity to known using pgvector backend.
-        
-        This is MUCH simpler than FAISS because:
-        - No index reconstruction needed
-        - No vector movement between indexes
-        - Just update database records!
-        """
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] ========================================")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] 🚀 Starting pgvector promotion")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] Identity ID: {identity_id}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] Display name: '{display_name}'")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] User ID: {user_id}")
-        
-        # Count embeddings before
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] Step 1: Counting embeddings before promotion...")
-        emb_count_result = await db.execute(
-            select(func.count(IdentityEmbedding.id)).where(
-                IdentityEmbedding.identity_id == identity_id,
-                IdentityEmbedding.embedding.isnot(None)
-            )
-        )
-        embedding_count = emb_count_result.scalar() or 0
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   ✅ Found {embedding_count} embeddings with non-NULL vectors")
-        
-        # Count by type
-        emb_type_result = await db.execute(
-            select(
-                IdentityEmbedding.faiss_index_type,
-                func.count(IdentityEmbedding.id)
-            ).where(
-                IdentityEmbedding.identity_id == identity_id
-            ).group_by(IdentityEmbedding.faiss_index_type)
-        )
-        emb_by_type = {row[0]: row[1] for row in emb_type_result.all()}
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   Embeddings by type: {emb_by_type}")
-        
-        # Step 1: Update identity type (UNKNOWN → KNOWN)
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] Step 2: Updating identity record...")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   BEFORE:")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     type: {identity.type.value}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     status: {identity.status.value}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     display_name: {identity.display_name}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     updated_at: {identity.updated_at}")
-        
+        """Promote the reviewed photo, preserving the cluster as history only."""
+        from backend.core.enrollment_service import (adopt_existing_file,
+                                                      ensure_image_reference,
+                                                      pending_absolute_path)
+        from backend.core.promotion_review import PromotionError
+        from backend.utils.path_utils import normalize_storage_path
+        best_image_path = identity.best_snapshot_path
+        if not best_image_path:
+            raise PromotionError('PROMOTION_IMAGE_REQUIRED',
+                'This person has no saved photo. Add a clear reference photo through Known Faces.', 400)
+        try:
+            absolute = pending_absolute_path(normalize_storage_path(best_image_path))
+            adopted = await adopt_existing_file(db, identity, absolute,
+                source_type="promotion", actor_user_id=user_id, copied_files=copied_files)
+            if adopted is None:
+                raise ValueError('Selected photo is unavailable')
+            # Extraction uses the exact photo shown for promotion. No vector
+            # from the unknown cluster is implicitly approved by this action.
+            await ensure_image_reference(db, identity, adopted, self)
+        except Exception as exc:
+            raise PromotionError('PROMOTION_REFERENCE_INVALID',
+                'The selected photo cannot be used for recognition. Add a clear single-face photo through Known Faces.', 400) from exc
+
         identity.type = IdentityType.KNOWN
         identity.status = IdentityStatus.PROMOTED
-        old_display_name = identity.display_name
         identity.display_name = display_name
         identity.updated_at = datetime.utcnow()
-        
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   AFTER:")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     ✅ type: {identity.type.value} (was {IdentityType.UNKNOWN.value})")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     ✅ status: {identity.status.value} (was {identity.status.value})")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     ✅ display_name: '{identity.display_name}' (was '{old_display_name}')")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]     ✅ updated_at: {identity.updated_at}")
-        
-        # Step 2: Update embedding records (just change faiss_index_type field)
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] Step 3: Updating embedding records...")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   Updating faiss_index_type: 'unknown' → 'known'")
-        
-        update_result = await db.execute(
-            update(IdentityEmbedding).where(
-                IdentityEmbedding.identity_id == identity_id,
-                IdentityEmbedding.faiss_index_type == 'unknown'
-            ).values(
-                faiss_index_type='known'
-            )
-        )
-        rows_updated = update_result.rowcount
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   ✅ Updated {rows_updated} embedding records")
-        
-        # Verify the update
-        emb_after_result = await db.execute(
-            select(
-                IdentityEmbedding.faiss_index_type,
-                func.count(IdentityEmbedding.id)
-            ).where(
-                IdentityEmbedding.identity_id == identity_id
-            ).group_by(IdentityEmbedding.faiss_index_type)
-        )
-        emb_after_by_type = {row[0]: row[1] for row in emb_after_result.all()}
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   Embeddings after update: {emb_after_by_type}")
-        
-        if 'known' in emb_after_by_type and emb_after_by_type['known'] > 0:
-            logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   ✅ {emb_after_by_type['known']} embeddings now marked as KNOWN")
-        else:
-            logger.warning(f"[IDENTITY_PROMOTE] [PGVECTOR]   ⚠️ No embeddings marked as KNOWN after update!")
-        
-        # Step 3: adopt the best snapshot into the identity's UUID folder
-        # (same shared implementation as the non-pgvector path above).
-        best_image_path = identity.best_snapshot_path
-        if best_image_path:
-            from backend.core.enrollment_service import adopt_existing_file
-
-            adopted = await adopt_existing_file(
-                db, identity, best_image_path, source_type="promotion", copied_files=copied_files)
-            if adopted is not None:
-                identity.best_snapshot_path = adopted.storage_path
-                logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   ✅ Adopted image -> {adopted.storage_path}")
-                await db.execute(
-                    update(IdentityAppearance).where(
-                        IdentityAppearance.identity_id == identity_id,
-                        IdentityAppearance.best_snapshot_path == best_image_path
-                    ).values(
-                        best_snapshot_path=adopted.storage_path
-                    )
-                )
-            else:
-                logger.warning("[IDENTITY_PROMOTE] [PGVECTOR]   ⚠️ Could not adopt best image")
-        else:
-            logger.warning("[IDENTITY_PROMOTE] [PGVECTOR]   ⚠️ No best image path available")
-        
-        # Step 4: Update Face records
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] Step 5: Updating Face records...")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   Setting name: 'Unknown' → '{display_name}'")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   Setting label_state: AUTO_UNKNOWN → MANUAL_LABELED")
-        
-        face_update_result = await db.execute(
-            update(Face).where(
-                Face.identity_id == identity_id
-            ).values(
-                name=display_name,
-                label_state=LabelState.MANUAL_LABELED
-            )
-        )
-        faces_updated = face_update_result.rowcount
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   ✅ Updated {faces_updated} Face records")
-        
-        # Verify Face records were updated
-        face_verify_result = await db.execute(
-            select(func.count(Face.id), func.count(Face.id).filter(Face.name == display_name))
-            .where(Face.identity_id == identity_id)
-        )
-        face_verify_row = face_verify_result.first()
-        total_faces = face_verify_row[0] or 0
-        faces_with_name = face_verify_row[1] or 0
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   Verification: {faces_with_name}/{total_faces} Face records have name '{display_name}'")
-        
+        identity.best_snapshot_path = adopted.storage_path
+        await db.execute(update(IdentityEmbedding).where(
+            IdentityEmbedding.identity_id == identity_id,
+            IdentityEmbedding.image_id.is_(None),
+            IdentityEmbedding.faiss_index_type == 'unknown'
+        ).values(faiss_index_type='known_observation'))
+        await db.execute(update(IdentityAppearance).where(
+            IdentityAppearance.identity_id == identity_id,
+            IdentityAppearance.best_snapshot_path == best_image_path
+        ).values(best_snapshot_path=adopted.storage_path))
+        # Preserve prior workflow labels; these remain historical operator
+        # assignments, not evidence that every vector was an enrolled reference.
+        await db.execute(update(Face).where(Face.identity_id == identity_id)
+                         .values(name=display_name, label_state=LabelState.MANUAL_LABELED))
         await db.flush()
-        
-        # Verify
-        verify_result = await db.execute(
-            select(func.count(IdentityEmbedding.id)).where(
-                IdentityEmbedding.identity_id == identity_id,
-                IdentityEmbedding.faiss_index_type == 'known',
-                IdentityEmbedding.embedding.isnot(None)
-            )
-        )
-        known_count = verify_result.scalar() or 0
-        
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] ✅ Successfully promoted identity {identity_id}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   • Display name: {display_name}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR]   • Embeddings as KNOWN: {known_count}")
-        logger.info(f"[IDENTITY_PROMOTE] [PGVECTOR] ===== Promotion complete =====")
+        logger.info("[IDENTITY_PROMOTE] Promoted %s with approved image %s; camera history retained",
+                    identity_id, adopted.id)
         _count_identity_op("promote")
         return identity
-    
+
     async def measured_snapshot_quality(self, db, person):
         from backend.core.enrollment_service import pending_absolute_path
         from backend.utils.path_utils import normalize_storage_path

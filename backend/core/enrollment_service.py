@@ -1742,6 +1742,53 @@ async def adopt_existing_file(db: AsyncSession, identity, source_path: str,
         return None
 
 
+async def ensure_image_reference(db: AsyncSession, identity, image_row: IdentityImage,
+                                 identity_service) -> IdentityEmbedding:
+    """Build a reference from one operator-approved image; flush, never commit.
+
+    Used by promotion and explicit repairs, not by camera ingestion or startup.
+    Re-running for the same image/model is idempotent. Existing observations
+    remain untouched, including observations that resemble the approved image.
+    """
+    import asyncio
+    model_version = identity_service.embedding_model_version
+    if (image_row.identity_id != identity.id or image_row.processing_status != "completed"
+            or not model_version):
+        raise EnrollmentError("invalid_reference", "The selected reference is not ready.")
+    # Serialize repeated repairs/promotions of the same image without a new
+    # uniqueness constraint or schema migration.
+    await db.execute(select(IdentityImage.id).where(IdentityImage.id == image_row.id).with_for_update())
+    existing = (await db.execute(select(IdentityEmbedding).where(
+        IdentityEmbedding.identity_id == identity.id,
+        IdentityEmbedding.image_id == image_row.id,
+        IdentityEmbedding.embedding_model_version == model_version,
+        IdentityEmbedding.embedding.isnot(None)).order_by(IdentityEmbedding.id).limit(1))).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    path = pending_absolute_path(image_row.storage_path)
+    def prepare_reference():
+        with open(path, "rb") as handle:
+            payload = handle.read()
+        if sha256_of(payload) != image_row.file_checksum:
+            raise EnrollmentError("reference_changed", "The selected reference photo changed. Upload it again.")
+        return prepare_upload(payload, original_filename=image_row.original_filename,
+                              content_type=image_row.content_type, is_face_image=True)
+    prepared = await asyncio.to_thread(prepare_reference)
+    record = await identity_service.save_embedding(identity, prepared.embedding_normalized,
+        detection_id=None, pipeline_id=None, quality_score=None, db=db, defer_commit=True)
+    if record is None:
+        raise EnrollmentError("embedding_save_failed", "Could not store the approved reference.")
+    record.image_id = image_row.id
+    record.faiss_index_type = 'known'
+    record.quality = prepared.quality
+    record.quality_scorer_version = prepared.quality_scorer_version
+    image_row.quality_score = prepared.quality
+    image_row.quality_scorer_version = prepared.quality_scorer_version
+    await db.flush()
+    validate_saved_embedding(record, identity.id, image_row.id)
+    return record
+
+
 async def set_primary_image(db: AsyncSession, identity_id: str, image_id: int,
                             actor_user_id: Optional[int] = None) -> Dict[str, Any]:
     """Promote one image to primary. Explicit, administrator-driven only."""

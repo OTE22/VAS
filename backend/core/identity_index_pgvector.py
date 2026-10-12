@@ -69,6 +69,31 @@ def _timed_vector_search(fn):
     return wrapper
 
 
+# Camera history is not an enrollment gallery. The image ownership join also
+# invalidates deleted/moved/failed enrollment references immediately. Enrichment
+# is explicit, reversible by its setting, and must remain close to a manual
+# anchor in the CURRENT model space; enrichment can never bootstrap itself.
+KNOWN_REFERENCE_SQL = """
+    ie.embedding_model_version = :reference_model_version AND (
+        EXISTS (SELECT 1 FROM identity_images reference_image
+                WHERE reference_image.id = ie.image_id
+                  AND reference_image.identity_id = ie.identity_id
+                  AND reference_image.processing_status = 'completed')
+        OR (:allow_enriched AND ie.faiss_index_type = 'known_enriched'
+            AND EXISTS (
+                SELECT 1 FROM identity_embeddings anchor
+                JOIN identity_images anchor_image ON anchor_image.id = anchor.image_id
+                  AND anchor_image.identity_id = anchor.identity_id
+                  AND anchor_image.processing_status = 'completed'
+                WHERE anchor.identity_id = ie.identity_id
+                  AND anchor.embedding_model_version = :reference_model_version
+                  AND anchor.embedding IS NOT NULL
+                  AND 1 - (anchor.embedding <=> ie.embedding)
+                      BETWEEN :reference_min_similarity AND 1.0))
+    )
+"""
+
+
 class IdentityIndexPgVector:
     """
     pgvector-based identity index service.
@@ -258,10 +283,17 @@ class IdentityIndexPgVector:
         db: AsyncSession,
         top_k: int = 1,
         threshold: float = None,
-        include_inactive: bool = False
+        include_inactive: bool = False,
+        *,
+        recognition_only: bool = False,
+        model_version: Optional[str] = None,
+        allow_enriched: bool = False
     ) -> List[Tuple[str, float]]:
         """
         Search KNOWN people, using each person's highest embedding similarity.
+
+        Live recognition MUST pass recognition_only=True and its model version.
+        Historical search intentionally retains all camera observations.
 
         Args:
             embedding: Query embedding (will be L2-normalized)
@@ -280,6 +312,16 @@ class IdentityIndexPgVector:
 
         if threshold is None:
             threshold = float(settings.SIMILARITY_THRESHOLD)
+
+        if recognition_only and not model_version:
+            return []  # Unknown model provenance cannot establish an identity.
+        reference_filter = KNOWN_REFERENCE_SQL if recognition_only else "TRUE"
+        reference_params = ({
+            "reference_model_version": model_version,
+            "allow_enriched": bool(allow_enriched),
+            "reference_min_similarity": max(float(settings.IDENTITY_ENRICH_MIN_SIMILARITY),
+                                            float(settings.SIMILARITY_THRESHOLD)),
+        } if recognition_only else {})
 
         logger.info(f"[PGVECTOR] [SEARCH_KNOWN] ========================================")
         logger.info(f"[PGVECTOR] [SEARCH_KNOWN] 🔍 Starting KNOWN Identity Search (pgvector)")
@@ -364,6 +406,7 @@ class IdentityIndexPgVector:
                         AND i.type::text = UPPER(:identity_type)
                         AND (i.status::text IN ('ACTIVE', 'PROMOTED') OR (:include_inactive AND i.status::text = 'INACTIVE'))
                         AND i.merged_into_id IS NULL
+                        AND ({reference_filter})
                         AND 1 - (ie.embedding <=> qv.vec) BETWEEN :threshold AND 1.0
                     ORDER BY ie.identity_id, ie.embedding <=> qv.vec, ie.id
                     )
@@ -373,6 +416,7 @@ class IdentityIndexPgVector:
                     LIMIT :top_k
                 """),
                 {
+                    **reference_params,
                     "include_inactive": include_inactive,
                     "identity_type": IdentityType.KNOWN.value,  # Use enum value: "known"
                     "threshold": threshold,
@@ -399,10 +443,11 @@ class IdentityIndexPgVector:
                               AND i.type::text = UPPER(:identity_type)
                               AND (i.status::text IN ('ACTIVE', 'PROMOTED') OR (:include_inactive AND i.status::text = 'INACTIVE'))
                               AND i.merged_into_id IS NULL
+                        AND ({reference_filter})
                             ORDER BY ie.embedding <=> '{embedding_array_str}'::vector
                             LIMIT 1
                         """),
-                        {"identity_type": IdentityType.KNOWN.value, "include_inactive": include_inactive}
+                        {**reference_params, "identity_type": IdentityType.KNOWN.value, "include_inactive": include_inactive}
                     )
                     best = diag.fetchone()
                     if best:
