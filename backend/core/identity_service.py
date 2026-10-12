@@ -362,21 +362,8 @@ class IdentityService:
         else:
             logger.info(f"[IDENTITY_SEARCH] Using FAISS backend (use_pgvector={self.use_pgvector}, pgvector_index={self.pgvector_index is not None})")
         
-        # FAISS backend, through the VectorIndex contract.
-        #
-        # The index answers with EMBEDDING KEYS (identity_embeddings.id) and has
-        # no notion of a person; search_vector_index resolves those keys through
-        # PostgreSQL and groups them by identity. That indirection is the whole
-        # point — it is what lets the index implementation change without
-        # touching a schema or a route, and it means a stale key that no longer
-        # has an ACTIVE row simply cannot win a match.
-        if self.vector_index is None:
-            logger.error("[IDENTITY_SEARCH] No vector index is configured; "
-                         "cannot search. Creating a new UNKNOWN identity.")
-            identity, emb_id = await self._create_unknown_identity(
-                embedding, pipeline_id, detection_id, db, quality_score,
-                quality_scorer_version)
-            return IdentityResolution(identity, True, 0.0, emb_id, True)
+        # Live recognition uses PostgreSQL references on either backend.
+        # A missing/disconnected FAISS history cache must not bypass this gate.
 
         # Step 1: KNOWN
         known_matches = await self.search_vector_index(
@@ -405,6 +392,8 @@ class IdentityService:
                 select(Identity).where(Identity.id == uuid.UUID(identity_id_str))
             )).scalar_one_or_none()
             if identity is not None:
+                if identity.type != IdentityType.UNKNOWN or identity.status != IdentityStatus.ACTIVE or identity.merged_into_id:
+                    raise RuntimeError("Unknown reference ownership changed during recognition; retry")
                 logger.info(f"[IDENTITY] Matched UNKNOWN identity {identity.id} "
                             f"(sim={similarity:.3f})")
                 await self._update_identity_seen(identity, db)
@@ -937,19 +926,11 @@ class IdentityService:
     async def search_vector_index(self, db: AsyncSession, embedding: np.ndarray,
                                   *, top_k: int = 1, threshold: float = 0.0,
                                   index_type: str = 'known'):
-        """Search the index, then resolve results through PostgreSQL.
+        """Rank approved Known photos or stable Unknown references.
 
-        The index speaks EMBEDDING KEYS (identity_embeddings.id) and nothing
-        else — it has no notion of a person. Turning keys into identities is
-        done here, against the database:
-
-            key -> identity_embeddings row -> identity (ACTIVE only)
-
-        and multiple embeddings of the same person collapse to that person's
-        best score. Keeping identity resolution out of the index is what lets
-        the index implementation change without touching a schema or a route.
-
-        Returns [(identity_id, similarity)] — the shape callers already expect.
+        Retained observations are available to historical search only. The
+        reference boundary is identical with either vector backend configured.
+        Returns [(identity_id, similarity)] for the existing recognition callers.
         """
         if index_type == 'known':
             # A global FAISS top-k can be crowded out by retained observations.

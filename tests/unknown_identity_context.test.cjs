@@ -76,3 +76,19 @@ test('live card updates pass the currently displayed appearance, not the initial
   assert.match(source,/el\.closest\('\[data-identity-id\]'\)\?\.dataset.appearanceId/);
  } finally {h.dom.window.close();}
 });
+test('review context action prevents link navigation and passes the selected appearance',()=>{
+ const h=harness();
+ try {
+  h.w.eval(fs.readFileSync('frontend/js/actions.js','utf8'));
+  const start=source.indexOf('    viewIdentityDetails: (el, event) => {');
+  const end=source.indexOf('    promoteIdentityModal:',start);
+  h.w.eval('Actions.register({'+source.slice(start,end)+'});');
+  const link=h.w.document.createElement('a');
+  link.href='/admin/unknown?view=synthetic&appearance_id=7';
+  link.dataset.action='viewIdentityDetails';link.dataset.arg='synthetic';link.dataset.appearanceId='7';
+  h.w.document.body.append(link);
+  const click=new h.w.MouseEvent('click',{bubbles:true,cancelable:true});link.dispatchEvent(click);
+  assert.equal(click.defaultPrevented,true);
+  assert.equal(h.pending[0].url,'/api/admin/identity/synthetic?appearance_id=7');
+ } finally {h.dom.window.close();}
+});

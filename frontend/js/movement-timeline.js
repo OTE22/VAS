@@ -173,12 +173,28 @@
     document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPlayback();});
 
     function render(appearances, label) {
+        if (!Array.isArray(appearances) || !appearances.some(app => app.association_status)) {
+            return renderSequence(appearances, label);
+        }
+        const included = appearances.filter(app => ['selected', 'consistent'].includes(app.association_status));
+        const review = appearances.filter(app => !['selected', 'consistent'].includes(app.association_status));
+        const notice = `<div class="movement-association-notice" role="note"><strong>${included.length} sightings in this journey · ${review.length} need review</strong><p>Automated similarity to the selected reference does not confirm identity. Other stored associations are excluded from the journey and kept below. No history has been deleted.</p>${review.length ? `<p>Identity actions apply to all ${appearances.length} recorded sightings. Review this group before promoting, merging or creating an identity alert.</p>` : ''}</div>`;
+        const gallery = review.length ? `<details class="movement-association-review"><summary>Other recorded associations — review required (${review.length})</summary><p>These photos do not establish the selected person's movement. Review each sighting separately.</p><section class="movement-evidence" data-journey-ready="true" aria-label="Associations requiring review"><ol class="movement-list">${review.map((app, index) => {
+            const url = imageUrl(app.snapshot_url || app.best_snapshot_path);
+            const camera = app.location_name || (app.pipeline_id ? label(app.pipeline_id) : 'Unknown camera');
+            const stamp = Number.isFinite(Date.parse(app.start_time)) ? new Date(app.start_time).toLocaleString() : 'Time unavailable';
+            const reason = app.association_reason || 'Association not verified';
+            return `<li class="movement-item"><article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-snapshot="${escape(url)}" data-caption="${escape(`${camera} · ${stamp}`)}" data-transition="Review required — excluded from journey">${url ? `<img src="${escape(url)}" alt="Sighting requiring review" loading="lazy">` : '<span class="movement-missing">No saved image</span>'}<span class="movement-photo-label">Inspect photo ↗</span></button><div class="movement-details"><h5>${escape(camera)}</h5><time>${escape(stamp)}</time><p>${escape(reason)}</p>${app.identity_id && app.id ? `<a href="/admin/unknown?view=${encodeURIComponent(app.identity_id)}&amp;appearance_id=${encodeURIComponent(app.id)}" ${typeof window.viewIdentityDetails === 'function' ? 'data-action="viewIdentityDetails"' : ''} data-arg="${escape(app.identity_id)}" data-appearance-id="${escape(app.id)}">Use this sighting as context</a>` : ''}</div></article></li>`;
+        }).join('')}</ol></section></details>` : '';
+        return notice + (included.length ? renderSequence(included, label) : '<p class="timeline-empty">No reliable reference is available for a movement journey. Review the recorded associations below.</p>') + gallery;
+    }
+    function renderSequence(appearances, label) {
         if (!Array.isArray(appearances) || !appearances.length) return '<p class="timeline-empty">No recorded appearances available.</p>';
         const rows = appearances.map((app, index) => ({app, index, time: Date.parse(app.start_time)}))
             .sort((a, b) => (Number.isFinite(a.time) ? a.time : Infinity) - (Number.isFinite(b.time) ? b.time : Infinity) || a.index - b.index);
         const cameras = new Set(rows.map(({app}) => app.pipeline_id).filter(Boolean));
         const camera = app => app.location_name || (app.pipeline_id ? label(app.pipeline_id) : 'Unknown camera');
-        return `<section class="movement-evidence" data-movement-view="overview" aria-label="Recorded appearance sequence">
+        return `<section class="movement-evidence" data-movement-view="overview" data-initial-index="${Math.max(0, rows.findIndex(row => row.app.association_status === 'selected'))}" aria-label="Recorded appearance sequence">
             <div class="movement-intro"><strong>${rows.length} recorded appearances</strong><span>${cameras.size === 1 ? 'One camera • chronological sightings' : `${cameras.size} cameras • chronological sightings`}</span></div>
             <p class="movement-hint">Select a photo to inspect it. Arrows show the order of recorded sightings; spacing does not represent elapsed time. Times use your local timezone.</p>
             ${graph(rows, camera)}
@@ -208,7 +224,7 @@
         active = Math.max(0, Math.min(items.length - 1, index));
         const item = items[active];
         const root = item.closest('.movement-evidence');
-        if (root) selectSighting(root, active, false);
+        if (root?.querySelector('.graph-photo')) selectSighting(root, active, false);
         const image = viewer.querySelector('img');
         image.hidden = !item.dataset.snapshot;
         if (item.dataset.snapshot) image.src = item.dataset.snapshot; else image.removeAttribute('src');
@@ -264,7 +280,7 @@
     }, true);
     if (typeof MutationObserver !== 'undefined') {
         const initialize = () => document.querySelectorAll('.movement-evidence:not([data-journey-ready])').forEach(root => {
-            root.dataset.journeyReady = 'true'; updateVisit(root, 0, false);
+            root.dataset.journeyReady = 'true'; selectSighting(root, Number(root.dataset.initialIndex || 0), false);
         });
         new MutationObserver(initialize).observe(document.documentElement, {childList:true, subtree:true});
         initialize();

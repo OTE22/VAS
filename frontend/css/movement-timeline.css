@@ -83,3 +83,11 @@
 .movement-evidence[data-movement-view=lanes] .journey-overview{display:none}
 .journey-view-controls button:focus-visible,.journey-visit:focus-visible,.journey-contact-sheet button:focus-visible{outline:2px solid #b4ffe5;outline-offset:2px}
 @media(max-width:600px){.journey-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.journey-visit{grid-template-columns:24px 54px minmax(0,1fr);gap:9px;padding:10px}.journey-visit-open{display:none}.journey-visit-photo{width:54px;height:74px}.journey-visit-copy strong{font-size:13px}.journey-overview-caption{align-items:flex-start;flex-direction:column}.journey-view-controls{padding:10px}.journey-view-controls button{padding:9px 10px;font-size:11px}}
+
+/* Historical association review remains separate from the movement graph. */
+.movement-association-notice { padding: 1rem; margin-bottom: 1rem; border: 1px solid #b98938; border-radius: 8px; background: #302919; color: #ffe1aa; }
+.movement-association-notice p, .movement-association-review p { line-height: 1.5; margin: .5rem 0 0; }
+.movement-association-review { margin-top: 1.25rem; border: 1px solid #536377; border-radius: 8px; padding: 1rem; }
+.movement-association-review summary { cursor: pointer; font-weight: 600; color: #ffe1aa; }
+.movement-association-review .movement-list { padding-top: 1rem; }
+.movement-association-review [data-appearance-id] { display: inline-block; text-decoration: none; margin-top: .75rem; padding: .6rem .8rem; background: #193345; color: #e5f5ff; border: 1px solid #638da6; border-radius: 5px; cursor: pointer; }

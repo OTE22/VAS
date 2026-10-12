@@ -152,7 +152,7 @@ async function openDeepLinkedIdentity() {
         return;
     }
 
-    const identity = await viewIdentityDetails(view);
+    const identity = await viewIdentityDetails(view, params.get('appearance_id'));
     if (identity) {
         reframeForKnownIdentity(identity, from);
     }
@@ -1023,6 +1023,8 @@ function updateIdentityCard(identityId, updatedIdentity) {
         return false; // Card not visible (on different page)
     }
     
+    card.dataset.appearanceId = updatedIdentity.appearance_id || '';
+
     // Replace the image in its stable frame; never stack absolute clones.
     const img = card.querySelector('.identity-img');
     if (img) {
@@ -1381,13 +1383,14 @@ function createIdentityCard(identity) {
         if (multiSelectMode) {
             toggleIdentitySelection(identity.id, e);
         } else {
-            viewIdentityDetails(identity.id);
+            viewIdentityDetails(identity.id, card.dataset.appearanceId);
         }
     });
 
     card.setAttribute('title', 'Click to view details and create alerts for this unknown person');
     card.setAttribute('data-identity-id', identity.id);
     card.setAttribute('data-pipeline-id', identity.pipeline_id || '');
+    card.dataset.appearanceId = identity.appearance_id || '';
 
     const sightings = identity.appearances_count ?? 1;
     const lastSeen = new Date(identity.last_seen_at || identity.first_seen_at);
@@ -1397,7 +1400,7 @@ function createIdentityCard(identity) {
             <img class="identity-img face-preview" alt="Latest camera sighting" decoding="async" hidden>
             <div class="face-placeholder">Image unavailable — history retained</div>
         </div>
-        <div class="identity-photo-caption" title="The photo belongs to the camera event below; open details for the representative portrait.">${identity.pipeline_evidence_only ? 'Representative portrait' : 'Latest sighting'}</div>
+        <div class="identity-photo-caption" title="The photo belongs to this camera event; open details to review its related sightings.">${identity.pipeline_evidence_only ? 'Representative portrait' : 'Latest sighting'}</div>
         <div class="identity-meta">
             <span data-last-seen title="Last seen"><i class="fas fa-clock"></i>${identity.pipeline_evidence_only ? 'No recorded sighting' : lastSeen.toLocaleString()}</span>
             <div class="identity-badge" data-appearances-count="${sightings}" title="${sightings} sighting${sightings === 1 ? '' : 's'}">
@@ -1489,13 +1492,23 @@ function renderAdvancedTimeline(appearances) {
     return window.MovementTimeline.render(appearances, getPipelineDisplayName);
 }
 
-// View identity details
-async function viewIdentityDetails(identityId) {
+// Only the most recent click may publish content, even after a modal close.
+let identityDetailRevision = 0;
+let identityDetailController = null;
+async function viewIdentityDetails(identityId, appearanceId = null) {
     const modal = document.getElementById('identity-detail-modal');
     const content = document.getElementById('identity-detail-content');
+    const revision = ++identityDetailRevision;
+    identityDetailController?.abort();
+    identityDetailController = new AbortController();
+    const query = /^[1-9][0-9]*$/.test(String(appearanceId || ''))
+        ? `?appearance_id=${encodeURIComponent(appearanceId)}` : '';
+    content.innerHTML = '<p role="status">Loading the selected sighting…</p>';
+    ModalStack.open(modal, { onClose: handleDetailModalClose });
 
     try {
-        const response = await fetch(`/api/admin/identity/${identityId}`, {
+        const response = await fetch(`/api/admin/identity/${encodeURIComponent(identityId)}${query}`, {
+            signal: identityDetailController.signal,
             credentials: 'include' // Include HttpOnly cookies
         });
 
@@ -1511,17 +1524,22 @@ async function viewIdentityDetails(identityId) {
         }
 
         const identity = await response.json();
-        
+        if (revision !== identityDetailRevision) return null;
+        const review = identity.association_review;
+        const selected = review && identity.appearances?.find(app => app.id === review.reference_appearance_id);
+        const portraitUrl = review ? selected?.snapshot_url : identity.snapshot_url;
+        const portraitLabel = review ? (review.reference_kind === 'selected_sighting' ? 'Selected sighting' : 'Initial reference sighting') : 'Representative portrait';
+
         content.innerHTML = `
             <div class="detail-header">
-                <div class="detail-image" aria-label="Representative portrait">
-                    ${identity.snapshot_url ? 
-                        `<img src="${identity.snapshot_url}" alt="Identity" data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'%3E%3Crect fill=\'%23333\' width=\'100\' height=\'100\'/%3E%3Ctext fill=\'%23999\' x=\'50\' y=\'50\' text-anchor=\'middle\' dominant-baseline=\'middle\' font-size=\'40\'%3E%3F%3C/text%3E%3C/svg%3E">` :
+                <div class="detail-image" aria-label="${portraitLabel}">
+                    ${portraitUrl ? 
+                        `<img src="${portraitUrl}" alt="Identity" data-fallback-src="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\'%3E%3Crect fill=\'%23333\' width=\'100\' height=\'100\'/%3E%3Ctext fill=\'%23999\' x=\'50\' y=\'50\' text-anchor=\'middle\' dominant-baseline=\'middle\' font-size=\'40\'%3E%3F%3C/text%3E%3C/svg%3E">` :
                         `<div class="no-image"><i class="fas fa-user"></i></div>`
                     }
                 </div>
                 <div class="detail-info">
-                    <p class="portrait-description"><strong>Representative portrait</strong> · Best available photo selected for this identity. Camera cards and the timeline show individual sightings.</p>
+                    <p class="portrait-description"><strong>${portraitLabel}</strong> · ${review ? 'The journey uses direct comparisons to this sighting. Other stored associations are available below for review.' : 'Best available photo selected for this identity. Camera cards and the timeline show individual sightings.'}</p>
                     <h3>${identity.display_name || 'Unknown Identity'}</h3>
                     <div style="margin: 1rem 0; padding: 0.75rem; background: rgba(0, 255, 150, 0.1); border: 1px solid rgba(0, 255, 150, 0.3); border-radius: 6px;">
                         <p style="margin: 0 0 0.5rem 0; font-size: 0.85rem; color: #999;">Identity ID:</p>
@@ -1548,8 +1566,8 @@ async function viewIdentityDetails(identityId) {
                 <div class="timeline-header">
                     <h4><i class="fas fa-route"></i> Movement Timeline</h4>
                     <div class="timeline-stats">
-                        <span><i class="fas fa-video"></i> ${identity.pipeline_ids?.length || 0} Cameras</span>
-                        <span><i class="fas fa-clock"></i> ${identity.appearances_count} Appearances</span>
+                        <span><i class="fas fa-video"></i> ${review ? new Set(identity.appearances.filter(app => ['selected', 'consistent'].includes(app.association_status)).map(app => app.pipeline_id).filter(Boolean)).size : identity.pipeline_ids?.length || 0} Cameras</span>
+                        <span><i class="fas fa-clock"></i> ${review ? review.included_count : identity.appearances_count} in journey${review ? ` · ${review.review_count} to review` : ''}</span>
                         <span><i class="fas fa-calendar"></i> ${identity.first_seen_at ? new Date(identity.first_seen_at).toLocaleDateString() : 'N/A'} - ${identity.last_seen_at ? new Date(identity.last_seen_at).toLocaleDateString() : 'N/A'}</span>
                     </div>
                 </div>
@@ -1603,9 +1621,10 @@ async function viewIdentityDetails(identityId) {
             </div>
         `;
 
-        ModalStack.open(modal, { onClose: handleDetailModalClose });
         return identity;
     } catch (error) {
+        if (revision !== identityDetailRevision || error.name === 'AbortError') return null;
+        content.innerHTML = '<p role="alert">Unable to load this sighting. Close this window and try again.</p>';
         console.error('Error loading identity details:', error);
         showNotification(error.message || 'Error loading identity details', 'error');
         return null;
@@ -1616,6 +1635,9 @@ async function viewIdentityDetails(identityId) {
 // cascade — so a deep-linked ?view= URL is always cleaned up and a referrer
 // redirect is never skipped, regardless of HOW the modal was dismissed.
 function handleDetailModalClose() {
+    ++identityDetailRevision;
+    identityDetailController?.abort();
+    identityDetailController = null;
     // Backend handles redirect logic - check if we came from another page
     if (window.identityModalReferrer && window.identityModalReferrer !== window.location.pathname) {
         // Redirect back to the page we came from (without view parameter)
@@ -1625,6 +1647,7 @@ function handleDetailModalClose() {
         const url = new URL(window.location.href);
         if (url.searchParams.has('view')) {
             url.searchParams.delete('view');
+            url.searchParams.delete('appearance_id');
             url.searchParams.delete('from');
             window.history.replaceState({}, '', url.toString());
         }
@@ -2212,7 +2235,8 @@ function updateMultiMergeForm() {
 // Fetch identity details
 async function fetchIdentityDetails(identityId) {
     try {
-        const response = await fetch(`/api/admin/identity/${identityId}`, {
+        const response = await fetch(`/api/admin/identity/${encodeURIComponent(identityId)}${query}`, {
+            signal: identityDetailController.signal,
             credentials: 'include' // Include HttpOnly cookies
         });
         if (response.ok) {
@@ -3586,7 +3610,11 @@ Actions.register({
         copyIdentityId(fromInput ? fromInput.value : el.dataset.arg);
     },
 
-    viewIdentityDetails: (el) => viewIdentityDetails(el.dataset.arg),
+    viewIdentityDetails: (el, event) => {
+        event?.preventDefault();
+        return viewIdentityDetails(el.dataset.arg,
+            el.dataset.appearanceId || el.closest('[data-identity-id]')?.dataset.appearanceId);
+    },
     promoteIdentityModal: (el) => promoteIdentityModal(el.dataset.arg),
     mergeIntoKnownCandidate: (el) =>
         mergeIntoKnownCandidate(el.dataset.arg, el.dataset.arg2),

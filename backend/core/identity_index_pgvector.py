@@ -581,12 +581,17 @@ class IdentityIndexPgVector:
             return []
         # Compute IDs before reading vector payloads: one stable reference per
         # identity/model, irrespective of how many camera observations it has.
-        anchor_cte = """, unknown_anchors AS MATERIALIZED (
+        anchor_cte = """, unknown_anchor_ids AS MATERIALIZED (
             SELECT identity_id, MIN(id) AS id FROM identity_embeddings
             WHERE embedding IS NOT NULL AND embedding_model_version = :model_version
             GROUP BY identity_id
+        ), unknown_anchors AS MATERIALIZED (
+            SELECT ie.id, ie.identity_id, ie.embedding, ie.quality
+            FROM identity_embeddings ie JOIN unknown_anchor_ids a ON a.id = ie.id
         )""" if recognition_only else ""
-        anchor_join = "JOIN unknown_anchors anchor ON anchor.id = ie.id" if recognition_only else ""
+        # Materialize before distance filtering so the optimizer cannot score
+        # every historical observation and only then discard non-reference rows.
+        vector_source = "unknown_anchors ie" if recognition_only else "identity_embeddings ie"
 
         logger.debug(f"[PGVECTOR] [SEARCH_UNKNOWN] Starting search: top_k={top_k}, threshold={threshold}")
         
@@ -633,8 +638,7 @@ class IdentityIndexPgVector:
                         ie.identity_id::text as identity_id,
                         1 - (ie.embedding <=> qv.vec) as similarity,
                         ie.quality
-                    FROM identity_embeddings ie
-                    {anchor_join}
+                    FROM {vector_source}
                     JOIN identities i ON ie.identity_id = i.id
                     CROSS JOIN query_vector qv
                     WHERE 
