@@ -6716,7 +6716,7 @@ body.modal-stack-locked .intelligence-content {
     word-break: break-all;
 }
 
-.promote-candidate-merge { margin-top: 0.25rem; }
+
 
 /* ==========================================================================
    The `system` audit principal — protected, non-login account
@@ -6839,3 +6839,9 @@ body.modal-stack-locked .intelligence-content {
         align-items: flex-start;
     }
 }
+
+#promote-preview { margin: 16px 0; padding: 16px; background: #122331; border: 1px solid #4c718a; border-radius: 8px; }
+#promote-preview:empty { display:none; }
+#promote-preview img { display:block; width:100%; max-width:260px; height:220px; object-fit:contain; margin:auto; }
+#promote-preview p, .promote-scope { line-height:1.5; color:#d8e7f1; }
+.promote-candidate-profile { color:#79e4bc; text-decoration:underline; }

@@ -23,7 +23,7 @@
 
     <!-- Stylesheets -->
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
-    <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
+    <link rel="stylesheet" href="/frontend/css/admin.css?v=selected-sighting-20261012-1">
     <link rel="stylesheet" href="/frontend/css/face-cards.css?v=portraits-1">
     <link rel="stylesheet" href="/frontend/css/footer.css">
     <link rel="stylesheet" href="/frontend/css/admin-review-workspace.css?v=review-1">
@@ -298,9 +298,8 @@
                 </button>
             </div>
             <div class="modal-body">
-                <!-- Match suggestions. Populated by loadPromoteCandidates() from the
-                     read-only /match-candidates endpoint; nothing here is
-                     pre-selected and nothing merges without an explicit click. -->
+                <p class="promote-scope"><strong>Only this selected sighting becomes Known.</strong> This exact photo becomes its recognition reference. The other sightings remain Unknown.</p>
+                <figure id="promote-preview" aria-label="Selected sighting preview" aria-live="polite"></figure>
                 <div id="promote-candidates-section">
                     <h3 class="promote-candidates-heading">Is this someone you already know?</h3>
                     <p id="promote-candidates-warning" role="alert"></p>
@@ -320,7 +319,7 @@
                     </button>
                 </div>
                 <form id="promote-form">
-                    <p class="promote-newperson-heading">Or promote as a new person</p>
+                    <p class="promote-newperson-heading">Create a Known profile for this sighting</p>
                     <div class="form-group">
                         <label for="promote-name">Display Name *</label>
                         <input type="text" id="promote-name" class="intelligence-input" required>
@@ -338,7 +337,7 @@
                                 <span class="btn-title">CANCEL</span>
                             </div>
                         </button>
-                        <button type="submit" class="intelligence-admin-btn">
+                        <button type="submit" class="intelligence-admin-btn" disabled>
                             <div class="btn-content">
                                 <div class="btn-icon-wrapper">
                                     <i class="fas fa-arrow-up"></i>
@@ -845,8 +844,8 @@
     <script src="/frontend/js/navbar-loader.js?v=nav-7"></script>
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/face-image.js?v=faces-3"></script>
-    <script src="/frontend/js/movement-timeline.js?v=associations-20261012-1"></script>
+    <script src="/frontend/js/movement-timeline.js?v=selected-sighting-20261012-1"></script>
     <script src="/frontend/js/search-image.js?v=reference-1"></script>
-    <script src="/frontend/js/admin-unknown.js?v=associations-20261012-1"></script>
+    <script src="/frontend/js/admin-unknown.js?v=selected-sighting-20261012-1"></script>
 </body>
 </html>

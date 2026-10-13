@@ -92,3 +92,19 @@ test('review context action prevents link navigation and passes the selected app
   assert.equal(h.pending[0].url,'/api/admin/identity/synthetic?appearance_id=7');
  } finally {h.dom.window.close();}
 });
+test('promotion follows the photo selected in the journey or review viewer',async()=>{
+ const h=harness();try{
+  h.w.eval(source.slice(source.indexOf('let currentIdentityId'),source.indexOf('let multiSelectMode')));
+  const request=h.w.viewIdentityDetails('synthetic',2);
+  const data=identity('synthetic',2);
+  data.appearances.push({id:3,identity_id:'synthetic',pipeline_id:'camera',start_time:'2026-01-01T10:03:00Z',snapshot_url:'/storage/3.jpg',association_status:'consistent'});
+  respond(h.pending[0],data);await request;
+  await new Promise(resolve=>h.w.setTimeout(resolve,0));
+  const button=h.w.document.querySelector('[data-action="promoteIdentityModal"]');
+  assert.equal(button.dataset.appearanceId,'2');
+  h.w.document.querySelector('[data-graph-step="1"]').click();
+  assert.equal(button.dataset.appearanceId,'3');
+  h.w.document.querySelector('.movement-association-review .movement-photo').click();
+  assert.equal(button.dataset.appearanceId,'1');
+ }finally{h.dom.window.close();}
+});

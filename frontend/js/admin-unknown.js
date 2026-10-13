@@ -21,6 +21,28 @@ const pipelinePages = new Map();
 // true = Show-all (older unknowns stay STORED either way — display-only window)
 let showAllUnknowns = false;
 let currentIdentityId = null;
+let promotionSelection = null;
+let promotionRevision = 0;
+let promotionController = null;
+const promotedSightings = new Set();
+function closePromotionSelection() {
+    ++promotionRevision;
+    promotionController?.abort();
+    promotionSelection = null;
+}
+function refreshAfterSightingPromotion(data) {
+    if (data.appearance_id) promotedSightings.add(String(data.appearance_id));
+    if (data.source_status === 'inactive' && data.source_identity_id) mergedAwayIdentities.add(data.source_identity_id);
+    ++unknownLoadSequence;
+    clearTimeout(mergeRefreshTimer);
+    mergeRefreshTimer = setTimeout(() => loadUnknownFaces(), 150);
+}
+document.addEventListener('movement-sighting-selected', event => {
+    const detail = document.getElementById('identity-detail-content');
+    if (!detail?.contains(event.target)) return;
+    const button = detail.querySelector('[data-action="promoteIdentityModal"]');
+    if (button && event.detail.identityId === button.dataset.arg) button.dataset.appearanceId = event.detail.appearanceId;
+});
 let multiSelectMode = false;
 let selectedIdentities = new Set();
 let selectionDetailsSequence = 0;
@@ -927,6 +949,7 @@ function handleWebSocketMessage(message) {
 
     switch (message.type) {
         case 'identity_promoted':
+            if (message.data?.source_identity_id) { refreshAfterSightingPromotion(message.data); break; }
             if (!message.data?.identity_id) break;
             // Use the same refresh/tombstone handling as a merge, but keep the ID.
             handleWebSocketMessage({type: 'identities_merged', data: {source_ids: [message.data.identity_id]}});
@@ -969,7 +992,7 @@ function handleWebSocketMessage(message) {
 
 // Only persisted backend events can advance a camera-specific card.
 function applyUnknownEvent(event) {
-    if (mergedAwayIdentities.has(event?.identity_id)) return;
+    if (mergedAwayIdentities.has(event?.identity_id) || promotedSightings.has(String(event?.appearance_id))) return;
     if (!event?.identity_id || !event.pipeline_id || !event.event_id || !event.timestamp) return;
     const pipelineId = event.pipeline_id;
     if (window.userPipelines !== null && !window.userPipelines.includes(pipelineId)) return;
@@ -1601,7 +1624,7 @@ async function viewIdentityDetails(identityId, appearanceId = null) {
                     </div>
                 </button>
                 ${identity.type === 'unknown' ? `
-                    <button class="intelligence-admin-btn" data-action="promoteIdentityModal" data-arg="${identity.id}">
+                    <button class="intelligence-admin-btn" data-action="promoteIdentityModal" data-arg="${identity.id}" data-appearance-id="${selected?.id || ''}">
                         <div class="btn-content">
                             <div class="btn-icon-wrapper">
                                 <i class="fas fa-arrow-up"></i>
@@ -1662,89 +1685,70 @@ function analyzeInSecurityIntelligence(identityId) {
     window.location.href = `/admin/security-intelligence?identity_id=${identityId}&tab=${tab}`;
 }
 
-function promoteIdentityModal(identityId) {
+function promoteIdentityModal(identityId, appearanceId = null) {
+    if (mergeSubmitInFlight) return;
+    if (!/^[1-9][0-9]*$/.test(String(appearanceId || ''))) {
+        viewIdentityDetails(identityId);
+        showNotification('Select a saved sighting in Identity Details, then choose Promote to Known.', 'info');
+        return;
+    }
+    closePromotionSelection();
+    const revision = promotionRevision;
     currentIdentityId = identityId;
     document.getElementById('promote-name').value = '';
     document.getElementById('promote-code').value = '';
-    // Undo any collapse left by a previous "none of these" on another face.
-    const candidatesSection = document.getElementById('promote-candidates-section');
-    if (candidatesSection) candidatesSection.style.display = '';
+    document.getElementById('promote-preview').replaceChildren();
+    document.getElementById('promote-candidates-section').style.display = '';
+    document.querySelector('#promote-form button[type="submit"]').disabled = true;
     setNoneOfTheseVisible(false);
-    ModalStack.open(document.getElementById('promote-modal'));
-    // Fire-and-forget: the name field and PROMOTE button are usable immediately,
-    // so a slow or failing lookup never blocks creating a new person.
-    loadPromoteCandidates(identityId);
+    ModalStack.open(document.getElementById('promote-modal'), {onClose: closePromotionSelection});
+    promotionController = new AbortController();
+    loadPromoteCandidates(identityId, appearanceId, revision, promotionController.signal);
 }
 
-/**
- * Ask the backend who this unknown face might already be.
- *
- * The endpoint is read-only and answers 200 even when it cannot compare
- * (missing file, unreadable bytes, no detectable face, vector search down),
- * carrying a `warning` instead. That is deliberate: the administrator must
- * always be able to fall through to "promote as a new person".
- *
- * Thresholds are never decided here — the backend applies the ENROLL_* values
- * from config.py and echoes them back for display only.
- */
-async function loadPromoteCandidates(identityId) {
+/** Preview pins an exact event and photo checksum. Failures keep saving disabled. */
+async function loadPromoteCandidates(identityId, appearanceId, revision, signal) {
     const list = document.getElementById('promote-candidates');
     const warning = document.getElementById('promote-candidates-warning');
-    if (!list || !warning) return;
-
+    const preview = document.getElementById('promote-preview');
     warning.textContent = '';
-    list.replaceChildren();
-    const loading = document.createElement('p');
-    loading.className = 'promote-candidates-loading';
-    loading.textContent = 'Checking whether this face is already enrolled…';
-    list.appendChild(loading);
-
-    let data;
+    list.textContent = 'Checking the selected sighting…';
     try {
-        const response = await fetch(
-            `/api/admin/unknown/${encodeURIComponent(identityId)}/match-candidates`,
-            { credentials: 'include' });
-        if (!response.ok) {
-            if (currentIdentityId !== identityId) return;
-            list.replaceChildren();
-            warning.textContent =
-                'Could not check for existing people. You can still promote this face as a new person.';
-            return;
+        const response = await fetch(`/api/admin/unknown/${encodeURIComponent(identityId)}/match-candidates?appearance_id=${encodeURIComponent(appearanceId)}`,
+            {credentials: 'include', signal});
+        const data = await response.json();
+        if (revision !== promotionRevision) return;
+        if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not verify this sighting. Close and try again.');
+        const selection = data.selection;
+        if (String(selection?.appearance_id) !== String(appearanceId) || !/^[a-f0-9]{64}$/.test(selection?.photo_sha256 || '') || !selection.preview_image?.startsWith('/storage/')) {
+            throw new Error('The selected photo could not be verified. Close and select the sighting again.');
         }
-        data = await response.json();
+        const image = document.createElement('img');
+        image.alt = 'Exact selected photo to use as the Known profile reference';
+        const caption = document.createElement('p');
+        caption.textContent = `${selection.camera_name} · ${new Date(selection.seen_at).toLocaleString()} · Sighting #${selection.appearance_id}`;
+        image.addEventListener('load', () => {
+            if (revision !== promotionRevision) return;
+            promotionSelection = {identityId, appearanceId: Number(appearanceId), photoSha256: selection.photo_sha256, revision};
+            document.querySelector('#promote-form button[type="submit"]').disabled = mergeSubmitInFlight;
+        });
+        image.addEventListener('error', () => {
+            if (revision !== promotionRevision) return;
+            promotionSelection = null;
+            document.querySelector('#promote-form button[type="submit"]').disabled = true;
+            warning.textContent = 'The selected photo could not be displayed. Close and try again.';
+        });
+        image.src = selection.preview_image + (selection.preview_image.includes('?') ? '&' : '?') + 'promotion_photo=' + selection.photo_sha256;
+        preview.replaceChildren(image, caption);
+        const candidates = data.candidates || [];
+        list.replaceChildren(...candidates.map(buildPromoteCandidateRow));
+        if (!candidates.length) list.textContent = 'No similar Known person was found.';
+        setNoneOfTheseVisible(candidates.length > 0);
     } catch (err) {
-        if (currentIdentityId !== identityId) return;
+        if (revision !== promotionRevision || err.name === 'AbortError') return;
         list.replaceChildren();
-        warning.textContent =
-            'Could not reach the server to check for existing people. You can still promote this face as a new person.';
-        return;
+        warning.textContent = err.message || 'Could not verify this sighting. Close and try again.';
     }
-
-    // Guard against a late response for a face the admin already moved on from.
-    if (currentIdentityId !== identityId) return;
-
-    list.replaceChildren();
-    if (data.warning) warning.textContent = data.warning;
-
-    const candidates = data.candidates || [];
-    if (candidates.length === 0) {
-        // No candidates: the modal is already in create-new mode, so the
-        // "none of these" button would be answering a question nobody asked.
-        setNoneOfTheseVisible(false);
-        if (!data.warning) {
-            const none = document.createElement('p');
-            none.className = 'promote-candidates-empty';
-            none.textContent = 'No similar known person was found.';
-            const guidance = document.createElement('p');
-            guidance.className = 'promote-candidates-empty';
-            guidance.textContent = 'Enter a name below to promote this face as a new person.';
-            list.append(none, guidance);
-        }
-        return;
-    }
-
-    candidates.forEach((candidate) => list.appendChild(buildPromoteCandidateRow(candidate)));
-    setNoneOfTheseVisible(true);
 }
 
 /** Show or hide the "none of these" escape hatch. */
@@ -1769,8 +1773,8 @@ function chooseNoneOfThese() {
 }
 
 /** Promotion-specific builder: upload-modal.js shares this page's global scope.
- *  Keep this distinct from its enrollment builder so candidates dispatch the
- *  identity merge action, never an upload action with no pending upload. */
+ *  Keep this distinct from its enrollment builder: promotion candidates open
+ *  profiles for review; they cannot merge the entire Unknown group. */
 function buildPromoteCandidateRow(candidate) {
     const row = document.createElement('div');
     row.className = 'merge-search-result promote-candidate';
@@ -1817,102 +1821,39 @@ function buildPromoteCandidateRow(candidate) {
     id.textContent = candidate.identity_id;
     info.appendChild(id);
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'intelligence-admin-btn promote-candidate-merge';
-    // data-action + data-arg, registered in the Actions block: dynamically
-    // rendered rows need no rebinding and inline handlers are CSP-blocked.
-    button.setAttribute('data-action', 'mergeIntoKnownCandidate');
-    button.setAttribute('data-arg', candidate.identity_id);
-    button.setAttribute('data-arg2', candidate.display_name || '');
-    const content = document.createElement('div');
-    content.className = 'btn-content';
-    const iconWrap = document.createElement('div');
-    iconWrap.className = 'btn-icon-wrapper';
-    const icon = document.createElement('i');
-    icon.className = 'fas fa-code-merge';
-    iconWrap.appendChild(icon);
-    const title = document.createElement('span');
-    title.className = 'btn-title';
-    title.textContent = 'MERGE WITH THIS PERSON';
-    content.append(iconWrap, title);
-    button.appendChild(content);
-    info.appendChild(button);
+    const link = document.createElement('a');
+    link.className = 'promote-candidate-profile';
+    link.href = '/admin/identity/' + encodeURIComponent(candidate.identity_id) + '?from=/admin/unknown';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Review Known profile ↗';
+    info.appendChild(link);
 
     row.append(imageWrap, info);
     return row;
 }
 
-/**
- * Merge the unknown face into the chosen known person.
- *
- * Uses the existing pair-merge endpoint unchanged. Direction matters and is not
- * symmetric: `from_identity_id` is the LOSER (soft-deleted, status=MERGED,
- * merged_into_id set) and `to_identity_id` is the survivor. The unknown must
- * therefore be `from`, so the known person keeps its own type — which is why
- * the Known count is unchanged by this branch.
- */
-async function mergeIntoKnownCandidate(knownIdentityId, knownDisplayName) {
-    if (!currentIdentityId) return;
-    if (mergeSubmitInFlight) return;   // one candidate merge at a time
-    const identityId = currentIdentityId;
-    const label = knownDisplayName || knownIdentityId;
-
-    // Ordinary application confirmation (stacked above the promote modal).
-    // If the backend then judges the pair suspicious, the HIGH-RISK
-    // confirmation inside postMergeWithRiskGate becomes the meaningful final
-    // ask — the two only appear together in the suspicious case.
-    const intent = await AppConfirm.confirm({
-        title: `Merge this face into ${label}?`,
-        lines: [
-            'Its sightings and images move to that person, and this unknown '
-            + 'entry is marked as merged. This cannot be undone.'
-        ],
-        confirmLabel: 'Merge',
-        cancelLabel: 'Cancel',
-        danger: true
-    });
-    if (!intent || currentIdentityId !== identityId || mergeSubmitInFlight) return;
-
-    mergeSubmitInFlight = true;
-    try {
-        const result = await postMergeWithRiskGate('/api/admin/identities/merge', {
-            from_identity_id: identityId,          // the unknown = loser
-            to_identity_id: knownIdentityId,       // the known  = winner
-            notes: 'Merged from the promote match suggestions',
-            // Recorded in the merge audit row, so this is distinguishable
-            // from an ordinary admin merge. Allowlisted server-side.
-            decision: 'merge_existing'
-        });
-        if (result === null) { return; }   // cancelled at the risk confirmation
-        showNotification(result.message || `Merged into ${label}`, 'success');
-        if (currentIdentityId === identityId) ModalStack.close(document.getElementById('promote-modal'));
-        loadUnknownFaces();
-    } catch (err) {
-        showNotification(err.message || 'Could not reach the server. Nothing was merged.', 'error');
-    } finally {
-        mergeSubmitInFlight = false;
-    }
-}
-
 // Promote identity - ALL VALIDATION IN BACKEND
 async function promoteIdentity() {
-    if (mergeSubmitInFlight || !currentIdentityId) return;
-    const identityId = currentIdentityId;
+    if (mergeSubmitInFlight || !promotionSelection) return;
+    const selection = promotionSelection;
+    const identityId = selection.identityId;
     const name = document.getElementById('promote-name').value.trim();
     const code = document.getElementById('promote-code').value.trim();
     const button = document.querySelector('#promote-form button[type="submit"]');
     mergeSubmitInFlight = true;
     if (button) button.disabled = true;
-    const payload = {display_name: name, person_code: code || null, decision: 'create_new'};
+    const payload = {display_name: name, person_code: code || null, decision: 'create_new',
+        appearance_id: selection.appearanceId, photo_sha256: selection.photoSha256};
     try {
         for (let attempt = 0; attempt < 2; attempt++) {
-            if (currentIdentityId !== identityId) return;
+            if (promotionSelection !== selection) return;
             const response = await fetch(`/api/admin/unknown/${encodeURIComponent(identityId)}/promote`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 credentials: 'include', body: JSON.stringify(payload)
             });
             const result = await response.json();
+            if (!response.ok && promotionSelection !== selection) return;
             if (response.status === 409 && result.code === 'PROMOTION_REVIEW_REQUIRED' && attempt === 0) {
                 const candidates = result.review?.candidates || [];
                 const list = document.getElementById('promote-candidates');
@@ -1924,29 +1865,29 @@ async function promoteIdentity() {
                     lines: [
                         'An existing person has a strong face match or the same name.',
                         ...candidates.map(candidate => candidate.display_name || candidate.identity_id),
-                        'Cancel to review and merge into an existing person. Continue only if this is a different person.'
+                        'Cancel to review the existing profile. Continue only if the selected sighting belongs to a different person.'
                     ],
                     confirmLabel: 'Create Separate Person', cancelLabel: 'Review Existing People', danger: true
                 });
-                if (!proceed || currentIdentityId !== identityId) return;
+                if (!proceed || promotionSelection !== selection) return;
                 payload.confirm_create_new = true;
                 continue;
             }
             if (!response.ok) {
                 throw new Error(typeof result.detail === 'string' ? result.detail : 'Could not promote this identity.');
             }
-            mergedAwayIdentities.add(identityId);
-            ++unknownLoadSequence;
+            refreshAfterSightingPromotion(result);
             showNotification(result.message || 'Identity promoted successfully', 'success');
-            if (currentIdentityId === identityId) ModalStack.close(document.getElementById('promote-modal'));
-            loadUnknownFaces();
+            if (promotionSelection === selection) ModalStack.close(document.getElementById('promote-modal'));
+            const detailModal = document.getElementById('identity-detail-modal');
+            if (document.querySelector('#identity-detail-content [data-action="promoteIdentityModal"]')?.dataset.arg === identityId) ModalStack.close(detailModal);
             return;
         }
     } catch (error) {
         showFaceDetectionAlert(error.message || 'Could not complete promotion. Refresh to check its current status.');
     } finally {
         mergeSubmitInFlight = false;
-        if (button) button.disabled = false;
+        if (button) button.disabled = !promotionSelection;
     }
 }
 
@@ -2072,7 +2013,7 @@ function createSearchResultCard(result, reference) {
     card.querySelector('.card-image').prepend(image);
     card.querySelector('.card-info').prepend(caption);
     SearchImage.render(image, caption, raw, reference);
-    for (const [label, action] of [['VIEW','viewIdentityDetails'], ...(result.type === 'unknown' ? [['PROMOTE','promoteIdentityModal']] : [])]) {
+    for (const [label, action] of [['VIEW','viewIdentityDetails']]) {
         const button = document.createElement('button');
         button.type = 'button'; button.className = 'intelligence-admin-btn small';
         button.dataset.action = action; button.dataset.arg = result.identity_id;
@@ -3615,9 +3556,8 @@ Actions.register({
         return viewIdentityDetails(el.dataset.arg,
             el.dataset.appearanceId || el.closest('[data-identity-id]')?.dataset.appearanceId);
     },
-    promoteIdentityModal: (el) => promoteIdentityModal(el.dataset.arg),
-    mergeIntoKnownCandidate: (el) =>
-        mergeIntoKnownCandidate(el.dataset.arg, el.dataset.arg2),
+    promoteIdentityModal: (el) => promoteIdentityModal(el.dataset.arg, el.dataset.appearanceId || el.closest('.identity-card-compact')?.dataset.appearanceId),
+
     openMergeModal: (el) => openMergeModal(el.dataset.arg),
     analyzeInSecurityIntelligence: (el) => analyzeInSecurityIntelligence(el.dataset.arg),
     selectIdentityForMerge: (el) => selectIdentityForMerge(el.dataset.arg),

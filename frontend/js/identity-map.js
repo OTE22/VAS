@@ -93,6 +93,7 @@ export class IdentityMapController {
                        patterns: false, risk: false, timeline: false, avatar: false };
         this._timeline = null;          // playback HUD + current detection index
         this._avatarMarker = null;
+        this._cameraLabels = [];
         this._playbackFrame = null;
         this._playbackResolve = null;
         this._autoPlayTimer = null;
@@ -150,6 +151,7 @@ export class IdentityMapController {
     destroy() {
         this._destroyed = true;
         this._closePopup();
+        this._clearCameraLabels();
         this._teardownTimeline();
         this._clearOverlayHandlers();
         for (const [target, evt, fn] of this._handlers) {
@@ -290,11 +292,18 @@ export class IdentityMapController {
         if (!b || !this.map) return;
         const [[w, s], [e, n]] = b;
         if (w === e && s === n) { this.map.easeTo({ center: [w, s], zoom: 15 }); return; }
-        this.map.fitBounds([[w, s], [e, n]], { padding: 60, maxZoom: 16, duration: 600 });
+        // Keep names inside the viewport and clear of the replay controls.
+        const labelNodes = this._cameraLabels.map(item => item.marker.getElement());
+        const width = this.container.clientWidth || 800, height = this.container.clientHeight || 500;
+        const side = Math.min(width / 3, Math.max(60, ...labelNodes.map(node => node.offsetWidth / 2 + 20)));
+        const top = Math.min(height / 3, Math.max(60, ...labelNodes.map(node => node.offsetHeight + 24)));
+        const bottom = Math.min(height * .4, Math.max(60, (this._timeline?.el.offsetHeight || 0) + 48));
+        this.map.fitBounds([[w, s], [e, n]], {padding: {top, right: side, bottom, left: side}, maxZoom: 16, duration: 600});
     }
 
     // ---------------------------------------------------------------- overlays
     _clearOverlays() {
+        this._clearCameraLabels();
         if (!this.map || !this.map.getStyle()) return;
         for (const id of LAYER_ORDER) if (this.map.getLayer(id)) this.map.removeLayer(id);
         for (const id of Object.values(SRC)) if (this.map.getSource(id)) this.map.removeSource(id);
@@ -398,8 +407,39 @@ export class IdentityMapController {
                 paint: { 'circle-radius': 5, 'circle-color': '#212121',
                          'circle-stroke-width': 2, 'circle-stroke-color': '#ffeb3b' } });
         }
+        this._drawCameraLabels(d.cameras);
         this._wireInteractions();
         this._syncTimeline();
+    }
+
+    _clearCameraLabels() {
+        for (const label of this._cameraLabels.splice(0)) label.marker.remove();
+    }
+
+    _drawCameraLabels(cameras) {
+        // DOM labels stay readable on every offline basemap without requiring
+        // a particular glyph/font archive. Co-located cameras share a label.
+        const positions = new Map();
+        for (const feature of cameras?.features || []) {
+            const coordinates = feature.geometry?.coordinates;
+            if (feature.geometry?.type !== 'Point' || !Array.isArray(coordinates)
+                || coordinates.length < 2 || !coordinates.slice(0, 2).every(Number.isFinite)
+                || Math.abs(coordinates[0]) > 180 || Math.abs(coordinates[1]) > 90) continue;
+            const name = String(feature.properties?.pipeline_name || feature.properties?.pipeline_id || 'Unnamed camera');
+            const key = coordinates.slice(0, 2).join(',');
+            if (!positions.has(key)) positions.set(key, {coordinates, names: new Set(), ids: new Set()});
+            const group = positions.get(key);
+            group.names.add(name);
+            group.ids.add(String(feature.properties?.pipeline_id || ''));
+        }
+        for (const {coordinates, names, ids} of positions.values()) {
+            const node = el('div', 'ae-camera-label');
+            node.setAttribute('aria-label', `Cameras: ${[...names].join(', ')}`);
+            for (const name of names) node.append(el('span', 'ae-camera-label-name', name));
+            const marker = new maplibregl.Marker({element: node, anchor: 'bottom', offset: [0, -12]})
+                .setLngLat(coordinates).addTo(this.map);
+            this._cameraLabels.push({marker, ids});
+        }
     }
 
     _clearOverlayHandlers() {
@@ -730,6 +770,9 @@ export class IdentityMapController {
                 ['case', ['<=', ['get', 'seq'], p.seq], 1, 0.15]);
             this.map.setPaintProperty('ae-detections-point', 'circle-stroke-opacity',
                 ['case', ['<=', ['get', 'seq'], p.seq], 1, 0.15]);
+        }
+        for (const label of this._cameraLabels) {
+            label.marker.getElement().classList.toggle('is-current', label.ids.has(String(p.pipeline_id || '')));
         }
         this._setAvatarPosition(f.geometry.coordinates, f, f, 1);
         this._setProgressLine(idx, f.geometry.coordinates);

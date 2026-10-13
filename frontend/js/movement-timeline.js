@@ -129,6 +129,8 @@
         index=Math.max(0,Math.min(photos.length-1,index));
         const photo=photos[index], card=photo.closest('.movement-card');
         root.dataset.graphActive=String(index);
+        photo.dispatchEvent(new CustomEvent('movement-sighting-selected', {bubbles:true,
+            detail:{appearanceId:photo.dataset.appearanceId, identityId:photo.dataset.identityId}}));
         root.querySelectorAll('[data-graph-select]').forEach(node=>{const selected=Number(node.dataset.graphSelect)===index;node.classList.toggle('is-selected',selected);node.setAttribute('aria-pressed',String(selected));});
         root.querySelectorAll('[data-graph-edge]').forEach(edge=>edge.classList.toggle('is-traversed',Number(edge.dataset.graphEdge)<=index));
         const panel=root.querySelector('.graph-photo');let image=panel.querySelector('img');
@@ -178,13 +180,13 @@
         }
         const included = appearances.filter(app => ['selected', 'consistent'].includes(app.association_status));
         const review = appearances.filter(app => !['selected', 'consistent'].includes(app.association_status));
-        const notice = `<div class="movement-association-notice" role="note"><strong>${included.length} sightings in this journey · ${review.length} need review</strong><p>Automated similarity to the selected reference does not confirm identity. Other stored associations are excluded from the journey and kept below. No history has been deleted.</p>${review.length ? `<p>Identity actions apply to all ${appearances.length} recorded sightings. Review this group before promoting, merging or creating an identity alert.</p>` : ''}</div>`;
+        const notice = `<div class="movement-association-notice" role="note"><strong>${included.length} sightings in this journey · ${review.length} need review</strong><p>Automated similarity to the selected reference does not confirm identity. Other stored associations are excluded from the journey and kept below. No history has been deleted.</p>${review.length ? `<p>Promotion moves only the selected sighting to Known. Merge and identity alerts still apply to the full group of ${appearances.length} sightings.</p>` : ''}</div>`;
         const gallery = review.length ? `<details class="movement-association-review"><summary>Other recorded associations — review required (${review.length})</summary><p>These photos do not establish the selected person's movement. Review each sighting separately.</p><section class="movement-evidence" data-journey-ready="true" aria-label="Associations requiring review"><ol class="movement-list">${review.map((app, index) => {
             const url = imageUrl(app.snapshot_url || app.best_snapshot_path);
             const camera = app.location_name || (app.pipeline_id ? label(app.pipeline_id) : 'Unknown camera');
             const stamp = Number.isFinite(Date.parse(app.start_time)) ? new Date(app.start_time).toLocaleString() : 'Time unavailable';
             const reason = app.association_reason || 'Association not verified';
-            return `<li class="movement-item"><article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-snapshot="${escape(url)}" data-caption="${escape(`${camera} · ${stamp}`)}" data-transition="Review required — excluded from journey">${url ? `<img src="${escape(url)}" alt="Sighting requiring review" loading="lazy">` : '<span class="movement-missing">No saved image</span>'}<span class="movement-photo-label">Inspect photo ↗</span></button><div class="movement-details"><h5>${escape(camera)}</h5><time>${escape(stamp)}</time><p>${escape(reason)}</p>${app.identity_id && app.id ? `<a href="/admin/unknown?view=${encodeURIComponent(app.identity_id)}&amp;appearance_id=${encodeURIComponent(app.id)}" ${typeof window.viewIdentityDetails === 'function' ? 'data-action="viewIdentityDetails"' : ''} data-arg="${escape(app.identity_id)}" data-appearance-id="${escape(app.id)}">Use this sighting as context</a>` : ''}</div></article></li>`;
+            return `<li class="movement-item"><article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-appearance-id="${escape(app.id || '')}" data-identity-id="${escape(app.identity_id || '')}" data-snapshot="${escape(url)}" data-caption="${escape(`${camera} · ${stamp}`)}" data-transition="Review required — excluded from journey">${url ? `<img src="${escape(url)}" alt="Sighting requiring review" loading="lazy">` : '<span class="movement-missing">No saved image</span>'}<span class="movement-photo-label">Inspect photo ↗</span></button><div class="movement-details"><h5>${escape(camera)}</h5><time>${escape(stamp)}</time><p>${escape(reason)}</p>${app.identity_id && app.id ? `<a href="/admin/unknown?view=${encodeURIComponent(app.identity_id)}&amp;appearance_id=${encodeURIComponent(app.id)}" ${typeof window.viewIdentityDetails === 'function' ? 'data-action="viewIdentityDetails"' : ''} data-arg="${escape(app.identity_id)}" data-appearance-id="${escape(app.id)}">Use this sighting as context</a>` : ''}</div></article></li>`;
         }).join('')}</ol></section></details>` : '';
         return notice + (included.length ? renderSequence(included, label) : '<p class="timeline-empty">No reliable reference is available for a movement journey. Review the recorded associations below.</p>') + gallery;
     }
@@ -208,7 +210,7 @@
                 const elapsed = previous ? gap(time - previous.time) : '';
                 return `<li class="movement-item">
                     <div class="movement-transition ${changed ? 'is-camera-change' : ''}"><span aria-hidden="true">${index ? '↓' : '●'}</span> ${index ? `${changed ? 'Camera change' : (previous.app.pipeline_id && app.pipeline_id ? 'Same camera' : 'Camera unknown')} · ${elapsed} since previous sighting` : 'First recorded sighting'}</div>
-                    <article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-snapshot="${escape(url)}" data-caption="${escape(title)}" data-transition="${escape(index ? `${changed ? 'Camera change' : 'Next sighting'} · ${elapsed} since previous sighting` : 'First recorded sighting')}" aria-label="${escape(`Inspect appearance ${index + 1}: ${title}`)}">
+                    <article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-appearance-id="${escape(app.id || '')}" data-identity-id="${escape(app.identity_id || '')}" data-snapshot="${escape(url)}" data-caption="${escape(title)}" data-transition="${escape(index ? `${changed ? 'Camera change' : 'Next sighting'} · ${elapsed} since previous sighting` : 'First recorded sighting')}" aria-label="${escape(`Inspect appearance ${index + 1}: ${title}`)}">
                         ${url ? `<img src="${escape(url)}" alt="Recorded appearance ${index + 1}" loading="lazy" decoding="async">` : '<span class="movement-missing">No saved image</span>'}
                         <span class="movement-photo-label">${url ? 'Enlarge photo ↗' : 'View details'}</span></button>
                     <div class="movement-details"><span class="movement-number">APPEARANCE ${String(index + 1).padStart(2, '0')}</span><h5>${escape(camera(app))}</h5>
@@ -223,6 +225,7 @@
     function show(index) {
         active = Math.max(0, Math.min(items.length - 1, index));
         const item = items[active];
+        item.dispatchEvent(new CustomEvent('movement-sighting-selected', {bubbles:true, detail:{appearanceId:item.dataset.appearanceId, identityId:item.dataset.identityId}}));
         const root = item.closest('.movement-evidence');
         if (root?.querySelector('.graph-photo')) selectSighting(root, active, false);
         const image = viewer.querySelector('img');

@@ -1693,3 +1693,9 @@
 .engine-badge { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; margin: 0 0 0.6rem; padding: 0.25rem 0.6rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); font-size: 0.76rem; color: #b9c8dc; }
 .engine-badge strong { color: #e4eefb; }
 .engine-badge.engine-badge--missing { color: #ffd699; border-color: rgba(255, 173, 51, 0.4); }
+
+/* Camera names stay visible while reviewing movement, independently of popups. */
+.ae-camera-label { max-width: 240px; padding: 5px 9px; border: 1px solid #93b5c9; border-radius: 6px; background: #122331; color: #f3faff; box-shadow: 0 2px 7px #0007; font: 600 12px/1.4 system-ui, sans-serif; text-align: center; pointer-events: none; }
+.ae-camera-label-name { display: block; overflow-wrap: anywhere; }
+.ae-camera-label-name + .ae-camera-label-name { border-top: 1px solid #476172; margin-top: 3px; padding-top: 3px; }
+.ae-camera-label.is-current { border: 2px solid #7dffc6; background: #123d33; color: #e7fff5; }
