@@ -77,13 +77,17 @@ for (const security of [false,true]) test(`${security?'Security':'Identity'} Int
  assert.ok(start>0);
  source=source.slice(0,start)+(security?'window.probe={createSelector,selectorRegistry};':'window.probe={createIdentityPicker,picker,destroyIdentityPicker};')+'\n})();';
  w.eval(source);
- w.fetch=async url=>({ok:true,status:200,json:async()=>String(url).includes('/config')?{allowed_extensions:['.png'],max_file_size_mb:10}:String(url).includes('/by-image')?[match,{...match,identity_id:'f1bfe233-3918-407c-8822-2344387babc9',snapshot_url:'/gone.jpg'}]:{identities:[],total:0,pages:1}});
+ w.fetch=async url=>({ok:true,status:200,json:async()=>String(url).includes('/config')?{allowed_extensions:['.png'],max_file_size_mb:10}:String(url).includes('/by-image')?[{...match,type:'unverified',display_name:null,matched_embedding_id:17,identity_verification:'unverified'},{...match,identity_id:'f1bfe233-3918-407c-8822-2344387babc9',snapshot_url:'/gone.jpg'}]:{identities:[],total:0,pages:1}});
  const select=w.document.querySelector('select');
  if(security)w.probe.createSelector(select,{mode:'identity',multi:false,label:'Select Identity'});else w.probe.createIdentityPicker(select);
  const input=w.document.querySelector('.filter-photo-input');Object.defineProperty(input,'files',{value:[h.file]});
  input.dispatchEvent(new w.Event('change'));
  for(let i=0;i<15&&!w.document.querySelector('[data-search-image-source]');i++)await tick();
  const imgs=w.document.querySelectorAll('[data-search-image-source]');assert.equal(imgs.length,2);
+ const disabled=w.document.querySelector('[aria-disabled="true"]');assert.ok(disabled);
+ const review=disabled.querySelector('a');assert.ok(review.href.includes('search_embedding_id=17'));
+ assert.ok(review.href.includes('search_unverified=true'));disabled.click();assert.equal(select.value,'');
+
  assert.equal(imgs[0].dataset.searchImageSource,'uploaded');assert.equal(h.urls.get(imgs[0].src),h.file);
  assert.equal(imgs[1].dataset.searchImageSource,'stored');imgs[1].dispatchEvent(new w.Event('error'));
  assert.equal(imgs[1].src,imgs[0].src);assert.equal(w.document.querySelectorAll('.search-image-caption:not([hidden])').length,2);

@@ -17,42 +17,22 @@ import time
 import uuid
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 import numpy as np
 import cv2
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, exists
+from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 
 from config import settings
 from db_models import (
-    Identity, IdentityType, IdentityAppearance, Watchlist, WatchlistEntry,
-    WatchlistAlert, SearchHistory, SearchType
+    WatchlistEntry,
+    WatchlistAlert, SearchType
 )
-from backend.core.face_quality import assess_face_quality, QualityAssessment
+from backend.core.face_quality import assess_face_quality
 from backend.core.face_extraction import (DetectedFace, embed_face_normalized,
                                           extract_faces)
-
-# Import path_to_url utility - handle import errors gracefully
-try:
-    from backend.utils.path_utils import path_to_url
-except ImportError:
-    # Fallback: define a simple path_to_url function if import fails
-    def path_to_url(path: str) -> str:
-        """Convert file path to URL format."""
-        if not path:
-            # Resolved at call time, so the constant defined below is available.
-            return PLACEHOLDER_AVATAR_DATA_URI
-        if path.startswith('storage/'):
-            return f"/{path}"
-        elif not path.startswith('/'):
-            return f"/storage/{path}"
-        else:
-            return path
-
-from backend.core.vector_index.access import search_similar_embeddings
-from backend.core.vector_index.base import usable_score
 
 logger = logging.getLogger(__name__)
 
@@ -160,17 +140,6 @@ def _match_log(stage: str, *, request_id: Optional[str] = None,
         logger.debug("[UPLOAD_MATCH] failed to emit stage=%s", stage)
 
 
-# Shown when an identity has no usable snapshot. Kept as one constant so the
-# two places that emit it cannot drift apart.
-PLACEHOLDER_AVATAR_DATA_URI = (
-    'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100"%3E'
-    '%3Crect fill="%23333" width="100" height="100"/%3E'
-    '%3Ccircle cx="50" cy="35" r="15" fill="%23999"/%3E'
-    '%3Cpath d="M 25 70 Q 25 60 35 60 L 65 60 Q 75 60 75 70 L 75 85 L 25 85 Z" fill="%23999"/%3E'
-    '%3C/svg%3E'
-)
-
-
 @dataclass
 class FaceSearchResult:
     """Individual face match result"""
@@ -184,6 +153,15 @@ class FaceSearchResult:
     last_seen_at: Optional[datetime] = None
     appearances_count: int = 0
     watchlist_match: Optional[Dict] = None
+    matched_embedding_id: Optional[int] = None
+    matched_appearance_id: Optional[int] = None
+    matched_face_id: Optional[int] = None
+    matched_image_id: Optional[int] = None
+    matched_at: Optional[str] = None
+    matched_pipeline_id: Optional[str] = None
+    match_source: str = 'unavailable'
+    identity_verification: str = 'unverified'
+    reference_similarity: Optional[float] = None
 
 
 @dataclass
@@ -236,33 +214,6 @@ class AdvancedSearchService:
     Advanced search service with multi-face detection, quality scoring,
     watchlist checking, and search history logging.
     """
-
-    # Recall floor for candidate retrieval. Deliberately looser than the
-    # ingest-time thresholds: this is an investigative search where the
-    # operator judges the ranked list, not an auto-identification decision.
-    # It is applied to BOTH backends — the FAISS call sites used to omit it and
-    # silently fall back to the index defaults (0.4 / 0.35), so the two
-    # deployments searched to different depths.
-    #
-    # These are properties, not class constants: as constants they were a
-    # second, unreachable declaration of values the settings page offers.
-    # Read per call so an admin edit takes effect without a restart.
-    @property
-    def candidate_threshold(self) -> float:
-        return float(settings.SEARCH_RETRIEVAL_FLOOR)
-
-    # Candidate pool multiplier. The vector indexes return one row per
-    # EMBEDDING, and an identity may own many, so the pool has to be wider than
-    # the quota to have a chance of containing `top_k` distinct people. Widened
-    # further when a filter is active, because filtering happens after the
-    # index has already chosen the candidates.
-    @property
-    def candidate_multiplier(self) -> int:
-        return int(settings.SEARCH_CANDIDATE_MULTIPLIER)
-
-    @property
-    def filtered_candidate_multiplier(self) -> int:
-        return int(settings.SEARCH_FILTERED_CANDIDATE_MULTIPLIER)
 
     def __init__(self, model_manager=None, identity_index=None, pgvector_index=None):
         self.model_manager = model_manager
@@ -629,7 +580,7 @@ class AdvancedSearchService:
                     for m in alert_candidates if m.watchlist_match
                 }
                 for match in matches:
-                    if match.identity_id in by_identity:
+                    if match.identity_id in by_identity and match.identity_verification in ('verified_reference', 'consistent_reference'):
                         match.watchlist_match = by_identity[match.identity_id]
 
         face_data.matches = matches
@@ -646,246 +597,32 @@ class AdvancedSearchService:
         filters: Dict,
         request_id: str = None
     ) -> Tuple[List[FaceSearchResult], List[FaceSearchResult]]:
-        """Search vector indexes (pgvector or FAISS) and return matches.
-
-        Returns TWO lists:
-          - `display`: what the user asked for — filters applied, capped at top_k.
-          - `alert_candidates`: the same ranking WITHOUT the pipeline/date
-            filters, capped at top_k.
-
-        They are separate on purpose. Watchlist alerts are persisted security
-        records (`WatchlistAlert` rows, `SearchHistory.watchlist_alerts_count`),
-        and they used to be derived from whatever survived the filters. That
-        meant narrowing the Camera dropdown to "Lobby" would silently suppress
-        the alert — and its audit trail — for a THREAT-list subject who matched
-        the uploaded face but had only ever been captured on "Garage".
-        Filtering is a view concern; an alert is a record. Different lists.
-        """
-        _search_started = time.perf_counter()
-        _match_log("vector_search_started", request_id=request_id,
-                   scope=scope, top_k=top_k,
-                   vector_backend=settings.VECTOR_BACKEND,
-                   retrieval_floor=self.candidate_threshold,
-                   display_floor=float(settings.SIMILARITY_THRESHOLD))
-
-        # Determine which indexes to search
-        search_known = scope in ("known", "both")
-        search_unknown = scope in ("unknown", "both")
-
-        has_db_filter = bool(filters and (
-            filters.get('pipeline_id') or filters.get('date_from') or filters.get('date_to')))
-        fetch_k = top_k * (self.filtered_candidate_multiplier if has_db_filter
-                           else self.candidate_multiplier)
-
-        identity_ids_scores = []
-
-        # Use pgvector if enabled, otherwise use FAISS
-        if self.use_pgvector and self.pgvector_index:
-            logger.debug(f"[ADVANCED_SEARCH] Using pgvector backend for search (scope={scope}, top_k={top_k})")
-
-            if search_known:
-                known_results = await self.pgvector_index.search_known(
-                    embedding=embedding,
-                    top_k=fetch_k,
-                    threshold=self.candidate_threshold,
-                    db=db,
-                    include_inactive=True,
-                    recognition_only=False
-                )
-                # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
-                for identity_id, score in known_results:
-                    if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
-                        continue
-                    identity_ids_scores.append((identity_id, score, "known"))
-
-            if search_unknown:
-                unknown_results = await self.pgvector_index.search_unknown(
-                    embedding=embedding,
-                    top_k=fetch_k,
-                    threshold=self.candidate_threshold,
-                    db=db,
-                    include_inactive=True,
-                    recognition_only=False
-                )
-                # pgvector returns List[Tuple[str, float]]: (identity_id, similarity)
-                for identity_id, score in unknown_results:
-                    if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
-                        continue
-                    identity_ids_scores.append((identity_id, score, "unknown"))
+        """Return exact matched observations, plus unfiltered alert candidates."""
+        from backend.core.search_evidence import search_evidence
+        _match_log('vector_search_started', request_id=request_id, scope=scope, top_k=top_k,
+                   vector_backend='authoritative_database', display_floor=float(settings.SIMILARITY_THRESHOLD))
+        model = _embedding_model_version()
+        filters = filters or {}
+        kwargs = dict(start=filters.get('date_from'), end=filters.get('date_to'),
+                      pipeline_id=filters.get('pipeline_id'))
+        hits = await search_evidence(db, embedding, model, scope, top_k,
+                                    exclude_identity_ids=exclude_identity_ids, **kwargs)
+        def build(items):
+            return [FaceSearchResult(**{**hit.result(),
+                'last_seen_at': hit.identity.last_seen_at,
+                'confidence_band': self._get_confidence_band(hit.similarity)}) for hit in items]
+        for hit in hits:
+            _match_log('raw_candidate', request_id=request_id, identity_id=str(hit.identity.id),
+                       embedding_id=hit.embedding.id, raw_similarity=_fmt_score(hit.similarity),
+                       identity_verification=hit.verification)
+        matches = build(hits)
+        if any(kwargs.values()):
+            alerts = build(await search_evidence(db, embedding, model, scope, top_k,
+                          exclude_identity_ids=exclude_identity_ids))
         else:
-            # In-process index, through the contract.
-            #
-            # The threshold is passed explicitly. Omitting it fell back to the
-            # legacy index defaults (0.4 known / 0.35 unknown), so this branch
-            # searched roughly half as deep as the pgvector branch while the
-            # comment above claimed a lower threshold.
-            logger.debug(f"[ADVANCED_SEARCH] Using the in-process vector index (scope={scope}, top_k={top_k})")
+            alerts = matches
+        return matches, alerts
 
-            for wanted, enabled in (("known", search_known), ("unknown", search_unknown)):
-                if not enabled:
-                    continue
-                hits = await search_similar_embeddings(
-                    db, embedding, top_k=fetch_k,
-                    threshold=self.candidate_threshold, identity_type=wanted, include_inactive=True)
-                if not hits:
-                    logger.debug(f"[ADVANCED_SEARCH] no {wanted} candidates")
-                for hit in hits:
-                    identity_id = hit["identity_id"]
-                    if exclude_identity_ids and str(identity_id) in exclude_identity_ids:
-                        continue
-                    identity_ids_scores.append((identity_id, hit["similarity"], wanted))
-
-        # Collapse to one entry per identity, keeping its best score.
-        #
-        # The indexes rank EMBEDDINGS, not people, and an identity may own many
-        # (6 do in the live database). Without this, one person can occupy
-        # several result slots — and once truncation moves after filtering,
-        # a filter that removes competing identities would backfill the freed
-        # slots with more copies of the survivor.
-        best_by_identity = {}
-        for identity_id, score, idx_type in identity_ids_scores:
-            key = str(identity_id)
-            current = best_by_identity.get(key)
-            if current is None or score > current[1]:
-                best_by_identity[key] = (identity_id, score, idx_type)
-        identity_ids_scores = list(best_by_identity.values())
-
-        # Rank. NOTE: no truncation here — the DB filters below must be applied
-        # across the whole candidate pool, or a narrow filter silently shrinks
-        # an already-cut list instead of promoting the next valid match.
-        for _iid, _score, _itype in identity_ids_scores:
-            _match_log("raw_candidate", request_id=request_id,
-                       identity_id=str(_iid), index_type=_itype,
-                       raw_similarity=_fmt_score(_score),
-                       raw_distance=_fmt_score(
-                           None if _score is None else 1.0 - float(_score)
-                           if isinstance(_score, (int, float)) and math.isfinite(float(_score))
-                           else None))
-        identity_ids_scores.sort(key=lambda x: x[1], reverse=True)
-
-        if not identity_ids_scores:
-            return [], []
-
-        # Fetch identity details from database
-        identity_ids = [str(i[0]) for i in identity_ids_scores]
-        base_ids = [uuid.UUID(i) for i in identity_ids]
-        query = select(Identity).where(Identity.id.in_(base_ids))
-        unfiltered_query = query
-
-        # Apply date filters if provided.
-        #
-        # Deliberately still on Identity.last_seen_at rather than on an
-        # appearance timestamp: 5 of 10 KNOWN identities have no appearance rows
-        # at all (enrolled but never captured), and moving this predicate would
-        # silently drop every one of them. Note that last_seen_at carries
-        # onupdate=utcnow, so it behaves more like updated_at than like a
-        # sighting time — changing that is a separate, deliberate decision.
-        if filters:
-            if filters.get('date_from'):
-                query = query.where(Identity.last_seen_at >= filters['date_from'])
-            if filters.get('date_to'):
-                query = query.where(Identity.last_seen_at <= filters['date_to'])
-
-            # Camera / location filter. Correlated EXISTS so the planner can
-            # drive from the (already small) candidate list and stop at the
-            # first matching appearance, rather than materialising every
-            # appearance row for the camera.
-            #
-            # Consequence worth knowing: an identity with no appearance rows
-            # fails this on every camera. That is correct for "seen on camera X"
-            # but it does mean enrolled-but-never-captured people disappear
-            # whenever a camera is selected — which is exactly why watchlist
-            # alerts are computed from the unfiltered set instead.
-            #
-            # Also note this predicate carries no time bound, so combining it
-            # with the date range above reads as "ever seen on camera X" AND
-            # "last_seen_at within range" — a looser conjunction than it looks.
-            if filters.get('pipeline_id'):
-                query = query.where(exists().where(
-                    (IdentityAppearance.identity_id == Identity.id) &
-                    (IdentityAppearance.pipeline_id == filters['pipeline_id'])
-                ))
-
-        result = await db.execute(query)
-        identities = {str(i.id): i for i in result.scalars().all()}
-
-        # The alert path must not inherit the filters. Only re-query when a
-        # filter actually narrowed something.
-        if has_db_filter:
-            unfiltered_result = await db.execute(unfiltered_query)
-            unfiltered_identities = {str(i.id): i for i in unfiltered_result.scalars().all()}
-        else:
-            unfiltered_identities = identities
-
-        # RETRIEVAL floor vs DISPLAY floor. SEARCH_RETRIEVAL_FLOOR exists to
-        # search deeply enough that filtering has something to work with; it was
-        # also, accidentally, the only floor, so a 0.21 match was rendered as a
-        # result card labelled VERY_LOW. Anything the operator's configured
-        # recognition threshold would reject is not a match and is not shown.
-        display_floor = float(settings.SIMILARITY_THRESHOLD)
-
-        def build(pool, limit):
-            """Walk candidates in score order, keeping those the pool admits."""
-            built = []
-            for identity_id, score, idx_type in identity_ids_scores:
-                if len(built) >= limit:
-                    break
-                if not usable_score(score, display_floor):
-                    # Ordered by score, so everything after this is also below
-                    # the floor — but log the first rejection with its reason
-                    # rather than dropping the tail silently.
-                    _match_log("candidate_filtered", request_id=request_id,
-                               identity_id=str(identity_id),
-                               raw_similarity=_fmt_score(score),
-                               threshold=display_floor,
-                               rejection_reason="below_display_threshold")
-                    break
-                identity = pool.get(str(identity_id))
-                if not identity:
-                    _match_log("candidate_filtered", request_id=request_id,
-                               identity_id=str(identity_id),
-                               raw_similarity=_fmt_score(score),
-                               rejection_reason="not_in_filtered_pool")
-                    continue
-                built.append(self._build_match(identity, identity_id, score, idx_type))
-            return built
-
-        results = build(identities, top_k)
-        alert_candidates = build(unfiltered_identities, top_k) if has_db_filter else results
-
-        if has_db_filter and len(results) < top_k:
-            # Say so, rather than letting a short list read as "no more matches
-            # exist". The pool is finite and the filter ran after the index
-            # already chose the candidates.
-            logger.info(
-                "[ADVANCED_SEARCH] filtered result under-filled: %d/%d from %d candidates "
-                "(scope=%s, pipeline=%s) — widen the candidate pool if this is common",
-                len(results), top_k, len(identity_ids_scores), scope,
-                (filters or {}).get('pipeline_id'))
-
-        return results, alert_candidates
-
-    def _build_match(self, identity, identity_id, score, idx_type) -> FaceSearchResult:
-        """Build one API-facing match from a hydrated Identity row."""
-        # Backend constructs snapshot URL using path_to_url utility (all logic in backend)
-        if identity.best_snapshot_path:
-            snapshot_url = path_to_url(identity.best_snapshot_path)
-        else:
-            # Backend provides fallback URL (SVG data URI with user icon)
-            snapshot_url = PLACEHOLDER_AVATAR_DATA_URI
-
-        return FaceSearchResult(
-            identity_id=str(identity_id),
-            display_name=identity.display_name,
-            type=identity.type.value if identity.type else idx_type,
-            similarity=float(round(score, 4)),  # Convert numpy type to Python float
-            confidence_band=self._get_confidence_band(score),
-            best_snapshot_path=identity.best_snapshot_path,  # Keep original path for reference
-            snapshot_url=snapshot_url,  # Backend provides ready-to-use URL
-            last_seen_at=identity.last_seen_at,
-            appearances_count=identity.appearances_count or 0
-        )
-    
     async def _check_watchlists(
         self,
         db: AsyncSession,
@@ -897,7 +634,11 @@ class AdvancedSearchService:
         if not matches:
             return matches
         
-        identity_ids = [uuid.UUID(m.identity_id) for m in matches]
+        # Historical assignment alone must not trigger a Known-name alert.
+        identity_ids = [uuid.UUID(m.identity_id) for m in matches
+                        if m.identity_verification in ('verified_reference', 'consistent_reference')]
+        if not identity_ids:
+            return matches
         
         # Query watchlist entries for these identities
         query = select(WatchlistEntry).options(
@@ -938,7 +679,7 @@ class AdvancedSearchService:
         
         # Update matches with watchlist info
         for match in matches:
-            if match.identity_id in watchlist_lookup:
+            if match.identity_id in watchlist_lookup and match.identity_verification in ('verified_reference', 'consistent_reference'):
                 match.watchlist_match = watchlist_lookup[match.identity_id]
         
         return matches
@@ -1023,6 +764,10 @@ class AdvancedSearchService:
                     "skip_reason": f.skip_reason,
                     "matches": [
                         {
+                            **{key: getattr(m, key) for key in (
+                                'matched_embedding_id', 'matched_appearance_id', 'matched_face_id',
+                                'matched_image_id', 'matched_at', 'matched_pipeline_id',
+                                'match_source', 'identity_verification', 'reference_similarity')},
                             "identity_id": m.identity_id,
                             "display_name": m.display_name,
                             "type": m.type,

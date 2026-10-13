@@ -70,7 +70,8 @@ async def publish_unknown_events(events):
             logging.getLogger(__name__).exception('Committed unknown event delivery failed')
 
 
-async def review_unknown_associations(db, identity_id, appearances, selected_appearance_id=None):
+async def review_unknown_associations(db, identity_id, appearances, selected_appearance_id=None,
+                                      *, reference_embedding_id=None, threshold=None):
     """Read-only, direct comparison; never infer a person's movement by chaining.
 
     All rows remain in the response and in storage. A uniquely linked current-
@@ -85,7 +86,7 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
     from backend.core.identity_service import IdentityService
 
     model = IdentityService._resolve_model_version()
-    threshold = float(settings.UNKNOWN_SIMILARITY_THRESHOLD)
+    threshold = float(settings.UNKNOWN_SIMILARITY_THRESHOLD) if threshold is None else float(threshold)
     vectors = (await db.execute(select(IdentityEmbedding).where(
         IdentityEmbedding.identity_id == identity_id,
         IdentityEmbedding.embedding_model_version == model,
@@ -127,7 +128,10 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
             linked[app.id] = (row.id, value)
 
     reference_id = selected_appearance_id
-    if selected_appearance_id is not None:
+    if reference_embedding_id is not None:
+        row = next((row for row in vectors if row.id == reference_embedding_id), None)
+        reference = normalized(row.embedding) if row else None
+    elif selected_appearance_id is not None:
         reference = linked.get(selected_appearance_id, (None, None))[1]
     else:
         # Use the exact same stable reference as live recognition, not the
@@ -151,15 +155,16 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
             'association_similarity': round(score, 6) if score is not None else None,
             'association_reason': {
                 'selected': 'Selected reference sighting; identity is not independently verified',
-                'consistent': 'Direct similarity meets the configured Unknown threshold',
-                'review_required': 'Direct similarity is below the configured Unknown threshold',
+                'consistent': 'Direct similarity meets the comparison threshold',
+                'review_required': 'Direct similarity is below the comparison threshold',
                 'unverified': 'No unambiguous current-model vector link for this comparison',
             }[state],
         }
     included = sum(r['association_status'] in ('selected', 'consistent') for r in result.values())
     return result, {
         'reference_appearance_id': reference_id,
-        'reference_kind': 'selected_sighting' if selected_appearance_id is not None else 'initial_reference',
+        'reference_kind': 'search_observation' if reference_embedding_id is not None else 'selected_sighting' if selected_appearance_id is not None else 'initial_reference',
+        'reference_embedding_id': reference_embedding_id,
         'reference_available': reference is not None,
         'threshold': threshold,
         'included_count': included,

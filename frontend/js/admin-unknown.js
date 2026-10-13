@@ -174,7 +174,7 @@ async function openDeepLinkedIdentity() {
         return;
     }
 
-    const identity = await viewIdentityDetails(view, params.get('appearance_id'));
+    const identity = await viewIdentityDetails(view, params.get('appearance_id'), params.get('search_embedding_id'), params.get('search_unverified') === 'true');
     if (identity) {
         reframeForKnownIdentity(identity, from);
     }
@@ -1518,13 +1518,15 @@ function renderAdvancedTimeline(appearances) {
 // Only the most recent click may publish content, even after a modal close.
 let identityDetailRevision = 0;
 let identityDetailController = null;
-async function viewIdentityDetails(identityId, appearanceId = null) {
+async function viewIdentityDetails(identityId, appearanceId = null, searchEmbeddingId = null, searchUnverified = false) {
     const modal = document.getElementById('identity-detail-modal');
     const content = document.getElementById('identity-detail-content');
     const revision = ++identityDetailRevision;
     identityDetailController?.abort();
     identityDetailController = new AbortController();
-    const query = /^[1-9][0-9]*$/.test(String(appearanceId || ''))
+    const query = /^[1-9][0-9]*$/.test(String(searchEmbeddingId || ''))
+        ? `?search_embedding_id=${encodeURIComponent(searchEmbeddingId)}${searchUnverified ? '&search_unverified=true' : ''}`
+        : /^[1-9][0-9]*$/.test(String(appearanceId || ''))
         ? `?appearance_id=${encodeURIComponent(appearanceId)}` : '';
     content.innerHTML = '<p role="status">Loading the selected sighting…</p>';
     ModalStack.open(modal, { onClose: handleDetailModalClose });
@@ -1550,8 +1552,8 @@ async function viewIdentityDetails(identityId, appearanceId = null) {
         if (revision !== identityDetailRevision) return null;
         const review = identity.association_review;
         const selected = review && identity.appearances?.find(app => app.id === review.reference_appearance_id);
-        const portraitUrl = review ? selected?.snapshot_url : identity.snapshot_url;
-        const portraitLabel = review ? (review.reference_kind === 'selected_sighting' ? 'Selected sighting' : 'Initial reference sighting') : 'Representative portrait';
+        const portraitUrl = identity.search_match ? identity.snapshot_url : review ? selected?.snapshot_url : identity.snapshot_url;
+        const portraitLabel = identity.search_match ? 'Matched search observation' : review ? (review.reference_kind === 'selected_sighting' ? 'Selected sighting' : 'Initial reference sighting') : 'Representative portrait';
 
         content.innerHTML = `
             <div class="detail-header">
@@ -1644,6 +1646,9 @@ async function viewIdentityDetails(identityId, appearanceId = null) {
             </div>
         `;
 
+        if (identity.search_match && !['verified_reference', 'consistent_reference'].includes(identity.search_match.identity_verification)) {
+            content.querySelectorAll('[data-action="analyzeInSecurityIntelligence"], [data-action="openCreateLiveAlertModal"], [data-action="openAddToWatchlistModal"], [data-action="openMergeModal"]').forEach(button => { button.hidden = true; });
+        }
         return identity;
     } catch (error) {
         if (revision !== identityDetailRevision || error.name === 'AbortError') return null;
@@ -1997,8 +2002,8 @@ function createSearchResultCard(result, reference) {
     card.innerHTML = `<div class="card-image"><div class="similarity-badge"></div></div>
         <div class="card-content"><div class="card-header"><h3></h3><span class="card-badge"></span></div>
         <div class="card-info"><p class="search-appearances"></p><p class="search-last-seen"></p></div><div class="card-actions"></div></div>`;
-    card.querySelector('h3').textContent = result.display_name || 'Unknown';
-    card.querySelector('.card-badge').textContent = result.type === 'known' ? 'known' : 'unknown';
+    card.querySelector('h3').textContent = result.display_name || (result.type === 'unverified' ? 'Unverified historical match' : 'Unknown');
+    card.querySelector('.card-badge').textContent = result.type || 'unknown';
     card.querySelector('.similarity-badge').textContent = `${(Number(result.similarity) * 100).toFixed(1)}% similarity`;
     card.querySelector('.search-appearances').textContent = `${Number(result.appearances_count) || 0} appearances`;
     const stamp = result.last_seen_at ? new Date(result.last_seen_at) : null;
@@ -2017,6 +2022,9 @@ function createSearchResultCard(result, reference) {
         const button = document.createElement('button');
         button.type = 'button'; button.className = 'intelligence-admin-btn small';
         button.dataset.action = action; button.dataset.arg = result.identity_id;
+        button.dataset.searchEmbeddingId = result.matched_embedding_id || '';
+        button.dataset.searchUnverified = result.type === 'unverified' ? 'true' : 'false';
+        button.dataset.appearanceId = result.matched_appearance_id || '';
         const content = document.createElement('div'); content.className = 'btn-content';
         const title = document.createElement('span'); title.className = 'btn-title'; title.textContent = label;
         content.appendChild(title); button.appendChild(content); card.querySelector('.card-actions').appendChild(button);
@@ -3554,7 +3562,8 @@ Actions.register({
     viewIdentityDetails: (el, event) => {
         event?.preventDefault();
         return viewIdentityDetails(el.dataset.arg,
-            el.dataset.appearanceId || el.closest('[data-identity-id]')?.dataset.appearanceId);
+            el.dataset.appearanceId || el.closest('[data-identity-id]')?.dataset.appearanceId,
+            el.dataset.searchEmbeddingId, el.dataset.searchUnverified === 'true');
     },
     promoteIdentityModal: (el) => promoteIdentityModal(el.dataset.arg, el.dataset.appearanceId || el.closest('.identity-card-compact')?.dataset.appearanceId),
 

@@ -281,15 +281,15 @@ def test_a_face_below_the_threshold_is_not_attached_anyway():
 
 
 def test_the_display_floor_is_the_configured_threshold():
-    source = _source(SERVICE_SRC)
-    assert "display_floor" in source, "results are shown below the match threshold"
+    source = _source("/app/backend/core/search_evidence.py")
+    assert "distance <= 1 - float(settings.SIMILARITY_THRESHOLD)" in source
     assert "settings.SIMILARITY_THRESHOLD" in source
 
 
 def test_by_image_search_uses_configured_thresholds_and_collapses_per_identity():
     source = _source("/app/backend/routes/identities.py")
     assert "threshold=0.4" not in source, "by-image search hardcodes its threshold"
-    assert "best_by_identity" in source, (
+    assert "search_evidence" in source, (
         "by-image search returns one row per EMBEDDING, so one person can "
         "occupy several of the top_k slots")
 

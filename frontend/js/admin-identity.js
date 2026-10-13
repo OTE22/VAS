@@ -154,9 +154,14 @@
         error.hidden = false;
     }
 
+    function searchContextQuery() {
+        const id = new URLSearchParams(window.location.search).get('search_embedding_id');
+        return /^[1-9][0-9]*$/.test(id || '') ? `?search_embedding_id=${encodeURIComponent(id)}${new URLSearchParams(window.location.search).get('search_unverified') === 'true' ? '&search_unverified=true' : ''}` : '';
+    }
+
     async function loadIdentity() {
         const response = await fetch(
-            `/api/admin/identity/${encodeURIComponent(state.identityId)}`,
+            `/api/admin/identity/${encodeURIComponent(state.identityId)}` + searchContextQuery(),
             { credentials: 'include' });
         if (!response.ok) {
             let detail = '';
@@ -199,7 +204,7 @@
         snapshot.dataset.fallbackSrc = PLACEHOLDER_AVATAR;
         snapshot.alt = identity.display_name || 'Identity snapshot';
 
-        const name = identity.display_name || 'Unidentified person';
+        const name = identity.display_name || (identity.type === 'unverified' ? 'Unverified historical match' : 'Unidentified person');
         document.getElementById('profile-name').textContent = name;
         document.title = `${name} - Identity Profile | Face Recognition Service`;
 
@@ -217,7 +222,11 @@
     }
 
     function renderActions(identity) {
+        document.querySelectorAll('.profile-actions button').forEach(button => {
+            button.hidden = identity.search_match && !['verified_reference', 'consistent_reference'].includes(identity.search_match.identity_verification);
+        });
         const analyze = document.getElementById('profile-analyze-link');
+        analyze.hidden = !!identity.search_match && !['verified_reference', 'consistent_reference'].includes(identity.search_match.identity_verification);
         analyze.href = `/admin/security-intelligence`
             + `?identity_id=${encodeURIComponent(identity.id)}&tab=threats`;
 
@@ -228,7 +237,8 @@
         manage.hidden = !isUnknown;
         if (isUnknown) {
             manage.href = `/admin/unknown?view=${encodeURIComponent(identity.id)}`
-                + `&from=${encodeURIComponent(window.location.pathname)}`;
+                + `&from=${encodeURIComponent(window.location.pathname)}`
+                + searchContextQuery().replace('?', '&');
         }
     }
 
@@ -613,7 +623,10 @@
             renderHeader(identity);
             renderActions(identity);
             renderFacts(identity);
-            renderWatchlists(watchlists);
+            if (identity.type === 'unverified') {
+                document.getElementById('profile-watchlists').replaceChildren(buildEl('p', 'profile-empty',
+                    'Historical group membership is not verified for this matched observation.'));
+            } else renderWatchlists(watchlists);
             document.getElementById('identity-timeline').innerHTML =
                 renderAdvancedTimeline(identity.appearances || []);
 

@@ -1,498 +1,210 @@
-"""Advanced Search candidate selection: dedup, filter ordering, alert scoping.
-
-Three defects motivated these tests, all confirmed against the running app
-before the fix:
-
-  1. `pipeline_id` was accepted by /api/search/advanced, threaded into
-     search_multi_face and written to SearchHistory.filters, but no query ever
-     read it. Filtering to a camera the matched face had never been seen on
-     returned the IDENTICAL result set.
-
-  2. Candidates were truncated to top_k BEFORE the date predicate was applied,
-     so a narrow range silently shrank an already-cut list instead of promoting
-     the next valid match.
-
-  3. The vector indexes rank EMBEDDINGS, not people, and nothing deduped them.
-     Harmless while truncation came first; combined with fix (2) it would have
-     backfilled freed slots with more copies of the same survivor.
-
-The unit tests drive `_search_indexes` directly with stubbed indexes and a fake
-session, because that is where the ordering lives and there is no DB fixture
-factory in this suite. The live test at the bottom is the end-to-end guard that
-would have caught defect (1) originally.
-"""
-
-import asyncio
-import json
-import urllib.error
-import urllib.request
+"""Search integrity against disposable PostgreSQL and synthetic vectors only."""
+from datetime import datetime
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock, patch
+import hashlib
 import uuid
-from dataclasses import dataclass
-from typing import List, Optional
-
+import numpy as np
 import pytest
-
-from backend.core.advanced_search import AdvancedSearchService, FaceSearchResult
-
-BASE = "http://localhost:8000"
-
-
-# ---------------------------------------------------------------------------
-# Test doubles
-# ---------------------------------------------------------------------------
-
-@dataclass
-class FakeIdentity:
-    """Stands in for a hydrated db_models.Identity row."""
-    id: uuid.UUID
-    display_name: str
-    pipeline_ids: tuple = ()          # which cameras this identity was seen on
-    last_seen_at: Optional[object] = None
-    best_snapshot_path: Optional[str] = None
-    appearances_count: int = 0
-    type: Optional[object] = None
-
-
-class FakeResult:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def scalars(self):
-        return self
-
-    def all(self):
-        return self._rows
-
-
-class FakeSession:
-    """Applies the filters the real query would, by inspecting what was asked.
-
-    The production code builds one SQLAlchemy Select and adds predicates to it.
-    Rather than parse SQL, the service is handed a session that records the
-    query and a resolver decides which identities that query admits — the same
-    decision Postgres would make, expressed in Python.
-    """
-
-    def __init__(self, identities, admits):
-        self.identities = identities
-        self.admits = admits           # fn(query) -> set of admitted ids
-        self.queries = []
-
-    async def execute(self, query):
-        self.queries.append(query)
-        allowed = self.admits(query)
-        return FakeResult([i for i in self.identities if str(i.id) in allowed])
-
-
-class FakeVectorIndex:
-    """Returns (identity_id, score) rows — one per EMBEDDING, like the real one."""
-
-    def __init__(self, rows):
-        self.rows = rows
-        self.requested_top_k = []
-        self.requested_threshold = []
-
-    async def search_known(self, embedding, top_k, threshold, db=None, include_inactive=False, recognition_only=True):
-        assert recognition_only is False, "Historical search must retain camera observations"
-        self.requested_top_k.append(top_k)
-        self.requested_threshold.append(threshold)
-        return list(self.rows)
-
-    async def search_unknown(self, embedding, top_k, threshold, db=None, include_inactive=False, recognition_only=True):
-        assert recognition_only is False, "Unknown history must retain later observations"
-        self.requested_top_k.append(top_k)
-        self.requested_threshold.append(threshold)
-        return []
-
-
-def make_service(rows):
-    svc = AdvancedSearchService.__new__(AdvancedSearchService)
-    svc.use_pgvector = True
-    svc.pgvector_index = FakeVectorIndex(rows)
-    svc.identity_index = None
-    return svc
-
-
-def run(coro):
-    from conftest import run_on_shared_loop
-    return run_on_shared_loop(coro)
-
-
-def uid(n):
-    """Deterministic UUIDs so assertions can name identities."""
-    return uuid.UUID(int=n)
-
-
-# ---------------------------------------------------------------------------
-# 1. Dedup — one row per identity, carrying its best score
-# ---------------------------------------------------------------------------
-
-def test_multiple_embeddings_of_one_identity_collapse_to_one_match():
-    """pgvector selects FROM identity_embeddings with no DISTINCT, so an
-    identity with N embeddings occupied N result slots. 6 identities in the
-    live database have more than one embedding."""
-    rows = []
-    for ident in (1, 2, 3):
-        for e in range(10):
-            rows.append((str(uid(ident)), 0.9 - ident * 0.1 - e * 0.001))
-
-    identities = [FakeIdentity(uid(i), f"person-{i}") for i in (1, 2, 3)]
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(i.id) for i in identities})
-
-    matches, _ = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=10,
-        exclude_identity_ids=None, filters=None))
-
-    ids = [m.identity_id for m in matches]
-    assert len(ids) == len(set(ids)), f"the same identity appears twice: {ids}"
-    assert len(matches) == 3
-
-    # Each keeps its BEST score, not an arbitrary one.
-    best = max(s for i, s in rows if i == str(uid(1)))
-    assert matches[0].identity_id == str(uid(1))
-    assert matches[0].similarity == pytest.approx(round(best, 4))
-
-
-def test_dedup_happens_before_the_cut_so_top_k_counts_people():
-    """top_k is documented as 'max results per face'; without dedup it counted
-    embeddings, so 3 people could fill a 10-slot request."""
-    rows = [(str(uid(i)), 0.9 - i * 0.01) for i in range(1, 4) for _ in range(10)]
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in range(1, 4)]
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(i.id) for i in identities})
-
-    matches, _ = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=10,
-        exclude_identity_ids=None, filters=None))
-    assert len(matches) == 3, "expected 3 distinct people, got embedding rows"
-
-
-# ---------------------------------------------------------------------------
-# 2. Filter, then rank, then truncate
-# ---------------------------------------------------------------------------
-
-def test_filter_promotes_the_next_valid_match_instead_of_shrinking():
-    """The bug: truncate to top_k first, then filter, then drop the misses.
-    Ask for 5 with a filter that rejects the 35 best candidates and you used to
-    get 0 — the survivors were never in the truncated list."""
-    rows = [(str(uid(i)), 1.0 - i * 0.01) for i in range(1, 41)]
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in range(1, 41)]
-    survivors = {str(uid(i)) for i in range(36, 41)}
-
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: survivors)
-
-    matches, _ = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=5,
-        exclude_identity_ids=None,
-        filters={"pipeline_id": "cam-a"}))
-
-    assert len(matches) == 5, (
-        f"filter shrank the result instead of promoting: got {len(matches)}"
-    )
-    assert {m.identity_id for m in matches} == survivors
-    # Still ranked by score, best first.
-    assert [m.similarity for m in matches] == sorted(
-        (m.similarity for m in matches), reverse=True)
-
-
-def test_result_is_capped_at_top_k():
-    """Removing the pre-truncation must not remove the cap."""
-    rows = [(str(uid(i)), 1.0 - i * 0.01) for i in range(1, 41)]
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in range(1, 41)]
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(i.id) for i in identities})
-
-    matches, _ = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=7,
-        exclude_identity_ids=None, filters=None))
-    assert len(matches) == 7
-
-
-def test_no_duplicate_backfill_when_a_filter_empties_the_pool():
-    """The failure mode the naive fix would have introduced: with competing
-    identities filtered out, 'fill to top_k' walks deeper and finds only more
-    embeddings of the one survivor."""
-    rows = []
-    for ident in (1, 2, 3):
-        for e in range(10):
-            rows.append((str(uid(ident)), 0.9 - ident * 0.1 - e * 0.001))
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in (1, 2, 3)]
-
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(uid(2))})
-
-    matches, _ = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=10,
-        exclude_identity_ids=None, filters={"pipeline_id": "cam-a"}))
-
-    assert len(matches) == 1, (
-        f"backfilled the freed slots with duplicates: {[m.identity_id for m in matches]}"
-    )
-    assert matches[0].identity_id == str(uid(2))
-
-
-def test_excluded_identities_are_never_backfilled():
-    """exclude_identity_ids is an explicit 'do not show me this person'. The
-    fill loop must not reintroduce them from deeper in the candidate list."""
-    rows = [(str(uid(i)), 1.0 - i * 0.01) for i in range(1, 11)]
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in range(1, 11)]
-    excluded = {str(uid(3)), str(uid(4))}
-
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(i.id) for i in identities})
-
-    matches, _ = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=10,
-        exclude_identity_ids=excluded, filters=None))
-
-    assert not (excluded & {m.identity_id for m in matches})
-
-
-# ---------------------------------------------------------------------------
-# 3. Alert scoping — the security-relevant one
-# ---------------------------------------------------------------------------
-
-def test_alert_candidates_ignore_the_filters():
-    """Watchlist alerts become persisted WatchlistAlert rows and feed
-    SearchHistory.watchlist_alerts_count. If they were derived from the
-    filtered matches, narrowing the Camera dropdown would silently suppress a
-    threat alert AND its audit trail."""
-    rows = [(str(uid(i)), 1.0 - i * 0.01) for i in range(1, 6)]
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in range(1, 6)]
-    only_one = {str(uid(5))}
-
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: (
-        only_one if _query_is_filtered(q) else {str(i.id) for i in identities}))
-
-    matches, alert_candidates = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=5,
-        exclude_identity_ids=None, filters={"pipeline_id": "cam-a"}))
-
-    assert {m.identity_id for m in matches} == only_one, "filter was not applied"
-    assert len(alert_candidates) == 5, (
-        "alert candidates were narrowed by a browse filter — a camera filter "
-        "must not decide whether a threat alert is recorded"
-    )
-
-
-def test_alert_candidates_are_the_same_list_when_no_filter_is_active():
-    """No filter means no second query and no divergence."""
-    rows = [(str(uid(i)), 1.0 - i * 0.01) for i in range(1, 4)]
-    identities = [FakeIdentity(uid(i), f"p{i}") for i in range(1, 4)]
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(i.id) for i in identities})
-
-    matches, alert_candidates = run(svc._search_indexes(
-        embedding=None, db=db, scope="known", top_k=5,
-        exclude_identity_ids=None, filters=None))
-
-    assert matches is alert_candidates
-    assert len(db.queries) == 1, "an unnecessary second query was issued"
-
-
-def _query_is_filtered(query):
-    """True when the query carries a date or camera predicate.
-
-    Inspects the WHERE clause, not the whole statement: `select(Identity)`
-    expands to every column, so `last_seen_at` appears in the SELECT list of
-    the *unfiltered* query too and a naive substring check calls everything
-    filtered.
-    """
-    # Explicit None check: a SQLAlchemy clause raises on truthiness testing,
-    # so `whereclause or ""` is a TypeError, not a default.
-    clause = query.whereclause
-    where = "" if clause is None else str(clause).lower()
-    return "exists" in where or "last_seen_at" in where
-
-
-# ---------------------------------------------------------------------------
-# 4. Candidate pool sizing
-# ---------------------------------------------------------------------------
-
-def test_pool_widens_when_a_filter_is_active():
-    """Filtering happens after the index has already chosen candidates, so a
-    filtered search has to start from a wider pool or it under-fills."""
-    rows = [(str(uid(1)), 0.9)]
-    identities = [FakeIdentity(uid(1), "p1")]
-
-    svc = make_service(rows)
-    db = FakeSession(identities, admits=lambda q: {str(uid(1))})
-    run(svc._search_indexes(embedding=None, db=db, scope="known", top_k=10,
-                            exclude_identity_ids=None, filters=None))
-    unfiltered_k = svc.pgvector_index.requested_top_k[0]
-
-    svc2 = make_service(rows)
-    db2 = FakeSession(identities, admits=lambda q: {str(uid(1))})
-    run(svc2._search_indexes(embedding=None, db=db2, scope="known", top_k=10,
-                             exclude_identity_ids=None,
-                             filters={"pipeline_id": "cam-a"}))
-    filtered_k = svc2.pgvector_index.requested_top_k[0]
-
-    assert filtered_k > unfiltered_k, (
-        f"filtered search asked for {filtered_k}, unfiltered for {unfiltered_k}"
-    )
-
-
-def test_both_backends_search_to_the_same_depth():
-    """pgvector was called with threshold=0.2 under a comment saying 'lower
-    threshold for advanced search'; the FAISS calls passed no threshold at all
-    and silently used the index defaults (0.4 known / 0.35 unknown), so the two
-    deployments searched to different depths."""
-    import inspect
-    src = inspect.getsource(AdvancedSearchService._search_indexes)
-    code = "\n".join(
-        line for line in src.splitlines() if not line.strip().startswith("#"))
-
-    assert "threshold=self.candidate_threshold" in code
-    # Every search call passes it — none fall back to a default.
-    #
-    # The call shape changed with the vector-index contract: the in-process
-    # branch no longer calls search_known()/search_unknown() on a two-index
-    # service, it calls search_similar_embeddings() once per scope and lets
-    # PostgreSQL decide which hits are KNOWN and which are UNKNOWN. The
-    # invariant under test is unchanged — both backends search to the same
-    # depth — so count the search calls that actually exist.
-    calls = (code.count("search_known(") + code.count("search_unknown(")
-             + code.count("search_similar_embeddings("))
-    passes = code.count("threshold=self.candidate_threshold")
-    assert calls > 0, "no search calls found — the test is no longer looking at the right code"
-    assert passes == calls, (
-        f"{calls} search calls but only {passes} pass an explicit threshold"
-    )
-
-
-def test_ef_search_never_drops_below_the_requested_k():
-    """pgvector needs ef_search >= k; a widened pool with a fixed ef_search
-    silently loses recall instead of erroring."""
-    from backend.core.identity_index_pgvector import IdentityIndexPgVector
-
-    index = IdentityIndexPgVector.__new__(IdentityIndexPgVector)
-    index.hnsw_ef_search = 100
-    assert index._effective_ef_search(20) == 100, "configured value is a floor"
-    assert index._effective_ef_search(600) == 600, "must rise to meet k"
-    assert index._effective_ef_search(None) == 100
-    index.hnsw_ef_search = None
-    assert index._effective_ef_search(40) == 40
-
-
-# ---------------------------------------------------------------------------
-# 5. Live end-to-end guard
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def token():
-    req = urllib.request.Request(
-        BASE + "/api/auth/login",
-        data=json.dumps({"username": "admin", "password": "admin123"}).encode(),
-        method="POST")
-    req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())["access_token"]
-
-
-def _get(path, token):
-    req = urllib.request.Request(BASE + path)
-    req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
-
-
-def _search(token, image_bytes, **fields):
-    boundary = uuid.uuid4().hex
-    parts = [("--" + boundary).encode(),
-             b'Content-Disposition: form-data; name="image"; filename="p.jpg"',
-             b"Content-Type: image/jpeg", b"", image_bytes]
-    for name, value in fields.items():
-        parts += [("--" + boundary).encode(),
-                  ('Content-Disposition: form-data; name="%s"' % name).encode(),
-                  b"", str(value).encode()]
-    parts.append(("--" + boundary + "--").encode())
-
-    req = urllib.request.Request(BASE + "/api/search/advanced",
-                                 data=b"\r\n".join(parts), method="POST")
-    req.add_header("Content-Type", "multipart/form-data; boundary=" + boundary)
-    req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read())
-
-
-def _match_ids(result):
-    return [m["identity_id"]
-            for f in result.get("faces", [])
-            for m in f.get("matches", [])]
-
-
-def test_camera_filter_changes_the_result_set(token):
-    """The assertion that would have caught the original dead-parameter bug:
-    before the fix this returned the IDENTICAL set for any camera."""
-    identities = _get("/api/admin/identities?limit=20&type=known", token).get("identities", [])
-    snapshot = next((i["snapshot_url"] for i in identities
-                     if (i.get("snapshot_url") or "").startswith("/")), None)
-    if not snapshot:
-        pytest.skip("no stored snapshot to search with")
-
-    req = urllib.request.Request(BASE + snapshot)
-    req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        image = resp.read()
-
-    baseline = _match_ids(_search(token, image, scope="both", top_k=10,
-                                  check_watchlist="false"))
-    if not baseline:
-        pytest.skip("probe image returned no matches")
-
-    # A camera id that cannot have appearances.
-    filtered = _match_ids(_search(token, image, scope="both", top_k=10,
-                                  check_watchlist="false",
-                                  pipeline_id="pytest-no-such-camera"))
-
-    assert filtered != baseline or not baseline, (
-        "pipeline_id had no effect on the result set — the filter is a no-op again"
-    )
-    assert len(filtered) <= len(baseline)
-
-
-def test_no_identity_is_repeated_in_a_single_face_result(token):
-    """Live shape check: the vector query ranks embeddings, so without dedup one
-    person can occupy several slots of the same face's match list."""
-    identities = _get("/api/admin/identities?limit=20&type=known", token).get("identities", [])
-    snapshot = next((i["snapshot_url"] for i in identities
-                     if (i.get("snapshot_url") or "").startswith("/")), None)
-    if not snapshot:
-        pytest.skip("no stored snapshot to search with")
-
-    req = urllib.request.Request(BASE + snapshot)
-    req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        image = resp.read()
-
-    result = _search(token, image, scope="both", top_k=50, check_watchlist="false")
-    for face in result.get("faces", []):
-        ids = [m["identity_id"] for m in face.get("matches", [])]
-        assert len(ids) == len(set(ids)), f"identity repeated in one face: {ids}"
-
-
-def test_search_still_works_end_to_end(token):
-    """The reordering touches the hot path of every search; this is the
-    smoke test that the response shape is unchanged."""
-    identities = _get("/api/admin/identities?limit=20&type=known", token).get("identities", [])
-    snapshot = next((i["snapshot_url"] for i in identities
-                     if (i.get("snapshot_url") or "").startswith("/")), None)
-    if not snapshot:
-        pytest.skip("no stored snapshot to search with")
-
-    req = urllib.request.Request(BASE + snapshot)
-    req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        image = resp.read()
-
-    result = _search(token, image, scope="both", top_k=5, check_watchlist="true")
-    for key in ("search_id", "faces", "watchlist_alerts", "summary", "processing_time_ms"):
-        assert key in result, f"response lost {key}"
-    assert isinstance(result["watchlist_alerts"], list)
-    summary = result["summary"]
-    for key in ("total_faces_detected", "total_matches", "unique_identities_found"):
-        assert key in summary
+from sqlalchemy import select, func
+from fastapi import HTTPException
+from config import settings
+import db_models as m
+from conftest import run_on_shared_loop as run
+from test_person_history_retention import isolated
+from backend.core.search_evidence import search_evidence, hydrate_evidence
+from backend.core.advanced_search import AdvancedSearchService, FaceInImage, MultiSearchResult
+from backend.routes.identities import get_identity_details
+
+MODEL='search-test-v1'
+def vector(angle):
+    v=np.zeros(512,dtype=np.float32);v[:2]=[np.cos(np.deg2rad(angle)),np.sin(np.deg2rad(angle))];return v
+
+@pytest.fixture(autouse=True)
+def config(monkeypatch):
+    monkeypatch.setattr(settings,'SIMILARITY_THRESHOLD',.8)
+    monkeypatch.setattr(settings,'UNKNOWN_SIMILARITY_THRESHOLD',.35)
+    monkeypatch.setattr(settings,'RECOGNITION_MODEL',MODEL+'.onnx')
+
+async def person(db, kind=m.IdentityType.UNKNOWN):
+    p=m.Identity(type=kind,status=m.IdentityStatus.ACTIVE,display_name='Synthetic enrolled name' if kind==m.IdentityType.KNOWN else None,
+                 best_snapshot_path='storage/wrong-group-portrait.jpg')
+    db.add(p);await db.flush();return p
+
+async def sighting(db, p, angle, camera='demo-camera', day=1, model=MODEL):
+    if not await db.scalar(select(m.Pipeline.id).where(m.Pipeline.pipeline_id==camera)):
+        db.add(m.Pipeline(pipeline_id=camera));await db.flush()
+    d=m.Detection(pipeline_id=camera,timestamp=datetime(2026,1,day));db.add(d);await db.flush()
+    path=f'storage/{camera}/evidence-{d.id}.jpg'
+    f=m.Face(identity_id=p.id,detection_id=d.id,name='Synthetic',similarity=.9,face_image_path=path)
+    a=m.IdentityAppearance(identity_id=p.id,detection_id=d.id,pipeline_id=camera,start_time=d.timestamp,best_snapshot_path=path)
+    e=m.IdentityEmbedding(identity_id=p.id,detection_id=d.id,pipeline_id=camera,embedding=vector(angle),embedding_model_version=model)
+    db.add_all([f,a,e]);await db.flush();return f,a,e
+
+async def enrollment(db,p,angle,status='completed',model=MODEL):
+    path=f'storage/faces/{p.id}/{uuid.uuid4()}.jpg'
+    im=m.IdentityImage(identity_id=p.id,storage_path=path,file_checksum=hashlib.sha256(path.encode()).hexdigest(),processing_status=status)
+    db.add(im);await db.flush();e=m.IdentityEmbedding(identity_id=p.id,image_id=im.id,embedding=vector(angle),embedding_model_version=model)
+    db.add(e);await db.flush();return im,e
+
+
+def test_mixed_group_returns_exact_photo_and_details_exclude_other_person(isolated):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p=await person(db);_,a0,e0=await sighting(db,p,0);face,a,e=await sighting(db,p,90,day=2)
+            service=AdvancedSearchService()
+            matches,_=await service._search_indexes(vector(90),db,'both',10,[],{})
+            hit=matches[0]
+            assert hit.similarity==pytest.approx(1.) and hit.best_snapshot_path==face.face_image_path
+            assert hit.best_snapshot_path!=p.best_snapshot_path
+            assert (hit.matched_embedding_id,hit.matched_appearance_id,hit.matched_face_id)==(e.id,a.id,face.id)
+            data=await get_identity_details(str(p.id),db,NS(role='admin'),search_embedding_id=e.id)
+            assert data['best_snapshot_path']==face.face_image_path
+            states={row['id']:row['association_status'] for row in data['appearances']}
+            assert states=={a.id:'selected',a0.id:'review_required'}
+            assert data['association_review']['threshold']==.8
+            assert await db.scalar(select(func.count(m.IdentityAppearance.id)))==2
+    run(check())
+
+
+def test_known_wrong_history_never_inherits_name_or_watchlist(isolated):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p=await person(db,m.IdentityType.KNOWN);im,ref=await enrollment(db,p,0);f,a,e=await sighting(db,p,90)
+            service=AdvancedSearchService()
+            hits,_=await service._search_indexes(vector(90),db,'known',10,[],{})
+            hit=hits[0];assert hit.display_name is None and hit.type=='unverified'
+            assert hit.similarity==pytest.approx(1.) and hit.reference_similarity==pytest.approx(0.,abs=1e-6)
+            no_db=NS(execute=AsyncMock(side_effect=AssertionError('Unverified name must not query watchlists')))
+            checked=await service._check_watchlists(no_db,hits,[])
+            assert checked[0].watchlist_match is None
+            good=(await search_evidence(db,vector(0),MODEL,'known',10))[0]
+            assert good.result()['display_name']==p.display_name and good.snapshot_path==im.storage_path
+            data=await get_identity_details(str(p.id),db,NS(role='admin'),search_embedding_id=e.id)
+            assert data['display_name'] is None and data['type']=='unverified'
+            assert await db.scalar(select(func.count(m.IdentityEmbedding.id)))==2
+    run(check())
+
+
+@pytest.mark.parametrize('case',['failed_image','other_model','wrong_owner','query_only','observation_only'])
+def test_reference_verification_requires_owned_completed_same_model_image_and_both_comparisons(isolated,case):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p=await person(db,m.IdentityType.KNOWN)
+            im,ref=await enrollment(db,p,0,status='failed' if case=='failed_image' else 'completed',model='old' if case=='other_model' else MODEL)
+            _,_,e=await sighting(db,p,50 if case=='query_only' else 0)
+            if case=='wrong_owner':
+                other=await person(db);im.identity_id=other.id;await db.flush()
+            query=vector(50 if case=='observation_only' else 0)
+            hit=(await hydrate_evidence(db,[(p,e,.9)],query,MODEL))[0]
+            assert hit.verification=='unverified' and hit.result()['display_name'] is None
+    run(check())
+
+
+def test_camera_and_date_filter_the_matched_sighting_before_ranking(isolated):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p=await person(db);await sighting(db,p,0,'camera-a',1);_,app,e=await sighting(db,p,30,'camera-b',2)
+            p.last_seen_at=datetime(2026,5,1)
+            hits=await search_evidence(db,vector(0),MODEL,'both',1,pipeline_id='camera-b',start=datetime(2026,1,2),end=datetime(2026,1,2))
+            assert hits[0].embedding.id==e.id and hits[0].appearance_id==app.id
+            assert hits[0].similarity==pytest.approx(np.cos(np.deg2rad(30)))
+            assert not await search_evidence(db,vector(0),MODEL,'both',10,pipeline_id='camera-a',start=datetime(2026,1,2))
+            shown,alerts=await AdvancedSearchService()._search_indexes(vector(0),db,'both',10,[],{'pipeline_id':'absent'})
+            assert shown==[] and len(alerts)==1
+    run(check())
+
+
+def test_distinct_people_model_threshold_exclusions_and_inactive_history(isolated):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            people=[await person(db) for _ in range(6)]
+            for _ in range(30):await sighting(db,people[0],0)
+            await sighting(db,people[1],20);await sighting(db,people[2],60)
+            await sighting(db,people[3],0,model='old');await sighting(db,people[4],0);await sighting(db,people[5],0)
+            people[4].status=m.IdentityStatus.INACTIVE
+            people[5].merged_into_id=people[0].id;people[5].status=m.IdentityStatus.MERGED;await db.flush()
+            hits=await search_evidence(db,vector(0),MODEL,'both',10)
+            assert {h.identity.id for h in hits}=={people[i].id for i in [0,1,4]}
+            assert len(await search_evidence(db,vector(0),MODEL,'both',2))==2
+            hits=await search_evidence(db,vector(0),MODEL,'both',10,exclude_identity_ids=[str(people[0].id)])
+            assert {h.identity.id for h in hits}=={people[i].id for i in [1,4]}
+            for bad in [np.zeros(512),np.full(512,np.nan),np.ones(12)]:
+                with pytest.raises(HTTPException):await search_evidence(db,bad,MODEL,'both',10)
+    run(check())
+
+
+@pytest.mark.parametrize('case',['two_faces','two_vectors','wrong_snapshot','missing_detection','expired_photo'])
+def test_ambiguous_and_expired_evidence_never_borrows_group_portrait(isolated,case):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p=await person(db);f,a,e=await sighting(db,p,0)
+            if case=='two_faces':db.add(m.Face(identity_id=p.id,detection_id=e.detection_id,name='Other',similarity=.8,face_image_path='storage/other.jpg'))
+            if case=='two_vectors':db.add(m.IdentityEmbedding(identity_id=p.id,detection_id=e.detection_id,embedding=vector(10),embedding_model_version=MODEL))
+            if case=='wrong_snapshot':a.best_snapshot_path='storage/unrelated.jpg'
+            if case=='missing_detection':e.detection_id=None
+            if case=='expired_photo':f.face_image_path=None;a.best_snapshot_path=None
+            await db.flush();hit=(await search_evidence(db,vector(0),MODEL,'both',10))[0]
+            assert hit.snapshot_path!=p.best_snapshot_path
+            if case in ('two_faces','two_vectors','missing_detection','expired_photo'):assert hit.snapshot_path is None
+            if case!='expired_photo':assert hit.appearance_id is None
+    run(check())
+
+
+def test_scoped_details_reject_cross_identity_and_cross_sighting_ids(isolated):
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p,q=await person(db),await person(db);_,a,e=await sighting(db,p,0);_,b,other=await sighting(db,q,0)
+            for kwargs in [{'search_embedding_id':other.id},{'search_embedding_id':e.id,'appearance_id':b.id}]:
+                with pytest.raises(HTTPException) as err:await get_identity_details(str(p.id),db,NS(role='admin'),**kwargs)
+                assert err.value.status_code==404
+    run(check())
+
+
+def test_batch_and_single_serialization_preserve_provenance(isolated,monkeypatch):
+    from backend.core.batch_search_service import BatchSearchService
+    sessions,_=isolated
+    async def check():
+        async with sessions() as db:
+            p=await person(db);_,a,e=await sighting(db,p,0)
+            svc=AdvancedSearchService();matches,_=await svc._search_indexes(vector(0),db,'both',10,[],{})
+            face=FaceInImage(0,{},.9,{},matches=matches)
+            result=MultiSearchResult('demo',{},[face],[],1,{'total_faces_detected':1,'faces_searchable':1,'watchlist_alerts':0})
+            from backend.routes.advanced_search import FaceMatchResponse
+            payload=FaceMatchResponse(**svc.to_dict(result)['faces'][0]['matches'][0]).model_dump()
+            assert payload['matched_embedding_id']==e.id and payload['matched_appearance_id']==a.id
+            svc.search_multi_face=AsyncMock(return_value=result)
+            batch=BatchSearchService();batch.initialize(svc)
+            with patch('backend.core.search_audit.record_image_search',AsyncMock()):
+                result=await batch.search_batch(db,[('synthetic.png',np.zeros((10,10,3),dtype=np.uint8),'abc')],1)
+            assert result.results[0].status=='success'
+            assert result.results[0].matches[0]['matched_embedding_id']==e.id
+    run(check())
+
+
+def test_http_serialization_keeps_context_and_unverified_status():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.routes.identities import SearchResult
+    from backend.routes.advanced_search import FaceMatchResponse
+    payload={'identity_id':str(uuid.uuid4()),'display_name':None,'type':'unverified','similarity':.9,
+             'confidence_band':'HIGH','best_snapshot_path':None,'appearances_count':1,
+             'matched_embedding_id':12,'matched_appearance_id':34,'match_source':'sighting','identity_verification':'unverified'}
+    app=FastAPI()
+    @app.get('/quick',response_model=list[SearchResult])
+    def quick():return [payload]
+    @app.get('/advanced',response_model=FaceMatchResponse)
+    def advanced():return payload
+    with TestClient(app) as client:
+        for path in ['/quick','/advanced']:
+            response=client.get(path);assert response.status_code==200
+            data=response.json();data=data[0] if isinstance(data,list) else data
+            assert data['matched_embedding_id']==12 and data['matched_appearance_id']==34
+            assert data['type']=='unverified' and data['display_name'] is None

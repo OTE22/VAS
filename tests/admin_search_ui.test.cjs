@@ -116,3 +116,30 @@ test('batch decoding omissions remap unique filenames and never guess between du
  assert.equal(h.w.document.querySelector('.match-snapshot').dataset.searchImageSource,'unavailable');
  assert.match(h.w.document.querySelector('.search-image-caption').textContent,/Image unavailable/);h.close();
 });
+
+
+test('same identity matched by different faces opens the exact clicked observation',async()=>{
+ const h=harness(),data=results();
+ data.faces[0].matches=[{...match,matched_embedding_id:11,matched_appearance_id:21,snapshot_url:'/storage/first.jpg',match_source:'sighting'}];
+ data.faces[1].matches=[{...match,matched_embedding_id:12,matched_appearance_id:22,snapshot_url:'/storage/second.jpg',match_source:'sighting',similarity:.94}];
+ h.t.state.currentResults=data;h.t.displayResults(data);
+ const requested=[];h.w.fetch=async url=>{requested.push(String(url));return {ok:true,json:async()=>String(url).endsWith('/watchlists')?{watchlists:[]}:{id,display_name:'Different group portrait',snapshot_url:'/storage/wrong.jpg',appearances:[{id:21,association_status:'review_required'},{id:22,association_status:'selected'}],association_review:{included_count:1,review_count:1}}};};
+ await h.t.viewIdentity(id,0,12);
+ assert.ok(requested.some(url=>url.endsWith('?search_embedding_id=12')));
+ assert.equal(new URL(h.w.document.querySelector('.identity-snapshot').src).pathname,'/storage/second.jpg');
+ assert.equal(h.w.document.querySelectorAll('.identity-sighting').length,1);
+ assert.match(h.w.document.querySelector('#identity-modal-body').textContent,/1 historical association/);
+ assert.match(h.w.document.querySelector('.identity-match-context').textContent,/94%/);
+ assert.ok(h.w.document.querySelector('#identity-full-profile').href.endsWith('?search_embedding_id=12'));
+ h.close();
+});
+test('unverified historical match does not inherit group name or watchlist claim',async()=>{
+ const h=harness(),data=results();data.faces=[{matches:[{...match,type:'unverified',display_name:null,identity_verification:'unverified',matched_embedding_id:44}]}];
+ h.t.state.currentResults=data;h.t.displayResults(data);assert.match(h.w.document.querySelector('.match-card').textContent,/Unverified historical match/);
+ h.w.fetch=async url=>({ok:true,json:async()=>String(url).endsWith('/watchlists')?{watchlists:[{name:'Sensitive group'}]}:{id,display_name:'Wrong group name',snapshot_url:'/storage/wrong.jpg',appearances:[]}});
+ await h.t.viewIdentity(id,0,44);
+ const text=h.w.document.querySelector('#identity-modal-body').textContent;
+ assert.doesNotMatch(text,/Wrong group name|Sensitive group/);
+ assert.match(text,/not verified/);assert.equal(h.w.document.querySelector('#identity-analyze').hidden,true);
+ h.close();
+});

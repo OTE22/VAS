@@ -81,7 +81,8 @@ async def seed(sessions, folder, age=500, copies=12, gallery=False):
         return identity.id, detection.id, vector, path
 
 
-def test_expire_image_preserve_history_and_search_after_inactivation(isolated):
+def test_expire_image_preserve_history_and_search_after_inactivation(isolated, monkeypatch):
+    monkeypatch.setattr(settings, "RECOGNITION_MODEL", "synthetic-v1.onnx")
     sessions, folder = isolated
     async def exercise():
         iid, did, vector, path = await seed(sessions, folder)
@@ -117,8 +118,8 @@ def test_expire_image_preserve_history_and_search_after_inactivation(isolated):
             assert await index.search_unknown(vector, db, threshold=.8, model_version='synthetic-v1') == []
             historical = await index.search_unknown(vector, db, threshold=.8, include_inactive=True, recognition_only=False)
             assert historical and historical[0][0] == str(iid)
-            from backend.core.quick_image_search import rank_people
-            assert (await rank_people(db, vector, 'synthetic-v1', 'both', 10))[0][0].id == iid
+            from backend.core.search_evidence import search_evidence
+            assert (await search_evidence(db, vector, 'synthetic-v1', 'both', 10))[0].identity.id == iid
             from backend.core.vector_index.access import search_similar_embeddings
             hits = await search_similar_embeddings(db, vector, include_inactive=True)
             assert hits and hits[0]['identity_id'] == str(iid)

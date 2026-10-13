@@ -1138,17 +1138,18 @@
                      aria-label="${escapeHtml(cardLabel)}"
                      data-action="viewIdentity" data-action-keydown="viewIdentityKey"
                      data-arg="${escapeHtml(match.identity_id)}"
-                     data-identity-type="${escapeHtml(match.type)}" data-reference-index="${referenceIndex}">
+                     data-embedding-id="${escapeHtml(match.matched_embedding_id || '')}" data-identity-type="${escapeHtml(match.type)}" data-reference-index="${referenceIndex}">
                     <img class="match-snapshot" data-stored-src="${escapeHtml(snapshotUrl)}" alt="${escapeHtml(match.display_name || 'Match')}"
                          style="display: block; width: 50px; height: 50px; object-fit: cover; border-radius: 6px;">
                     <div class="match-details">
-                        <div class="match-name">${escapeHtml(match.display_name || 'Unknown')}</div>
+                        <div class="match-name">${escapeHtml(match.display_name || (match.type === 'unverified' ? 'Unverified historical match' : 'Unknown'))}</div>
                         <div class="match-meta">
                             <span><i class="fas fa-${match.type === 'known' ? 'user-check' : 'user-secret'}"></i> ${escapeHtml(match.type)}</span>
                             <span><i class="fas fa-eye" aria-hidden="true"></i> ${escapeHtml(match.appearances_count || 0)} detections</span>
                         </div>
                         <div class="match-meta search-image-caption" hidden></div>
-                        <div class="match-last-seen">Last seen ${escapeHtml(formatDateTime(match.last_seen_at))}</div>
+                        <div class="match-last-seen">${match.match_source === 'sighting' ? 'Matched sighting ' + escapeHtml(formatDateTime(match.matched_at)) : match.match_source === 'enrollment' ? 'Matched enrollment photo' : 'Matched photo unavailable'}</div>
+                        ${match.identity_verification === 'unverified' ? '<div class="match-meta">Recorded name could not be verified against approved photos.</div>' : ''}
                         ${match.watchlist_match ? `
                             <div class="watchlist-badge ${escapeHtml(match.watchlist_match.alert_level)}" style="margin-top: 0.3rem;">
                                 <i class="fas fa-exclamation-triangle"></i>
@@ -1454,7 +1455,7 @@
      * Handles both response shapes: single (faces[].matches) and batch
      * (results[].matches).
      */
-    function findMatchContext(identityId, referenceIndex) {
+    function findMatchContext(identityId, referenceIndex, embeddingId) {
         const results = state.currentResults;
         if (!results) return null;
         let groups = results.faces || results.results || [];
@@ -1463,7 +1464,7 @@
         }
         for (const group of groups) {
             for (const match of (group.matches || [])) {
-                if (match && match.identity_id === identityId) return match;
+                if (match && match.identity_id === identityId && (!embeddingId || String(match.matched_embedding_id) === String(embeddingId))) return match;
             }
         }
         return null;
@@ -1583,7 +1584,7 @@
 
         if (sightings.length === 0) {
             section.appendChild(buildEl('p', 'identity-empty',
-                'No sightings recorded for this person.'));
+                'No sightings verified for this match.'));
             return section;
         }
 
@@ -1643,11 +1644,21 @@
         const title = document.getElementById('identity-modal-title');
         if (!body) return;
 
+        if (matchContext) {
+            // Keep this query's photo/name even if a concurrent group update
+            // changes the representative portrait or reference verification.
+            identity = {...identity, snapshot_url: matchContext.snapshot_url,
+                display_name: matchContext.display_name, type: matchContext.type};
+        }
         if (title) {
             title.textContent = identity.display_name || 'Identity';
         }
 
-        const sightings = Array.isArray(identity.appearances) ? identity.appearances : [];
+        const allSightings = Array.isArray(identity.appearances) ? identity.appearances : [];
+        const sightings = identity.association_review ? allSightings.filter(app =>
+            ['selected', 'consistent'].includes(app.association_status)) : allSightings;
+        if (identity.association_review) identity = {...identity,
+            pipeline_ids: [...new Set(sightings.map(app => app.pipeline_id))]};
         const children = [
             buildIdentityHeader(identity, reference),
             buildIdentityFacts(identity, sightings)
@@ -1655,7 +1666,14 @@
         if (matchContext) {
             children.push(buildMatchContext(matchContext));
         }
-        children.push(buildWatchlists(watchlists), buildSightings(sightings));
+        if (identity.association_review) {
+            children.push(buildEl('p', 'identity-score-explainer',
+                `${allSightings.length - sightings.length} historical association(s) excluded from this match because they could not be verified. Similarity is not proof of identity.`));
+        }
+        if (matchContext?.type === 'unverified') {
+            children.push(buildEl('p', 'identity-score-explainer', 'The historical group name and watchlist membership are not verified for this observation.'));
+        } else children.push(buildWatchlists(watchlists));
+        children.push(buildSightings(sightings));
         body.replaceChildren(...children);
 
         ['identity-full-profile', 'identity-analyze'].forEach(id => { const link = document.getElementById(id); if (link) link.hidden = false; });
@@ -1667,13 +1685,15 @@
         // dashboard) do pass `from`, where the back link is truthful.
         const fullProfile = document.getElementById('identity-full-profile');
         if (fullProfile) {
-            fullProfile.href = `/admin/identity/${encodeURIComponent(identity.id)}`;
+            fullProfile.href = `/admin/identity/${encodeURIComponent(identity.id)}`
+                + (matchContext?.matched_embedding_id ? `?search_embedding_id=${encodeURIComponent(matchContext.matched_embedding_id)}${matchContext.type === 'unverified' ? '&search_unverified=true' : ''}` : '');
         }
         // The existing cross-page deep link (?identity_id= is read by
         // admin-security-intelligence.js) — the useful next step for a known
         // or watchlisted person.
         const analyze = document.getElementById('identity-analyze');
         if (analyze) {
+            analyze.hidden = !!matchContext?.matched_embedding_id && !['verified_reference', 'consistent_reference'].includes(matchContext.identity_verification);
             analyze.href = `/admin/security-intelligence`
                 + `?identity_id=${encodeURIComponent(identity.id)}&tab=threats`;
         }
@@ -1706,8 +1726,8 @@
     // Scoped, not window.viewIdentity: dispatch goes through the Actions
     // registry alone, so there is no reason to offer this as a global — and a
     // global is one more thing an injected script could replace.
-    async function viewIdentity(identityId, referenceIndex) {
-        const matchContext = findMatchContext(identityId, referenceIndex);
+    async function viewIdentity(identityId, referenceIndex, embeddingId) {
+        const matchContext = findMatchContext(identityId, referenceIndex, embeddingId);
         const reference = matchContext ? state.resultReferences[referenceIndex] : null;
         if (!identityId) return;
         ['identity-full-profile', 'identity-analyze'].forEach(id => { const link = document.getElementById(id); if (link) link.hidden = true; });
@@ -1740,7 +1760,8 @@
         const controller = beginRequest('identity');
 
         try {
-            const response = await fetch(`/api/admin/identity/${encodeURIComponent(identityId)}`, {
+            const query = matchContext?.matched_embedding_id ? `?search_embedding_id=${encodeURIComponent(matchContext.matched_embedding_id)}${matchContext.type === 'unverified' ? '&search_unverified=true' : ''}` : '';
+            const response = await fetch(`/api/admin/identity/${encodeURIComponent(identityId)}${query}`, {
                 credentials: 'include',
                 signal: controller.signal
             });
@@ -1787,14 +1808,14 @@
     // not a window global. actions.js is script #1 on this page, so the
     // registry exists by the time this runs.
     Actions.register({
-        viewIdentity: (el) => viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex)),
+        viewIdentity: (el) => viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId),
         // Keyboard activation for the result cards (role="button" divs).
         // Delegated through the data-action-keydown binding actions.js already
         // has; Space is preventDefault'ed so the page does not scroll.
         viewIdentityKey: (el, event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
             event.preventDefault();
-            viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex));
+            viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId);
         },
     });
 

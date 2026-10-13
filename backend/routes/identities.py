@@ -253,6 +253,7 @@ class IdentityDetail(IdentityListItem):
     embeddings_count: int
     faces_count: int
     association_review: Optional[dict] = None
+    search_match: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -338,7 +339,10 @@ class SearchByImageRequest(BaseModel):
     pipeline_id: Optional[str] = None
 
 
-class SearchResult(BaseModel):
+from backend.core.search_evidence import SearchMatchContext
+
+
+class SearchResult(SearchMatchContext):
     identity_id: str
     type: str
     display_name: Optional[str]
@@ -1128,7 +1132,9 @@ async def get_identity_details(
     identity_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    appearance_id: Optional[int] = None
+    appearance_id: Optional[int] = None,
+    search_embedding_id: Optional[int] = None,
+    search_unverified: bool = False
 ):
     """
     Get detailed information about an identity including timeline (admin only).
@@ -1171,10 +1177,32 @@ async def get_identity_details(
             raise HTTPException(status_code=404, detail="Sighting does not belong to this identity")
         association_review = None
         associations = {}
-        if identity.type == IdentityType.UNKNOWN:
+        search_match = None
+        if search_embedding_id is not None:
+            from backend.core.search_evidence import hydrate_evidence
+            from backend.core.identity_service import IdentityService
+            model = IdentityService._resolve_model_version()
+            observation = (await db.execute(select(IdentityEmbedding).where(
+                IdentityEmbedding.id == search_embedding_id,
+                IdentityEmbedding.identity_id == identity_uuid,
+                IdentityEmbedding.embedding_model_version == model,
+                IdentityEmbedding.embedding.isnot(None)))).scalar_one_or_none()
+            if observation is None:
+                raise HTTPException(404, 'Search observation is no longer available; run the search again')
+            search_match = (await hydrate_evidence(db, [(identity, observation, 1.)], None, model))[0]
+            if appearance_id is not None and appearance_id != search_match.appearance_id:
+                raise HTTPException(404, 'Sighting does not belong to the matched observation')
+            appearance_id = search_match.appearance_id
+            # A downgrade from the original query cannot be upgraded merely
+            # by opening details, which no longer has the uploaded vector.
+            if search_unverified:
+                search_match.verification = 'unverified'
+        if identity.type == IdentityType.UNKNOWN or search_match is not None:
             from backend.core.appearance_events import review_unknown_associations
             associations, association_review = await review_unknown_associations(
-                db, identity_uuid, appearances, appearance_id)
+                db, identity_uuid, appearances, appearance_id,
+                reference_embedding_id=search_embedding_id,
+                threshold=float(settings.SIMILARITY_THRESHOLD) if search_match else None)
 
         # Get embeddings count
         embeddings_result = await db.execute(
@@ -1208,21 +1236,24 @@ async def get_identity_details(
         
         best_snapshot_path = None
         
-        # Priority 1: Check identity.best_snapshot_path from database
-        if identity.best_snapshot_path:
-            logger.info(f"[IDENTITIES] 📸 Checking identity.best_snapshot_path from database: {identity.best_snapshot_path}")
-            if os.path.exists(identity.best_snapshot_path):
-                best_snapshot_path = identity.best_snapshot_path
-                logger.info(f"[IDENTITIES] ✅ Using identity.best_snapshot_path: {best_snapshot_path}")
-            else:
-                logger.warning(f"[IDENTITIES] ⚠️ identity.best_snapshot_path doesn't exist: {identity.best_snapshot_path}")
+        if search_match is not None:
+            best_snapshot_path = search_match.snapshot_path
+        else:
+            # Priority 1: Check identity.best_snapshot_path from database
+            if identity.best_snapshot_path:
+                logger.info(f"[IDENTITIES] 📸 Checking identity.best_snapshot_path from database: {identity.best_snapshot_path}")
+                if os.path.exists(identity.best_snapshot_path):
+                    best_snapshot_path = identity.best_snapshot_path
+                    logger.info(f"[IDENTITIES] ✅ Using identity.best_snapshot_path: {best_snapshot_path}")
+                else:
+                    logger.warning(f"[IDENTITIES] ⚠️ identity.best_snapshot_path doesn't exist: {identity.best_snapshot_path}")
         
-        # Priority 2: Search database Face.face_image_path records (via helper function)
-        if not best_snapshot_path:
-            logger.info(f"[IDENTITIES] 📸 Searching database Face records for identity: {identity.id}")
-            best_snapshot_path = await _find_best_image_from_storage_for_identity(identity, storage_dir, db)
-            if best_snapshot_path:
-                logger.info(f"[IDENTITIES] ✅ Found image from database Face records: {best_snapshot_path}")
+            # Priority 2: Search database Face.face_image_path records (via helper function)
+            if not best_snapshot_path:
+                logger.info(f"[IDENTITIES] 📸 Searching database Face records for identity: {identity.id}")
+                best_snapshot_path = await _find_best_image_from_storage_for_identity(identity, storage_dir, db)
+                if best_snapshot_path:
+                    logger.info(f"[IDENTITIES] ✅ Found image from database Face records: {best_snapshot_path}")
         
         # Convert path to URL - handles both database paths and storage paths
         if best_snapshot_path:
@@ -1262,8 +1293,8 @@ async def get_identity_details(
         
         return {
             "id": str(identity.id),
-            "type": identity.type.value,
-            "display_name": identity.display_name,
+            "type": search_match.result()['type'] if search_match else identity.type.value,
+            "display_name": search_match.result()['display_name'] if search_match else identity.display_name,
             "person_code": identity.person_code,
             "status": identity.status.value,
             "first_seen_at": _identity_iso_z(identity.first_seen_at),
@@ -1274,6 +1305,7 @@ async def get_identity_details(
             "pipeline_ids": pipeline_ids,  # List of pipeline IDs where this identity was seen
             "appearances": appearances_data,
             "association_review": association_review,
+            "search_match": search_match.result() if search_match else None,
             "embeddings_count": embeddings_count,
             "faces_count": faces_count
         }
@@ -2781,7 +2813,8 @@ async def search_by_image(
     _search_id = str(uuid.uuid4())
     response.headers["X-Search-Id"] = _search_id
     try:
-        from backend.core.quick_image_search import search_dates, decode_search_image, rank_people
+        from backend.core.quick_image_search import search_dates, decode_search_image
+        from backend.core.search_evidence import search_evidence
         from starlette.concurrency import run_in_threadpool
         if scope not in ('known', 'unknown', 'both') or not 1 <= top_k <= 100:
             raise HTTPException(422, 'Choose a valid search scope and between 1 and 100 results.')
@@ -2843,17 +2876,9 @@ async def search_by_image(
         response.headers["X-Faces-Detected"] = str(len(faces))
         response.headers["X-Padded-Retry"] = "true" if best.padded_retry else "false"
 
-        # best_by_identity ranking is performed in the database before top_k.
-        matches = await rank_people(db, embedding, model_version, scope, top_k, start, end, pipeline_id)
-        from backend.utils.path_utils import path_to_url
-        search_results = [{
-            "identity_id": str(person.id), "type": person.type.value,
-            "display_name": person.display_name, "similarity": min(1.0, max(-1.0, float(similarity))),
-            "best_snapshot_path": person.best_snapshot_path,
-            "snapshot_url": path_to_url(person.best_snapshot_path, settings.STORAGE_DIR) if person.best_snapshot_path else None,
-            "last_seen_at": _identity_iso_z(person.last_seen_at),
-            "appearances_count": person.appearances_count or 0
-        } for person, similarity in matches]
+        matches = await search_evidence(db, embedding, model_version, scope, top_k,
+                                        start=start, end=end, pipeline_id=pipeline_id)
+        search_results = [match.result() for match in matches]
 
         # Audit — one row, one writer
         from backend.core.search_audit import record_image_search

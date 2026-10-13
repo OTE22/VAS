@@ -1046,27 +1046,14 @@ class Settings(BaseSettings):
         description="Hard ceiling on matches per query face; requests above this are rejected. Default: 100"
     )
 
-    # Retrieval floor vs display floor. SEARCH_RETRIEVAL_FLOOR is how deep the
-    # vector index is asked to look; SIMILARITY_THRESHOLD is what an operator
-    # is allowed to see. Retrieval must stay BELOW display or raising the
-    # display threshold would silently shrink the candidate pool it filters.
-    # config_guard refuses to start if that ordering is inverted.
-    SEARCH_RETRIEVAL_FLOOR: float = Field(
-        default=0.2,
-        description=("Similarity floor used when asking the vector index for "
-                     "candidates, before the display threshold filters them. "
-                     "Must be <= SIMILARITY_THRESHOLD. Default: 0.2")
-    )
-    SEARCH_CANDIDATE_MULTIPLIER: int = Field(
-        default=2,
-        description=("Over-fetch factor for an unfiltered search: the index is asked "
-                     "for top_k x this, so post-filtering still fills the page. Default: 2")
-    )
-    SEARCH_FILTERED_CANDIDATE_MULTIPLIER: int = Field(
-        default=6,
-        description=("Over-fetch factor when database filters (camera, date, type) will "
-                     "discard candidates after retrieval. Default: 6")
-    )
+    # Accepted for existing environment/settings compatibility. Historical image
+    # search now ranks exact DB observations at SIMILARITY_THRESHOLD directly.
+    SEARCH_RETRIEVAL_FLOOR: float = Field(default=0.2,
+        description="Legacy approximate-search option; unused by image search. Use SIMILARITY_THRESHOLD.")
+    SEARCH_CANDIDATE_MULTIPLIER: int = Field(default=2,
+        description="Legacy approximate-search option; unused by exact image search.")
+    SEARCH_FILTERED_CANDIDATE_MULTIPLIER: int = Field(default=6,
+        description="Legacy approximate-search option; unused by exact image search.")
 
     # Batch Search
     BATCH_SEARCH_MAX_IMAGES: int = Field(

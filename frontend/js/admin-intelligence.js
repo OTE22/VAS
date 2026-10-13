@@ -618,6 +618,7 @@
         // THE single authoritative selection path — exactly one identity
         // request per user selection.
         function chooseIdentity(identity) {
+            if (identity.searchUnverified) return;
             const id = normalizeId(identity && identity.id);
             if (!id) return;
             const label = identity.display_name ? safeText(identity.display_name) : 'Unknown #' + shortId(id);
@@ -668,6 +669,11 @@
                     const caption = el('div', { className: 'identity-item-meta search-image-caption' });
                     item.querySelector('.identity-item-info').append(caption);
                     SearchImage.render(image, caption, identity.snapshot_url, identity.searchReference);
+                }
+                if (identity.searchUnverified) {
+                    item.setAttribute('aria-disabled', 'true');
+                    item.querySelector('.identity-item-info').append(el('p', {text: 'Historical observation; group association is unverified.'}),
+                        el('a', {text: 'Review matched observation', attrs: {href: '/admin/identity/' + encodeURIComponent(id) + '?search_embedding_id=' + encodeURIComponent(identity.searchEmbeddingId) + '&search_unverified=true'}}));
                 }
                 item.addEventListener('click', function () { chooseIdentity(identity); });
                 resultsContainer.append(item);
@@ -800,6 +806,8 @@
                 // backend type is preserved verbatim (unknown stays unknown).
                 const items = (Array.isArray(matches) ? matches : []).map(function (m) {
                     return {
+                        searchUnverified: !!m.matched_embedding_id && !['verified_reference', 'consistent_reference'].includes(m.identity_verification),
+                        searchEmbeddingId: m.matched_embedding_id,
                         id: m.identity_id,
                         display_name: m.display_name,
                         type: m.type,

@@ -827,40 +827,8 @@ def collect_violations(
             "(defaults: 25 and 5).",
         ))
 
-    # ---- Search retrieval floor vs display threshold ----------------------
-    # SEARCH_RETRIEVAL_FLOOR is how deep the vector index is asked to look;
-    # SIMILARITY_THRESHOLD is the bar a match must clear to be shown. Retrieval
-    # has to sit at or below display, because display filters what retrieval
-    # returned. Inverted, the display threshold silently stops meaning anything:
-    # nothing between the two bars is ever retrieved, so raising it changes
-    # nothing and lowering it cannot recover the matches it excluded.
-    #
-    # Same contract as the enrollment bands above: refuse, never clamp.
-    retrieval, retrieval_bad = _enroll_number("SEARCH_RETRIEVAL_FLOOR", 0.2, float)
-    if retrieval_bad is not None:
-        add(ConfigViolation(
-            "SEARCH_RETRIEVAL_FLOOR_NOT_A_NUMBER", "SEARCH_RETRIEVAL_FLOOR",
-            f"SEARCH_RETRIEVAL_FLOOR={retrieval_bad!r} is not a number.",
-            "Set a cosine similarity between 0 and 1 (default: 0.2).",
-        ))
-    elif retrieval is not None and not (0.0 <= retrieval <= 1.0):
-        add(ConfigViolation(
-            "SEARCH_RETRIEVAL_FLOOR_OUT_OF_RANGE", "SEARCH_RETRIEVAL_FLOOR",
-            f"SEARCH_RETRIEVAL_FLOOR={retrieval} is outside 0-1.",
-            "SEARCH_RETRIEVAL_FLOOR=0.2",
-        ))
-    elif (retrieval is not None and recognition_min is not None
-            and recognition_bad is None and retrieval > recognition_min):
-        add(ConfigViolation(
-            "SEARCH_RETRIEVAL_FLOOR_ABOVE_DISPLAY", "SEARCH_RETRIEVAL_FLOOR",
-            f"SEARCH_RETRIEVAL_FLOOR={retrieval} is above SIMILARITY_THRESHOLD="
-            f"{recognition_min}. The index would never return a candidate the "
-            "display threshold could admit, so lowering SIMILARITY_THRESHOLD "
-            "would appear to do nothing.",
-            f"Set SEARCH_RETRIEVAL_FLOOR to {recognition_min} or lower.",
-        ))
-
-    # ---- Search result depth ---------------------------------------------
+    # Exact image search uses SIMILARITY_THRESHOLD directly; the legacy
+    # retrieval-floor setting no longer controls which matches are found.
     default_k, default_k_bad = _enroll_number("SEARCH_DEFAULT_TOP_K", 10, int)
     max_k, max_k_bad = _enroll_number("SEARCH_MAX_TOP_K", 100, int)
     for _name, _bad in (("SEARCH_DEFAULT_TOP_K", default_k_bad),

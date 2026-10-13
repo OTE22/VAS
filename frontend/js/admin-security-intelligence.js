@@ -170,7 +170,7 @@
 
     function normalizeIdentityType(value) {
         const t = String(value || '').toLowerCase();
-        return t === 'known' ? 'known' : 'unknown';
+        return ['known', 'unknown', 'unverified'].includes(t) ? t : 'unknown';
     }
 
     // ONE shape for identities regardless of which endpoint produced them.
@@ -849,6 +849,7 @@
         }
 
         function choose(item) {
+            if (item.searchUnverified) return;
             const id = item.id;
             component.selectionLabels.set(id, item.displayName);
             if (config.multi) {
@@ -924,6 +925,11 @@
                     const caption = el('div', { className: 'identity-item-meta search-image-caption' });
                     node.querySelector('.identity-item-info').append(caption);
                     SearchImage.render(image, caption, item.snapshotUrl, item.searchReference);
+                }
+                if (item.searchUnverified) {
+                    node.setAttribute('aria-disabled', 'true');
+                    node.querySelector('.identity-item-info').append(el('p', {text: 'Historical observation; group association is unverified.'}),
+                        el('a', {text: 'Review matched observation', attrs: {href: '/admin/identity/' + encodeURIComponent(item.id) + '?search_embedding_id=' + encodeURIComponent(item.searchEmbeddingId) + '&search_unverified=true'}}));
                 }
                 node.dataset.itemId = item.id;
                 node.addEventListener('click', function () { choose(item); });
@@ -1053,7 +1059,11 @@
                         last_seen_at: m.last_seen_at,
                         snapshot_url: m.snapshot_url || snapshotUrlFromPath(m.best_snapshot_path)
                     });
-                    if (norm) norm.searchReference = component.searchReference;
+                    if (norm) {
+                        norm.searchReference = component.searchReference;
+                        norm.searchUnverified = !!m.matched_embedding_id && !['verified_reference', 'consistent_reference'].includes(m.identity_verification);
+                        norm.searchEmbeddingId = m.matched_embedding_id;
+                    }
                     if (norm && typeof m.similarity === 'number') norm.similarity = m.similarity;
                     return norm;
                 }).filter(Boolean);

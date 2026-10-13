@@ -191,37 +191,11 @@ def test_similarity_model_heuristic_uses_the_configured_weights():
 # Retrieval and display floors
 # ---------------------------------------------------------------------------
 
-def test_retrieval_floor_and_display_floor_are_separately_configurable():
-    from backend.core.advanced_search import AdvancedSearchService
-
-    service = AdvancedSearchService.__new__(AdvancedSearchService)
-
-    with setting_override("SEARCH_RETRIEVAL_FLOOR", 0.12):
-        assert service.candidate_threshold == pytest.approx(0.12)
-    with setting_override("SEARCH_CANDIDATE_MULTIPLIER", 7):
-        assert service.candidate_multiplier == 7
-    with setting_override("SEARCH_FILTERED_CANDIDATE_MULTIPLIER", 9):
-        assert service.filtered_candidate_multiplier == 9
-
-
-def test_config_guard_refuses_a_retrieval_floor_above_the_display_threshold():
-    """Refuse, never clamp.
-
-    Inverted, the display threshold stops meaning anything: nothing between the
-    two bars is ever retrieved, so lowering SIMILARITY_THRESHOLD cannot recover
-    the matches it excluded. Silently correcting it would mean the operator who
-    typed it never learns the configuration they wrote does not exist.
-    """
+def test_legacy_retrieval_floor_does_not_block_exact_search():
     from types import SimpleNamespace
     from backend.security.config_guard import collect_violations
-
-    cfg = SimpleNamespace(SEARCH_RETRIEVAL_FLOOR=0.9, SIMILARITY_THRESHOLD=0.4)
-    codes = {v.code for v in collect_violations(cfg, env={})}
-    assert "SEARCH_RETRIEVAL_FLOOR_ABOVE_DISPLAY" in codes
-
-    cfg = SimpleNamespace(SEARCH_RETRIEVAL_FLOOR=0.2, SIMILARITY_THRESHOLD=0.4)
-    codes = {v.code for v in collect_violations(cfg, env={})}
-    assert "SEARCH_RETRIEVAL_FLOOR_ABOVE_DISPLAY" not in codes
+    cfg = SimpleNamespace(SEARCH_RETRIEVAL_FLOOR=0.9, SIMILARITY_THRESHOLD=0.8)
+    assert not any(v.code.startswith('SEARCH_RETRIEVAL_FLOOR') for v in collect_violations(cfg, env={}))
 
 
 def test_config_guard_refuses_an_inverted_top_k_pair():
@@ -343,7 +317,10 @@ def test_batch_search_timeout_is_enforced_not_just_reported():
     assert "BATCH_SEARCH_TIMEOUT_SECONDS" in source
 
 
-def test_every_retention_sweep_runs_without_poisoning_the_others():
+from test_person_history_retention import isolated
+
+
+def test_every_retention_sweep_runs_without_poisoning_the_others(isolated):
     """ML_SNAPSHOT_RETENTION_DAYS had never deleted a row.
 
     ml_feature_snapshots records `computed_at`, not `created_at`, so the sweep
@@ -352,7 +329,7 @@ def test_every_retention_sweep_runs_without_poisoning_the_others():
     with InFailedSQLTransactionError too. Both were swallowed by a broad except
     and reported as zero rows — indistinguishable from "nothing was expired".
 
-    A dry run touches nothing, so this is safe to assert against the live DB.
+    Uses the disposable synthetic database, never the application database.
     """
     import logging
     from backend.core.data_retention import DataRetentionManager
@@ -364,7 +341,6 @@ def test_every_retention_sweep_runs_without_poisoning_the_others():
             records.append(record.getMessage())
 
     async def scenario():
-        await _session()          # the test process needs its own engine
         return await DataRetentionManager().cleanup_old_data(dry_run=True)
 
     handler = Capture()

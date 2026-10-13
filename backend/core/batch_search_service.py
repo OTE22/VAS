@@ -180,6 +180,10 @@ class BatchSearchService:
                             quality_scores.append(face.quality_score)
                             for match in face.matches:
                                 matches.append({
+                                    **{key: getattr(match, key) for key in (
+                                        'matched_embedding_id', 'matched_appearance_id', 'matched_face_id',
+                                        'matched_image_id', 'matched_at', 'matched_pipeline_id',
+                                        'match_source', 'identity_verification', 'reference_similarity')},
                                     'face_index': face.face_index,
                                     'identity_id': match.identity_id,
                                     'display_name': match.display_name,

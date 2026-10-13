@@ -4,10 +4,6 @@ from io import BytesIO
 import warnings
 from PIL import Image
 from fastapi import HTTPException
-from sqlalchemy import select, func, or_, and_
-from config import settings
-from db_models import Identity, IdentityEmbedding, IdentityAppearance, IdentityType, IdentityStatus
-from backend.core.merge_compatibility import _parse_vector
 
 
 def search_dates(date_from, date_to):
@@ -48,32 +44,3 @@ def decode_search_image(payload):
         raise HTTPException(400, str(exc))
 
 
-async def rank_people(db, embedding, model_version, scope, top_k, start=None, end=None, pipeline_id=None):
-    vector = _parse_vector(embedding)
-    if vector is None or vector.size != 512 or not model_version:
-        raise HTTPException(503, 'The current recognition model is not ready for search.')
-    distance = IdentityEmbedding.embedding.cosine_distance(vector)
-    filters = [Identity.merged_into_id.is_(None),
-               Identity.status.in_([IdentityStatus.ACTIVE, IdentityStatus.PROMOTED, IdentityStatus.INACTIVE]),
-               IdentityEmbedding.embedding_model_version == model_version,
-               IdentityEmbedding.embedding.isnot(None)]
-    thresholds = []
-    if scope in ('known', 'both'):
-        thresholds.append(and_(Identity.type == IdentityType.KNOWN, distance <= 1 - float(settings.SIMILARITY_THRESHOLD)))
-    if scope in ('unknown', 'both'):
-        thresholds.append(and_(Identity.type == IdentityType.UNKNOWN, distance <= 1 - float(settings.UNKNOWN_SIMILARITY_THRESHOLD)))
-    filters.append(or_(*thresholds))
-    if start or end or pipeline_id:
-        appearance = select(IdentityAppearance.id).where(IdentityAppearance.identity_id == Identity.id)
-        if start: appearance = appearance.where(IdentityAppearance.start_time >= start)
-        if end: appearance = appearance.where(IdentityAppearance.start_time <= end)
-        if pipeline_id: appearance = appearance.where(IdentityAppearance.pipeline_id == pipeline_id)
-        filters.append(appearance.exists())
-    # Filter first, collapse ALL embeddings to one identity, then apply top_k.
-    best_by_identity = (select(Identity.id.label('identity_id'), func.min(distance).label('distance'))
-        .join(IdentityEmbedding, IdentityEmbedding.identity_id == Identity.id)
-        .where(*filters).group_by(Identity.id).subquery())
-    result = await db.execute(select(Identity, (1 - best_by_identity.c.distance).label('similarity'))
-        .join(best_by_identity, best_by_identity.c.identity_id == Identity.id)
-        .order_by(best_by_identity.c.distance, Identity.id).limit(top_k))
-    return result.all()

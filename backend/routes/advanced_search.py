@@ -127,7 +127,10 @@ class WatchlistMatchResponse(BaseModel):
     action_instructions: Optional[str] = None
 
 
-class FaceMatchResponse(BaseModel):
+from backend.core.search_evidence import SearchMatchContext
+
+
+class FaceMatchResponse(SearchMatchContext):
     identity_id: str
     display_name: Optional[str] = None
     type: str
@@ -382,7 +385,7 @@ async def get_search_config(
             "max_top_k": settings.SEARCH_MAX_TOP_K
         },
         # The bar a match must clear to be shown at all. Distinct from the
-        # retrieval floor, which is an internal recall knob.
+        # legacy retrieval settings; exact search uses this same threshold.
         "display": {
             "min_similarity": settings.SIMILARITY_THRESHOLD
         },
