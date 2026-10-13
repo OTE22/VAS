@@ -130,6 +130,7 @@ async def hydrate_evidence(db, hits, query_vector, model_version):
         first = select(IdentityEmbedding.identity_id.label('identity_id'),
             func.min(IdentityEmbedding.id).label('id')).where(
                 IdentityEmbedding.identity_id.in_(unknown_ids),
+                IdentityEmbedding.faiss_index_type.is_distinct_from('unknown_observation'),
                 IdentityEmbedding.embedding_model_version == model_version,
                 IdentityEmbedding.embedding.isnot(None)).group_by(IdentityEmbedding.identity_id).subquery()
         similarity = 1 - anchor.embedding.cosine_distance(IdentityEmbedding.embedding)

@@ -136,10 +136,12 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
     else:
         # Use the exact same stable reference as live recognition, not the
         # best-looking/current portrait, which can be a later misassociation.
-        reference = normalized(vectors[0].embedding) if vectors else None
-        if vectors:
+        anchor = next((row for row in vectors
+                       if row.faiss_index_type != 'unknown_observation'), None)
+        reference = normalized(anchor.embedding) if anchor else None
+        if anchor:
             reference_id = next((app.id for app in appearances
-                if linked.get(app.id, (None,))[0] == vectors[0].id), None)
+                if linked.get(app.id, (None,))[0] == anchor.id), None)
 
     result = {}
     for app in appearances:

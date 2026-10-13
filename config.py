@@ -897,11 +897,11 @@ class Settings(BaseSettings):
     # =====================================================
     IDENTITY_QUALITY_THRESHOLD_KNOWN: float = Field(
         default=0.5,
-        description="Minimum quality score (0-1) to save embedding for KNOWN identities. Higher = stricter. Default: 0.5"
+        description="Minimum quality for Known enrollment/reference admission (0-1). Accepted camera observations retain their valid embeddings independently. Default: 0.5"
     )
     IDENTITY_QUALITY_THRESHOLD_UNKNOWN: float = Field(
         default=0.1,
-        description="Minimum quality score (0-1) to save embedding for UNKNOWN identities. Lower = save more. Default: 0.1 (saves almost all)"
+        description="Minimum quality for an Unknown live-recognition reference (0-1). Lower-quality accepted observations remain searchable history. Default: 0.1"
     )
 
     # Dedicated bar for the DESTRUCTIVE merge path, deliberately its own knob

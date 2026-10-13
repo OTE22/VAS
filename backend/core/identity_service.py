@@ -93,8 +93,8 @@ def _count_identity_op(op: str) -> None:
 
 class IdentityResolution(NamedTuple):
     """What one frame's face resolved to. `embedding_id` is the row THIS
-    processing attempt inserted for the frame (None when quality was below the
-    threshold and nothing was written) — never a pre-existing row, so the
+    processing attempt inserted for the frame (None for an existing match
+    until the caller saves its observation) — never a pre-existing row, so the
     caller can link it to the detection exactly and, if the detection can never
     be persisted, remove exactly it. `identity_created` marks an identity that
     exists only because of this frame."""
@@ -404,7 +404,7 @@ class IdentityService:
                     f"(thresholds known={self.known_threshold} "
                     f"unknown={self.unknown_threshold}); creating a new identity")
         identity, emb_id = await self._create_unknown_identity(
-            embedding, pipeline_id, detection_id, db, quality_score)
+            embedding, pipeline_id, detection_id, db, quality_score, quality_scorer_version)
         return IdentityResolution(identity, True, 0.0, emb_id, True)
 
     async def _create_unknown_identity(
@@ -416,93 +416,24 @@ class IdentityService:
         quality_score: Optional[float] = None,
         quality_scorer_version: Optional[str] = None
     ) -> Tuple[Identity, Optional[int]]:
-        """Create a new unknown identity. Returns (identity, embedding row id or
-        None when quality was below the unknown threshold)."""
-        identity_id = uuid.uuid4()
-        emb_id: Optional[int] = None
+        """Create an Unknown identity with its exact camera observation.
+
+        Low-quality accepted observations are retained for historical search,
+        but cannot become the stable live-recognition anchor.
+        """
         now = datetime.utcnow()
-        
-        # Create identity record
         identity = Identity(
-            id=identity_id,
-            type=IdentityType.UNKNOWN,
-            status=IdentityStatus.ACTIVE,
-            display_name=None,
-            first_seen_at=now,
-            last_seen_at=now,
-            appearances_count=0,
-            created_at=now,
-            updated_at=now
-        )
+            id=uuid.uuid4(), type=IdentityType.UNKNOWN, status=IdentityStatus.ACTIVE,
+            display_name=None, first_seen_at=now, last_seen_at=now,
+            appearances_count=0, created_at=now, updated_at=now)
         db.add(identity)
         await db.flush()
-        
-        # Add embedding to appropriate backend
-        # Use lower threshold for unknown identities to enable merge suggestions/clustering
-        # Even low-quality embeddings can be useful for finding connections
-        quality_threshold = self.quality_threshold_unknown
-        if quality_score is None or quality_score >= quality_threshold:
-            if self.use_pgvector and self.pgvector_index:
-                # pgvector backend - store embedding directly in PostgreSQL
-                emb_id = await self.pgvector_index.add_embedding(
-                    identity_id=str(identity_id),
-                    embedding=embedding,
-                    detection_id=detection_id,
-                    pipeline_id=pipeline_id,
-                    quality_score=quality_score,
-                    index_type='unknown',
-                    db=db
-                )
-                # add_embedding predates these columns; stamp provenance on the
-                # row it just created. Without this, every new identity's FIRST
-                # embedding looks like a legacy-scorer row and is excluded from
-                # the version-scoped best-snapshot comparison forever after.
-                #
-                # embedding_model_version was missing from this same patch-up
-                # while save_embedding stamped it — so every identity created by
-                # camera ingest carried a NULL model version, and reconciliation
-                # could never converge on those rows. Both columns are set here
-                # for the same reason and by the same rule as save_embedding.
-                if emb_id:
-                    stamp = {
-                        "embedding_model_version": self.embedding_model_version,
-                        "vector_index_sync_state": SYNC_SYNCED,
-                    }
-                    if quality_scorer_version:
-                        stamp["quality_scorer_version"] = quality_scorer_version
-                    await db.execute(
-                        update(IdentityEmbedding)
-                        .where(IdentityEmbedding.id == emb_id)
-                        .values(**stamp))
-                logger.debug(f"[IDENTITY] Added embedding to pgvector (emb_id={emb_id})")
-            else:
-                # FAISS backend. The embedding row is created first and its id
-                # IS the index key — the positional faiss_id column this used
-                # to null-fill was dropped in migration c5d6e7f8a9b0.
-                embedding_record = IdentityEmbedding(
-                    identity_id=identity_id,
-                    detection_id=detection_id,
-                    pipeline_id=pipeline_id,
-                    faiss_index_type='unknown',
-                    embedding=self._normalize_for_storage(embedding).tolist(),
-                    embedding_model_version=self.embedding_model_version,
-                    vector_index_sync_state=SYNC_PENDING,
-                    quality=quality_score,
-                    quality_scorer_version=quality_scorer_version,
-                    created_at=now
-                )
-                db.add(embedding_record)
-                await db.flush()
-                emb_id = embedding_record.id
-                logger.debug("[IDENTITY] Added embedding row (key = row id)")
-        else:
-            logger.warning(f"[IDENTITY] ⚠️ Skipping embedding save for UNKNOWN identity (quality {quality_score:.2f} < threshold {quality_threshold:.2f})")
-            logger.warning(f"[IDENTITY] This identity will NOT appear in merge suggestions/clustering!")
-            logger.warning(f"[IDENTITY] Consider lowering IDENTITY_QUALITY_THRESHOLD_UNKNOWN if you need merge suggestions for low-quality faces")
-        
-        await db.flush()
-        logger.info(f"[IDENTITY] Created UNKNOWN identity: {identity_id}")
-        return identity, emb_id
+        row = await self.save_embedding(
+            identity, embedding, detection_id, pipeline_id, quality_score, db,
+            defer_commit=True, quality_scorer_version=quality_scorer_version)
+        if row is None:
+            raise RuntimeError("New camera identity has no saved observation embedding")
+        return identity, row.id
 
     async def _find_or_create_identity_pgvector(
         self,
@@ -1027,7 +958,8 @@ class IdentityService:
             defer_commit: hand the transaction back to the caller — see below
 
         Returns:
-            IdentityEmbedding record if saved, None if skipped due to quality
+            IdentityEmbedding record if saved. Only enrollment/preload may return
+            None for low quality; camera observations must persist or fail.
 
         ``defer_commit`` exists for callers that must keep this write inside a
         larger atomic unit. `enroll_image` is the motivating case: it moves the
@@ -1043,15 +975,25 @@ class IdentityService:
         reconciliation exists to repair, and the caller is expected to call
         `sync_pending_embedding()` after its own commit.
         """
-        # Use appropriate quality threshold based on identity type
+        camera_observation = pipeline_id is not None or detection_id is not None
         quality_threshold = self.quality_threshold_known if identity.type == IdentityType.KNOWN else self.quality_threshold_unknown
-        
-        if quality_score is not None and quality_score < quality_threshold:
-            logger.debug(f"[IDENTITY] Skipping embedding save (quality {quality_score:.2f} < threshold {quality_threshold:.2f} for {identity.type.value})")
+        if quality_score is not None and not np.isfinite(quality_score):
+            raise ValueError("embedding quality must be finite")
+        if not camera_observation and quality_score is not None and quality_score < quality_threshold:
             return None
-        
+
+        # A recorded sighting keeps its valid signature regardless of quality.
+        # The quality gate controls reference admission, not history storage.
+        embedding = self._normalize_for_storage(embedding)
+        if embedding.shape != (int(settings.IDENTITY_EMBEDDING_SIZE),):
+            raise ValueError("embedding dimension does not match the recognition model")
+        if camera_observation and not self.embedding_model_version:
+            raise ValueError("camera observation requires a recognition model version")
+
         # Determine which index to use
-        index_type = 'unknown'
+        index_type = ('unknown_observation' if camera_observation and
+                      (quality_score is None or quality_score < self.quality_threshold_unknown)
+                      else 'unknown')
         if identity.type == IdentityType.KNOWN:
             # Keep the observation for historical searches, but never promote a
             # camera match into an enrolled reference. Enrollment links image_id
@@ -1093,9 +1035,13 @@ class IdentityService:
                     if quality_scorer_version is not None:
                         embedding_record.quality_scorer_version = quality_scorer_version
                     await db.flush()
+                if camera_observation and embedding_record is None:
+                    raise RuntimeError("Saved camera observation embedding is unavailable")
                 logger.debug(f"[IDENTITY] [PGVECTOR] Saved embedding: id={emb_id}")
                 return embedding_record
             else:
+                if camera_observation:
+                    raise RuntimeError("Failed to save camera observation embedding")
                 logger.warning(f"[IDENTITY] [PGVECTOR] Failed to save embedding for identity {identity.id}")
                 return None
         else:

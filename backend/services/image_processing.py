@@ -597,36 +597,19 @@ async def process_image_async(
                             logger.debug(f"[PROCESS] [STEP-BY-STEP] ⚠️ Face will NOT be shown on DASHBOARD (UNKNOWN identity)")
                             logger.debug(f"[PROCESS] [STEP-BY-STEP] ⚠️ UNKNOWN faces are filtered out by default (SHOW_UNKNOWN_FACES_ON_DASHBOARD=False)")
                         
-                        # Save embedding (if quality is good)
-                        # NOTE: For NEW identities, embedding is already saved in _create_unknown_identity() or _create_known_identity()
-                        # Only save embedding for EXISTING identities (when is_new_identity=False)
-                        # This prevents duplicate embeddings and ensures pgvector works correctly
-                        if not is_new_identity:
-                            # For existing identities, save additional embedding (for tracking multiple appearances)
+                        # Every accepted camera sighting retains one exact observation.
+                        # Reuse the row created for a new Unknown or explicit enrichment
+                        # instead of creating two vectors for the same face/detection.
+                        if frame_embedding_id is None:
                             saved = await identity_service.save_embedding(
-                                identity=identity,
-                                embedding=embedding,
-                                detection_id=None,  # linked EXACTLY by persist_detection via embedding_id
-                                pipeline_id=pipeline_id,
-                                quality_score=quality_score,
-                                quality_scorer_version=quality_scorer,
-                                db=db
-                            )
-                            if saved is not None and getattr(saved, "id", None) is not None:
-                                # save_embedding's row is the frame's primary embedding;
-                                # an enrichment row (rare, gated) is also frame-created
-                                # and travels in the secondary list.
-                                if frame_embedding_id is not None and frame_embedding_id != saved.id:
-                                    frame_secondary_embedding_ids.append(frame_embedding_id)
-                                frame_embedding_id = saved.id
-                        else:
-                            # For new identities, embedding was already saved in _create_unknown_identity() or _create_known_identity()
-                            # Verify embedding was saved (check if quality threshold was met)
-                            if quality_score is not None and quality_score < identity_service.quality_threshold:
-                                logger.warning(f"[PROCESS] New identity {identity.id} created but embedding NOT saved (quality {quality_score:.2f} < threshold {identity_service.quality_threshold})")
-                            else:
-                                logger.debug(f"[PROCESS] New identity {identity.id} created with embedding saved during creation")
-                        
+                                identity=identity, embedding=embedding, detection_id=None,
+                                pipeline_id=pipeline_id, quality_score=quality_score,
+                                quality_scorer_version=quality_scorer, db=db,
+                                defer_commit=True)
+                            frame_embedding_id = getattr(saved, "id", None)
+                        if frame_embedding_id is None:
+                            raise RuntimeError("Accepted camera face has no observation embedding")
+
                         await db.commit()
                     except Exception as identity_error:
                         # Rollback transaction on any error to prevent "transaction aborted" state
@@ -792,6 +775,7 @@ async def process_image_async(
             # created by this frame, and a stable per-face event id that the
             # post-commit `detection_alerts` event echoes as detection_event_id.
             "_embedding_id": frame_embedding_id,
+            "_requires_embedding": True,
             "_embedding_created_by_this_frame": frame_embedding_id is not None,
             "_secondary_embedding_ids": list(frame_secondary_embedding_ids),
             "_identity_created_by_this_frame": bool(frame_identity_created),
@@ -956,6 +940,7 @@ async def process_image_async(
                 "quality_scorer": f.get("quality_scorer"),
                 # provenance for persist_detection (stripped before insert(Face))
                 "_embedding_id": f.get("_embedding_id"),
+                "_requires_embedding": bool(f.get("_requires_embedding")),
                 "_embedding_created_by_this_frame": f.get("_embedding_created_by_this_frame"),
                 "_secondary_embedding_ids": f.get("_secondary_embedding_ids") or [],
                 "_identity_created_by_this_frame": f.get("_identity_created_by_this_frame"),

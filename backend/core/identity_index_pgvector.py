@@ -584,6 +584,7 @@ class IdentityIndexPgVector:
         anchor_cte = """, unknown_anchor_ids AS MATERIALIZED (
             SELECT identity_id, MIN(id) AS id FROM identity_embeddings
             WHERE embedding IS NOT NULL AND embedding_model_version = :model_version
+              AND faiss_index_type IS DISTINCT FROM 'unknown_observation'
             GROUP BY identity_id
         ), unknown_anchors AS MATERIALIZED (
             SELECT ie.id, ie.identity_id, ie.embedding, ie.quality

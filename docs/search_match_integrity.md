@@ -37,3 +37,18 @@ No database schema migration, reclassification, deletion or image/embedding rewr
 `tests/test_search_filters.py` exercises exact photos, incorrect Known associations, reference ownership/status/model checks, sighting filters before ranking, deduplication, inactive history, ambiguity, stale/cross-identity context, single/batch serialization and HTTP response-model preservation. Quick Search and frontend regressions cover the same contract, including multi-face clicks and unverified picker selections.
 
 Integration fixtures use a disposable PostgreSQL instance named `retention-test-db`, database `retention_test`, isolated from production. Tests never seed the application database. The candidate was also checked with read-only transactions against the previously investigated historical cases and a synthetic Firefox desktop/mobile session. Two read-only searches measured roughly 65–81 ms; this is a spot check, not a throughput or recognition-accuracy benchmark.
+
+
+## New camera captures: retain observation evidence
+
+For newly processed, accepted camera faces, a valid finite, nonzero embedding of the configured dimension is retained even below the reference-quality threshold. This changes storage admission only: camera face acceptance, matching thresholds, and enrollment quality checks still apply.
+
+Known captures remain `known_observation`, without a gallery-image link. Low-quality or unscored Unknown captures are marked `unknown_observation` in the existing type column; they remain available to historical image search but are excluded from stable live-recognition anchors, automatic Unknown reference verification and clustering reference pools. An existing trusted Unknown anchor is not replaced by a later observation.
+
+The processing path emits a required-embedding marker in the durable queue payload. The shared writer checks the exact vector's owner, camera, model metadata and numeric validity before committing the sighting. It locks identities in deterministic order before Face insertion so concurrent sightings do not deadlock by upgrading foreign-key locks. A failed required link rolls back the detection, faces, appearances and alerts together; the existing retry/quarantine mechanism reports failures. Explicit enrichment reuses its new vector instead of creating two ambiguous vectors for one observation.
+
+This is a code-only forward change. It adds no tables or columns, does not backfill old records, and accepts legacy queued payloads without pretending that their historical links were verified. It does not relax a search similarity threshold or guarantee that every retained sighting appears for every query. Rejected/unusable faces remain unassigned evidence. Ambiguous legacy links and multiple indistinguishable faces under one identity/detection remain unverified.
+
+With person-history preservation enabled, retaining more observations increases database storage; index synchronization and database capacity still require monitoring. Photo retention is independent of embedding retention.
+
+`tests/test_future_capture_evidence.py` covers low-quality Known and Unknown captures, reference isolation on both backends, invalid-vector rejection, strict evidence rollback, duplicate replay, concurrent captures, and ingest-to-search provenance with synthetic fixtures. No production data is required.

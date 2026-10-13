@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, text, update as sa_update
+from sqlalchemy import select, text, case, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -69,6 +69,9 @@ class LinkOutcome(str, enum.Enum):
     NO_EMBEDDING = "NO_EMBEDDING"          # the frame wrote no embedding (quality gate)
     CROSS_LINK_REFUSED = "CROSS_LINK_REFUSED"  # row belongs to another detection
     EMBEDDING_MISSING = "EMBEDDING_MISSING"    # explicit id supplied, row gone
+    REQUIRED_EMBEDDING_MISSING = "REQUIRED_EMBEDDING_MISSING"
+    EMBEDDING_OWNER_MISMATCH = "EMBEDDING_OWNER_MISMATCH"
+    INVALID_EMBEDDING = "INVALID_EMBEDDING"
 
 
 class EmbeddingLinkError(RuntimeError):
@@ -76,7 +79,7 @@ class EmbeddingLinkError(RuntimeError):
     detection transaction — a detection is never reported as persisted while
     its exact embedding provenance is known to be inconsistent."""
 
-    def __init__(self, outcome: LinkOutcome, embedding_id: int, detection_id: int,
+    def __init__(self, outcome: LinkOutcome, embedding_id: Optional[int], detection_id: int,
                  existing_detection_id: Optional[int] = None):
         self.outcome = outcome
         self.embedding_id = embedding_id
@@ -128,6 +131,7 @@ class FaceEvidence:
     name: str
     is_known: bool
     event_id: Optional[str]
+    requires_embedding: bool = False  # Only new accepted captures; legacy queue remains readable.
 
     @classmethod
     def from_face_dict(cls, f: Dict[str, Any]) -> "FaceEvidence":
@@ -136,6 +140,7 @@ class FaceEvidence:
         return cls(
             identity_id=str(f["identity_id"]) if f.get("identity_id") else None,
             embedding_id=f.get("_embedding_id"),
+            requires_embedding=bool(f.get("_requires_embedding")),
             embedding_created=bool(f.get("_embedding_created_by_this_frame")),
             secondary_embedding_ids=[int(x) for x in (f.get("_secondary_embedding_ids") or []) if x is not None],
             identity_created=bool(f.get("_identity_created_by_this_frame")),
@@ -220,11 +225,23 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
             pending_face['name'] = survivor.display_name or 'Unknown'
             pending_face['label_state'] = LabelState.MANUAL_LABELED
         embedding_ids = [pending_face.get('_embedding_id'), *(pending_face.get('_secondary_embedding_ids') or [])]
+        # A merge can move a queued row before this writer runs, or leave a
+        # late row attached to its loser. Handle both exact owners, never a
+        # third identity. Changing ownership does not grant reference trust:
+        # preserve Known observations and explicitly admitted enrichment.
+        # Known-only enrichment is not an Unknown recognition anchor.
+        survivor_is_unknown = survivor.type == IdentityType.UNKNOWN
         await db.execute(sa_update(IdentityEmbedding).where(
             IdentityEmbedding.id.in_([i for i in embedding_ids if i is not None]),
-            IdentityEmbedding.identity_id == uuid.UUID(str(original_id))
+            IdentityEmbedding.identity_id.in_({uuid.UUID(str(original_id)), survivor.id})
         ).values(identity_id=survivor.id,
-                 faiss_index_type='unknown' if survivor.type == IdentityType.UNKNOWN else 'known'))
+                 faiss_index_type=case(
+                     (IdentityEmbedding.faiss_index_type == 'unknown_observation', 'unknown_observation'),
+                     (IdentityEmbedding.faiss_index_type == 'known_observation',
+                      'unknown_observation' if survivor_is_unknown else 'known_observation'),
+                     (IdentityEmbedding.faiss_index_type == 'known_enriched',
+                      'unknown_observation' if survivor_is_unknown else 'known_enriched'),
+                     else_='unknown' if survivor_is_unknown else 'known')))
     detection = Detection(**det_cols)
     db.add(detection)
     await db.flush()
@@ -232,6 +249,13 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
     timestamp = detection.timestamp or datetime.utcnow()
 
     faces = [FaceEvidence.from_face_dict(f) for f in detection_data.get("faces", [])]
+    # Lock in one order before inserting FK-bearing face rows. FOR UPDATE
+    # after Face inserts upgrades competing KEY SHARE locks and deadlocks
+    # simultaneous sightings. We update counters/timestamps, never identity keys.
+    identity_ids = sorted({uuid.UUID(face.identity_id) for face in faces if face.identity_id})
+    identities = {row.id: row for row in (await db.execute(select(Identity).where(
+        Identity.id.in_(identity_ids)).order_by(Identity.id)
+        .with_for_update(key_share=True).execution_options(populate_existing=True))).scalars().all()} if identity_ids else {}
     for f in detection_data.get("faces", []):
         db.add(Face(detection_id=detection_id, **face_row_columns(f)))
     await db.flush()
@@ -241,14 +265,35 @@ async def persist_detection(db: AsyncSession, *, detection_data: Dict[str, Any])
     unknown_events = []
 
     for face in faces:
+        if face.requires_embedding and not face.identity_id:
+            raise EmbeddingLinkError(LinkOutcome.EMBEDDING_OWNER_MISMATCH, face.embedding_id, detection_id)
+        if face.requires_embedding and identity_service is None:
+            raise RuntimeError("Identity service unavailable for required camera evidence")
         if not face.identity_id or identity_service is None:
             continue
         # ---- CORE: identity, appearance, exact link
-        identity = (await db.execute(
-            select(Identity).where(Identity.id == uuid.UUID(face.identity_id)).with_for_update()
-        )).scalar_one_or_none()
+        identity = identities.get(uuid.UUID(face.identity_id))
         if identity is None:
             raise RuntimeError(f"identity {face.identity_id} vanished before its detection was persisted")
+        if face.requires_embedding:
+            # Lock the exact row through the evidence commit. Never borrow an
+            # older/group vector to make a missing observation appear complete.
+            if face.embedding_id is None:
+                raise EmbeddingLinkError(LinkOutcome.REQUIRED_EMBEDDING_MISSING, None, detection_id)
+            observation = (await db.execute(select(IdentityEmbedding).where(
+                IdentityEmbedding.id == face.embedding_id).with_for_update())).scalar_one_or_none()
+            if observation is None:
+                raise EmbeddingLinkError(LinkOutcome.EMBEDDING_MISSING, face.embedding_id, detection_id)
+            if (observation.identity_id != identity.id or observation.pipeline_id != pipeline_id
+                    or observation.image_id is not None):
+                raise EmbeddingLinkError(LinkOutcome.EMBEDDING_OWNER_MISMATCH, face.embedding_id, detection_id)
+            from backend.core.identity_service import IdentityService
+            try:
+                vector = IdentityService._normalize_for_storage(observation.embedding)
+                if vector.shape != (int(settings.IDENTITY_EMBEDDING_SIZE),) or not observation.embedding_model_version:
+                    raise ValueError("invalid observation model or dimensions")
+            except (ValueError, TypeError):
+                raise EmbeddingLinkError(LinkOutcome.INVALID_EMBEDDING, face.embedding_id, detection_id)
         if identity.type == IdentityType.UNKNOWN:
             identity.first_seen_at = min(identity.first_seen_at, timestamp) if identity.appearances_count else timestamp
             identity.last_seen_at = max(identity.last_seen_at, timestamp) if identity.appearances_count else timestamp
