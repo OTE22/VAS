@@ -2,7 +2,7 @@
 
 [Illustrated VAS user guide](user-guide/README.md) — Word/PDF, genuine annotated screenshots, and a verified capability checklist (isolated synthetic test, 7 October 2026).
 
-[Guided installation](GUIDED_INSTALLATION.md) — load Docker images or build a fresh VAS installation.
+[VAS deployment guide](GUIDED_INSTALLATION.md) — run `./deploy.sh`, follow the eight setup steps, verify the installation, and update an existing server. VMS has a separate `docker-start.sh` guide in its repository.
 
 
 Start with [Offline deployment — move this same server](offline-deployment.md).

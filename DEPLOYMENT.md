@@ -1,12 +1,13 @@
-# DEPLOYMENT — Plain-English Guide
+# Historical VAS deployment notes
 
-How this system is deployed, where every value comes from, and how the
-certificates, IP addresses and names actually work.
+For current installation and update instructions, use the
+[VAS deployment guide](Docs/GUIDED_INSTALLATION.md). Start it with `./deploy.sh`
+from the VAS checkout. VMS uses its own `docker-start.sh` and separate guide.
 
-Written to be read start to finish once. For exact commands see
-[`Docs/04_DEPLOYMENT_RUNBOOK.md`](Docs/04_DEPLOYMENT_RUNBOOK.md) (the production
-authority) and [`Docs/01_SYSTEM_OVERVIEW.md`](Docs/01_SYSTEM_OVERVIEW.md)
-(the orientation map).
+The sections below describe an earlier server deployment. Host addresses, schema
+revisions, service counts, models and recorded test results are historical examples,
+not the current installation defaults or a fresh-server procedure. Current page
+instructions are indexed in [Docs/README.md](Docs/README.md).
 
 **Last updated: 2026-09-07** — sections 10–16 added (offline policy, rebuild
 cache, the `migrate` preflight, the generated variable inventory, volumes, the
@@ -418,11 +419,11 @@ sudo ./deploy.sh start
 
 That produces `SAN: DNS:face-detector.internal, DNS:localhost, IP:127.0.0.1, IP:192.168.1.111`.
 
-> Even then, browsing by IP still fails **login**, because the app checks the
-> browser's `Origin` against `PUBLIC_ORIGIN` (§5). To make IP access work end
-> to end you must also set `PUBLIC_ORIGIN=https://192.168.1.111` in
-> `docker/.env` and restart. **Using the name is simpler and is what this
-> deployment is built around.**
+> Current releases validate the browser against `PUBLIC_ORIGINS`. The guided
+> installer adds the selected `SERVER_IP` HTTPS origin while preserving the
+> primary `PUBLIC_ORIGIN`. Both DNS and IP access can coexist when the certificate
+> covers them. Existing certificates require a planned update; follow the current
+> [server configuration instructions](Docs/GUIDED_INSTALLATION.md#server-configuration).
 
 Certificate lifetimes are set in the script: CA 3650 days (10 years), server
 825 days (~27 months, the maximum most browsers accept).
@@ -968,16 +969,19 @@ on the pytorch index, so naming it forces the CPU wheel.
 
 ```bash
 sudo ./deploy.sh doctor     # read-only: what is wrong, and the exact fix
-sudo ./deploy.sh health     # 31-check acceptance battery, no rebuild
+sudo ./deploy.sh health     # current acceptance battery, no rebuild
 sudo ./deploy.sh paths      # file ownership drift
-sudo ./deploy.sh start      # bring the stack up
+sudo ./deploy.sh start      # can build and run database/startup stages
 sudo ./deploy.sh stop
 sudo ./deploy.sh backup     # pg_dump into the backup volume
 sudo ./deploy.sh upgrade    # backup → build → pin schema → migrate → restart
 ```
 
-`upgrade` is the safe path for new code: it takes a verified backup first, tags
-a rollback point, and rolls back automatically if the new version fails.
+`upgrade` takes a backup and configuration snapshot, tags an image recovery
+point and runs rollout checks. Automatic image rollback applies only to supported
+failure paths when the schema has not advanced; it is not a general data recovery
+guarantee. Follow the current [upgrade instructions](Docs/GUIDED_INSTALLATION.md#updating-vas)
+and [recovery limitations](Docs/backup-and-recovery.md).
 
 Every long-running service is `restart: unless-stopped` and Docker starts at
 boot, so **the stack returns by itself after a power cut**. `migrate` is
@@ -2111,8 +2115,10 @@ The backend image bakes the source, so after touching any file above:
 `sudo ./deploy.sh upgrade` (backup → `:rollback` tags → build → rollout → health), then
 `cd ~/vas-assistant && ./tools/install-nginx-route.sh` (route refresh + gate restart), then
 `E2E_USER=<a user with Chatbot> E2E_PASS=… ./assistant.sh e2e --live` to prove the
-whole chain (sign-in, hand-off, audit row, logout). Rollback: `sudo ./deploy.sh rollback`
-and `./tools/install-nginx-route.sh --remove`.
+whole chain (sign-in, hand-off, audit row, logout). The current wrapper has no
+`rollback` subcommand; use a reviewed recovery plan. Its automatic upgrade rollback
+is limited to applicable failures before schema advancement. The separate chatbot
+route-removal command is `./tools/install-nginx-route.sh --remove`.
 
 ### 18.4 Limits to know
 
@@ -2121,20 +2127,12 @@ permitted user has the assistant's full tool set inside its container; one
 answer generated at a time (shared GPU). The per-user split ("data-only lane")
 is designed and deferred — see the LAF-AI runbook.
 
-## 19. The web pages: where every button is documented
+## 19. Current page and API documentation
 
-[`Docs/46_WEB_PAGES_REFERENCE.md`](Docs/46_WEB_PAGES_REFERENCE.md) walks through
-**every page** of the application — sign-in, change password, home, dashboard,
-the legacy assistant, and all 18 admin pages — and for each one lists every
-button, form and modal, what it triggers, the API call and payload, what the
-backend does (tables written, audit, side effects) and what the user sees.
-Section 0 explains the shared mechanics (page routing and access rules, session
-cookie and CSRF header, the navbar driven by `/api/auth/me/privileges`, the
-`data-action` dispatcher, the dashboard WebSocket events); section 25 covers the
-add-person enrollment modal; section 20 is the LAF-AI integration of §18.
+[Docs/README.md](Docs/README.md) indexes the current page-by-page guides, including
+permissions, controls and expected results. The old numbered page/API-reference
+files cited by this historical document are no longer part of the checkout.
 
-Its companion [`Docs/47_API_INDEX.md`](Docs/47_API_INDEX.md) is **generated** from
-the route files (`python3 scripts/generate_api_index.py > Docs/47_API_INDEX.md`):
-every route with handler, auth dependencies, whether it writes to the database
-and whether it audits. Regenerate it after any route change and re-read the
-affected page section.
+The [illustrated user guide](Docs/user-guide/README.md) includes its own verification
+scope. API declarations live in [backend/routes](backend/routes/) and
+[sql_agent/api](sql_agent/api/); production disables `/docs` and `/redoc`.

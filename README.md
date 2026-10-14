@@ -7,6 +7,7 @@ local services to be present.
 
 ## Start here
 
+- [Deploy VAS step by step — run `./deploy.sh`](Docs/GUIDED_INSTALLATION.md)
 - [Move this same server to the offline intranet](Docs/offline-deployment.md)
 - [Page-by-page documentation](Docs/README.md)
 - [End-to-end operator demo](Docs/demo.md)

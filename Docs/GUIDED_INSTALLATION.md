@@ -1,10 +1,28 @@
-# Guided VAS installation
+# VAS deployment guide
 
-From the VAS release directory on the target Linux server, run:
+**Entry point: `deploy.sh` in the VAS checkout.** Reviewed against the scripts on
+14 October 2026. This guide covers VAS installation, configuration, startup and
+updates. VMS has its own `docker-start.sh` and separate deployment guide.
+
+## 1. Open the correct checkout
+
+Open a terminal on the deployment server. Change to the VAS release directory;
+`/opt/vas` below is an example, so replace it with your actual checkout path:
 
 ```bash
+cd /opt/vas
 ./deploy.sh
 ```
+
+If the copied file is not executable, use `bash deploy.sh`. Both forms launch the
+same guide without arguments. You need Bash, Python 3 and an account allowed to
+use sudo. The wizard requests administrator access before collecting choices.
+Have the server's assigned IPv4 address, approved release files and model weights
+ready. Mount any dedicated data disk before choosing its location.
+
+**For an existing installation, read [Updating VAS](#updating-vas) first.** Preserve
+its environment, certificates, model files and storage. Moving the same server to
+another network has a separate [offline move procedure](offline-deployment.md).
 
 No arguments are required. Run it in an interactive terminal. On Linux, the script
 requests your sudo password when administrator access is needed, then opens the
@@ -16,7 +34,7 @@ chooses **Preview checks only**, so select 1 when you want to install.
 terminal, a bare invocation stops with instructions rather than deploying silently.
 Use explicit subcommands for automation; `--help` lists them.
 
-## Choose one installation method
+## 2. Choose one installation method
 
 | Choice | What happens | What you need |
 | --- | --- | --- |
@@ -26,16 +44,24 @@ Use explicit subcommands for automation; `--help` lists them.
 Both choices preserve existing volumes. On an existing deployment, the protected
 backup/upgrade flow is used. “Fresh build” never means deleting the database.
 
-The guide takes you through these eight steps, in order:
+## 3. Answer the eight setup steps
 
-1. Installation method.
-2. Optional release-package directory and, for load mode, one or more image archives.
-3. **Server IP and browser URL:** enter the server-network IPv4 address, then use the IP or a DNS name for HTTPS.
-4. **GPU/CPU setup:** require NVIDIA acceleration or use CPU; verify existing GPU prerequisites or opt into installation/repair, then choose installation connectivity.
-5. Keep the displayed default configuration or customize it.
-6. **Service connections:** keep automatic internal connections and default language models, or choose model names and an already deployed notebook URL.
-7. **Storage:** keep Docker-managed volumes (recommended), or choose a dedicated directory before a new installation. Review the exact ONNX/map destinations.
-8. **Review:** install, preview checks only, or cancel.
+The addresses and paths below are examples. Use your server's actual values.
+
+| Step / displayed prompt | What to enter | What to check before continuing |
+| --- | --- | --- |
+| **1 — Installation method**, `Choose 1 or 2` | `1` for saved images; `2` to build this release. | The default is build. Use the release checkout matching the images. |
+| **2 — Installation files**, `Release package directory (Enter to use files already here)` | Example `/media/vas-release`, or Enter when the files are already in place. | The directory exists and has the required weights/manifest. |
+| Load mode only: `Image archive path (Enter when finished)` | Enter one full archive path per prompt, then Enter to finish. | Already loaded images can be reused; every required service tag must exist. |
+| **3 — Server network and browser address**, `SERVER_IP` | The IPv4 address assigned to this server on the client network, for example `10.20.30.40`. | Use neither a camera's address nor `0.0.0.0`/`localhost`. |
+| `VAS browser URL` | `https://10.20.30.40` or a DNS name pointing to that server. | HTTPS port 443 is supported; clients must route to the address. Existing installations keep their configured primary URL. |
+| **4 — Hardware and connectivity**, `Hardware option` | `1` requires NVIDIA GPU; `2` selects CPU. | CPU is lower throughput. GPU selection does not certify a camera count. |
+| GPU only: `GPU setup option` | `1` verifies an existing setup; `2` opts into installation/repair. | Driver installation may require a manual reboot; Docker runtime repair can interrupt other containers. See [GPU setup](#gpu-setup-in-order). |
+| `Installation connectivity` | `1` allows installation downloads; `2` requires offline prerequisites. | Runtime remains subject to the production offline policy in either case. |
+| **5 — Default configuration**, `Configuration option` | `1` keeps displayed values; `2` customizes the four displayed settings. | Check log level, backup retention and available storage. Person-history and image retention are separate. |
+| **6 — Service connections**, `Service configuration option` | `1` keeps values; `2` chooses model names / notebook URL. | Ollama models must fit the hardware. A notebook URL does not install Jupyter. |
+| **7 — Storage and model/map files**, `Storage option` | `1` keeps storage; `2` chooses a host data directory for a new installation. | Existing volumes are preserved. For option 2, use an already mounted location such as `/srv/vas-data`. |
+| **8 — Review**, `Continue` | Enter **`1` to install**, `2` to preview, or `3` to cancel. | Enter alone selects **preview**, so it does not deploy. |
 
 Enter file paths without surrounding quotes; spaces are supported. Press Enter
 to accept the displayed default. The review defaults to preview checks. Cancelling
@@ -185,11 +211,11 @@ Automation examples:
 ```bash
 # Require GPU, checking existing prerequisites only:
 sudo ./deploy.sh deploy --gpu --gpu-setup=verify --yes \
-  --server-ip=10.21.5.22 --public-origin=https://10.21.5.22
+  --server-ip=10.20.30.40 --public-origin=https://10.20.30.40
 
 # Opt into missing-driver/runtime installation or repair:
 sudo ./deploy.sh deploy --gpu --gpu-setup=install --nvidia-driver=auto --yes \
-  --server-ip=10.21.5.22 --public-origin=https://10.21.5.22
+  --server-ip=10.20.30.40 --public-origin=https://10.20.30.40
 ```
 
 `--dry-run` and `validate` never install drivers or restart Docker. If a prerequisite
@@ -204,14 +230,22 @@ new installation. Press Enter to keep them, or select **Customize**:
 | Setting | New installation default | Meaning |
 | --- | --- | --- |
 | `LOG_LEVEL` | `INFO` | Normal operational logging; `WARNING` and `ERROR` are quieter. |
-| `DATA_RETENTION_DAYS` | `365` | Detections/events become eligible for cleanup after this age. |
+| `DATA_RETENTION_DAYS` | `365` | Age-based detection cleanup only when `PRESERVE_PERSON_HISTORY=false`; generated reports also use this period. |
 | `BACKUP_RETENTION_DAYS` | `14` | Older automatic backups become eligible for deletion. |
 | `MAX_STORAGE_GB` | `5000` | Storage capacity used for dashboard reporting; not a disk quota or reservation. |
 
+Person-history preservation defaults to **`PRESERVE_PERSON_HISTORY=true`**.
+Routine cleanup keeps recorded person history and embeddings; logs and temporary
+data still have their own expiry. Camera images use **`SNAPSHOT_RETENTION_DAYS`**
+(default 90), subject to retained references. These two settings are not among the
+four wizard prompts; review their effective values in **Settings** after login.
+See [Person history and image retention](PERSON_HISTORY_RETENTION.md).
+
 Choose retention periods according to your storage and operational requirements.
-Reducing a retention period can cause older records or backups to be removed by
-the existing cleanup jobs. Storage reporting should reflect the capacity available
-to this installation; the default does not mean the machine has 5 TB available.
+Reducing backup/image retention can remove eligible backups/images; turning history
+preservation off also enables the applicable historical cleanup. Storage reporting
+should reflect capacity available to this installation; the default does not mean
+the machine has 5 TB available.
 
 Values are validated and included in the review before installation. Settings are
 written to `docker/.env` only during the deployment stages; a dry run prints the
@@ -236,7 +270,11 @@ when installation connectivity allows it; an offline host must have them preload
 
 `ML_NOTEBOOK_URL` stays empty until a notebook service is separately deployed. Use
 its HTTPS URL without embedded credentials or token query strings. Setting a URL
-does not install Jupyter. Prepared `.mbtiles` archives and map fonts must also be
+does not install Jupyter. The current wizard requires an absolute HTTPS URL, such
+as `https://vas.example/notebooks/lab`; it will reject a saved relative path such
+as `/notebooks/lab` even when you choose to keep existing values. Preserve the same
+working service by supplying its full HTTPS URL; use `-` only when intentionally
+disabling the notebook link. Prepared `.mbtiles` archives and map fonts must also be
 supplied separately; the guide reports missing assets. The final runtime checks,
 not the existence of files, determine service health.
 
@@ -247,12 +285,18 @@ URL: https://<VAS-server-IP-or-hostname>/api/webhook/<pipeline_id>
 Header: X-Webhook-Key: <VAS ingest credential>
 ```
 
+For the supplied VMS launcher, set `WEBHOOK_BASE_URL` to the HTTPS origin only
+(for example `https://vas.example`), and put its credential in
+`WEBHOOK_AUTH_TOKEN`. VMS constructs `/webhook/{pipeline_id}` and sends bearer
+authentication itself; do not paste the complete per-camera URL into its base-URL
+setting. The URL/header above describe a generic sender, not VMS field values.
+
 Read the generated token privately from `secrets/webhook_api_keys`, or issue a
 credential in VAS. Trust the VAS public CA certificate on the VMS sender and verify
 an actual camera detection. The installer prints these directions but does not
 change VMS pipelines, create camera records, or expose the credential in its log.
 
-## After installation
+## 4. Finish installation and verify it
 
 The final report shows results and the deployment log location. The guide prints:
 
@@ -266,16 +310,153 @@ New installations use the default `admin` account unless bootstrap configuration
 was customized. Existing accounts and passwords remain in effect. Never distribute
 `internal-ca.key` or other private keys to client PCs.
 
+1. Wait for the final deployment report. Required stages must pass. A preview
+   report means no installation was performed.
+2. Trust **only** `certs/internal-ca.crt` on each client computer if using the
+   generated CA. Keep CA/server private keys on the managed server.
+3. Open the chosen URL, for example `https://10.20.30.40/signin`.
+4. For a new installation, read the bootstrap password privately on the server:
+
+   ```bash
+   sudo cat secrets/bootstrap_admin_password
+   ```
+
+5. Sign in as `admin` unless bootstrap configuration was customized, then complete
+   any required password change. Existing deployments use their existing account
+   passwords; the bootstrap file does not reset an existing password.
+6. Check the services and acceptance report from the VAS checkout:
+
+   ```bash
+   sudo ./deploy.sh status
+   sudo ./deploy.sh health
+   ```
+
+   The API and dependencies should be healthy. The `migrate` job exiting with
+   code 0 is expected: it is a one-shot job, not a continuously running service.
+   Required GPU acceptance includes actual model inference, not just `nvidia-smi`.
+   For a separate GPU check, run `sudo ./deploy.sh gpu-test --gpu` after the API is
+   running and require the successful SCRFD/ArcFace inference result. A warning
+   that the API is stopped, or a skipped stage, does not prove GPU acceptance.
+7. Connect one approved test camera using the **separate VMS guide** and the
+   [ingest credential instructions](ingest-credentials.md). Confirm the publisher
+   accepts the webhook, then verify a new detection in [Live Feeds](dashboard.md)
+   and its expected [pipeline](pipelines.md). A healthy server alone does not prove
+   the camera-to-VAS connection or search accuracy.
+
+For diagnosis, follow the API log and stop viewing it with Ctrl+C:
+
 ```bash
-./deploy.sh status
-./deploy.sh health
-./deploy.sh logs face_recognition
+sudo ./deploy.sh logs face_recognition
 ```
 
-If Docker access requires privileges, prefix those commands with `sudo`.
-Fix the failing prerequisite and rerun the same guided installation. A dry run
-checks what it can without importing images or starting services; it is not a
-successful installation or a hardware acceptance test.
+Ctrl+C ends the log viewer; it does not stop VAS. Fix a failing prerequisite and
+rerun the guide. Check the final result again; a dry run or an image build alone is
+not a successful deployment.
+
+## Updating VAS
+
+Use this section for an existing server. Plan an interruption and preserve the
+installed configuration and persistent storage while replacing release source.
+
+**Check the installed configuration first.** `deploy.sh` reads `docker/.env` and
+selects its production GPU/storage overlays. An installation previously started
+with another `--env-file`, project name or extra Compose override must retain
+those choices. Do not assume the wrapper reproduces a custom deployment. These
+read-only commands show the Compose files and optional explicit environment file
+recorded on the standard production API container:
+
+```bash
+sudo docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' face_detector_prod-face_recognition-1
+sudo docker inspect --format '{{index .Config.Labels "com.docker.compose.project.environment_file"}}' face_detector_prod-face_recognition-1
+```
+
+A blank environment-file label is possible; it is not proof of missing settings.
+If the recorded configuration differs from this guide, have the operator reconcile
+it with the actual installed environment before using the wrapper to update it.
+Do not copy production secrets into a guide or share full Compose output.
+
+For an installation already managed by this wrapper:
+
+1. Run `sudo ./deploy.sh status` and `sudo ./deploy.sh validate` from the installed
+   checkout. Resolve configuration errors before changing the running service.
+2. Install the approved release source while retaining `docker/.env`, `secrets/`,
+   `certs/`, `weights/`, map data, deployment state and the selected data volumes.
+   Keep a recoverable copy of the current release and a verified external backup;
+   see [Backup and recovery](backup-and-recovery.md) for actual restore limitations.
+3. Run `./deploy.sh` and choose the new release's image-loading or build path, or
+   use this command for a source build on an installation that requires GPU:
+
+   ```bash
+   sudo ./deploy.sh upgrade --gpu
+   ```
+
+   Use `--cpu` instead for an intentionally CPU-only installation; add `--offline`
+   when installation downloads must remain disabled. Repeat the intended hardware
+   and connectivity flags on maintenance commands: a bare `upgrade` can detect
+   hardware/connectivity again rather than preserve a previous CLI choice. The
+   guide asks you to confirm these choices explicitly.
+
+4. Follow the backup, configuration snapshot, build/load, migration, rollout and
+   acceptance stages. Verify the final result, login and one approved test capture.
+
+The upgrade can migrate the schema when a release contains migrations. “Preserve
+volumes” does not mean “never changes database schema.” Image rollback is attempted
+on applicable upgrade failures only when the schema has not advanced. The current
+script has **no `rollback` subcommand**; schema changes or data-format changes need
+a release-specific recovery plan. Its backup/restore tooling has the limitations
+documented in the linked recovery guide.
+
+## Command reference
+
+Run these from the VAS checkout. The primary installation command is still the
+bare `./deploy.sh`; helper scripts under `scripts/deploy/` are called by it.
+
+| Purpose | Command | Actual behavior |
+| --- | --- | --- |
+| Interactive installation / guided update | `./deploy.sh` | Eight setup steps, review, installation and checks. |
+| Read usage | `./deploy.sh --help` | Prints supported commands and options. |
+| Validate prerequisites | `sudo ./deploy.sh validate` | Checks without installation changes; writes a diagnostic log. |
+| Inspect status | `sudo ./deploy.sh status` | Lists recorded state and current services. |
+| Acceptance checks | `sudo ./deploy.sh health` | Checks the installed stack without rebuilding it. |
+| Storage locations | `sudo ./deploy.sh storage` | Prints persistent-data and model/map locations. |
+| Model file validation | `sudo ./deploy.sh model-check` | Checks required weights against the manifest. |
+| GPU proof | `sudo ./deploy.sh gpu-test --gpu` | Requires GPU setup; the API must be running to execute the real inference check. A skipped/warning-only result is not proof. |
+| View API logs | `sudo ./deploy.sh logs face_recognition` | Follows recent logs; Ctrl+C exits the viewer. |
+| Prepare host/config only | `sudo ./deploy.sh install` | Does not complete application build/start/acceptance. |
+| Start through deployment stages | `sudo ./deploy.sh start` | Can build, initialize/check the database, back up and start services. |
+| Reconcile/start existing stack | `sudo ./deploy.sh restart` | Uses Compose `up -d`; unchanged containers may stay running. It is not a forced process restart or a release rebuild. |
+| Deploy new GPU release | `sudo ./deploy.sh upgrade --gpu` | Uses backup/snapshot/rollout checks; use `--cpu` for CPU-only, and add `--offline` when required. |
+| Stop services | `sudo ./deploy.sh stop` | Stops this stack; preserves persistent volumes. |
+| Create backup | `sudo ./deploy.sh backup` | Runs backup/checksum verification; follow the recovery guide to protect and rehearse restoration. |
+
+Routine deployment does not require `uninstall`; ordinary uninstall preserves
+volumes. `uninstall --purge-data` and `docker compose down -v` remove persistent
+volumes and are outside this guide.
+
+## Troubleshooting
+
+| What you see | What to do next |
+| --- | --- |
+| No installation happened | At review select **1 — Install now**. Enter selects preview. |
+| `Permission denied` launching the file | Run `bash deploy.sh` from the VAS checkout; supply sudo credentials when prompted. |
+| `The wizard requires a terminal` | Open an interactive SSH/local terminal, or use explicit automation flags below. |
+| Missing model or checksum mismatch | Supply the matching approved ONNX files and manifest; run `sudo ./deploy.sh model-check`. Do not rename models or regenerate a manifest just to bypass a failure. |
+| Missing Docker image tag in load mode | Import the missing release archive or obtain the matching tag. `docker export` archives are unsuitable. |
+| `REBOOT_REQUIRED` / exit 75 | Save work, reboot manually, complete required driver enrollment and rerun the GPU setup. |
+| GPU fails or falls back to CPU | Run `sudo ./deploy.sh gpu-test --gpu`; resolve the reported driver/toolkit/provider problem before accepting GPU deployment. |
+| Login blocked by origin or certificate error | Verify the exact browser URL, `PUBLIC_ORIGINS`, certificate SANs, client CA trust and server reachability. Existing certificates are not silently replaced. |
+| Notebook URL is rejected | Supply the existing service's full HTTPS URL, without tokens or embedded credentials. Relative paths are rejected by this wizard. |
+| Storage layout mismatch | Remount the expected disk and keep the recorded `VAS_DATA_ROOT`. Do not substitute empty directories for existing data. |
+| Migration/configuration failure | Keep the stage log from `logs/deploy/`; inspect `sudo ./deploy.sh logs migrate` or `logs face_recognition`. Correct the stated cause before rerunning. |
+| Healthy VAS but no camera events | Check VMS publishing, the exact pipeline ID, ingest credential, TLS trust and network reachability; verify an approved capture end to end. |
+
+## Verification scope of this guide
+
+Commands, prompt labels and configuration paths were checked against the current
+repository and safe help output. This documentation update did not install packages,
+restart services or change databases. Installation on a new target still requires
+its own final health, GPU and camera acceptance checks; a camera-capacity claim
+requires a representative load test.
 
 ## Automation
 
@@ -283,7 +464,7 @@ Build from source:
 
 ```bash
 sudo ./deploy.sh deploy --yes --image-mode=build \
-  --server-ip=10.21.5.22 --public-origin=https://vas.example
+  --server-ip=10.20.30.40 --public-origin=https://vas.example
 ```
 
 Load a release without building or pulling Docker images:
@@ -292,7 +473,7 @@ Load a release without building or pulling Docker images:
 sudo ./deploy.sh deploy --yes --image-mode=load \
   --image-archive=/media/vas-images.tar \
   --deploy-package=/media/vas-release \
-  --server-ip=10.21.5.22 --public-origin=https://10.21.5.22
+  --server-ip=10.20.30.40 --public-origin=https://10.20.30.40
 ```
 
 Repeat `--image-archive` for additional archives. Add `--offline` when host/package
