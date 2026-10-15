@@ -112,7 +112,7 @@
             <div class="graph-inspector-title"><span class="movement-number" data-graph-number>SIGHTING 01</span><span class="graph-inspector-live">RECORDED</span></div>
             <button type="button" class="graph-photo" data-graph-enlarge aria-label="Enlarge selected sighting photo">${imageUrl(first.app.snapshot_url||first.app.best_snapshot_path)?`<img src="${escape(imageUrl(first.app.snapshot_url||first.app.best_snapshot_path))}" alt="Selected recorded sighting">`:''}<span class="graph-photo-missing" ${imageUrl(first.app.snapshot_url||first.app.best_snapshot_path)?'hidden':''}>Image unavailable</span><span class="movement-photo-label">Enlarge ↗</span></button>
             <h5 data-graph-camera>${escape(camera(first.app))}</h5><p data-graph-date>${Number.isFinite(first.time)?escape(new Date(first.time).toLocaleString()):'Time unavailable'}</p>
-            <p class="graph-selected-transition" data-graph-transition aria-live="polite">First recorded sighting</p><div class="journey-contact-label">Photos from this visit</div><div class="journey-contact-sheet" aria-label="Photos in selected visit"></div><p class="graph-disclaimer">Camera lanes show observation order, not a physical route. Activity between sightings is not recorded here.</p>
+            <p class="graph-selected-transition" data-graph-transition aria-live="polite">First recorded sighting</p><div data-graph-review></div><div class="journey-contact-label">Photos from this visit</div><div class="journey-contact-sheet" aria-label="Photos in selected visit"></div><p class="graph-disclaimer">Camera lanes show observation order, not a physical route. Activity between sightings is not recorded here.</p>
           </aside></div>
         </div>`;
     }
@@ -142,6 +142,9 @@
         root.querySelector('[data-graph-camera]').textContent=card.querySelector('h5').textContent;
         root.querySelector('[data-graph-date]').textContent=card.querySelector('time').textContent;
         root.querySelector('[data-graph-transition]').textContent=photo.dataset.transition;
+        const reviewPanel=root.querySelector('[data-graph-review]');
+        const controls=card.querySelector('.sighting-review-controls');
+        reviewPanel.replaceChildren(...(controls ? [controls.cloneNode(true)] : []));
         root.querySelector('[data-graph-counter]').textContent=`${index+1} / ${photos.length}`;
         root.querySelector('[data-graph-scrub]').value=String(index);
         root.querySelector('[data-graph-step="-1"]').disabled=index===0;
@@ -174,23 +177,37 @@
     document.addEventListener('input',event=>{if(event.target.matches('[data-graph-scrub]')){stopPlayback();selectSighting(event.target.closest('.movement-evidence'),Number(event.target.value),true);}});
     document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPlayback();});
 
-    function render(appearances, label) {
+    const isJourneyAppearance = app => !app.association_status || ['selected', 'consistent', 'operator_confirmed'].includes(app.association_status);
+    function associationLabel(app) {
+        return {selected:'Reference sighting', consistent:'Automatic similarity', operator_confirmed:'Operator confirmed',
+            operator_rejected:'Different person — operator reviewed'}[app.association_status] || 'Review required';
+    }
+    function reviewControls(app, review) {
+        const badge = app.association_status ? `<span class="sighting-review-badge ${app.association_status === 'operator_confirmed' ? 'is-confirmed' : ''}">${escape(associationLabel(app))}</span>` : '';
+        const actor = app.manual_review ? `<small class="sighting-review-actor">${escape(app.manual_review.reviewer)} · ${escape(new Date(app.manual_review.reviewed_at).toLocaleString())}${app.manual_review.stale ? ' · Review changed evidence' : ''}</small>` : '';
+        const button = review?.can_review && app.id && app.id !== review.reference_appearance_id
+            ? `<button type="button" class="sighting-review-open" data-review-sighting="${escape(app.id)}">${app.manual_review ? 'Review / undo decision' : 'Review this sighting'}</button>` : '';
+        return `<div class="sighting-review-controls">${badge}${actor}${button}</div>`;
+    }
+    function render(appearances, label, reviewContext = null) {
         if (!Array.isArray(appearances) || !appearances.some(app => app.association_status)) {
             return renderSequence(appearances, label);
         }
-        const included = appearances.filter(app => ['selected', 'consistent'].includes(app.association_status));
-        const review = appearances.filter(app => !['selected', 'consistent'].includes(app.association_status));
-        const notice = `<div class="movement-association-notice" role="note"><strong>${included.length} sightings in this journey · ${review.length} need review</strong><p>Automated similarity to the selected reference does not confirm identity. Other stored associations are excluded from the journey and kept below. No history has been deleted.</p>${review.length ? `<p>Promotion moves only the selected sighting to Known. Merge and identity alerts still apply to the full group of ${appearances.length} sightings.</p>` : ''}</div>`;
-        const gallery = review.length ? `<details class="movement-association-review"><summary>Other recorded associations — review required (${review.length})</summary><p>These photos do not establish the selected person's movement. Review each sighting separately.</p><section class="movement-evidence" data-journey-ready="true" aria-label="Associations requiring review"><ol class="movement-list">${review.map((app, index) => {
+        const included = appearances.filter(isJourneyAppearance);
+        const review = appearances.filter(app => !isJourneyAppearance(app));
+        const pending = review.filter(app => app.association_status !== 'operator_rejected').length;
+        const confirmed = included.filter(app => app.association_status === 'operator_confirmed').length;
+        const notice = `<div class="movement-association-notice" role="note"><strong>${included.length} sightings in this journey · ${pending} need review</strong><p>${confirmed} operator confirmed. Automatic similarity and operator decisions are labeled separately. Decisions compare individual sightings with this reference; other associations remain below.</p>${review.length ? `<p>Promotion moves only the selected sighting to Known. Merge and identity alerts still apply to the full group of ${appearances.length} sightings.</p>` : ''}</div>`;
+        const gallery = review.length ? `<details class="movement-association-review"><summary>Other recorded associations — review required (${pending})${review.length > pending ? ` · ${review.length - pending} marked different` : ''}</summary><p>Compare the reference and each sighting before deciding. Images and history are retained.</p><section class="movement-evidence" data-journey-ready="true" aria-label="Associations requiring review"><ol class="movement-list">${review.map((app, index) => {
             const url = imageUrl(app.snapshot_url || app.best_snapshot_path);
             const camera = app.location_name || (app.pipeline_id ? label(app.pipeline_id) : 'Unknown camera');
             const stamp = Number.isFinite(Date.parse(app.start_time)) ? new Date(app.start_time).toLocaleString() : 'Time unavailable';
             const reason = app.association_reason || 'Association not verified';
-            return `<li class="movement-item"><article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-appearance-id="${escape(app.id || '')}" data-identity-id="${escape(app.identity_id || '')}" data-snapshot="${escape(url)}" data-caption="${escape(`${camera} · ${stamp}`)}" data-transition="Review required — excluded from journey">${url ? `<img src="${escape(url)}" alt="Sighting requiring review" loading="lazy">` : '<span class="movement-missing">No saved image</span>'}<span class="movement-photo-label">Inspect photo ↗</span></button><div class="movement-details"><h5>${escape(camera)}</h5><time>${escape(stamp)}</time><p>${escape(reason)}</p>${app.identity_id && app.id ? `<a href="/admin/unknown?view=${encodeURIComponent(app.identity_id)}&amp;appearance_id=${encodeURIComponent(app.id)}" ${typeof window.viewIdentityDetails === 'function' ? 'data-action="viewIdentityDetails"' : ''} data-arg="${escape(app.identity_id)}" data-appearance-id="${escape(app.id)}">Use this sighting as context</a>` : ''}</div></article></li>`;
+            return `<li class="movement-item"><article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-appearance-id="${escape(app.id || '')}" data-identity-id="${escape(app.identity_id || '')}" data-snapshot="${escape(url)}" data-caption="${escape(`${camera} · ${stamp}`)}" data-transition="${escape(associationLabel(app))} — excluded from journey">${url ? `<img src="${escape(url)}" alt="Sighting requiring review" loading="lazy">` : '<span class="movement-missing">No saved image</span>'}<span class="movement-photo-label">Inspect photo ↗</span></button><div class="movement-details"><h5>${escape(camera)}</h5><time>${escape(stamp)}</time><p>${escape(reason)}</p>${reviewControls(app, reviewContext)}${app.identity_id && app.id ? `<a href="/admin/unknown?view=${encodeURIComponent(app.identity_id)}&amp;appearance_id=${encodeURIComponent(app.id)}" ${typeof window.viewIdentityDetails === 'function' ? 'data-action="viewIdentityDetails"' : ''} data-arg="${escape(app.identity_id)}" data-appearance-id="${escape(app.id)}">Use this sighting as context</a>` : ''}</div></article></li>`;
         }).join('')}</ol></section></details>` : '';
-        return notice + (included.length ? renderSequence(included, label) : '<p class="timeline-empty">No reliable reference is available for a movement journey. Review the recorded associations below.</p>') + gallery;
+        return `<div class="movement-review-scope" data-review-identity="${escape(reviewContext?.identity_id || '')}" data-review-reference="${escape(reviewContext?.reference_appearance_id || '')}" data-review-search-embedding="${escape(reviewContext?.reference_embedding_id || '')}" data-review-search-unverified="${Boolean(reviewContext?.search_unverified)}">` + notice + (included.length ? renderSequence(included, label, reviewContext) : '<p class="timeline-empty">No reliable reference is available for a movement journey. Review the recorded associations below.</p>') + gallery + '</div>';
     }
-    function renderSequence(appearances, label) {
+    function renderSequence(appearances, label, reviewContext = null) {
         if (!Array.isArray(appearances) || !appearances.length) return '<p class="timeline-empty">No recorded appearances available.</p>';
         const rows = appearances.map((app, index) => ({app, index, time: Date.parse(app.start_time)}))
             .sort((a, b) => (Number.isFinite(a.time) ? a.time : Infinity) - (Number.isFinite(b.time) ? b.time : Infinity) || a.index - b.index);
@@ -210,10 +227,10 @@
                 const elapsed = previous ? gap(time - previous.time) : '';
                 return `<li class="movement-item">
                     <div class="movement-transition ${changed ? 'is-camera-change' : ''}"><span aria-hidden="true">${index ? '↓' : '●'}</span> ${index ? `${changed ? 'Camera change' : (previous.app.pipeline_id && app.pipeline_id ? 'Same camera' : 'Camera unknown')} · ${elapsed} since previous sighting` : 'First recorded sighting'}</div>
-                    <article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-appearance-id="${escape(app.id || '')}" data-identity-id="${escape(app.identity_id || '')}" data-snapshot="${escape(url)}" data-caption="${escape(title)}" data-transition="${escape(index ? `${changed ? 'Camera change' : 'Next sighting'} · ${elapsed} since previous sighting` : 'First recorded sighting')}" aria-label="${escape(`Inspect appearance ${index + 1}: ${title}`)}">
+                    <article class="movement-card"><button type="button" class="movement-photo" data-movement-index="${index}" data-appearance-id="${escape(app.id || '')}" data-identity-id="${escape(app.identity_id || '')}" data-snapshot="${escape(url)}" data-caption="${escape(title)}" data-transition="${escape((index ? `${changed ? 'Camera change' : 'Next sighting'} · ${elapsed} since previous sighting` : 'First recorded sighting') + (app.association_status ? ' · ' + associationLabel(app) : ''))}" aria-label="${escape(`Inspect appearance ${index + 1}: ${title}`)}">
                         ${url ? `<img src="${escape(url)}" alt="Recorded appearance ${index + 1}" loading="lazy" decoding="async">` : '<span class="movement-missing">No saved image</span>'}
                         <span class="movement-photo-label">${url ? 'Enlarge photo ↗' : 'View details'}</span></button>
-                    <div class="movement-details"><span class="movement-number">APPEARANCE ${String(index + 1).padStart(2, '0')}</span><h5>${escape(camera(app))}</h5>
+                    <div class="movement-details">${reviewControls(app, reviewContext)}<span class="movement-number">APPEARANCE ${String(index + 1).padStart(2, '0')}</span><h5>${escape(camera(app))}</h5>
                         <time ${date ? `datetime="${date.toISOString()}"` : ''}>${escape(stamp)}</time>
                         <dl>${app.track_id !== null && app.track_id !== undefined ? `<div><dt>Camera track</dt><dd>${escape(app.track_id)}</dd></div>` : ''}
                         ${app.end_time && Date.parse(app.end_time) >= time ? `<div><dt>Observed duration</dt><dd>${gap(Date.parse(app.end_time) - time)}</dd></div>` : ''}</dl>
@@ -288,5 +305,5 @@
         new MutationObserver(initialize).observe(document.documentElement, {childList:true, subtree:true});
         initialize();
     }
-    window.MovementTimeline = {render};
+    window.MovementTimeline = {render, isJourneyAppearance};
 })();

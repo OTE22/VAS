@@ -74,9 +74,9 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
                                       *, reference_embedding_id=None, threshold=None):
     """Read-only, direct comparison; never infer a person's movement by chaining.
 
-    All rows remain in the response and in storage. A uniquely linked current-
-    model vector is required before an appearance can join the displayed journey.
-    No vector, ambiguous multi-face detection, or mismatched photo => unverified.
+    All rows remain in the response and in storage. Automatic inclusion requires
+    a uniquely linked current-model vector. Explicit human decisions apply to
+    the exact reviewed pair and are labeled separately from automatic matches.
     The selected photo is context, not a newly approved recognition reference.
     """
     from collections import defaultdict
@@ -162,7 +162,9 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
                 'unverified': 'No unambiguous current-model vector link for this comparison',
             }[state],
         }
-    included = sum(r['association_status'] in ('selected', 'consistent') for r in result.values())
+    from backend.core.sighting_review import apply_decisions, JOURNEY_STATES
+    await apply_decisions(db, identity_id, appearances, reference_id, result)
+    included = sum(r['association_status'] in JOURNEY_STATES for r in result.values())
     return result, {
         'reference_appearance_id': reference_id,
         'reference_kind': 'search_observation' if reference_embedding_id is not None else 'selected_sighting' if selected_appearance_id is not None else 'initial_reference',
@@ -170,6 +172,7 @@ async def review_unknown_associations(db, identity_id, appearances, selected_app
         'reference_available': reference is not None,
         'threshold': threshold,
         'included_count': included,
-        'review_count': len(appearances) - included,
+        'review_count': sum(r['association_status'] in ('review_required', 'unverified') for r in result.values()),
+        'rejected_count': sum(r['association_status'] == 'operator_rejected' for r in result.values()),
         'total_count': len(appearances),
     }

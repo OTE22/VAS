@@ -40,13 +40,13 @@ class SnapshotTests(unittest.IsolatedAsyncioTestCase):
                         await trigger_snapshot(uuid4(), object(), {'id':7, 'role':'user'})
                     self.assertEqual(error.exception.status_code,404)
 
-    async def test_photo_cap_allows_only_eligible_auto_capture_alert(self):
+    async def test_camera_evidence_is_saved_even_without_an_eligible_alert(self):
         @asynccontextmanager
         async def session():
             yield object()
         for eligible, auto_capture, save_enabled, expected in (
-            (True,True,True,True), (False,True,True,False),
-            (True,False,True,False), (True,True,False,False),
+            (True,True,True,True), (False,True,True,True),
+            (True,False,True,True), (True,True,False,False),
         ):
             with self.subTest(eligible=eligible,auto_capture=auto_capture,save_enabled=save_enabled):
                 with tempfile.TemporaryDirectory() as folder, \
@@ -54,7 +54,6 @@ class SnapshotTests(unittest.IsolatedAsyncioTestCase):
                      patch.object(settings,'SAVE_IMAGES',save_enabled), \
                      patch.object(settings,'MAX_PHOTOS_PER_PERSON',1), \
                      patch.object(settings,'LIVE_ALERTS_ENABLED',True), \
-                     patch.object(storage,'stored_camera_photos',AsyncMock(return_value={'old.jpg'})), \
                      patch.object(live_alert_service,'get_active_alerts_for_identity',AsyncMock(return_value=[SimpleNamespace(auto_capture_snapshot=auto_capture)])), \
                      patch.object(live_alert_service,'_should_alert_trigger',AsyncMock(return_value=eligible)):
                     result = await storage.save_camera_crop(np.zeros((112,112,3),dtype=np.uint8),

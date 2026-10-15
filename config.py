@@ -615,6 +615,7 @@ class Settings(BaseSettings):
     STORAGE_DIR: str = Field(default="/app/storage")  # Docker path
     SAVE_IMAGES: bool = Field(default=True)
     MAX_STORAGE_GB: int = Field(default=500)
+    # Legacy compatibility only; camera evidence is governed by save flags and retention.
     MAX_PHOTOS_PER_PERSON: int = Field(default=1)
     SAVE_UNKNOWN_FACES: bool = Field(default=False)
     MAX_FILE_SIZE: int = Field(default=10485760)  # 10MB in bytes

@@ -497,12 +497,15 @@ class DataRetentionManager:
             al_cutoff = now - timedelta(days=al_days)
             deleted = 0
             for table in ("chatbot_audit_log", "identity_audit_log", "settings_audit_log"):
+                # Sighting decisions are persistent identity evidence stored in
+                # the existing journal, not expiring operational log entries.
+                evidence_guard = " AND action_type != 'sighting_review'" if table == "identity_audit_log" else ""
                 if dry_run:
                     deleted += (await db.execute(sa_text(
-                        f"SELECT count(*) FROM {table} WHERE created_at < :c"), {"c": al_cutoff})).scalar() or 0
+                        f"SELECT count(*) FROM {table} WHERE created_at < :c{evidence_guard}"), {"c": al_cutoff})).scalar() or 0
                 else:
                     r = await db.execute(sa_text(
-                        f"DELETE FROM {table} WHERE created_at < :c"), {"c": al_cutoff})
+                        f"DELETE FROM {table} WHERE created_at < :c{evidence_guard}"), {"c": al_cutoff})
                     deleted += r.rowcount or 0
             extra["audit_logs_deleted"] = deleted
         except Exception as e:

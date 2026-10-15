@@ -1,5 +1,5 @@
 """Bounded Quick Search inputs and exact, filtered per-person ranking."""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
 from io import BytesIO
 import warnings
 from PIL import Image
@@ -16,6 +16,10 @@ def search_dates(date_from, date_to):
         except (ValueError, TypeError):
             raise HTTPException(422, 'Dates must use ISO date/time format.')
     start, end = parse(date_from), parse(date_to)
+    # A date-only upper bound includes the entire UTC calendar day. Browser
+    # callers send explicit UTC instants for their local calendar boundaries.
+    if end is not None and len(date_to) == 10:
+        end = datetime.combine(end.date(), time.max)
     if start and end and start > end:
         raise HTTPException(422, 'Start date must not be later than end date.')
     return start, end

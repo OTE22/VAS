@@ -91,3 +91,36 @@
 .movement-association-review summary { cursor: pointer; font-weight: 600; color: #ffe1aa; }
 .movement-association-review .movement-list { padding-top: 1rem; }
 .movement-association-review [data-appearance-id] { display: inline-block; text-decoration: none; margin-top: .75rem; padding: .6rem .8rem; background: #193345; color: #e5f5ff; border: 1px solid #638da6; border-radius: 5px; cursor: pointer; }
+
+/* Human review stays visible and separate from automatic similarity. */
+.sighting-review-badge { display: inline-block; align-self: flex-start; font-size: .75rem; line-height: 1.45; color: #c3d4e4; background: #203345; border: 1px solid #49647b; border-radius: 5px; padding: .2rem .45rem; }
+.sighting-review-badge.is-confirmed { color: #a7f3d0; background: #123c32; border-color: #39806a; }
+.sighting-review-actor { display: block; color: #afc1d2; overflow-wrap: anywhere; }
+.sighting-review-open { margin: .5rem 0; border: 1px solid #648ba9; background: #173147; color: #ecf5fc; border-radius: 6px; padding: .5rem .7rem; cursor: pointer; font: inherit; }
+.sighting-review-modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 1rem; background: rgb(0 0 0 / .72); }
+.sighting-review-panel { width: min(900px, 100%); max-height: calc(100dvh - 2rem); overflow: auto; background: #101e2b; color: #e7eff7; border: 1px solid #526b80; border-radius: 12px; box-shadow: 0 20px 80px #0008; }
+.sighting-review-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.25rem; border-bottom: 1px solid #354d61; }
+.sighting-review-heading h2 { margin: 0; color: #edf5fc; font-size: 1.3rem; }
+.sighting-review-content { padding: 1.25rem; }
+.sighting-review-explainer { margin: 0 0 1rem; line-height: 1.6; }
+.sighting-review-explainer small { display: block; color: #adc5d7; margin-top: .5rem; }
+.sighting-review-photos { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.sighting-review-photos figure { margin: 0; min-width: 0; }
+.sighting-review-photos h3 { font-size: 1rem; margin: 0 0 .6rem; color: #d3e8f7; }
+.sighting-review-photo { height: clamp(170px, 32vh, 320px); display: flex; align-items: center; justify-content: center; border: 1px solid #3d596f; background: #080f16; border-radius: 8px; overflow: hidden; }
+.sighting-review-photo img { width: 100%; height: 100%; object-fit: contain; }
+.sighting-review-photo img[hidden] { display: none; }
+.sighting-review-photos figcaption { display: grid; gap: .3rem; line-height: 1.4; padding: .7rem 0; overflow-wrap: anywhere; }
+.sighting-review-photos time { font-size: .85rem; color: #b0c8da; }
+.sighting-review-note { display: grid; gap: .5rem; margin: .7rem 0; }
+.sighting-review-note textarea { width: 100%; box-sizing: border-box; color: #edf4fb; background: #0a1620; border: 1px solid #526f86; border-radius: 6px; padding: .6rem; font: inherit; }
+.sighting-review-status { min-height: 1.5rem; color: #f4cf86; line-height: 1.5; }
+.sighting-review-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.sighting-review-actions button, .sighting-review-close { border: 1px solid #617a90; border-radius: 6px; padding: .65rem .85rem; color: #edf5fc; background: #263c4f; cursor: pointer; font: inherit; }
+.sighting-review-actions .review-confirm { background: #17553f; border-color: #4b9c7e; }
+.sighting-review-actions .review-reject { background: #50312d; border-color: #aa756c; }
+.sighting-review-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.sighting-review-actions button[hidden] { display: none; }
+.sighting-review-footnote { margin: 1rem 0 0; color: #adc0cf; font-size: .85rem; line-height: 1.5; }
+.sighting-review-panel button:focus-visible, .sighting-review-open:focus-visible { outline: 3px solid #8ed6ff; outline-offset: 3px; }
+@media (max-width: 560px) { .sighting-review-photos { grid-template-columns: 1fr; } .sighting-review-content { padding: 1rem; } .sighting-review-actions button { flex: 1 1 45%; } }

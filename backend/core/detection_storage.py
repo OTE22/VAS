@@ -102,33 +102,6 @@ def existing_paths(values):
     return found
 
 
-async def stored_camera_photos(db, identity_id, pipeline_id, name):
-    """Count live files across both layouts, preserving the camera photo cap.
-
-    Legacy untracked files also counted in the old implementation. Include
-    that folder for compatibility, but never use the name for new placement.
-    """
-    values = []
-    if identity_id:
-        values = list((await db.execute(select(Face.face_image_path)
-            .join(Detection, Face.detection_id == Detection.id)
-            .where(Face.identity_id == identity_id, Detection.pipeline_id == pipeline_id,
-                   Face.face_image_path.isnot(None)))).scalars().all())
-        values.extend((await db.execute(select(IdentityAppearance.best_snapshot_path).where(
-            IdentityAppearance.identity_id == identity_id, IdentityAppearance.pipeline_id == pipeline_id,
-            IdentityAppearance.best_snapshot_path.isnot(None)))).scalars().all())
-    def collect():
-        safe_name = ''.join(c for c in name if c.isalnum() or c in ('-', '_')).lower()
-        try:
-            legacy = local_path(Path(str(pipeline_id)) / safe_name)
-            values.extend(str(p) for p in legacy.glob('*') if p.suffix.lower() in ('.jpg', '.jpeg', '.png'))
-        except (ValueError, OSError):
-            pass
-        gallery = Path(settings.FACES_DIR).resolve()
-        return {p for p in existing_paths(values) if not Path(p).is_relative_to(gallery)}
-    return await asyncio.to_thread(collect)
-
-
 async def camera_photo_fallbacks(db, pairs):
     """Batch-load saved camera portraits for capped events without their own file."""
     if not pairs:
@@ -159,31 +132,15 @@ async def camera_photo_fallbacks(db, pairs):
 async def save_camera_crop(image, *, pipeline_id, capture_id, face_id, captured_at,
                            identity_id, name, session_factory, already_saved=0, executor=None,
                            similarity=None):
-    """Apply existing save settings before writing a crop in the new layout."""
+    """Save event evidence independently of the legacy profile photo cap.
+
+    SAVE_IMAGES and SAVE_UNKNOWN_FACES remain explicit capture controls.
+    Scheduled snapshot retention bounds disk use; a gallery count must never
+    silently suppress a later sighting's own image. Keep the existing keyword
+    arguments for callers using this shared ingestion entry point.
+    """
     is_unknown = name.lower() == 'unknown'
     if not settings.SAVE_IMAGES or (is_unknown and not settings.SAVE_UNKNOWN_FACES):
         return None
-    if not is_unknown:
-        maximum = settings.MAX_PHOTOS_PER_PERSON
-        async with session_factory() as db:
-            count = (len(await stored_camera_photos(db, identity_id, pipeline_id, name))
-                     if maximum > already_saved else 0)
-            if count + already_saved >= maximum:
-                # A gallery photo limit must not discard a new alert's evidence.
-                # Reuse alert eligibility (camera, score, cooldown and schedule)
-                # so ordinary sightings still obey the existing photo cap.
-                capture_alert = False
-                if settings.LIVE_ALERTS_ENABLED and identity_id and similarity is not None:
-                    from backend.core.live_alert_service import live_alert_service
-                    alerts = await live_alert_service.get_active_alerts_for_identity(db, str(identity_id))
-                    now = datetime.utcnow()
-                    for alert in alerts:
-                        if alert.auto_capture_snapshot and await live_alert_service._should_alert_trigger(
-                            alert, similarity, pipeline_id, now.time(), now.weekday(), now
-                        ):
-                            capture_alert = True
-                            break
-                if not capture_alert:
-                    return None
     return await asyncio.get_running_loop().run_in_executor(
         executor, write_crop, image, pipeline_id, capture_id, face_id, captured_at)

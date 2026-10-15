@@ -156,7 +156,8 @@
 
     function searchContextQuery() {
         const id = new URLSearchParams(window.location.search).get('search_embedding_id');
-        return /^[1-9][0-9]*$/.test(id || '') ? `?search_embedding_id=${encodeURIComponent(id)}${new URLSearchParams(window.location.search).get('search_unverified') === 'true' ? '&search_unverified=true' : ''}` : '';
+        const appearance = new URLSearchParams(window.location.search).get('appearance_id');
+        return /^[1-9][0-9]*$/.test(id || '') ? `?search_embedding_id=${encodeURIComponent(id)}${new URLSearchParams(window.location.search).get('search_unverified') === 'true' ? '&search_unverified=true' : ''}` : /^[1-9][0-9]*$/.test(appearance || '') ? `?appearance_id=${encodeURIComponent(appearance)}` : '';
     }
 
     async function loadIdentity() {
@@ -293,7 +294,7 @@
     // --------------------------------------------
     // Shared chronological appearance viewer.
     function renderAdvancedTimeline(appearances) {
-        return window.MovementTimeline.render(appearances, pipelineLabel);
+        return window.MovementTimeline.render(appearances, pipelineLabel, state.identity?.association_review);
     }
 
     // ============================================
@@ -642,6 +643,18 @@
                 error.message);
         }
     }
+
+    document.addEventListener('sighting-review-saved', async event => {
+        const timeline = document.getElementById('identity-timeline');
+        if (!timeline?.contains(event.detail.sourceRoot)) return;
+        try {
+            const identity = await loadIdentity();
+            if (!timeline.contains(event.detail.sourceRoot)) return;
+            state.identity = identity;
+            renderFacts(identity);
+            timeline.innerHTML = renderAdvancedTimeline(identity.appearances || []);
+        } catch (_) { showNotification('Decision saved. Refresh this profile to see the updated journey.', 'error'); }
+    });
 
     // Registered inside the IIFE — none of these are window globals.
     Actions.register({

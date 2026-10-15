@@ -9,7 +9,6 @@ import cv2
 import numpy as np
 import pytest
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -43,18 +42,18 @@ def test_atomic_crop_layout_and_invalid_paths(tmp_path, monkeypatch):
     (False, True, 'Unknown', 1, 0, False),
     (True, False, 'Unknown', 1, 0, False),
     (True, True, 'Unknown', 0, 3, True),
-    (True, True, 'Known person', 0, 0, False),
-    (True, True, 'Known person', 1, 1, False),
+    (True, True, 'Known person', 0, 0, True),
+    (True, True, 'Known person', 1, 1, True),
     (True, True, 'Known person', 2, 1, True),
 ])
-def test_save_settings_preserved(tmp_path, monkeypatch, enabled, unknown_enabled, name, limit, existing, expected):
+def test_save_flags_preserved_but_legacy_cap_does_not_suppress_evidence(tmp_path, monkeypatch, enabled, unknown_enabled, name, limit, existing, expected):
     monkeypatch.setattr(settings, 'STORAGE_DIR', str(tmp_path))
     monkeypatch.setattr(settings, 'SAVE_IMAGES', enabled)
     monkeypatch.setattr(settings, 'SAVE_UNKNOWN_FACES', unknown_enabled)
     monkeypatch.setattr(settings, 'MAX_PHOTOS_PER_PERSON', limit)
-    monkeypatch.setattr(storage, 'stored_camera_photos', AsyncMock(return_value=set(range(existing))))
     @asynccontextmanager
     async def session():
+        raise AssertionError("Saving an event must not query a profile photo cap")
         yield None
     result = asyncio.run(storage.save_camera_crop(np.zeros((112, 112, 3), dtype=np.uint8),
         pipeline_id='camera', capture_id=uuid4(), face_id=uuid4(), captured_at=datetime.utcnow(),
@@ -107,9 +106,7 @@ async def _exercise(tmp_path, monkeypatch, layout):
                     assert face.face_image_path == str(path)
                     appearance = (await db.execute(select(m.IdentityAppearance).where(m.IdentityAppearance.identity_id == person.id))).scalar_one()
                     assert appearance.best_snapshot_path == str(path)
-                    assert await storage.stored_camera_photos(db, person.id, pipeline.pipeline_id, 'Storage QA') == {str(path)}
                     # Renames have no effect on DB-backed file discovery.
-                    assert await storage.stored_camera_photos(db, person.id, pipeline.pipeline_id, 'Renamed') == {str(path)}
                     pairs = {(person.id, pipeline.pipeline_id)}
                     assert (await storage.camera_photo_fallbacks(db, pairs))[next(iter(pairs))] == str(path)
                     from backend.routes.identities import _find_best_image_from_storage_for_identity
@@ -129,7 +126,6 @@ async def _exercise(tmp_path, monkeypatch, layout):
                     db.add(alert); await db.flush()
                     await db.execute(delete(m.Face).where(m.Face.id == face.id))
                     assert (await storage.camera_photo_fallbacks(db, pairs))[next(iter(pairs))] == str(path)
-                    assert await storage.stored_camera_photos(db, person.id, pipeline.pipeline_id, 'Renamed') == {str(path)}
                     assert await retire_snapshot(db, appearance) == 0
                     assert path.exists()
                     assert await retire_snapshot(db, person) == 0

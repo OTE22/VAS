@@ -323,7 +323,9 @@
 
     /** Throw an Error carrying the server's real reason. */
     async function throwHttpError(response, fallback) {
-        throw new Error(await describeHttpError(response, fallback));
+        const error = new Error(await describeHttpError(response, fallback));
+        error.status = response.status;
+        throw error;
     }
 
     // ============================================
@@ -680,6 +682,7 @@
                 : await performSingleSearch(controller.signal);
 
             if (controller.signal.aborted) return;
+            cancelAppearanceView();
             releaseResultReferences();
             state.resultReferences = files.map(file => SearchImage.createReference(file));
             state.currentResults = results;
@@ -701,6 +704,14 @@
         }
     }
 
+    function localSearchDate(value, end = false) {
+        // Construct each local boundary separately so DST offsets are correct.
+        const boundary = new Date(`${value}T${end ? '23:59:59' : '00:00:00'}`);
+        if (!Number.isFinite(boundary.getTime())) throw new Error('Choose a valid date.');
+        const iso = boundary.toISOString();
+        return end ? iso.replace('.000Z', '.999999Z') : iso;
+    }
+
     async function performSingleSearch(signal) {
         const formData = new FormData();
         formData.append('image', state.selectedFile);
@@ -709,10 +720,10 @@
         formData.append('check_watchlist', elements.checkWatchlist.checked);
         
         if (elements.dateFrom.value) {
-            formData.append('date_from', elements.dateFrom.value);
+            formData.append('date_from', localSearchDate(elements.dateFrom.value));
         }
         if (elements.dateTo.value) {
-            formData.append('date_to', elements.dateTo.value);
+            formData.append('date_to', localSearchDate(elements.dateTo.value, true));
         }
         if (elements.pipelineFilter.value) {
             formData.append('pipeline_id', elements.pipelineFilter.value);
@@ -926,12 +937,12 @@
         const details = buildEl('div', 'search-applied-context');
         if (context) {
             details.append(buildEl('strong', null, context.file));
-            details.append(buildEl('p', null, `${context.scope} · Up to ${context.depth} matches per face · ${context.camera}`));
+            details.append(buildEl('p', null, `${context.scope} · Up to ${context.depth} identity groups per face · ${context.camera}`));
             details.append(buildEl('p', null, `${context.dates} · Watchlists ${context.watchlists ? 'checked' : 'not checked'}${context.excluded ? ' · Exclusions applied' : ''}`));
         }
         const skipped = batch ? groups.filter(group => group.status === 'error').length : groups.filter(group => group.skipped).length;
         const note = skipped ? `${skipped} ${batch ? 'image(s) failed' : 'face(s) skipped'}. Review the messages below.`
-            : matches.length ? 'Select a match to review identity details and recent sightings.'
+            : matches.length ? (results.appearance_context ? 'Open matching appearances to review recorded sightings across cameras, including matches under different identity groups.' : 'Select a match to review identity details and recent sightings.')
             : 'No matches returned. Check the image quality and applied filters before trying again.';
         host.replaceChildren(metrics, details, buildEl('p', 'search-result-note', note),
             buildEl('p', 'search-score-note', 'Similarity measures how closely face features match; it is not a probability or a confirmed identification. The same identity can appear for multiple faces.'));
@@ -1084,7 +1095,10 @@
                             </div>
                         </div>
                         <div class="matches-list">
-                            ${renderMatches(face.matches || [], 0)}
+                            <div class="appearance-search-action">
+                                ${results.appearance_context ? `<button type="button" class="btn-primary" data-action="viewSearchAppearances" data-face-index="${face.face_index ?? faceIndex}">View matching appearances across cameras</button><p>All matching recorded sightings in your filters, with pages. The identity-group limit below does not limit this view.</p>` : results.appearance_context_error ? `<p role="status">${escapeHtml(results.appearance_context_error)}</p>` : ''}
+                            </div>
+                            ${renderMatches(face.matches || [], 0, face.face_index ?? faceIndex)}
                         </div>
                     </div>
                 `;
@@ -1100,7 +1114,7 @@
         });
     }
 
-    function renderMatches(matches, referenceIndex) {
+    function renderMatches(matches, referenceIndex, faceIndex = null) {
         if (!matches || matches.length === 0) {
             return '<div style="color: rgba(255,255,255,0.5); font-size: 0.85rem; padding: 0.5rem;">No matches found</div>';
         }
@@ -1138,14 +1152,14 @@
                      aria-label="${escapeHtml(cardLabel)}"
                      data-action="viewIdentity" data-action-keydown="viewIdentityKey"
                      data-arg="${escapeHtml(match.identity_id)}"
-                     data-embedding-id="${escapeHtml(match.matched_embedding_id || '')}" data-identity-type="${escapeHtml(match.type)}" data-reference-index="${referenceIndex}">
+                     data-embedding-id="${escapeHtml(match.matched_embedding_id || '')}" data-identity-type="${escapeHtml(match.type)}" data-reference-index="${referenceIndex}" data-face-index="${faceIndex ?? ''}">
                     <img class="match-snapshot" data-stored-src="${escapeHtml(snapshotUrl)}" alt="${escapeHtml(match.display_name || 'Match')}"
                          style="display: block; width: 50px; height: 50px; object-fit: cover; border-radius: 6px;">
                     <div class="match-details">
                         <div class="match-name">${escapeHtml(match.display_name || (match.type === 'unverified' ? 'Unverified historical match' : 'Unknown'))}</div>
                         <div class="match-meta">
                             <span><i class="fas fa-${match.type === 'known' ? 'user-check' : 'user-secret'}"></i> ${escapeHtml(match.type)}</span>
-                            <span><i class="fas fa-eye" aria-hidden="true"></i> ${escapeHtml(match.appearances_count || 0)} detections</span>
+                            <span><i class="fas fa-eye" aria-hidden="true"></i> ${escapeHtml(match.appearances_count || 0)} group records</span>
                         </div>
                         <div class="match-meta search-image-caption" hidden></div>
                         <div class="match-last-seen">${match.match_source === 'sighting' ? 'Matched sighting ' + escapeHtml(formatDateTime(match.matched_at)) : match.match_source === 'enrollment' ? 'Matched enrollment photo' : 'Matched photo unavailable'}</div>
@@ -1157,7 +1171,7 @@
                             </div>
                         ` : ''}
                     </div>
-                    <div class="match-score-block"><div class="match-similarity ${similarityClass}">${escapeHtml(scoreText)}</div><span>Similarity</span><small>${escapeHtml(match.confidence_band ? String(match.confidence_band).replace(/_/g, ' ') + ' band' : 'Band unavailable')}</small><span class="match-view-hint">View details →</span></div>
+                    <div class="match-score-block"><div class="match-similarity ${similarityClass}">${escapeHtml(scoreText)}</div><span>Similarity</span><small>${escapeHtml(match.confidence_band ? String(match.confidence_band).replace(/_/g, ' ') + ' band' : 'Band unavailable')}</small><span class="match-view-hint">${faceIndex !== null && state.currentResults?.appearance_context ? 'View query appearances →' : 'View details →'}</span></div>
                 </div>
             `;
         }).join('');
@@ -1603,6 +1617,9 @@
                 pipelineLabel(sighting.pipeline_id)));
             item.appendChild(buildEl('span', 'sighting-time',
                 formatDateTime(sighting.start_time)));
+            if (sighting.association_status === 'operator_confirmed') {
+                item.appendChild(buildEl('span', 'sighting-review-badge is-confirmed', 'Operator confirmed'));
+            }
             list.appendChild(item);
         });
         section.appendChild(list);
@@ -1656,7 +1673,7 @@
 
         const allSightings = Array.isArray(identity.appearances) ? identity.appearances : [];
         const sightings = identity.association_review ? allSightings.filter(app =>
-            ['selected', 'consistent'].includes(app.association_status)) : allSightings;
+            ['selected', 'consistent', 'operator_confirmed'].includes(app.association_status)) : allSightings;
         if (identity.association_review) identity = {...identity,
             pipeline_ids: [...new Set(sightings.map(app => app.pipeline_id))]};
         const children = [
@@ -1668,7 +1685,7 @@
         }
         if (identity.association_review) {
             children.push(buildEl('p', 'identity-score-explainer',
-                `${allSightings.length - sightings.length} historical association(s) excluded from this match because they could not be verified. Similarity is not proof of identity.`));
+                `${allSightings.length - sightings.length} historical association(s) outside this journey: pending review or marked different by an operator. Operator confirmations are labeled separately from automatic similarity. Similarity is not proof of identity.`));
         }
         if (matchContext?.type === 'unverified') {
             children.push(buildEl('p', 'identity-score-explainer', 'The historical group name and watchlist membership are not verified for this observation.'));
@@ -1699,6 +1716,111 @@
         }
     }
 
+    let appearanceView = null;
+
+    function cancelAppearanceView() {
+        appearanceView = null;
+        if (inflight.identity) inflight.identity.abort();
+    }
+
+    async function viewSearchAppearances(faceIndex) {
+        const token = state.currentResults?.appearance_context;
+        if (!token || !Number.isInteger(faceIndex) || faceIndex < 0) return;
+        cancelAppearanceView();
+        const view = {token, faceIndex, cursors: [null], page: 0, payload: null,
+            context: state.resultContext, busy: false};
+        appearanceView = view;
+        ['identity-full-profile', 'identity-analyze'].forEach(id => {
+            const link = document.getElementById(id); if (link) link.hidden = true;
+        });
+        document.getElementById('identity-modal-title').textContent = `Matching appearances · Face ${faceIndex + 1}`;
+        document.getElementById('identity-modal-body').replaceChildren(
+            buildEl('p', 'identity-loading', 'Comparing recorded sightings with your uploaded face…'));
+        openIdentityModal();
+        await loadAppearancePage(view, 0, null);
+    }
+
+    async function loadAppearancePage(view, page, cursor) {
+        if (appearanceView !== view || view.busy) return;
+        view.busy = true;
+        const controller = beginRequest('identity');
+        document.querySelectorAll('.appearance-pagination button').forEach(button => { button.disabled = true; });
+        try {
+            const params = new URLSearchParams({face_index: view.faceIndex, limit: 50});
+            if (cursor !== null) params.set('after_id', cursor);
+            const response = await fetch(`/api/search/appearances/${encodeURIComponent(view.token)}?${params}`, {
+                credentials: 'include', signal: controller.signal
+            });
+            if (!response.ok) await throwHttpError(response, 'Could not load matching appearances');
+            const payload = await response.json();
+            if (appearanceView !== view || controller.signal.aborted) return;
+            view.page = page;
+            view.cursors[page] = cursor;
+            view.payload = payload;
+            view.busy = false;
+            renderAppearancePage(view);
+        } catch (error) {
+            if (isAbort(error) || appearanceView !== view) return;
+            view.busy = false;
+            if (view.payload) renderAppearancePage(view);
+            else document.getElementById('identity-modal-body').replaceChildren();
+            const notice = buildEl('div', 'appearance-load-error');
+            notice.setAttribute('role', 'alert');
+            notice.append(buildEl('p', null, error.message));
+            if (![409, 410].includes(error.status)) {
+                const retry = buildEl('button', 'btn-secondary', 'Retry this page');
+                retry.type = 'button';
+                retry.addEventListener('click', () => { notice.remove(); loadAppearancePage(view, page, cursor); });
+                notice.append(retry);
+            }
+            document.getElementById('identity-modal-body').prepend(notice);
+        } finally {
+            if (appearanceView === view) view.busy = false;
+            endRequest('identity', controller);
+        }
+    }
+
+    function renderAppearancePage(view) {
+        const payload = view.payload, rows = payload.appearances || [];
+        const body = document.getElementById('identity-modal-body');
+        const first = view.page * 50 + 1, last = first + rows.length - 1;
+        const summary = buildEl('section', 'appearance-page-summary');
+        summary.setAttribute('aria-live', 'polite');
+        summary.append(buildEl('h4', null, payload.total
+            ? `Showing ${first}–${last} of ${payload.total} matching recorded appearances`
+            : 'No recorded appearances meet this search'));
+        summary.append(buildEl('p', null,
+            `${payload.cameras} cameras in results · ${Math.round(payload.threshold * 100)}% minimum similarity · Compared with the original uploaded face`));
+        if (view.context) summary.append(buildEl('p', null,
+            `${view.context.scope} · ${view.context.camera} · ${view.context.dates}`));
+        summary.append(buildEl('p', 'search-score-note', payload.coverage));
+        summary.append(buildEl('p', 'search-score-note',
+            'The journey below covers this page. Use Next page for later matches. Rerun search to include newly recorded sightings. Missing photos remain unavailable; uploaded photos are not camera evidence.'));
+        const sequence = buildEl('section', 'appearance-page-journey');
+        if (window.MovementTimeline) sequence.innerHTML = window.MovementTimeline.render(rows, pipelineLabel);
+        else sequence.append(buildSightings(rows));
+        const scores = buildEl('details', 'appearance-match-scores');
+        scores.append(buildEl('summary', null, 'Review match scores and labels'));
+        const list = buildEl('ul', 'identity-sightings');
+        rows.forEach(row => {
+            const item = buildEl('li', 'identity-sighting');
+            item.append(buildEl('span', null, `${row.location_name || pipelineLabel(row.pipeline_id)} · ${formatDateTime(row.start_time)}`));
+            item.append(buildEl('span', null, `${Math.round(row.similarity * 100)}% similarity · ${row.display_name || (row.type === 'unverified' ? 'Unverified historical label' : 'Unknown')}`));
+            list.append(item);
+        });
+        scores.append(list);
+        const navigation = buildEl('nav', 'appearance-pagination');
+        navigation.setAttribute('aria-label', 'Matching appearance pages');
+        const previous = buildEl('button', 'btn-secondary', 'Previous page');
+        previous.type = 'button'; previous.disabled = view.page === 0;
+        previous.addEventListener('click', () => loadAppearancePage(view, view.page - 1, view.cursors[view.page - 1]));
+        const next = buildEl('button', 'btn-primary', 'Next page');
+        next.type = 'button'; next.disabled = !payload.has_more;
+        next.addEventListener('click', () => loadAppearancePage(view, view.page + 1, payload.next_after_id));
+        navigation.append(previous, buildEl('span', null, `Page ${view.page + 1}`), next);
+        body.replaceChildren(summary, navigation, sequence, scores);
+    }
+
     function openIdentityModal() {
         const modal = document.getElementById('identity-modal');
         if (!modal) return;
@@ -1717,6 +1839,7 @@
     }
 
     function closeIdentityModal() {
+        cancelAppearanceView();
         const modal = document.getElementById('identity-modal');
         if (!modal) return;
         if (window.ModalStack.isOpen(modal)) { window.ModalStack.close(modal); return; }
@@ -1726,8 +1849,14 @@
     // Scoped, not window.viewIdentity: dispatch goes through the Actions
     // registry alone, so there is no reason to offer this as a global — and a
     // global is one more thing an injected script could replace.
-    async function viewIdentity(identityId, referenceIndex, embeddingId) {
+    async function viewIdentity(identityId, referenceIndex, embeddingId, faceIndex) {
         const matchContext = findMatchContext(identityId, referenceIndex, embeddingId);
+        if (state.currentResults?.appearance_context && matchContext) {
+            const face = state.currentResults.faces?.find((item, index) => Number.isInteger(faceIndex)
+                ? (item.face_index ?? index) === faceIndex : item.matches?.includes(matchContext));
+            if (face) return viewSearchAppearances(face.face_index ?? state.currentResults.faces.indexOf(face));
+        }
+        cancelAppearanceView();
         const reference = matchContext ? state.resultReferences[referenceIndex] : null;
         if (!identityId) return;
         ['identity-full-profile', 'identity-analyze'].forEach(id => { const link = document.getElementById(id); if (link) link.hidden = true; });
@@ -1808,14 +1937,15 @@
     // not a window global. actions.js is script #1 on this page, so the
     // registry exists by the time this runs.
     Actions.register({
-        viewIdentity: (el) => viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId),
+        viewSearchAppearances: el => viewSearchAppearances(Number(el.dataset.faceIndex)),
+        viewIdentity: (el) => viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId, el.dataset.faceIndex ? Number(el.dataset.faceIndex) : undefined),
         // Keyboard activation for the result cards (role="button" divs).
         // Delegated through the data-action-keydown binding actions.js already
         // has; Space is preventDefault'ed so the page does not scroll.
         viewIdentityKey: (el, event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
             event.preventDefault();
-            viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId);
+            viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId, el.dataset.faceIndex ? Number(el.dataset.faceIndex) : undefined);
         },
     });
 
@@ -1888,6 +2018,7 @@
     function clearResults() {
         releaseResultReferences();
         // Backend logic: centralized clearing of all results
+        cancelAppearanceView();
         state.currentResults = null;
         state.resultContext = null;
         ['search-overview', 'search-feedback'].forEach(id => { const node = document.getElementById(id); if (node) { node.hidden = true; node.replaceChildren(); } });

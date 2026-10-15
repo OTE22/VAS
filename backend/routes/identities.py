@@ -1127,6 +1127,47 @@ async def list_unknown_identities(
 # Identity Details
 # =====================================================
 
+class SightingReviewRequest(BaseModel):
+    preview_token: str = Field(min_length=40, max_length=6000)
+    decision: Literal['confirmed', 'rejected', 'clear']
+    note: str = Field(default='', max_length=500)
+
+
+def _require_sighting_review_csrf(request: Request):
+    authorization = request.headers.get('authorization', '').split(None, 1)
+    bearer = len(authorization) == 2 and authorization[0].lower() == 'bearer' and bool(authorization[1].strip())
+    if not bearer and request.headers.get('x-requested-with', '').lower() != 'xmlhttprequest':
+        raise HTTPException(403, 'CSRF check failed: X-Requested-With header required')
+
+
+@router.get('/admin/identity/{identity_id}/sightings/{appearance_id}/review')
+async def preview_sighting_review(
+    identity_id: uuid.UUID, appearance_id: int,
+    reference_appearance_id: int = Query(ge=1),
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    from backend.core.sighting_review import preview_review
+    payload = await preview_review(db, identity_id, reference_appearance_id, appearance_id, current_user)
+    return JSONResponse(payload, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.post('/admin/identity/{identity_id}/sightings/{appearance_id}/review')
+async def record_sighting_review(
+    identity_id: uuid.UUID, appearance_id: int, body: SightingReviewRequest,
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(_require_sighting_review_csrf),
+):
+    from backend.core.sighting_review import save_review
+    try:
+        result = await save_review(db, identity_id, appearance_id, current_user,
+            preview_token=body.preview_token, decision=body.decision, note=body.note)
+        await db.commit()
+        return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+    except Exception:
+        await db.rollback()
+        raise
+
+
 @router.get("/admin/identity/{identity_id}", response_model=IdentityDetail, summary="Get Identity Details", description="Get detailed information about a specific identity including timeline (Admin or users with pipeline access)")
 async def get_identity_details(
     identity_id: str,
@@ -1197,12 +1238,14 @@ async def get_identity_details(
             # by opening details, which no longer has the uploaded vector.
             if search_unverified:
                 search_match.verification = 'unverified'
-        if identity.type == IdentityType.UNKNOWN or search_match is not None:
+        if identity.type == IdentityType.UNKNOWN or search_match is not None or appearance_id is not None:
             from backend.core.appearance_events import review_unknown_associations
             associations, association_review = await review_unknown_associations(
                 db, identity_uuid, appearances, appearance_id,
                 reference_embedding_id=search_embedding_id,
                 threshold=float(settings.SIMILARITY_THRESHOLD) if search_match else None)
+            association_review.update(identity_id=str(identity_uuid), search_unverified=search_unverified,
+                can_review=current_user.role == 'admin' and association_review['reference_appearance_id'] is not None)
 
         # Get embeddings count
         embeddings_result = await db.execute(

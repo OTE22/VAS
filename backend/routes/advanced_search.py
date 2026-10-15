@@ -7,7 +7,6 @@ watchlist checking, and search history.
 
 import logging
 import io
-from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
@@ -185,6 +184,8 @@ class MultiSearchResponse(BaseModel):
     watchlist_alerts: List[WatchlistAlertResponse]
     processing_time_ms: int
     summary: SearchSummary
+    appearance_context: Optional[str] = None
+    appearance_context_error: Optional[str] = None
 
 
 class ConfidenceBandConfig(BaseModel):
@@ -308,21 +309,12 @@ async def advanced_search(
         if exclude_watchlist_ids:
             exclude_wl_ids = [i.strip() for i in exclude_watchlist_ids.split(',') if i.strip()]
         
-        # Parse date filters
-        filters = {}
-        if date_from:
-            try:
-                filters['date_from'] = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid date_from format")
-        if date_to:
-            try:
-                filters['date_to'] = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid date_to format")
-        if pipeline_id:
-            filters['pipeline_id'] = pipeline_id
-        
+        # Share inclusive date-only and timezone-normalization semantics with
+        # Quick Search. The browser supplies UTC boundaries for local dates.
+        from backend.core.quick_image_search import search_dates
+        start, end = search_dates(date_from, date_to)
+        filters = {'date_from': start, 'date_to': end, 'pipeline_id': pipeline_id}
+
         # Get client info
         ip_address = request.client.host if request.client else None
         user_agent = request.headers.get('user-agent')
@@ -346,13 +338,35 @@ async def advanced_search(
         )
         
         # Convert to response format
-        return service.to_dict(result)
+        payload = service.to_dict(result)
+        from backend.core.search_appearances import create_context
+        payload['appearance_context'] = await create_context(
+            db, result.faces, user_id=current_user['id'], scope=scope,
+            filters=filters, exclude_identity_ids=exclude_ids)
+        if not payload['appearance_context'] and any(not f.skipped for f in result.faces):
+            payload['appearance_context_error'] = 'Appearance browsing is unavailable. Please rerun the search when the cache service is available.'
+        return payload
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[ADVANCED_SEARCH] Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get('/api/search/appearances/{context_id}')
+async def get_search_appearances(
+    context_id: UUID,
+    face_index: int = Query(ge=0),
+    after_id: Optional[int] = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin()),
+):
+    from backend.core.search_appearances import load_context, search_appearances
+    context = await load_context(context_id, current_user['id'], face_index)
+    payload = await search_appearances(db, context, face_index, after_id=after_id, limit=limit)
+    return JSONResponse(payload, headers={'Cache-Control': 'private, no-store'})
 
 
 @router.get(

@@ -1511,8 +1511,8 @@ function resetPagination() {
 }
 
 // Render advanced timeline visualization
-function renderAdvancedTimeline(appearances) {
-    return window.MovementTimeline.render(appearances, getPipelineDisplayName);
+function renderAdvancedTimeline(appearances, review = null) {
+    return window.MovementTimeline.render(appearances, getPipelineDisplayName, review);
 }
 
 // Only the most recent click may publish content, even after a modal close.
@@ -1591,13 +1591,13 @@ async function viewIdentityDetails(identityId, appearanceId = null, searchEmbedd
                 <div class="timeline-header">
                     <h4><i class="fas fa-route"></i> Movement Timeline</h4>
                     <div class="timeline-stats">
-                        <span><i class="fas fa-video"></i> ${review ? new Set(identity.appearances.filter(app => ['selected', 'consistent'].includes(app.association_status)).map(app => app.pipeline_id).filter(Boolean)).size : identity.pipeline_ids?.length || 0} Cameras</span>
+                        <span><i class="fas fa-video"></i> ${review ? new Set(identity.appearances.filter(app => ['selected', 'consistent', 'operator_confirmed'].includes(app.association_status)).map(app => app.pipeline_id).filter(Boolean)).size : identity.pipeline_ids?.length || 0} Cameras</span>
                         <span><i class="fas fa-clock"></i> ${review ? review.included_count : identity.appearances_count} in journey${review ? ` · ${review.review_count} to review` : ''}</span>
                         <span><i class="fas fa-calendar"></i> ${identity.first_seen_at ? new Date(identity.first_seen_at).toLocaleDateString() : 'N/A'} - ${identity.last_seen_at ? new Date(identity.last_seen_at).toLocaleDateString() : 'N/A'}</span>
                     </div>
                 </div>
                 <div class="advanced-timeline-container">
-                    ${renderAdvancedTimeline(identity.appearances || [])}
+                    ${renderAdvancedTimeline(identity.appearances || [], review)}
                 </div>
             </div>
             <div class="detail-actions">
@@ -1658,6 +1658,14 @@ async function viewIdentityDetails(identityId, appearanceId = null, searchEmbedd
         return null;
     }
 }
+
+document.addEventListener('sighting-review-saved', event => {
+    const content = document.getElementById('identity-detail-content');
+    if (!content?.contains(event.detail.sourceRoot)) return;
+    const data = event.detail;
+    viewIdentityDetails(data.identity_id, data.reference_appearance_id,
+                        data.search_embedding_id, data.search_unverified);
+});
 
 // Runs whenever the detail modal leaves the stack — X button, Escape, or a
 // cascade — so a deep-linked ?view= URL is always cleaned up and a referrer

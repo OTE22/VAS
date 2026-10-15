@@ -1980,3 +1980,12 @@ input:-webkit-autofill:focus {
 .search-workspace #identity-modal .modal-footer :is(.btn-primary, .btn-secondary) { text-transform: none; letter-spacing: 0; font-size: .83rem; box-shadow: none; border-radius: 8px; padding: 10px 14px; }
 .search-workspace #identity-modal .modal-footer .btn-secondary { border: 1px solid #47617d; background: #20344b; color: #d5e7fa; }
 .search-workspace #identity-modal .modal-footer .btn-primary { border: 1px solid #5999eb; background: #347ddd; color: #fff; }
+/* Complete appearance browsing stays bounded to one readable page. */
+.appearance-search-action { margin: .75rem 0; }
+.appearance-search-action p, .appearance-page-summary p { color: #b6c7d8; line-height: 1.5; }
+.appearance-pagination { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
+.appearance-pagination button:disabled { opacity: .5; cursor: not-allowed; }
+.appearance-page-summary h4 { font-size: 1.1rem; line-height: 1.5; }
+.appearance-load-error { padding: 1rem; border: 1px solid #e6ac48; border-radius: .5rem; }
+.appearance-match-scores { margin-top: 1rem; }
+.appearance-match-scores summary { cursor: pointer; }

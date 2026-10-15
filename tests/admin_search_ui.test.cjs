@@ -10,16 +10,71 @@ function harness(){
  w.eval(fs.readFileSync('frontend/js/search-image.js','utf8'));
  let source=fs.readFileSync('frontend/js/admin-search.js','utf8');
  const start=source.indexOf('    // Start when DOM is ready'),end=source.indexOf('    // Add CSS animation styles',start);
- source=source.slice(0,start)+'window.probe={state,elements,displayResults,clearResults,performSearch,viewIdentity,renderIdentityPanel,pipelineLabel,captureSearchContext};\n'+source.slice(end);
+ source=source.slice(0,start)+'window.probe={state,elements,displayResults,clearResults,performSearch,viewIdentity,renderIdentityPanel,pipelineLabel,captureSearchContext,viewSearchAppearances,localSearchDate,closeIdentityModal};\n'+source.slice(end);
  w.eval(source);return {w,t:w.probe,urls,revoked,close:()=>w.close()};
 }
 const match={identity_id:id,display_name:'Joey',type:'known',similarity:.89,confidence_band:'high',appearances_count:14,last_seen_at:'2026-09-17T07:56:29Z'};
+test('Date To covers the full local day, including microseconds and DST offsets',()=>{
+ const h=harness();
+ for(const day of ['2026-10-15','2026-03-29','2026-10-25']){
+  assert.equal(h.t.localSearchDate(day),new Date(`${day}T00:00:00`).toISOString());
+  assert.equal(h.t.localSearchDate(day,true),new Date(`${day}T23:59:59`).toISOString().replace('.000Z','.999999Z'));
+ }
+ h.close();
+});
+
+test('matching appearances use original context, paginate and retain the submitted filters',async()=>{
+ const h=harness(),token='e1bfe233-3918-407c-8822-2344387babc9';
+ h.t.state.currentResults={...results(),appearance_context:token};
+ h.t.state.currentResults.faces[0].face_index=0;
+ h.t.state.resultContext={scope:'All Identities',camera:'All Cameras',dates:'2026-10-01 → 2026-10-15'};
+ const urls=[];
+ h.w.MovementTimeline={render:rows=>`<div data-tested-journey>${rows.map(r=>r.id).join(',')}</div>`};
+ h.w.fetch=async url=>{
+  urls.push(url);const later=String(url).includes('after_id=50');
+  return {ok:true,json:async()=>({total:51,cameras:3,threshold:.8,coverage:'Direct comparison',has_more:!later,next_after_id:later?null:50,
+   appearances:[{id:later?51:50,pipeline_id:'north',location_name:'North gate',start_time:'2026-10-15T18:00:00Z',similarity:.9}]})};
+ };
+ await h.t.viewIdentity(id,0);
+ assert.match(urls[0],new RegExp(`/api/search/appearances/${token}\\?face_index=0&limit=50`));
+ assert.doesNotMatch(urls[0],/search_embedding_id/);
+ assert.match(h.w.document.querySelector('#identity-modal-body').textContent,/of 51 matching recorded appearances/);
+ h.t.elements.pipelineFilter.value='different';
+ h.w.document.querySelector('.appearance-pagination button:last-child').click();
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.match(urls.at(-1),/after_id=50/);
+ assert.equal(h.w.document.querySelector('[data-tested-journey]').textContent,'51');
+ assert.match(h.w.document.querySelector('#identity-modal-body').textContent,/All Cameras/);
+ assert.equal(h.w.document.querySelector('.appearance-pagination button:last-child').disabled,true);
+ h.w.document.querySelector('.appearance-pagination button').click();
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.doesNotMatch(urls.at(-1),/after_id/);
+ h.close();
+});
+
+test('stale appearance requests cannot overwrite a newer face selection',async()=>{
+ const h=harness();h.t.state.currentResults={appearance_context:id,faces:[{face_index:0},{face_index:1}]};
+ const pending=[];h.w.fetch=url=>new Promise(resolve=>pending.push({url,resolve}));
+ const first=h.t.viewSearchAppearances(0),second=h.t.viewSearchAppearances(1);
+ const response=total=>({ok:true,json:async()=>({appearances:[],total,cameras:0,threshold:.8,coverage:'Direct',has_more:false})});
+ pending[1].resolve(response(0));await second;pending[0].resolve(response(999));await first;
+ assert.match(h.w.document.querySelector('#identity-modal-title').textContent,/Face 2/);
+ assert.doesNotMatch(h.w.document.querySelector('#identity-modal-body').textContent,/999/);h.close();
+});
+
+test('expired appearance context is explained and does not fall back to group history',async()=>{
+ const h=harness();h.t.state.currentResults={appearance_context:id,faces:[{face_index:0}]};
+ let requests=0;h.w.fetch=async()=>{requests++;return {ok:false,status:410,json:async()=>({detail:'This search has expired. Run the image search again.'})};};
+ await h.t.viewSearchAppearances(0);
+ assert.match(h.w.document.querySelector('#identity-modal-body').textContent,/expired.*again/);
+ assert.equal(requests,1);assert.equal(h.w.document.querySelector('.appearance-load-error button'),null);h.close();
+});
 function results(){return {search_id:'search-1',faces:[{quality_score:.8,matches:[match]},{quality_score:.9,matches:[match]}],summary:{total_faces_detected:2,faces_searchable:2,total_matches:2,unique_identities_found:1},watchlist_alerts:[],processing_time_ms:20};}
 test('result overview distinguishes matches from unique identities and explains scores',()=>{
  const h=harness();h.t.displayResults(results());
  const metrics=[...h.w.document.querySelectorAll('.search-result-metric strong')].map(x=>x.textContent);
  assert.deepEqual(metrics,['2','2','1','0']);assert.match(h.w.document.querySelector('#search-overview').textContent,/not a probability/);
- assert.match(h.w.document.querySelector('.match-card').textContent,/Similarity/);assert.match(h.w.document.querySelector('.match-card').textContent,/14 detections/);
+ assert.match(h.w.document.querySelector('.match-card').textContent,/Similarity/);assert.match(h.w.document.querySelector('.match-card').textContent,/14 group records/);
  h.t.clearResults();assert.equal(h.w.document.querySelector('#search-overview').hidden,true);h.close();
 });
 test('batch overview handles integer watchlist counts and partial failures',()=>{

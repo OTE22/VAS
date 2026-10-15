@@ -25,7 +25,8 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=search-4">
+    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=appearance-search-1">
+    <link rel="stylesheet" href="/frontend/css/movement-timeline.css?v=sighting-review-1">
 </head>
 <body class="search-workspace">
     <!-- Skip to Main Content for Accessibility -->
@@ -138,17 +139,17 @@
                         </div>
 
                         <div class="form-group">
-                            <label for="top-k">Max Results Per Face</label>
+                            <label for="top-k">Identity Groups Per Face</label>
                             <!-- No `selected` attribute: the default comes from
                                  SEARCH_DEFAULT_TOP_K via /api/search/config, and
                                  options above SEARCH_MAX_TOP_K are removed on load.
                                  A `selected="10"` here was a second copy of the
                                  server default that could silently diverge. -->
                             <select class="form-control" id="top-k">
-                                <option value="5">5 matches</option>
-                                <option value="10">10 matches</option>
-                                <option value="20">20 matches</option>
-                                <option value="50">50 matches</option>
+                                <option value="5">5 groups</option>
+                                <option value="10">10 groups</option>
+                                <option value="20">20 groups</option>
+                                <option value="50">50 groups</option>
                             </select>
                         </div>
 
@@ -177,7 +178,7 @@
 
                         <div class="form-group">
                             <label for="date-to">Date To</label>
-                            <input type="date" class="form-control" id="date-to">
+                            <input type="date" class="form-control" id="date-to" aria-describedby="date-to-help"><small id="date-to-help">Includes the entire selected day in your local timezone.</small>
                         </div>
 
                         <div class="form-group">
@@ -467,6 +468,8 @@
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-navbar.js"></script>
     <script src="/frontend/js/search-image.js?v=reference-1"></script>
-    <script src="/frontend/js/admin-search.js?v=search-evidence-20261013"></script>
+    <script src="/frontend/js/movement-timeline.js?v=sighting-review-1"></script>
+    <script src="/frontend/js/sighting-review.js?v=sighting-review-1"></script>
+    <script src="/frontend/js/admin-search.js?v=sighting-review-1"></script>
 </body>
 </html>

@@ -77,10 +77,11 @@ class SearchEvidence:
         }
 
 
-async def hydrate_evidence(db, hits, query_vector, model_version):
+async def hydrate_evidence(db, hits, query_vector, model_version, *, reference_threshold=None):
     """Resolve only unambiguous links. Never borrow another photo from a group."""
     if not hits:
         return []
+    threshold = float(settings.SIMILARITY_THRESHOLD if reference_threshold is None else reference_threshold)
     ids = {person.id for person, _, _ in hits}
     detection_ids = {row.detection_id for _, row, _ in hits if row.detection_id is not None}
     image_ids = {row.image_id for _, row, _ in hits if row.image_id is not None}
@@ -165,12 +166,12 @@ async def hydrate_evidence(db, hits, query_vector, model_version):
         if score is not None and np.isfinite(score) and -1.000001 <= score <= 1.000001:
             item.reference_similarity = float(np.clip(score, -1., 1.))
         if person.type == IdentityType.KNOWN:
-            if item.reference_similarity is not None and item.reference_similarity >= float(settings.SIMILARITY_THRESHOLD):
+            if item.reference_similarity is not None and item.reference_similarity >= threshold:
                 item.verification = 'verified_reference'
         else:
             score = unknown_scores.get(row.id)
             item.verification = ('consistent_reference' if score is not None and
-                np.isfinite(score) and float(settings.SIMILARITY_THRESHOLD) <= score <= 1.000001 else 'unknown')
+                np.isfinite(score) and threshold <= score <= 1.000001 else 'unknown')
         results.append(item)
     return results
 
