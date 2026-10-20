@@ -120,6 +120,8 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "MAX_STORAGE_GB": SettingMeta("integer", "GB", 1, 100000, None, _DYN),
 
     # --- Search (per-call in batch_search/advanced_search) ---
+    "SEARCH_POSSIBLE_MIN_SIMILARITY": SettingMeta("float", "0-1", 0.0, 1.0, None, _DYN,
+        description="Lower cutoff for possible image-search matches requiring review; does not change recognition or alerts"),
     "BATCH_SEARCH_MAX_IMAGES": SettingMeta("integer", "count", 1, 500, None, _DYN),
     "BATCH_SEARCH_TIMEOUT_SECONDS": SettingMeta("integer", "sec", 10, 3600, None, _DYN),
     "BATCH_SEARCH_MAX_CONCURRENCY": SettingMeta("integer", "count", 1, 64, None, _DYN),
@@ -299,6 +301,8 @@ SETTINGS_REGISTRY: Dict[str, SettingMeta] = {
     "CLUSTER_STARTUP_DELAY_HOURS": SettingMeta("float", "hours", 0.0, 168.0, None, _JOB),
 
     # --- Curated restart-required (correct, honest labels) ---
+    "IDENTITY_CLUSTERING_ENABLED": SettingMeta("boolean", "on/off", apply_mode="api_restart",
+        description="Enable automatic identity clustering for merge suggestions; disabled by default"),
     "CONFIDENCE_THRESHOLD": SettingMeta("float", "0-1", 0.05, 1.0, None, "api_restart",
         description="Face-detector confidence (bound at model load)"),
     "QUEUE_WORKERS": SettingMeta("integer", "count", 1, 64, None, "api_restart"),

@@ -177,7 +177,8 @@ async def hydrate_evidence(db, hits, query_vector, model_version, *, reference_t
 
 
 async def search_evidence(db, embedding, model_version, scope, top_k, *,
-                          start=None, end=None, pipeline_id=None, exclude_identity_ids=None):
+                          start=None, end=None, pipeline_id=None, exclude_identity_ids=None,
+                          min_similarity=None, max_similarity=None):
     """Filter exact observation, rank distinct groups, then resolve provenance.
 
 The window retains the winning vector ID (min(distance) alone loses it).
@@ -189,12 +190,13 @@ configurations. No identity, sighting, gallery or embedding writes occur here.
         raise HTTPException(503, 'The current recognition model is not ready for search.')
     if scope not in ('known', 'unknown', 'both'):
         raise HTTPException(422, 'Choose a valid search scope.')
+    floor = float(settings.SIMILARITY_THRESHOLD if min_similarity is None else min_similarity)
     distance = IdentityEmbedding.embedding.cosine_distance(vector)
     filters = [Identity.merged_into_id.is_(None),
                Identity.status.in_([IdentityStatus.ACTIVE, IdentityStatus.PROMOTED, IdentityStatus.INACTIVE]),
                IdentityEmbedding.embedding_model_version == model_version,
                IdentityEmbedding.embedding.isnot(None),
-               distance >= -0.000001, distance <= 1 - float(settings.SIMILARITY_THRESHOLD)]
+               distance >= -0.000001, distance <= 1 - floor]
     if scope != 'both':
         filters.append(Identity.type == (IdentityType.KNOWN if scope == 'known' else IdentityType.UNKNOWN))
     if exclude_identity_ids:
@@ -213,8 +215,13 @@ configurations. No identity, sighting, gallery or embedding writes occur here.
         func.row_number().over(partition_by=IdentityEmbedding.identity_id,
             order_by=(distance, IdentityEmbedding.id)).label('rank'))\
         .join(Identity, Identity.id == IdentityEmbedding.identity_id).where(*filters).subquery()
+    best = [ranked.c.rank == 1]
+    # Apply the upper boundary AFTER choosing the group's best observation,
+    # so a strong group cannot reappear here via a weaker historical vector.
+    if max_similarity is not None:
+        best.append(ranked.c.distance > 1 - float(max_similarity))
     rows = (await db.execute(select(Identity, IdentityEmbedding, (1 - ranked.c.distance).label('similarity'))
         .join(IdentityEmbedding, IdentityEmbedding.identity_id == Identity.id)
-        .join(ranked, ranked.c.embedding_id == IdentityEmbedding.id).where(ranked.c.rank == 1)
+        .join(ranked, ranked.c.embedding_id == IdentityEmbedding.id).where(*best)
         .order_by(ranked.c.distance, Identity.id).limit(top_k))).all()
     return await hydrate_evidence(db, rows, vector, model_version)

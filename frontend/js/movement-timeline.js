@@ -177,19 +177,22 @@
     document.addEventListener('input',event=>{if(event.target.matches('[data-graph-scrub]')){stopPlayback();selectSighting(event.target.closest('.movement-evidence'),Number(event.target.value),true);}});
     document.addEventListener('visibilitychange',()=>{if(document.hidden)stopPlayback();});
 
-    const isJourneyAppearance = app => !app.association_status || ['selected', 'consistent', 'operator_confirmed'].includes(app.association_status);
+    const isJourneyAppearance = app => !app.association_status || ['selected', 'consistent', 'direct_match', 'operator_confirmed'].includes(app.association_status);
     function associationLabel(app) {
-        return {selected:'Reference sighting', consistent:'Automatic similarity', operator_confirmed:'Operator confirmed',
+        return {selected:'Reference sighting', consistent:'Automatic similarity', direct_match:'Direct image match', operator_confirmed:'Operator confirmed',
             operator_rejected:'Different person — operator reviewed'}[app.association_status] || 'Review required';
     }
     function reviewControls(app, review) {
         const badge = app.association_status ? `<span class="sighting-review-badge ${app.association_status === 'operator_confirmed' ? 'is-confirmed' : ''}">${escape(associationLabel(app))}</span>` : '';
         const actor = app.manual_review ? `<small class="sighting-review-actor">${escape(app.manual_review.reviewer)} · ${escape(new Date(app.manual_review.reviewed_at).toLocaleString())}${app.manual_review.stale ? ' · Review changed evidence' : ''}</small>` : '';
         const button = review?.can_review && app.id && app.id !== review.reference_appearance_id
-            ? `<button type="button" class="sighting-review-open" data-review-sighting="${escape(app.id)}">${app.manual_review ? 'Review / undo decision' : 'Review this sighting'}</button>` : '';
-        return `<div class="sighting-review-controls">${badge}${actor}${button}</div>`;
+            ? `<button type="button" class="sighting-review-open" data-review-sighting="${escape(app.id)}" data-review-pending="${app.association_status === 'review_required'}">${app.manual_review ? 'Review / undo decision' : 'Not the same person? Compare'}</button>` : '';
+        const compareOthers = review?.can_review && app.id === review.reference_appearance_id
+            ? '<button type="button" class="sighting-review-open" data-review-others>Compare other sightings</button>' : '';
+        return `<div class="sighting-review-controls">${badge}${actor}${button}${compareOthers}</div>`;
     }
     function render(appearances, label, reviewContext = null) {
+        if (reviewContext?.mode === 'search') return renderSequence(appearances, label);
         if (!Array.isArray(appearances) || !appearances.some(app => app.association_status)) {
             return renderSequence(appearances, label);
         }

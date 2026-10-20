@@ -162,6 +162,7 @@ class FaceSearchResult:
     match_source: str = 'unavailable'
     identity_verification: str = 'unverified'
     reference_similarity: Optional[float] = None
+    match_tier: str = 'strong'
 
 
 @dataclass
@@ -175,6 +176,7 @@ class FaceInImage:
     skipped: bool = False
     skip_reason: Optional[str] = None
     matches: List[FaceSearchResult] = field(default_factory=list)
+    possible_matches: List[FaceSearchResult] = field(default_factory=list)
     embedding: Optional[np.ndarray] = None
     # Watchlist-checked matches from BEFORE the pipeline/date filters were
     # applied. Alerts are collected from this, never from `matches`, so a
@@ -207,6 +209,12 @@ class MultiSearchResult:
     watchlist_alerts: List[WatchlistAlertInfo]
     processing_time_ms: int
     summary: Dict
+    thresholds: Dict = field(default_factory=dict)
+
+
+def search_thresholds():
+    strong = float(settings.SIMILARITY_THRESHOLD)
+    return {'strong': strong, 'possible': min(strong, float(settings.SEARCH_POSSIBLE_MIN_SIMILARITY))}
 
 
 class AdvancedSearchService:
@@ -418,6 +426,7 @@ class AdvancedSearchService:
             "unique_identities_found": len(unique_identities),
             "known_matches": len(known_matches),
             "unknown_matches": len(unknown_matches),
+            "possible_matches": sum(len(f.possible_matches) for f in searchable_faces),
             "watchlist_alerts": len(watchlist_alerts)
         }
         
@@ -475,7 +484,8 @@ class AdvancedSearchService:
             faces=faces_data,
             watchlist_alerts=watchlist_alerts,
             processing_time_ms=processing_time_ms,
-            summary=summary
+            summary=summary,
+            thresholds=search_thresholds()
         )
     
     async def _process_single_face(
@@ -585,7 +595,28 @@ class AdvancedSearchService:
 
         face_data.matches = matches
         face_data.alert_candidates = alert_candidates
+        # Separate review-only candidates never pass through watchlist checks.
+        face_data.possible_matches = await self._search_possible_matches(
+            embedding, db, scope, top_k, exclude_identity_ids, filters)
         return face_data
+
+    async def _search_possible_matches(self, embedding, db, scope, top_k,
+                                       exclude_identity_ids, filters):
+        from backend.core.search_evidence import search_evidence
+        thresholds = search_thresholds()
+        if thresholds['possible'] >= thresholds['strong']:
+            return []
+        filters = filters or {}
+        hits = await search_evidence(
+            db, embedding, _embedding_model_version(), scope, top_k,
+            start=filters.get('date_from'), end=filters.get('date_to'),
+            pipeline_id=filters.get('pipeline_id'), exclude_identity_ids=exclude_identity_ids,
+            min_similarity=thresholds['possible'], max_similarity=thresholds['strong'])
+        return [FaceSearchResult(**{**hit.result(), 'display_name': None,
+            'type': 'unknown' if hit.identity.type.value == 'unknown' else 'unverified',
+            'identity_verification': 'unverified', 'reference_similarity': None,
+            'confidence_band': 'POSSIBLE', 'match_tier': 'possible',
+            'last_seen_at': hit.identity.last_seen_at}) for hit in hits]
     
     async def _search_indexes(
         self,
@@ -748,11 +779,25 @@ class AdvancedSearchService:
         else:
             return obj
     
+    def match_to_dict(self, match):
+        return {
+            **{key: getattr(match, key) for key in (
+                'identity_id', 'display_name', 'type', 'confidence_band',
+                'best_snapshot_path', 'snapshot_url', 'appearances_count',
+                'matched_embedding_id', 'matched_appearance_id', 'matched_face_id',
+                'matched_image_id', 'matched_at', 'matched_pipeline_id',
+                'match_source', 'identity_verification', 'reference_similarity', 'match_tier')},
+            'similarity': self._convert_numpy_types(match.similarity),
+            'last_seen_at': match.last_seen_at.isoformat() if match.last_seen_at else None,
+            'watchlist_match': self._convert_numpy_types(match.watchlist_match) if match.watchlist_match else None,
+        }
+
     def to_dict(self, result: MultiSearchResult) -> Dict:
         """Convert MultiSearchResult to dictionary for JSON serialization."""
         return {
             "search_id": result.search_id,
             "image_info": result.image_info,
+            "thresholds": result.thresholds or search_thresholds(),
             "faces": [
                 {
                     "face_index": f.face_index,
@@ -762,25 +807,8 @@ class AdvancedSearchService:
                     "quality_warning": f.quality_warning,
                     "skipped": f.skipped,
                     "skip_reason": f.skip_reason,
-                    "matches": [
-                        {
-                            **{key: getattr(m, key) for key in (
-                                'matched_embedding_id', 'matched_appearance_id', 'matched_face_id',
-                                'matched_image_id', 'matched_at', 'matched_pipeline_id',
-                                'match_source', 'identity_verification', 'reference_similarity')},
-                            "identity_id": m.identity_id,
-                            "display_name": m.display_name,
-                            "type": m.type,
-                            "similarity": self._convert_numpy_types(m.similarity),
-                            "confidence_band": m.confidence_band,
-                            "best_snapshot_path": m.best_snapshot_path,  # Keep for reference
-                            "snapshot_url": m.snapshot_url,  # Backend provides ready-to-use URL
-                            "last_seen_at": m.last_seen_at.isoformat() if m.last_seen_at else None,
-                            "appearances_count": m.appearances_count,
-                            "watchlist_match": self._convert_numpy_types(m.watchlist_match) if m.watchlist_match else None
-                        }
-                        for m in f.matches
-                    ]
+                    "matches": [self.match_to_dict(m) for m in f.matches],
+                    "possible_matches": [self.match_to_dict(m) for m in f.possible_matches]
                 }
                 for f in result.faces
             ],

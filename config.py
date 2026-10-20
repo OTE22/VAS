@@ -859,6 +859,7 @@ class Settings(BaseSettings):
     # =====================================================
     # These settings control the automatic merge suggestion system
     # The clustering job runs periodically to find duplicate identities
+    IDENTITY_CLUSTERING_ENABLED: bool = Field(default=False, description="Enable automatic identity clustering for merge suggestions. Disabled by default; requires API restart.")
     CLUSTER_INTERVAL_HOURS: int = Field(default=24, description="Hours between clustering runs (default: 24)")
     CLUSTER_STARTUP_DELAY_HOURS: float = Field(default=7, description="Hours to wait after startup before first clustering run. Set to 0 for immediate. (default: 0)")
     CLUSTER_MIN_SIZE: int = Field(default=2, description="Minimum cluster size for merge suggestions (default: 2)")
@@ -1038,6 +1039,8 @@ class Settings(BaseSettings):
     # literals: /api/search/advanced defaulted to 10 while the batch service
     # defaulted to 5, and the search page drives both from a single control —
     # so a batch silently ran at half the depth the operator asked for.
+    SEARCH_POSSIBLE_MIN_SIMILARITY: float = Field(default=0.5, ge=0.0, le=1.0,
+        description="Lower similarity cutoff for separate image-search candidates requiring review. Never changes recognition or alert thresholds; disabled when at or above SIMILARITY_THRESHOLD.")
     SEARCH_DEFAULT_TOP_K: int = Field(
         default=10,
         description="Matches returned per query face when the caller does not specify. Default: 10"

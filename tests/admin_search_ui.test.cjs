@@ -3,14 +3,14 @@ const {JSDOM}=require('jsdom');
 const id='e1bfe233-3918-407c-8822-2344387babc9';
 function harness(){
  const dom=new JSDOM(fs.readFileSync('frontend/admin/search.html','utf8'),{url:'https://ui.test',runScripts:'outside-only'});
- const w=dom.window;w.Actions={register(){}};w.ModalStack={open(){},close(){}};
+ const w=dom.window;w.Actions={registered:{},register(handlers){Object.assign(this.registered,handlers)}};w.ModalStack={open(){},close(){},isOpen(){return false}};
  const urls=new Map(),revoked=[];
  w.URL.createObjectURL=file=>{const url='blob:https://ui.test/'+urls.size;urls.set(url,file);return url;};
  w.URL.revokeObjectURL=url=>revoked.push(url);
  w.eval(fs.readFileSync('frontend/js/search-image.js','utf8'));
  let source=fs.readFileSync('frontend/js/admin-search.js','utf8');
  const start=source.indexOf('    // Start when DOM is ready'),end=source.indexOf('    // Add CSS animation styles',start);
- source=source.slice(0,start)+'window.probe={state,elements,displayResults,clearResults,performSearch,viewIdentity,renderIdentityPanel,pipelineLabel,captureSearchContext,viewSearchAppearances,localSearchDate,closeIdentityModal};\n'+source.slice(end);
+ source=source.slice(0,start)+'window.probe={state,elements,displayResults,clearResults,performSearch,viewIdentity,renderIdentityPanel,pipelineLabel,captureSearchContext,viewSearchAppearances,localSearchDate,closeIdentityModal,viewPossibleMatch,loadSearchConfig};\n'+source.slice(end);
  w.eval(source);return {w,t:w.probe,urls,revoked,close:()=>w.close()};
 }
 const match={identity_id:id,display_name:'Joey',type:'known',similarity:.89,confidence_band:'high',appearances_count:14,last_seen_at:'2026-09-17T07:56:29Z'};
@@ -68,6 +68,42 @@ test('expired appearance context is explained and does not fall back to group hi
  await h.t.viewSearchAppearances(0);
  assert.match(h.w.document.querySelector('#identity-modal-body').textContent,/expired.*again/);
  assert.equal(requests,1);assert.equal(h.w.document.querySelector('.appearance-load-error button'),null);h.close();
+});
+test('operator-confirmed appearances show separate provenance without a fabricated similarity',async()=>{
+ const h=harness();try{
+  h.t.state.currentResults={appearance_context:id,faces:[{face_index:0}]};
+  let rendered;
+  h.w.MovementTimeline={render:(rows,label,options)=>{rendered={rows,options};return '<div>Test journey</div>'}};
+  h.w.fetch=async()=>({ok:true,json:async()=>({total:2,cameras:2,threshold:.8,direct_count:1,operator_confirmed_count:1,has_more:false,
+   appearances:[{id:1,pipeline_id:'entry',start_time:'2026-01-01T10:00:00Z',similarity:.9,match_basis:'direct'},
+    {id:2,identity_id:id,pipeline_id:'exit',start_time:'2026-01-02T10:00:00Z',similarity:null,match_basis:'operator_confirmed',
+     manual_review:{reviewer:'<script>not markup</script>',reviewed_at:'2026-01-03T10:00:00Z',reference_appearance_id:1,reference_similarity:.9}}]})});
+  await h.t.viewSearchAppearances(0);
+  const body=h.w.document.querySelector('#identity-modal-body');
+  assert.match(body.textContent,/1 direct image matches.*1 operator-confirmed sightings/);
+  assert.match(body.textContent,/no direct similarity score claimed/);
+  assert.doesNotMatch(body.textContent,/(?:^|[^0-9])0% similarity|NaN%/);
+  assert.equal(body.querySelector('script'),null);
+  assert.equal(body.querySelector('.appearance-match-scores a').getAttribute('href'),`/admin/identity/${id}?appearance_id=1`);
+  assert.equal(rendered.options.mode,'search');
+ }finally{h.close()}
+});
+test('a changed review stops paging and requests a new search',async()=>{
+ const h=harness();try{
+  h.t.state.currentResults={appearance_context:id,faces:[{face_index:0}]};
+  h.w.fetch=async()=>({ok:false,status:409,json:async()=>({detail:'Sighting review decisions changed. Run the image search again to refresh results.'})});
+  await h.t.viewSearchAppearances(0);
+  assert.match(h.w.document.querySelector('.appearance-load-error').textContent,/review decisions changed/);
+  assert.equal(h.w.document.querySelector('.appearance-load-error button'),null);
+ }finally{h.close()}
+});
+test('confirmed sightings can be explored when there are no direct summary cards in the filters',()=>{
+ const h=harness();try{
+  const data=results();data.faces[0].matches=[];data.faces[1].matches=[];data.appearance_context=id;
+  h.t.displayResults(data);
+  assert.match(h.w.document.querySelector('#search-overview').textContent,/Open matching appearances.*operator-confirmed/);
+  assert.equal(h.w.document.querySelectorAll('[data-action="viewSearchAppearances"]').length,2);
+ }finally{h.close()}
 });
 function results(){return {search_id:'search-1',faces:[{quality_score:.8,matches:[match]},{quality_score:.9,matches:[match]}],summary:{total_faces_detected:2,faces_searchable:2,total_matches:2,unique_identities_found:1},watchlist_alerts:[],processing_time_ms:20};}
 test('result overview distinguishes matches from unique identities and explains scores',()=>{
@@ -197,4 +233,153 @@ test('unverified historical match does not inherit group name or watchlist claim
  assert.doesNotMatch(text,/Wrong group name|Sensitive group/);
  assert.match(text,/not verified/);assert.equal(h.w.document.querySelector('#identity-analyze').hidden,true);
  h.close();
+});
+
+const possible={...match,similarity:.542,match_tier:'possible',match_source:'sighting',matched_embedding_id:52,
+ matched_at:'2026-10-20T10:00:00Z',matched_pipeline_id:'North gate',snapshot_url:'/storage/candidate.jpg',
+ // Deliberately hostile legacy data: a lower-tier card must ignore names/alerts.
+ display_name:'Misleading name',watchlist_match:{list_name:'Sensitive watchlist',alert_level:'critical'}};
+function tieredResults(){return {...results(),thresholds:{strong:.6,possible:.5},appearance_context:id,
+ faces:[{face_index:0,quality_score:.8,matches:[match],possible_matches:[possible,{...possible,snapshot_url:'/storage/second-candidate.jpg',similarity:.51}]}]};}
+
+test('strong and possible results have separate counts, ranges and no inherited possible identity claim',()=>{
+ const h=harness();try{
+  const data=tieredResults();h.t.displayResults(data);
+  assert.deepEqual([...h.w.document.querySelectorAll('.search-result-metric strong')].map(el=>el.textContent),['1','1','2','1','0']);
+  assert.equal(h.t.elements.matchesCount.textContent,'3');
+  const strong=h.w.document.querySelector('.strong-tier'),lower=h.w.document.querySelector('.possible-tier');
+  assert.match(strong.textContent,/Strong matches.*1/s);
+  assert.match(strong.textContent,/60% and above/);
+  assert.match(lower.textContent,/50% to below 60%/);
+  assert.match(lower.textContent,/Review required/);
+  assert.match(lower.textContent,/54.2%/);
+  assert.doesNotMatch(lower.textContent,/Misleading name|Sensitive watchlist|14 group records/);
+  assert.equal(lower.querySelector('.possible-match-card').tagName,'BUTTON');
+  assert.equal(lower.querySelector('[data-action="viewIdentity"]'),null);
+  assert.match(h.w.document.querySelector('#summary-tab').textContent,/Possible · review required/);
+ }finally{h.close()}
+});
+
+test('possible-only search remains useful and review compares exact evidence without group history requests',()=>{
+ const h=harness();try{
+  const data=tieredResults();data.faces[0].matches=[];
+  h.t.state.currentResults=data;
+  const file=new h.w.File(['upload'],'reference.jpg',{type:'image/jpeg'});
+  h.t.state.resultReferences=[h.w.SearchImage.createReference(file)];
+  h.t.displayResults(data);
+  assert.match(h.w.document.querySelector('.search-result-note').textContent,/No strong matches.*lower-similarity/);
+  let requests=0;h.w.fetch=()=>{requests++;throw new Error('Candidate preview must not fetch group history');};
+  const card=h.w.document.querySelector('.possible-match-card');
+  h.w.Actions.registered.viewPossibleMatch(card);
+  const body=h.w.document.querySelector('#identity-modal-body');
+  assert.match(body.textContent,/identity unconfirmed/);
+  assert.doesNotMatch(body.textContent,/Misleading name|Sensitive watchlist|Joey/);
+  assert.equal(h.w.document.querySelector('#identity-full-profile').hidden,true);
+  assert.equal(h.w.document.querySelector('#identity-analyze').hidden,true);
+  assert.equal(h.urls.get(body.querySelector('.reference-photo img').src),file);
+  assert.equal(new URL(body.querySelector('.candidate-photo img').src).pathname,'/storage/candidate.jpg');
+  assert.equal(body.querySelector('[data-possible-nav="previous"]').disabled,true);
+  body.querySelector('[data-possible-nav="next"]').click();
+  assert.match(body.textContent,/Candidate 2 of 2/);
+  assert.equal(new URL(body.querySelector('.candidate-photo img').src).pathname,'/storage/second-candidate.jpg');
+  assert.equal(body.querySelector('[data-possible-nav="next"]').disabled,true);
+  assert.equal(h.w.document.activeElement.dataset.possibleNav,'previous');
+  assert.equal(h.w.document.querySelector('#identity-modal').classList.contains('active'),true);
+  assert.equal(requests,0);
+ }finally{h.close()}
+});
+
+test('missing or failed possible photo never substitutes the uploaded reference as evidence',()=>{
+ const h=harness();try{
+  const data=tieredResults();data.faces[0].possible_matches=[{...possible,snapshot_url:null,best_snapshot_path:null,match_source:'unavailable'}];
+  h.t.state.currentResults=data;
+  h.t.state.resultReferences=[h.w.SearchImage.createReference(new h.w.File(['upload'],'reference.jpg'))];
+  h.t.displayResults(data);
+  assert.equal(h.w.document.querySelector('.possible-match-card img').dataset.searchImageSource,'unavailable');
+  assert.match(h.w.document.querySelector('.possible-match-card').textContent,/Photo source unavailable/);
+  h.t.viewPossibleMatch(0,0);
+  assert.match(h.w.document.querySelector('.possible-review-facts').textContent,/Photo source unavailable/);
+  assert.equal(h.w.document.querySelector('.candidate-photo img').dataset.searchImageSource,'unavailable');
+  assert.equal(h.w.document.querySelector('.reference-photo img').dataset.searchImageSource,'uploaded');
+  data.faces[0].possible_matches=[possible];h.t.viewPossibleMatch(0,0);
+  h.w.document.querySelector('.candidate-photo img').dispatchEvent(new h.w.Event('error'));
+  assert.equal(h.w.document.querySelector('.candidate-photo img').dataset.searchImageSource,'unavailable');
+ }finally{h.close()}
+});
+
+test('server config drives the guide while completed search keeps its original thresholds',async()=>{
+ const h=harness();try{
+  h.w.fetch=async()=>({ok:true,json:async()=>({results:{strong_threshold:.72,possible_threshold:.48}})});
+  await h.t.loadSearchConfig();
+  assert.match(h.w.document.querySelector('#search-threshold-guide').textContent,/72% and above/);
+  assert.match(h.w.document.querySelector('#search-threshold-guide').textContent,/48% to below 72%/);
+  h.t.displayResults(tieredResults());
+  assert.match(h.w.document.querySelector('.strong-tier .tier-range').textContent,/60% and above/);
+  assert.match(h.w.document.querySelector('.possible-tier .tier-range').textContent,/50% to below 60%/);
+  const data=tieredResults();data.thresholds={strong:.6,possible:.6};data.faces[0].possible_matches=[];
+  h.t.displayResults(data);
+  assert.match(h.w.document.querySelector('.possible-tier').textContent,/lower tier is disabled/);
+ }finally{h.close()}
+});
+
+test('batch possible review uses the correct uploaded image and preserves strong-only alert totals',()=>{
+ const h=harness();try{
+  const files=[new h.w.File(['one'],'first.jpg'),new h.w.File(['two'],'second.jpg')];
+  h.t.state.resultReferences=files.map(file=>h.w.SearchImage.createReference(file));
+  h.t.state.resultContext={referenceNames:files.map(file=>file.name)};
+  const data={batch_id:'batch',thresholds:{strong:.6,possible:.5},watchlist_alerts:0,results:[
+   {status:'success',image_index:0,image_name:'first.jpg',faces_detected:1,matches:[match],possible_matches:[]},
+   {status:'success',image_index:1,image_name:'second.jpg',faces_detected:2,matches:[],possible_matches:[{...possible,face_index:1}]}]};
+  h.t.state.currentResults=data;h.t.displayResults(data);
+  h.w.Actions.registered.viewPossibleMatch(h.w.document.querySelector('.possible-match-card'));
+  assert.equal(h.urls.get(h.w.document.querySelector('.reference-photo img').src),files[1]);
+  assert.match(h.w.document.querySelector('.reference-photo figcaption').textContent,/Uploaded image · compare Face 2/);
+  assert.equal(h.t.elements.alertsCount.textContent,'0');
+  assert.match(h.w.document.querySelector('#alerts-tab').textContent,/No watchlist alerts/i);
+ }finally{h.close()}
+});
+
+test('a stale identity request cannot replace a newer possible-photo comparison',async()=>{
+ const h=harness();try{
+  const data=tieredResults();delete data.appearance_context;h.t.state.currentResults=data;
+  let resolveIdentity;
+  h.w.fetch=url=>String(url).endsWith('/watchlists')
+   ? Promise.resolve({ok:true,json:async()=>({watchlists:[]})})
+   : new Promise(resolve=>{resolveIdentity=resolve});
+  const pending=h.t.viewIdentity(id,0);
+  h.t.viewPossibleMatch(0,0);
+  resolveIdentity({ok:true,json:async()=>({id,display_name:'Old request',appearances:[]})});
+  await pending;
+  assert.notEqual(h.w.document.querySelector('.possible-review'),null);
+  assert.doesNotMatch(h.w.document.querySelector('#identity-modal-body').textContent,/Old request/);
+ }finally{h.close()}
+});
+
+test('multi-face reference preview outlines only the server-selected query face',()=>{
+ const h=harness();try{
+  const data=tieredResults();data.faces[0].face_index=1;
+  data.faces[0].bounding_box={x1:200,y1:50,x2:300,y2:175};
+  h.t.state.currentResults=data;
+  h.t.state.resultReferences=[h.w.SearchImage.createReference(new h.w.File(['image'],'two-faces.jpg'))];
+  h.t.viewPossibleMatch(0,0);
+  const image=h.w.document.querySelector('.reference-photo img');
+  Object.defineProperty(image,'naturalWidth',{value:640});
+  Object.defineProperty(image,'naturalHeight',{value:480});
+  image.dispatchEvent(new h.w.Event('load'));
+  assert.match(h.w.document.querySelector('.reference-photo figcaption').textContent,/highlighted Face 2/);
+  assert.equal(h.w.document.querySelector('.reference-face-box').getAttribute('viewBox'),'0 0 640 480');
+  const rect=h.w.document.querySelector('.reference-face-box rect');
+  assert.equal(rect.getAttribute('x'),'200');assert.equal(rect.getAttribute('width'),'100');
+  assert.equal(h.w.document.querySelector('.candidate-photo .reference-face-box'),null);
+ }finally{h.close()}
+});
+
+test('possible scores below the strong boundary are never rounded into the strong tier',()=>{
+ const h=harness();try{
+  const data=tieredResults();data.faces[0].possible_matches=[{...possible,similarity:.59999}];
+  h.t.state.currentResults=data;h.t.displayResults(data);
+  assert.match(h.w.document.querySelector('.possible-score').textContent,/59.9%/);
+  h.t.viewPossibleMatch(0,0);
+  assert.equal(h.w.document.querySelector('.possible-review-score').textContent,'59.9% similarity');
+ }finally{h.close()}
 });

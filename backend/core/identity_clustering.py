@@ -143,6 +143,9 @@ class IdentityClusteringService:
 
     async def start(self):
         """Start periodic clustering job"""
+        if not settings.IDENTITY_CLUSTERING_ENABLED:
+            logger.info("[CLUSTERING] Automatic identity clustering disabled by IDENTITY_CLUSTERING_ENABLED")
+            return
         if self._clustering_task and not self._clustering_task.done():
             logger.warning("[CLUSTERING] Already running; ignoring duplicate start()")
             return

@@ -38,6 +38,7 @@ router = APIRouter(tags=["Export"])
 # =====================================================
 
 class BatchImageResultResponse(BaseModel):
+    possible_matches: List[dict] = []
     image_index: int
     image_name: str
     status: str
@@ -50,6 +51,8 @@ class BatchImageResultResponse(BaseModel):
 
 
 class BatchSearchResponse(BaseModel):
+    possible_matches: int = 0
+    thresholds: dict = {}
     batch_id: str
     total_images: int
     successful_images: int

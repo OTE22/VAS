@@ -40,7 +40,8 @@
         // server warned at SEARCH_QUALITY_WARNING_THRESHOLD (0.6), so the page
         // and the API disagreed about which faces were poor quality.
         quality: { minThreshold: null, warningThreshold: null },
-        results: { defaultTopK: null, maxTopK: null }
+        results: { defaultTopK: null, maxTopK: null },
+        thresholds: { strong: null, possible: null }
     };
 
     // ============================================
@@ -377,6 +378,11 @@
             if (Number.isFinite(maxTopK) && maxTopK > 0) {
                 state.results.maxTopK = Math.floor(maxTopK);
             }
+            state.thresholds = readThresholds({
+                strong: config?.results?.strong_threshold,
+                possible: config?.results?.possible_threshold
+            });
+            renderThresholdGuide();
             applyResultDepthConfig();
         } catch (error) {
             // Offline / blocked: keep the defaults, do not disable the page.
@@ -914,22 +920,64 @@
         };
     }
 
+    function readThresholds(values) {
+        const valid = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+        return { strong: valid(values?.strong), possible: valid(values?.possible) };
+    }
+
+    function searchThresholds(results) {
+        // Saved results keep the thresholds used when they were produced.
+        return results?.thresholds ? readThresholds(results.thresholds) : state.thresholds;
+    }
+
+    function thresholdPercent(value) {
+        return `${Number((value * 100).toFixed(1))}%`;
+    }
+
+    function candidateScoreText(value) {
+        // Do not round a 59.99% candidate up to the 60% strong boundary.
+        return typeof value === 'number' && Number.isFinite(value)
+            ? `${Math.floor(value * 1000) / 10}%` : 'Unavailable';
+    }
+
+    function tierRange(tier, thresholds) {
+        if (tier === 'strong') return thresholds.strong === null ? 'Higher similarity' : `${thresholdPercent(thresholds.strong)} and above`;
+        return thresholds.possible === null || thresholds.strong === null ? 'Lower similarity'
+            : thresholds.possible >= thresholds.strong ? 'Lower tier disabled'
+            : `${thresholdPercent(thresholds.possible)} to below ${thresholdPercent(thresholds.strong)}`;
+    }
+
+    function renderThresholdGuide() {
+        const guide = document.getElementById('search-threshold-guide');
+        if (!guide) return;
+        guide.querySelector('[data-threshold="strong"]').textContent = tierRange('strong', state.thresholds);
+        guide.querySelector('[data-threshold="possible"]').textContent = tierRange('possible', state.thresholds);
+    }
+
+    function possibleMatchCount(results) {
+        return (results.faces || results.results || []).reduce((sum, group) =>
+            sum + (Array.isArray(group.possible_matches) ? group.possible_matches.length : 0), 0);
+    }
+
     function renderResultOverview(results) {
         const host = document.getElementById('search-overview');
         if (!host) return;
         const batch = !!(results.batch_id || results.results);
         const groups = batch ? results.results || [] : results.faces || [];
         const matches = groups.flatMap(group => Array.isArray(group.matches) ? group.matches : []);
+        const possibleCount = possibleMatchCount(results);
+        const hasTiers = groups.some(group => Array.isArray(group.possible_matches));
         const distinct = new Set(matches.map(match => match.identity_id).filter(Boolean));
         const metrics = buildEl('div', 'search-result-metrics');
         const figures = [
             [batch ? results.total_images ?? groups.length : groups.length, batch ? 'Images submitted' : 'Faces detected'],
-            [matches.length, 'Returned matches'],
-            [distinct.size, 'Distinct identities'],
+            [matches.length, 'Strong matches'],
+            ...(hasTiers ? [[possibleCount, 'Possible · review required']] : []),
+            [distinct.size, 'Strong identity groups'],
             [alertCount(results.watchlist_alerts), 'Watchlist alerts']
         ];
         figures.forEach(([value, label]) => {
-            const card = buildEl('div', 'search-result-metric');
+            const card = buildEl('div', `search-result-metric${label === 'Possible · review required' ? ' is-possible' : ''}`);
             card.append(buildEl('strong', null, String(value)), buildEl('span', null, label));
             metrics.append(card);
         });
@@ -937,13 +985,14 @@
         const details = buildEl('div', 'search-applied-context');
         if (context) {
             details.append(buildEl('strong', null, context.file));
-            details.append(buildEl('p', null, `${context.scope} · Up to ${context.depth} identity groups per face · ${context.camera}`));
+            details.append(buildEl('p', null, `${context.scope} · Up to ${context.depth} identity groups per face${hasTiers ? ' in each tier' : ''} · ${context.camera}`));
             details.append(buildEl('p', null, `${context.dates} · Watchlists ${context.watchlists ? 'checked' : 'not checked'}${context.excluded ? ' · Exclusions applied' : ''}`));
         }
         const skipped = batch ? groups.filter(group => group.status === 'error').length : groups.filter(group => group.skipped).length;
         const note = skipped ? `${skipped} ${batch ? 'image(s) failed' : 'face(s) skipped'}. Review the messages below.`
             : matches.length ? (results.appearance_context ? 'Open matching appearances to review recorded sightings across cameras, including matches under different identity groups.' : 'Select a match to review identity details and recent sightings.')
-            : 'No matches returned. Check the image quality and applied filters before trying again.';
+            : possibleCount ? 'No strong matches. Review the lower-similarity candidates below against your uploaded reference.'
+            : results.appearance_context ? 'No direct match cards within these filters. Open matching appearances to check saved operator-confirmed sightings.' : 'No matches returned. Check the image quality and applied filters before trying again.';
         host.replaceChildren(metrics, details, buildEl('p', 'search-result-note', note),
             buildEl('p', 'search-score-note', 'Similarity measures how closely face features match; it is not a probability or a confirmed identification. The same identity can appear for multiple faces.'));
         host.hidden = false;
@@ -970,14 +1019,14 @@
             // Batch results
             const batchResults = results.results || [];
             batchResults.forEach(r => {
-                totalMatches += r.matches ? r.matches.length : 0;
+                totalMatches += (r.matches?.length || 0) + (r.possible_matches?.length || 0);
             });
             totalAlerts = alertCount(results.watchlist_alerts);
         } else {
             // Single search results (standard format)
             const faces = results.faces || [];
             faces.forEach(face => {
-                totalMatches += face.matches ? face.matches.length : 0;
+                totalMatches += (face.matches?.length || 0) + (face.possible_matches?.length || 0);
             });
             totalAlerts = alertCount(results.watchlist_alerts);
         }
@@ -1045,13 +1094,13 @@
                                 <h4>${escapeHtml(imgResult.image_name)}</h4>
                                 <div class="face-quality">
                                     <span style="color: rgba(255,255,255,0.5); font-size: 0.8rem;">
-                                        ${escapeHtml(imgResult.faces_detected)} face(s) detected • ${imgResult.matches?.length || 0} match(es)
+                                        ${escapeHtml(imgResult.faces_detected)} face(s) detected • ${imgResult.matches?.length || 0} strong · ${imgResult.possible_matches?.length || 0} possible
                                     </span>
                                 </div>
                             </div>
                         </div>
                         <div class="matches-list">
-                            ${renderMatches(imgResult.matches || [], batchReferenceIndex(imgResult, results))}
+                            ${renderMatchTiers(imgResult, results, batchReferenceIndex(imgResult, results), null, imgIndex)}
                         </div>
                     </div>
                 `;
@@ -1096,9 +1145,9 @@
                         </div>
                         <div class="matches-list">
                             <div class="appearance-search-action">
-                                ${results.appearance_context ? `<button type="button" class="btn-primary" data-action="viewSearchAppearances" data-face-index="${face.face_index ?? faceIndex}">View matching appearances across cameras</button><p>All matching recorded sightings in your filters, with pages. The identity-group limit below does not limit this view.</p>` : results.appearance_context_error ? `<p role="status">${escapeHtml(results.appearance_context_error)}</p>` : ''}
+                                ${results.appearance_context ? `<button type="button" class="btn-primary" data-action="viewSearchAppearances" data-face-index="${face.face_index ?? faceIndex}">View matching appearances across cameras</button><p>Direct image matches and operator-confirmed sightings within your filters, with pages. The identity-group limit below does not limit this view.</p>` : results.appearance_context_error ? `<p role="status">${escapeHtml(results.appearance_context_error)}</p>` : ''}
                             </div>
-                            ${renderMatches(face.matches || [], 0, face.face_index ?? faceIndex)}
+                            ${renderMatchTiers(face, results, 0, face.face_index ?? faceIndex, faceIndex)}
                         </div>
                     </div>
                 `;
@@ -1110,13 +1159,71 @@
         elements.matchesTab.querySelectorAll('.match-card').forEach(card => {
             const img = card.querySelector('.match-snapshot');
             SearchImage.render(img, card.querySelector('.search-image-caption'), img.dataset.storedSrc,
-                state.resultReferences[Number(card.dataset.referenceIndex)], PLACEHOLDER_AVATAR);
+                card.classList.contains('possible-match-card') ? null : state.resultReferences[Number(card.dataset.referenceIndex)], PLACEHOLDER_AVATAR);
         });
+    }
+
+    function renderMatchTiers(group, results, referenceIndex, faceIndex, groupIndex) {
+        const thresholds = searchThresholds(results);
+        const strong = group.matches || [];
+        const possible = group.possible_matches || [];
+        const hasPossible = Array.isArray(group.possible_matches);
+        return `
+            <section class="match-tier strong-tier" aria-label="Strong matches">
+                <div class="match-tier-heading">
+                    <div><span class="tier-eyebrow">Start here</span><h4>Strong matches <span class="tier-count">${strong.length}</span></h4></div>
+                    <span class="tier-range">${escapeHtml(tierRange('strong', thresholds))}</span>
+                </div>
+                <p class="match-tier-description">Closest face matches within your search. Review the photos before identifying a person.</p>
+                <div class="tier-match-list">${renderMatches(strong, referenceIndex, faceIndex)}</div>
+            </section>
+            ${hasPossible ? `<section class="match-tier possible-tier" aria-label="Possible matches — review required">
+                <div class="match-tier-heading">
+                    <div><span class="tier-eyebrow">Look a little further</span><h4>Possible matches <span class="tier-count">${possible.length}</span></h4></div>
+                    <span class="tier-range">${escapeHtml(tierRange('possible', thresholds))}</span>
+                </div>
+                <p class="match-tier-description"><strong>Review required.</strong> Lower-similarity candidates, including unknown faces when your scope includes them. These are not identified as the person in your reference.</p>
+                ${possible.length ? `<div class="possible-match-grid">${possible.map((match, index) => renderPossibleMatch(match, index, groupIndex, referenceIndex)).join('')}</div>`
+                    : `<div class="tier-empty">${thresholds.strong !== null && thresholds.possible !== null && thresholds.possible >= thresholds.strong
+                        ? 'The lower tier is disabled in the current search settings.' : 'No additional candidates in this similarity range and your selected filters.'}</div>`}
+            </section>` : ''}`;
+    }
+
+    function matchSnapshotUrl(match) {
+        if (match.snapshot_url) return safeImageUrl(match.snapshot_url);
+        const path = match.best_snapshot_path;
+        if (typeof path !== 'string') return '';
+        return safeImageUrl(path.startsWith('storage/') ? `/${path}` : path.startsWith('/') ? path : `/storage/${path}`);
+    }
+
+    function renderPossibleMatch(match, index, groupIndex, referenceIndex) {
+        const score = candidateScoreText(match.similarity);
+        // A candidate never inherits the identity group's name, watchlist,
+        // record count or history, even if an older API includes those fields.
+        const camera = match.match_source === 'sighting' ? pipelineLabel(match.matched_pipeline_id || match.pipeline_id)
+            : match.match_source === 'enrollment' ? 'Recorded reference photo' : 'Photo source unavailable';
+        const date = match.match_source === 'sighting' ? formatDateTime(match.matched_at)
+            : match.match_source === 'enrollment' ? 'Recorded reference · identity unconfirmed' : 'Identity unconfirmed';
+        return `<button type="button" class="match-card possible-match-card" data-action="viewPossibleMatch"
+                    data-group-index="${groupIndex}" data-match-index="${index}" data-reference-index="${referenceIndex}"
+                    aria-label="Compare possible match ${index + 1}, ${escapeHtml(score)} similarity">
+                <span class="possible-photo">
+                    <img class="match-snapshot" data-stored-src="${escapeHtml(matchSnapshotUrl(match))}" alt="Possible match ${index + 1} — identity unconfirmed">
+                    <span class="possible-score">${escapeHtml(score)} <small>similarity</small></span>
+                </span>
+                <span class="possible-card-details">
+                    <span class="possible-card-label">Candidate ${String(index + 1).padStart(2, '0')} <span>Unconfirmed</span></span>
+                    <span class="possible-camera">${escapeHtml(camera)}</span>
+                    <span class="possible-date">${escapeHtml(date)}</span>
+                    <span class="search-image-caption" hidden></span>
+                    <span class="possible-card-action">Compare photos <span aria-hidden="true">↗</span></span>
+                </span>
+            </button>`;
     }
 
     function renderMatches(matches, referenceIndex, faceIndex = null) {
         if (!matches || matches.length === 0) {
-            return '<div style="color: rgba(255,255,255,0.5); font-size: 0.85rem; padding: 0.5rem;">No matches found</div>';
+            return '<div style="color: rgba(255,255,255,0.5); font-size: 0.85rem; padding: 0.5rem;">No direct image matches within these filters.</div>';
         }
 
         return matches.map(match => {
@@ -1274,6 +1381,7 @@
     function renderSummaryTab(results) {
         const summary = results.summary || {};
         const isBatch = !!results.batch_id;
+        const hasTiers = (results.faces || results.results || []).some(group => Array.isArray(group.possible_matches));
 
         const html = `
             <div class="summary-stats">
@@ -1283,8 +1391,9 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-value">${escapeHtml(summary.total_matches || results.total_matches || 0)}</div>
-                    <div class="stat-label">Matches</div>
+                    <div class="stat-label">Strong matches</div>
                 </div>
+                ${hasTiers ? `<div class="stat-card possible-summary-stat"><div class="stat-value">${possibleMatchCount(results)}</div><div class="stat-label">Possible · review required</div></div>` : ''}
                 <div class="stat-card">
                     <div class="stat-value">${escapeHtml(summary.unique_identities_found || results.unique_identities || 0)}</div>
                     <div class="stat-label">Unique IDs</div>
@@ -1721,6 +1830,98 @@
     function cancelAppearanceView() {
         appearanceView = null;
         if (inflight.identity) inflight.identity.abort();
+        inflight.identity = null;
+    }
+
+    function viewPossibleMatch(groupIndex, matchIndex, moveFocus = false) {
+        const results = state.currentResults;
+        const groups = results?.faces || results?.results || [];
+        const group = Number.isInteger(groupIndex) ? groups[groupIndex] : null;
+        const candidates = group?.possible_matches || [];
+        const match = Number.isInteger(matchIndex) ? candidates[matchIndex] : null;
+        if (!match) return;
+        cancelAppearanceView();
+        const referenceIndex = results.results ? batchReferenceIndex(group, results) : 0;
+        const reference = state.resultReferences[referenceIndex];
+        const searchedFace = results.results ? match.face_index : group.face_index ?? groupIndex;
+        const faceLabel = Number.isInteger(searchedFace) ? ` · compare Face ${searchedFace + 1}` : '';
+        ['identity-full-profile', 'identity-analyze'].forEach(id => {
+            const link = document.getElementById(id); if (link) link.hidden = true;
+        });
+        document.getElementById('identity-modal-title').textContent = results.results
+            ? `Possible match review${faceLabel}` : `Possible match review · Face ${searchedFace + 1}`;
+        const body = document.getElementById('identity-modal-body');
+        const review = buildEl('section', 'possible-review');
+        const heading = buildEl('div', 'possible-review-heading');
+        const score = candidateScoreText(match.similarity);
+        heading.append(buildEl('span', 'possible-review-status', 'Review required · identity unconfirmed'),
+            buildEl('strong', 'possible-review-score', `${score} similarity`));
+        review.append(heading, buildEl('p', 'possible-review-intro',
+            'Compare your uploaded image with this exact candidate photo. Use Next to review the remaining candidates.'));
+        const photos = buildEl('div', 'possible-review-photos');
+        const photo = (label, source, uploadedReference, className, boundingBox = null) => {
+            const figure = buildEl('figure', `possible-review-photo ${className}`);
+            const heading = buildEl('figcaption', null, label);
+            figure.append(heading);
+            const img = buildEl('img');
+            img.alt = label;
+            const caption = buildEl('p', 'search-image-caption');
+            const frame = buildEl('div', 'possible-review-image');
+            frame.append(img);
+            // The original upload can contain several faces. Outline the
+            // searched face using the server's coordinates; never guess a crop.
+            if (boundingBox && ['x1', 'y1', 'x2', 'y2'].every(key => Number.isFinite(boundingBox[key]))) {
+                img.addEventListener('load', () => {
+                    if (img.dataset.searchImageSource !== 'uploaded' || !img.naturalWidth || !img.naturalHeight) return;
+                    const { x1, y1, x2, y2 } = boundingBox;
+                    if (x1 < 0 || y1 < 0 || x2 > img.naturalWidth || y2 > img.naturalHeight || x2 <= x1 || y2 <= y1) return;
+                    const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                    overlay.setAttribute('class', 'reference-face-box');
+                    overlay.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+                    overlay.setAttribute('aria-hidden', 'true');
+                    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                    for (const [key, value] of Object.entries({x:x1,y:y1,width:x2-x1,height:y2-y1})) rect.setAttribute(key, value);
+                    overlay.append(rect); frame.append(overlay);
+                    heading.textContent = `Uploaded image · highlighted Face ${searchedFace + 1}`;
+                }, {once:true});
+            }
+            SearchImage.render(img, caption, source, uploadedReference, PLACEHOLDER_AVATAR);
+            figure.append(frame, caption);
+            return figure;
+        };
+        photos.append(
+            photo(`Uploaded image${faceLabel}`, '', reference, 'reference-photo',
+                results.results ? match.query_bounding_box : group.bounding_box),
+            photo(`Candidate ${String(matchIndex + 1).padStart(2, '0')} · exact matched photo`, matchSnapshotUrl(match), null, 'candidate-photo')
+        );
+        review.append(photos);
+        const facts = buildEl('div', 'possible-review-facts');
+        facts.append(buildDetailRow('Photo source', match.match_source === 'sighting'
+            ? pipelineLabel(match.matched_pipeline_id || match.pipeline_id)
+            : match.match_source === 'enrollment' ? 'Recorded reference photo' : 'Photo source unavailable'));
+        if (match.match_source === 'sighting') facts.append(buildDetailRow('Recorded at', formatDateTime(match.matched_at)));
+        facts.append(buildDetailRow('Possible range', tierRange('possible', searchThresholds(results))));
+        review.append(facts, buildEl('p', 'search-score-note', 'Similarity is not an identification probability. Possible matches are not added to the matching journey. No review decision is saved by browsing.'));
+        const navigation = buildEl('nav', 'possible-review-navigation');
+        navigation.setAttribute('aria-label', 'Possible match candidates');
+        const previous = buildEl('button', 'btn-secondary', '← Previous');
+        previous.type = 'button'; previous.disabled = matchIndex === 0;
+        previous.dataset.possibleNav = 'previous';
+        previous.addEventListener('click', () => viewPossibleMatch(groupIndex, matchIndex - 1, 'previous'));
+        const next = buildEl('button', 'btn-primary', 'Next candidate →');
+        next.type = 'button'; next.disabled = matchIndex === candidates.length - 1;
+        next.dataset.possibleNav = 'next';
+        next.addEventListener('click', () => viewPossibleMatch(groupIndex, matchIndex + 1, 'next'));
+        const position = buildEl('span', 'possible-review-position', `Candidate ${matchIndex + 1} of ${candidates.length}`);
+        position.setAttribute('aria-live', 'polite');
+        navigation.append(previous, position, next);
+        review.insertBefore(navigation, photos);
+        body.replaceChildren(review);
+        if (!moveFocus) openIdentityModal();
+        else {
+            const requested = moveFocus === 'previous' ? previous : next;
+            (requested.disabled ? (requested === previous ? next : previous) : requested).focus();
+        }
     }
 
     async function viewSearchAppearances(faceIndex) {
@@ -1790,14 +1991,15 @@
             ? `Showing ${first}–${last} of ${payload.total} matching recorded appearances`
             : 'No recorded appearances meet this search'));
         summary.append(buildEl('p', null,
-            `${payload.cameras} cameras in results · ${Math.round(payload.threshold * 100)}% minimum similarity · Compared with the original uploaded face`));
+            `${payload.cameras} cameras in results · ${payload.direct_count ?? payload.total} direct image matches · ${payload.operator_confirmed_count ?? 0} operator-confirmed sightings`));
+        summary.append(buildEl('p', 'search-score-note', `${Math.round(payload.threshold * 100)}% minimum similarity applies to direct image matches. Confirmed sightings use your saved review decisions.`));
         if (view.context) summary.append(buildEl('p', null,
             `${view.context.scope} · ${view.context.camera} · ${view.context.dates}`));
         summary.append(buildEl('p', 'search-score-note', payload.coverage));
         summary.append(buildEl('p', 'search-score-note',
-            'The journey below covers this page. Use Next page for later matches. Rerun search to include newly recorded sightings. Missing photos remain unavailable; uploaded photos are not camera evidence.'));
+            'The journey below covers this page. Use Next page for later matches. Rerun search after confirming, rejecting or undoing a review, or to include new sightings. Missing photos remain unavailable; uploaded photos are not camera evidence.'));
         const sequence = buildEl('section', 'appearance-page-journey');
-        if (window.MovementTimeline) sequence.innerHTML = window.MovementTimeline.render(rows, pipelineLabel);
+        if (window.MovementTimeline) sequence.innerHTML = window.MovementTimeline.render(rows, pipelineLabel, {mode:'search'});
         else sequence.append(buildSightings(rows));
         const scores = buildEl('details', 'appearance-match-scores');
         scores.append(buildEl('summary', null, 'Review match scores and labels'));
@@ -1805,7 +2007,21 @@
         rows.forEach(row => {
             const item = buildEl('li', 'identity-sighting');
             item.append(buildEl('span', null, `${row.location_name || pipelineLabel(row.pipeline_id)} · ${formatDateTime(row.start_time)}`));
-            item.append(buildEl('span', null, `${Math.round(row.similarity * 100)}% similarity · ${row.display_name || (row.type === 'unverified' ? 'Unverified historical label' : 'Unknown')}`));
+            if (row.match_basis === 'operator_confirmed') {
+                item.append(buildEl('span', 'sighting-review-badge is-confirmed', 'Operator confirmed · no direct similarity score claimed'));
+                const review = row.manual_review || {};
+                item.append(buildEl('span', null, `${review.reviewer || 'Administrator'} · ${formatDateTime(review.reviewed_at)}`));
+                if (Number.isFinite(review.reference_similarity)) item.append(buildEl('span', null,
+                    `Linked reference: ${Math.round(review.reference_similarity * 100)}% similarity to the uploaded face. The reference may be outside the selected camera or dates.`));
+                if (row.identity_id && Number.isInteger(review.reference_appearance_id)) {
+                    const link = buildEl('a', null, 'Open reference and review decision ↗');
+                    link.href = `/admin/identity/${encodeURIComponent(row.identity_id)}?appearance_id=${review.reference_appearance_id}`;
+                    link.target = '_blank'; link.rel = 'noopener'; item.append(link);
+                }
+            } else {
+                const score = Number.isFinite(row.similarity) ? `${Math.round(row.similarity * 100)}% similarity` : 'Similarity unavailable';
+                item.append(buildEl('span', null, `Direct image match · ${score} · ${row.display_name || (row.type === 'unverified' ? 'Unverified historical label' : 'Unknown')}`));
+            }
             list.append(item);
         });
         scores.append(list);
@@ -1938,6 +2154,7 @@
     // registry exists by the time this runs.
     Actions.register({
         viewSearchAppearances: el => viewSearchAppearances(Number(el.dataset.faceIndex)),
+        viewPossibleMatch: el => viewPossibleMatch(Number(el.dataset.groupIndex), Number(el.dataset.matchIndex)),
         viewIdentity: (el) => viewIdentity(el.dataset.arg, Number(el.dataset.referenceIndex), el.dataset.embeddingId, el.dataset.faceIndex ? Number(el.dataset.faceIndex) : undefined),
         // Keyboard activation for the result cards (role="button" divs).
         // Delegated through the data-action-keydown binding actions.js already

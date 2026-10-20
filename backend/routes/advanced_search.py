@@ -130,6 +130,7 @@ from backend.core.search_evidence import SearchMatchContext
 
 
 class FaceMatchResponse(SearchMatchContext):
+    match_tier: str = 'strong'
     identity_id: str
     display_name: Optional[str] = None
     type: str
@@ -151,6 +152,7 @@ class FaceInImageResponse(BaseModel):
     skipped: bool = False
     skip_reason: Optional[str] = None
     matches: List[FaceMatchResponse] = []
+    possible_matches: List[FaceMatchResponse] = []
 
 
 class WatchlistAlertResponse(BaseModel):
@@ -167,6 +169,7 @@ class WatchlistAlertResponse(BaseModel):
 
 
 class SearchSummary(BaseModel):
+    possible_matches: int = 0
     total_faces_detected: int
     faces_searchable: int
     faces_skipped: int
@@ -178,6 +181,7 @@ class SearchSummary(BaseModel):
 
 
 class MultiSearchResponse(BaseModel):
+    thresholds: dict = {}
     search_id: str
     image_info: dict
     faces: List[FaceInImageResponse]
@@ -378,6 +382,8 @@ async def get_search_config(
     current_user: dict = Depends(require_admin())
 ):
     """Get search configuration."""
+    from backend.core.advanced_search import search_thresholds
+    thresholds = search_thresholds()
     return {
         "quality": {
             "min_threshold": settings.SEARCH_MIN_QUALITY_THRESHOLD,
@@ -396,7 +402,9 @@ async def get_search_config(
         # control because each had its own literal default.
         "results": {
             "default_top_k": settings.SEARCH_DEFAULT_TOP_K,
-            "max_top_k": settings.SEARCH_MAX_TOP_K
+            "max_top_k": settings.SEARCH_MAX_TOP_K,
+            "strong_threshold": thresholds['strong'],
+            "possible_threshold": thresholds['possible']
         },
         # The bar a match must clear to be shown at all. Distinct from the
         # legacy retrieval settings; exact search uses this same threshold.

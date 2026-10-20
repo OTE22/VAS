@@ -794,7 +794,9 @@ async def lifespan(app: FastAPI):
         logger.info("  🔄 Starting identity clustering service...")
         try:
             from backend.core.identity_clustering import clustering_service
-            if clustering_service and clustering_service._enabled:
+            if not settings.IDENTITY_CLUSTERING_ENABLED:
+                logger.info("  Identity clustering disabled (IDENTITY_CLUSTERING_ENABLED=false)")
+            elif clustering_service and clustering_service._enabled:
                 await clustering_service.start()
                 logger.info(f"  ✅ Identity clustering started (interval: {clustering_service.cluster_interval_hours} hours)")
                 initialized_components.append("identity_clustering")

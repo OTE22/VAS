@@ -8,6 +8,20 @@ from conftest import run_on_shared_loop as run
 from backend.core import service_supervisor as sup
 
 
+def test_identity_clustering_disabled_does_not_schedule(monkeypatch):
+    from config import Settings, settings
+    from backend.core.identity_clustering import IdentityClusteringService
+
+    assert Settings.model_fields["IDENTITY_CLUSTERING_ENABLED"].default is False
+    monkeypatch.setattr(settings, "IDENTITY_CLUSTERING_ENABLED", False)
+    delay = AsyncMock()
+    monkeypatch.setattr(sup, "durable_initial_delay", delay)
+    manager = IdentityClusteringService()
+    run(manager.start())
+    assert manager._clustering_task is None
+    delay.assert_not_awaited()
+
+
 @pytest.mark.parametrize('task_type,default,interval', [
     ('log_cleanup', 600, 6 * 3600),
     ('identity_retention', 3600, 24 * 3600),
@@ -53,6 +67,9 @@ def test_timestamp_offset_is_converted_to_utc(monkeypatch):
     ('identity_clustering', 'IdentityClusteringService', 'identity_clustering', 'stop'),
 ])
 def test_managers_restore_schedule_and_keep_intervals_live(monkeypatch, module_name, class_name, task_type, stop_name):
+    if task_type == 'identity_clustering':
+        from config import settings
+        monkeypatch.setattr(settings, 'IDENTITY_CLUSTERING_ENABLED', True)
     import importlib
     module = importlib.import_module('backend.core.' + module_name)
     manager = getattr(module, class_name)()

@@ -25,8 +25,8 @@
     <link rel="stylesheet" href="/frontend/vendor/fontawesome/css/all.min.css">
     <link rel="stylesheet" href="/frontend/css/admin.css?v=nav-4">
     <link rel="stylesheet" href="/frontend/css/footer.css">
-    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=appearance-search-1">
-    <link rel="stylesheet" href="/frontend/css/movement-timeline.css?v=sighting-review-1">
+    <link rel="stylesheet" href="/frontend/css/admin-search.css?v=match-tiers-20261020">
+    <link rel="stylesheet" href="/frontend/css/movement-timeline.css?v=continuous-review-20261020">
 </head>
 <body class="search-workspace">
     <!-- Skip to Main Content for Accessibility -->
@@ -139,7 +139,7 @@
                         </div>
 
                         <div class="form-group">
-                            <label for="top-k">Identity Groups Per Face</label>
+                            <label for="top-k">Groups Per Face, Per Tier</label>
                             <!-- No `selected` attribute: the default comes from
                                  SEARCH_DEFAULT_TOP_K via /api/search/config, and
                                  options above SEARCH_MAX_TOP_K are removed on load.
@@ -151,6 +151,12 @@
                                 <option value="20">20 groups</option>
                                 <option value="50">50 groups</option>
                             </select>
+                        </div>
+
+                        <div class="search-threshold-guide" id="search-threshold-guide" aria-label="Match similarity ranges">
+                            <div><span class="threshold-dot strong"></span><strong>Strong matches</strong><span data-threshold="strong">Higher similarity</span></div>
+                            <div><span class="threshold-dot possible"></span><strong>Possible matches</strong><span data-threshold="possible">Lower similarity</span></div>
+                            <p>Explore both tiers in one search. Possible matches stay separate for visual review.</p>
                         </div>
 
                         <div class="toggle-container">
@@ -318,7 +324,7 @@
                             <ol class="search-guide">
                                 <li><span>1</span><div><strong>Add an image</strong><p>Use a clear, well-lit reference.</p></div></li>
                                 <li><span>2</span><div><strong>Set your scope</strong><p>Choose identities and optional filters.</p></div></li>
-                                <li><span>3</span><div><strong>Review matches</strong><p>Explore results, alerts, and summaries.</p></div></li>
+                                <li><span>3</span><div><strong>Compare both tiers</strong><p>Review strong matches and possible candidates.</p></div></li>
                             </ol>
                         </div>
 
@@ -468,8 +474,8 @@
     <script src="/frontend/js/upload-modal-loader.js"></script>
     <script src="/frontend/js/admin-navbar.js"></script>
     <script src="/frontend/js/search-image.js?v=reference-1"></script>
-    <script src="/frontend/js/movement-timeline.js?v=sighting-review-1"></script>
-    <script src="/frontend/js/sighting-review.js?v=sighting-review-1"></script>
-    <script src="/frontend/js/admin-search.js?v=sighting-review-1"></script>
+    <script src="/frontend/js/movement-timeline.js?v=review-correction-20261020"></script>
+    <script src="/frontend/js/sighting-review.js?v=review-correction-20261020"></script>
+    <script src="/frontend/js/admin-search.js?v=match-tiers-20261020"></script>
 </body>
 </html>

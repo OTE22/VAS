@@ -124,3 +124,8 @@
 .sighting-review-footnote { margin: 1rem 0 0; color: #adc0cf; font-size: .85rem; line-height: 1.5; }
 .sighting-review-panel button:focus-visible, .sighting-review-open:focus-visible { outline: 3px solid #8ed6ff; outline-offset: 3px; }
 @media (max-width: 560px) { .sighting-review-photos { grid-template-columns: 1fr; } .sighting-review-content { padding: 1rem; } .sighting-review-actions button { flex: 1 1 45%; } }
+
+/* Continuous operator review: navigation stays inside the comparison dialog. */
+.sighting-review-progress { color: #b6d8eb; margin: 0 0 .5rem; font-weight: 600; }
+.sighting-review-picker { width: 100%; padding: .65rem; margin-bottom: 1rem; color: #edf5fc; background: #172b3c; border: 1px solid #617a90; border-radius: 6px; font: inherit; }
+.sighting-review-actions { position: sticky; bottom: 0; padding: .8rem 0; background: #101e2b; z-index: 1; }

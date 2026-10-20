@@ -1518,7 +1518,7 @@ function renderAdvancedTimeline(appearances, review = null) {
 // Only the most recent click may publish content, even after a modal close.
 let identityDetailRevision = 0;
 let identityDetailController = null;
-async function viewIdentityDetails(identityId, appearanceId = null, searchEmbeddingId = null, searchUnverified = false) {
+async function viewIdentityDetails(identityId, appearanceId = null, searchEmbeddingId = null, searchUnverified = false, refreshReview = false) {
     const modal = document.getElementById('identity-detail-modal');
     const content = document.getElementById('identity-detail-content');
     const revision = ++identityDetailRevision;
@@ -1528,8 +1528,10 @@ async function viewIdentityDetails(identityId, appearanceId = null, searchEmbedd
         ? `?search_embedding_id=${encodeURIComponent(searchEmbeddingId)}${searchUnverified ? '&search_unverified=true' : ''}`
         : /^[1-9][0-9]*$/.test(String(appearanceId || ''))
         ? `?appearance_id=${encodeURIComponent(appearanceId)}` : '';
-    content.innerHTML = '<p role="status">Loading the selected sighting…</p>';
-    ModalStack.open(modal, { onClose: handleDetailModalClose });
+    if (!refreshReview) {
+        content.innerHTML = '<p role="status">Loading the selected sighting…</p>';
+        ModalStack.open(modal, { onClose: handleDetailModalClose });
+    }
 
     try {
         const response = await fetch(`/api/admin/identity/${encodeURIComponent(identityId)}${query}`, {
@@ -1555,6 +1557,13 @@ async function viewIdentityDetails(identityId, appearanceId = null, searchEmbedd
         const portraitUrl = identity.search_match ? identity.snapshot_url : review ? selected?.snapshot_url : identity.snapshot_url;
         const portraitLabel = identity.search_match ? 'Matched search observation' : review ? (review.reference_kind === 'selected_sighting' ? 'Selected sighting' : 'Initial reference sighting') : 'Representative portrait';
 
+        // Refresh a saved review in place: keep the gallery expanded and the
+        // operator at the same position while working through the remaining rows.
+        const reviewView = refreshReview ? {
+            details: [...content.querySelectorAll('details')].map(node => node.open),
+            scroll: [modal, ...modal.querySelectorAll('*')].filter(node => node.scrollTop)
+                .map(node => ({node, top: node.scrollTop}))
+        } : null;
         content.innerHTML = `
             <div class="detail-header">
                 <div class="detail-image" aria-label="${portraitLabel}">
@@ -1646,15 +1655,23 @@ async function viewIdentityDetails(identityId, appearanceId = null, searchEmbedd
             </div>
         `;
 
+        if (reviewView) {
+            content.querySelectorAll('details').forEach((node, index) => {
+                node.open = reviewView.details[index] || false;
+            });
+            reviewView.scroll.forEach(({node, top}) => {
+                if (node.isConnected) node.scrollTop = top;
+            });
+        }
         if (identity.search_match && !['verified_reference', 'consistent_reference'].includes(identity.search_match.identity_verification)) {
             content.querySelectorAll('[data-action="analyzeInSecurityIntelligence"], [data-action="openCreateLiveAlertModal"], [data-action="openAddToWatchlistModal"], [data-action="openMergeModal"]').forEach(button => { button.hidden = true; });
         }
         return identity;
     } catch (error) {
         if (revision !== identityDetailRevision || error.name === 'AbortError') return null;
-        content.innerHTML = '<p role="alert">Unable to load this sighting. Close this window and try again.</p>';
+        if (!refreshReview) content.innerHTML = '<p role="alert">Unable to load this sighting. Close this window and try again.</p>';
         console.error('Error loading identity details:', error);
-        showNotification(error.message || 'Error loading identity details', 'error');
+        showNotification(refreshReview ? 'Decision saved, but the list could not refresh. Your review remains open; refresh the details before continuing.' : error.message || 'Error loading identity details', 'error');
         return null;
     }
 }
@@ -1664,7 +1681,7 @@ document.addEventListener('sighting-review-saved', event => {
     if (!content?.contains(event.detail.sourceRoot)) return;
     const data = event.detail;
     viewIdentityDetails(data.identity_id, data.reference_appearance_id,
-                        data.search_embedding_id, data.search_unverified);
+                        data.search_embedding_id, data.search_unverified, true);
 });
 
 // Runs whenever the detail modal leaves the stack — X button, Escape, or a

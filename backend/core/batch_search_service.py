@@ -40,6 +40,7 @@ class BatchImageResult:
     faces_detected: int = 0
     faces_searched: int = 0
     matches: List[Dict] = field(default_factory=list)
+    possible_matches: List[Dict] = field(default_factory=list)
     quality_scores: List[float] = field(default_factory=list)
     processing_time_ms: int = 0
 
@@ -175,9 +176,15 @@ class BatchSearchService:
                         
                         # Extract matches
                         matches = []
+                        possible_matches = []
                         quality_scores = []
                         for face in search_result.faces:
                             quality_scores.append(face.quality_score)
+                            for match in face.possible_matches:
+                                possible_matches.append({
+                                    **self.advanced_search_service.match_to_dict(match),
+                                    'query_bounding_box': face.bounding_box,
+                                    'face_index': face.face_index})
                             for match in face.matches:
                                 matches.append({
                                     **{key: getattr(match, key) for key in (
@@ -207,6 +214,7 @@ class BatchSearchService:
                             faces_detected=search_result.summary['total_faces_detected'],
                             faces_searched=search_result.summary['faces_searchable'],
                             matches=matches,
+                            possible_matches=possible_matches,
                             quality_scores=quality_scores,
                             processing_time_ms=img_time
                         ), search_result.summary['watchlist_alerts'], matches, search_result.summary['total_faces_detected']
@@ -328,7 +336,10 @@ class BatchSearchService:
 
     def to_dict(self, result: BatchSearchResult) -> Dict:
         """Convert BatchSearchResult to dictionary."""
+        from backend.core.advanced_search import search_thresholds
         return {
+            "thresholds": search_thresholds(),
+            "possible_matches": sum(len(r.possible_matches) for r in result.results),
             "batch_id": result.batch_id,
             "total_images": result.total_images,
             "successful_images": result.successful_images,
@@ -346,6 +357,7 @@ class BatchSearchService:
                     "faces_detected": r.faces_detected,
                     "faces_searched": r.faces_searched,
                     "matches": r.matches,
+                    "possible_matches": r.possible_matches,
                     "quality_scores": r.quality_scores,
                     "processing_time_ms": r.processing_time_ms
                 }

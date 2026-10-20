@@ -51,16 +51,19 @@ test('side-by-side photos must load before confirmation; exact preview is saved 
   assert.equal(post.options.headers['X-Requested-With'],'XMLHttpRequest');
   assert.deepEqual(JSON.parse(post.options.body),{preview_token:'synthetic-preview-token',decision:'confirmed',note:'Compared both photos'});
   await respond(post,{success:true,identity_id:'synthetic',reference_appearance_id:1,appearance_id:2,decision:'confirmed'});
+  assert.equal(h.saved.length,0);assert.equal(h.closes.length,0);
+  assert.match(h.w.document.querySelector('.sighting-review-status').textContent,/Decision saved/);
+  h.w.document.querySelector('.sighting-review-close').click();
   assert.equal(h.saved.length,1);assert.equal(h.saved[0].sourceRoot,h.w.document.querySelector('.movement-review-scope'));assert.equal(h.closes.length,1);
  }finally{h.close()}
 });
 
-test('different-person decision saves rejection; Not sure only closes',async()=>{
+test('different-person decision stays open; Done closes without another mutation',async()=>{
  const h=harness();try{
   await open(h);loaded(h);h.w.document.querySelector('.review-reject').click();
   assert.equal(JSON.parse(h.requests[1].options.body).decision,'rejected');
   await respond(h.requests[1],{success:true,identity_id:'synthetic',reference_appearance_id:1,appearance_id:2,decision:'rejected'});
-  await open(h);h.w.document.querySelector('.review-defer').click();assert.equal(h.requests.length,3);
+  h.w.document.querySelector('.sighting-review-close').click();assert.equal(h.requests.length,2);assert.equal(h.saved.length,1);
  }finally{h.close()}
 });
 
@@ -100,5 +103,78 @@ test('closing during save still delivers a successful persisted decision to the 
   h.w.ModalStack.close(h.w.document.getElementById('sighting-review-modal'));
   await respond(h.requests.at(-1),{success:true,identity_id:'synthetic',reference_appearance_id:1,appearance_id:2});
   assert.equal(h.saved.length,1);assert.equal(h.w.document.getElementById('sighting-review-modal').style.display,'none');
+ }finally{h.close()}
+});
+
+function addMore(h) {
+ h.rows.push({...h.rows[1],id:3}, {...h.rows[1],id:4,association_status:'operator_rejected',manual_review:{reviewer:'Operator',reviewed_at:'2026-01-01T11:00:00Z'}});
+ h.w.document.getElementById('root').innerHTML=h.w.MovementTimeline.render(h.rows,id=>id,h.context);
+}
+test('save advances within the modal, skips already reviewed rows, and fetches a fresh preview',async()=>{
+ const h=harness();try{
+  addMore(h);await open(h);loaded(h);
+  assert.match(h.w.document.querySelector('.sighting-review-progress').textContent,/Image 1 of 2/);
+  h.w.document.querySelector('.review-confirm').click();
+  assert.equal(h.w.document.querySelector('.sighting-review-picker').disabled,true);
+  await respond(h.requests[1],{identity_id:'synthetic',reference_appearance_id:1,appearance_id:2,decision:'confirmed'});
+  assert.equal(h.closes.length,0);assert.equal(h.saved.length,0);
+  assert.match(h.requests[2].url,/sightings\/3\/review/);
+  await respond(h.requests[2],preview({preview_token:'next-token',sighting:{id:3,snapshot_url:'/storage/3.jpg'}}));
+  assert.equal(h.w.document.querySelector('.review-confirm').disabled,true);
+  loaded(h);h.w.document.querySelector('.review-reject').click();
+  assert.equal(JSON.parse(h.requests[3].options.body).preview_token,'next-token');
+  await respond(h.requests[3],{identity_id:'synthetic',reference_appearance_id:1,appearance_id:3,decision:'rejected'});
+  assert.match(h.w.document.querySelector('.sighting-review-progress').textContent,/2 decisions saved/);
+  h.w.document.querySelector('.sighting-review-close').click();assert.equal(h.saved.length,1);
+ }finally{h.close()}
+});
+test('skip, previous, and image selection navigate without saving',async()=>{
+ const h=harness();try{
+  addMore(h);await open(h);h.w.document.querySelector('.review-defer').click();
+  assert.match(h.requests[1].url,/sightings\/3\/review/);
+  await respond(h.requests[1],preview());
+  h.w.document.querySelector('.review-previous').click();
+  assert.match(h.requests[2].url,/sightings\/2\/review/);
+  await respond(h.requests[2],preview());
+  const picker=h.w.document.querySelector('.sighting-review-picker');picker.value='1';picker.dispatchEvent(new h.w.Event('change'));
+  assert.match(h.requests[3].url,/sightings\/3\/review/);
+  assert.ok(h.requests.every(r=>r.options.method!=='POST'));
+ }finally{h.close()}
+});
+test('failed save stays on the same image and never auto-advances',async()=>{
+ const h=harness();try{
+  addMore(h);await open(h);loaded(h);h.w.document.querySelector('.review-confirm').click();
+  await respond(h.requests[1],{detail:'Review changed; reload.'},false);
+  assert.equal(h.requests.length,2);assert.equal(h.closes.length,0);assert.equal(h.saved.length,0);
+  assert.equal(h.w.document.querySelector('.review-confirm').disabled,true);
+ }finally{h.close()}
+});
+
+test('last decision remains visible and undo reloads its current version',async()=>{
+ const h=harness();try{
+  await open(h);loaded(h);h.w.document.querySelector('.review-confirm').click();
+  await respond(h.requests[1],{identity_id:'synthetic',reference_appearance_id:1,appearance_id:2,decision:'confirmed'});
+  h.w.document.querySelector('.review-revisit').click();
+  await respond(h.requests[2],preview({preview_token:'current-version',can_undo:true,decision:'confirmed'}));
+  h.w.document.querySelector('.review-undo').click();
+  assert.deepEqual(JSON.parse(h.requests[3].options.body),{preview_token:'current-version',decision:'clear',note:''});
+  await respond(h.requests[3],{identity_id:'synthetic',reference_appearance_id:1,appearance_id:2,decision:'clear'});
+  assert.match(h.requests[4].url,/sightings\/2\/review/);
+  await respond(h.requests[4],preview());
+  assert.match(h.w.document.querySelector('.sighting-review-progress').textContent,/0 decisions saved/);
+ }finally{h.close()}
+});
+
+test('reference sighting can open a comparison against another sighting without saving',async()=>{
+ const h=harness();try{
+  const trigger=h.w.document.querySelector('[data-review-others]');
+  assert.ok(trigger);assert.match(trigger.textContent,/Compare other sightings/);
+  assert.match(h.w.document.querySelector('[data-review-sighting]').textContent,/Not the same person/);
+  trigger.click();assert.equal(h.requests.length,1);
+  assert.match(h.requests[0].url,/sightings\/2\/review\?reference_appearance_id=1$/);
+  await respond(h.requests[0],preview());
+  assert.equal(h.w.document.querySelector('.review-reject').disabled,true);
+  loaded(h);assert.equal(h.w.document.querySelector('.review-reject').disabled,false);
+  assert.equal(h.requests.length,1,'opening comparison must not reject anything');
  }finally{h.close()}
 });
