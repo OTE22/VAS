@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request, Query, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_, or_, text
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel, field_validator, Field
 
@@ -855,6 +855,13 @@ async def list_unknown_identities(
             await redis_cache_service.set(cache_key, empty_result, ttl=cache_ttl)
             return empty_result
 
+        # Container PostgreSQL may have a small /dev/shm. These aggregates do
+        # not need parallel workers; avoiding their shared hash tables keeps a
+        # cache miss from exhausting it. LOCAL resets at transaction end and
+        # affects neither other requests nor the database's global settings.
+        if db.get_bind().dialect.name == "postgresql":
+            await db.execute(text("SET LOCAL max_parallel_workers_per_gather = 0"))
+
         # ---- Every condition, in SQL, BEFORE the count and before pagination.
         # The previous version selected a page and then dropped rows from it in
         # Python, so filtering by a camera whose faces were not among the newest
@@ -894,20 +901,18 @@ async def list_unknown_identities(
         # Membership + authorization, from the one effective-pipeline relation.
         conditions.append(pipeline_scope_predicate(pipeline_id, user_pipelines))
 
-        base_ids = select(Identity.id).where(*conditions).subquery()
-
-        # Aggregates are independent queries over their own row sources. Doing
-        # them in one join would multiply each identity by its camera count and
-        # inflate total_appearances.
-        total = (await db.execute(select(func.count()).select_from(base_ids))).scalar() or 0
-        total_appearances = (await db.execute(
-            select(func.coalesce(func.sum(Identity.appearances_count), 0))
-            .where(Identity.id.in_(select(base_ids.c.id)))
-        )).scalar() or 0
+        # Resolve membership once per statistics statement. Without a shared
+        # CTE, each camera tier repeated the entire filtered identity query.
+        base_ids = select(Identity.id, Identity.appearances_count).where(*conditions).cte(
+            "matching_unknown_identities").prefix_with("MATERIALIZED", dialect="postgresql")
         cameras_relation = effective_pipelines(select(base_ids.c.id)).subquery()
-        active_cameras = (await db.execute(
-            select(func.count(func.distinct(cameras_relation.c.pipeline_id)))
-        )).scalar() or 0
+        # Separate scalar aggregates avoid multiplying appearance counts by
+        # the number of cameras, while all three share the same matched IDs.
+        total, total_appearances, active_cameras = (await db.execute(select(
+            select(func.count()).select_from(base_ids).scalar_subquery(),
+            select(func.coalesce(func.sum(base_ids.c.appearances_count), 0)).scalar_subquery(),
+            select(func.count(func.distinct(cameras_relation.c.pipeline_id))).scalar_subquery(),
+        ))).one()
 
         # Count matching cameras before pagination so each gets its own page.
         pipeline_counts = await db.execute(
@@ -1115,11 +1120,13 @@ async def list_unknown_identities(
         
         return result
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error listing unknown identities: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list unknown identities: {str(e)}"
+            detail="Failed to list unknown identities. Please try again."
         )
 
 

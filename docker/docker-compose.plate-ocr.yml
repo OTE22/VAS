@@ -1,0 +1,88 @@
+# Private GPU workers for the vehicle pilot; managed separately from VAS/VMS.
+name: vas_plate_ocr
+services:
+  plate_ocr:
+    image: vas-plate-ocr:20261027
+    build:
+      context: ./plate-ocr
+    networks: [vehicle_processing]
+    command: [python, -m, uvicorn, 'worker:app', --host, '0.0.0.0', --port, '8091', --workers, '1', --limit-concurrency, '8', --no-access-log]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    shm_size: "256m"
+    pids_limit: 128
+    restart: unless-stopped
+    stop_grace_period: 45s
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      VEHICLE_WORKER_TOKEN_FILE: /run/secrets/vehicle_worker_token
+    secrets: [vehicle_worker_token]
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+          pids: 128
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${PLATE_OCR_GPU_DEVICE:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  vehicle-vision:
+    image: vas-vehicle-vision:20261027
+    build:
+      context: ./vehicle-vision
+    networks: [vehicle_processing]
+    read_only: true
+    user: '1000:1000'
+    tmpfs: ['/tmp:size=256m,mode=1777']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    shm_size: 256m
+    pids_limit: 128
+    restart: unless-stopped
+    environment:
+      VEHICLE_WORKER_TOKEN_FILE: /run/secrets/vehicle_worker_token
+      PLATE_OCR_URL: http://plate_ocr:8091
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    secrets: [vehicle_worker_token]
+    deploy:
+      resources:
+        limits: {cpus: '2.0', memory: 4G, pids: 128}
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${PLATE_OCR_GPU_DEVICE:-0}']
+              capabilities: [gpu]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: '10m', max-file: '3'}
+
+networks:
+  vehicle_processing:
+    name: vas_vehicle_processing
+    internal: true
+
+secrets:
+  vehicle_worker_token:
+    file: ../secrets/vehicle_worker_token

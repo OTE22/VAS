@@ -606,6 +606,8 @@ if identities_router:
 else:
     logger.warning("⚠️ Identities router not registered - identity management endpoints unavailable")
 app.include_router(webhook_router)
+from backend.routes.vehicles import router as vehicles_router
+app.include_router(vehicles_router)
 app.include_router(detections_router)
 app.include_router(stats_router)
 app.include_router(upload_router)

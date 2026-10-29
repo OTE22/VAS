@@ -55,6 +55,109 @@ class JSONB(_PostgresJSONB):
 Base = declarative_base()
 
 
+class KnownVehicle(Base):
+    __tablename__ = 'known_vehicles'
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(160), nullable=False)
+    plate = Column(String(64), nullable=False)
+    plate_key = Column(String(64), nullable=False)
+    country = Column(String(8), nullable=False)
+    make = Column(String(80))
+    model = Column(String(80))
+    color = Column(String(60))
+    year = Column(Integer)
+    notes = Column(Text)
+    photo_path = Column(String(512))
+    archived = Column(Boolean, nullable=False, default=False, server_default='false')
+    version = Column(Integer, nullable=False, default=1, server_default='1')
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (Index('uq_known_vehicle_plate', 'country', 'plate_key', unique=True,
+                           postgresql_where=text('NOT archived')),)
+
+
+class VehiclePipeline(Base):
+    __tablename__ = 'vehicle_pipelines'
+    pipeline_id = Column(String(255), ForeignKey('pipelines.pipeline_id', ondelete='RESTRICT'), primary_key=True)
+    enabled = Column(Boolean, nullable=False, default=False, server_default='false')
+    ocr_profile = Column(String(12), nullable=False, default='en', server_default='en')
+    country = Column(String(8), nullable=False, default='LB', server_default='LB')
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (CheckConstraint("ocr_profile IN ('ar','en','latin')", name='ck_vehicle_ocr_profile'),)
+
+
+class VehicleSighting(Base):
+    __tablename__ = 'vehicle_sightings'
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pipeline_id = Column(String(255), ForeignKey('pipelines.pipeline_id', ondelete='RESTRICT'), nullable=False)
+    event_id = Column(String(128), nullable=False)
+    detection_index = Column(Integer, nullable=False)
+    captured_at = Column(DateTime, nullable=False)
+    received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    vehicle_type = Column(String(32), nullable=False)
+    track_id = Column(String(128))
+    bbox = Column(JSONB, nullable=False)
+    detection_score = Column(Float, nullable=False)
+    scene_path = Column(String(512), nullable=False)
+    vehicle_path = Column(String(512), nullable=False)
+    plate_path = Column(String(512))
+    country = Column(String(8), nullable=False)
+    ocr_profile = Column(String(12), nullable=False)
+    ocr_result = Column(JSONB)
+    plate = Column(String(64))
+    plate_key = Column(String(64), index=True)
+    plate_score = Column(Float)
+    review_state = Column(String(24), nullable=False, default='pending', server_default='pending')
+    known_vehicle_id = Column(UUID(as_uuid=True), ForeignKey('known_vehicles.id', ondelete='RESTRICT'))
+    rejected_vehicle_ids = Column(JSONB, nullable=False, default=list, server_default='[]')
+    embedding = Column(Vector(256) if PGVECTOR_AVAILABLE else JSONB)
+    embedding_version = Column(String(64))
+    processing_state = Column(String(24), nullable=False, default='pending', server_default='pending')
+    attempts = Column(Integer, nullable=False, default=0, server_default='0')
+    lease_until = Column(DateTime)
+    next_attempt_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    error_code = Column(String(80))
+    version = Column(Integer, nullable=False, default=1, server_default='1')
+    __table_args__ = (
+        UniqueConstraint('pipeline_id', 'event_id', 'detection_index', name='uq_vehicle_event_detection'),
+        Index('ix_vehicle_pipeline_time', 'pipeline_id', 'captured_at'),
+        Index('ix_vehicle_capture_time', 'captured_at'),
+        Index('ix_vehicle_processing', 'processing_state', 'next_attempt_at'),
+        CheckConstraint("processing_state IN ('pending','processing','done','failed')", name='ck_vehicle_processing'),
+        CheckConstraint("review_state IN ('pending','confirmed','rejected','unreadable')", name='ck_vehicle_review'),
+    )
+
+
+class VehiclePersonLink(Base):
+    __tablename__ = 'vehicle_person_links'
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    vehicle_id = Column(UUID(as_uuid=True), ForeignKey('known_vehicles.id', ondelete='RESTRICT'), nullable=False)
+    identity_id = Column(UUID(as_uuid=True), ForeignKey('identities.id', ondelete='SET NULL'))
+    identity_name = Column(String(255), nullable=False)
+    historical_identity_id = Column(UUID(as_uuid=True), nullable=False)
+    relationship_type = Column(String(24), nullable=False)
+    evidence = Column(Text, nullable=False)
+    active = Column(Boolean, nullable=False, default=True, server_default='true')
+    reviewed_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'))
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (
+        CheckConstraint("relationship_type IN ('registered_owner','driver','associated')", name='ck_vehicle_person_relation'),
+        Index('ix_vehicle_person_vehicle', 'vehicle_id'),
+    )
+
+
+class VehicleAudit(Base):
+    __tablename__ = 'vehicle_audit'
+    id = Column(Integer, primary_key=True)
+    entity_type = Column(String(24), nullable=False)
+    entity_id = Column(String(255), nullable=False)
+    action = Column(String(40), nullable=False)
+    actor_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'))
+    details = Column(JSONB, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (Index('ix_vehicle_audit_entity', 'entity_type', 'entity_id'),)
+
+
 # Enums for identity management
 class IdentityType(str, enum.Enum):
     UNKNOWN = "unknown"

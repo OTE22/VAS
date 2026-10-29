@@ -1,0 +1,29 @@
+# Add after the production/GPU compose files. Workers run in their own project.
+services:
+  migrate:
+    image: vas-vehicles:20261027
+    build:
+      dockerfile: docker/Dockerfile.gpu
+    environment:
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-a027b001cars}
+  face_recognition:
+    image: vas-vehicles:20261027
+    environment:
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-a027b001cars}
+      VEHICLE_PROCESSING_ENABLED: 'true'
+      VEHICLE_VISION_URL: http://vehicle-vision:8092
+      VEHICLE_WORKER_TOKEN_FILE: /run/secrets/vehicle_worker_token
+      VEHICLE_PILOT_PIPELINE_ID: '4c79dc55-8ef0-4cbe-bbd6-dcd01d4d755b'
+    secrets: [vehicle_worker_token]
+    networks: [vehicle_processing]
+  ml_worker:
+    image: vas-vehicles:20261027
+    environment:
+      MIGRATIONS_EXPECTED_HEAD: ${MIGRATIONS_EXPECTED_HEAD:-a027b001cars}
+networks:
+  vehicle_processing:
+    external: true
+    name: vas_vehicle_processing
+secrets:
+  vehicle_worker_token:
+    file: ../secrets/vehicle_worker_token

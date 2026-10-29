@@ -1074,11 +1074,18 @@ async def lifespan(app: FastAPI):
         raise startup_error
 
     # ==================== RUNNING PHASE ====================
+    vehicle_task = None
+    if settings.VEHICLE_PROCESSING_ENABLED:
+        from backend.vehicles.processing import run as run_vehicle_processing
+        vehicle_task = asyncio.create_task(run_vehicle_processing(), name='vehicle-processing')
     try:
         # Service is now running
         yield
 
     finally:
+        if vehicle_task:
+            vehicle_task.cancel()
+            await asyncio.gather(vehicle_task, return_exceptions=True)
         # ==================== SHUTDOWN PHASE ====================
         shutdown_time = time.time()
         logger.info("=" * 70)

@@ -228,6 +228,7 @@ cmd_upgrade() {
     else
         run mkdir -p "$ROOT/backups"
         local members=(docker/.env docker/docker-compose.prod.yml docker/docker-compose.prod.gpu.yml docker/docker-compose.prod.storage.yml)
+        [ -f "$ROOT/docker/docker-compose.vehicles.yml" ] && members+=(docker/docker-compose.vehicles.yml)
         [ -f "$GPU_OVERLAY" ] && members+=(docker/gpu-allocation.generated.yml)
         [ -d "$ROOT/secrets" ] && members+=(secrets)
         [ -d "$ROOT/certs" ] && members+=(certs)

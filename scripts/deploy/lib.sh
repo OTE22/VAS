@@ -244,6 +244,9 @@ compose_files() {
     if [ -n "$(storage_root)" ]; then
         files+=(-f "$ROOT/docker/docker-compose.prod.storage.yml")
     fi
+    if [ "$(read_env_kv VEHICLE_PILOT_ENABLED 2>/dev/null)" = "1" ]; then
+        files+=(-f "$ROOT/docker/docker-compose.vehicles.yml")
+    fi
     printf '%s\n' "${files[@]}"
 }
 

@@ -613,6 +613,10 @@ class Settings(BaseSettings):
     # Storage Configuration
     # =====================================================
     STORAGE_DIR: str = Field(default="/app/storage")  # Docker path
+    VEHICLE_PROCESSING_ENABLED: bool = Field(default=False)
+    VEHICLE_VISION_URL: str = Field(default="http://vehicle-vision:8092")
+    VEHICLE_WORKER_TOKEN_FILE: str = Field(default="")
+    VEHICLE_PILOT_PIPELINE_ID: str = Field(default="")
     SAVE_IMAGES: bool = Field(default=True)
     MAX_STORAGE_GB: int = Field(default=500)
     # Legacy compatibility only; camera evidence is governed by save flags and retention.

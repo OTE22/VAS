@@ -24,7 +24,7 @@ the route layer and the auth layer can use it without an import cycle —
 the dependency could not run the other way.
 """
 
-from sqlalchemy import exists, false, select, union
+from sqlalchemy import exists, false, or_, select, union
 
 from db_models import (
     Detection,
@@ -55,8 +55,8 @@ def has_embedding_pipelines(identity_col):
     )
 
 
-def effective_pipelines(identity_ids=None):
-    """Distinct ``(identity_id, pipeline_id)`` pairs under the priority rule.
+def _effective_pipeline_queries(identity_ids=None):
+    """The three priority-qualified sources, before deduplication.
 
     ``identity_ids`` may be a list of ids or a scalar SELECT of them; it is
     pushed into every branch so each can use its own ``(identity_id, ...)``
@@ -96,8 +96,13 @@ def effective_pipelines(identity_ids=None):
         embeddings = embeddings.where(IdentityEmbedding.identity_id.in_(identity_ids))
         faces = faces.where(Face.identity_id.in_(identity_ids))
 
-    # UNION (not UNION ALL): the pairs must be distinct.
-    return union(appearances, embeddings, faces)
+    return appearances, embeddings, faces
+
+
+def effective_pipelines(identity_ids=None):
+    """Distinct ``(identity_id, pipeline_id)`` pairs under the priority rule."""
+    # UNION (not UNION ALL): callers count and display distinct pairs.
+    return union(*_effective_pipeline_queries(identity_ids))
 
 
 def pipeline_scope_predicate(pipeline_id, allowed_pipelines):
@@ -127,11 +132,18 @@ def pipeline_scope_predicate(pipeline_id, allowed_pipelines):
     elif pipeline_id:
         wanted = [pipeline_id]
 
-    scope = effective_pipelines().subquery()
-    member = select(scope.c.identity_id)
-    if wanted is not None:
-        member = member.where(scope.c.pipeline_id.in_(wanted))
-    return Identity.id.in_(member)
+    # Membership only needs one matching row. Building the global UNION here
+    # made every filtered count repeat that full relation inside each camera
+    # branch. Keep the same priority sources, but probe them per identity.
+    members = []
+    for source in _effective_pipeline_queries():
+        member = source.where(source.selected_columns.identity_id == Identity.id)
+        if wanted is not None:
+            member = member.where(source.selected_columns.pipeline_id.in_(wanted))
+        # The route also joins appearances when counting cameras. Correlating
+        # only Identity keeps each source table local to its EXISTS in that case.
+        members.append(member.correlate(Identity).exists())
+    return or_(*members)
 
 
 async def pipelines_for(db, identity_ids):

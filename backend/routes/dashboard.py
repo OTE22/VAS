@@ -497,7 +497,9 @@ async def admin_audit(
 
 
 @router.get("/admin/pipelines")
+@router.get("/admin/vehicles", include_in_schema=False)
 async def admin_pipelines(
+    request: Request,
     current_user: User = Depends(require_strict_access(allowed_roles=["admin"], require_pipeline_access=False))
 ):
     """
@@ -510,7 +512,7 @@ async def admin_pipelines(
     """
     try:
         logger.info(f"[ADMIN_PIPELINES] ✅ STRICT AUTH: Admin user {current_user.username} (ID: {current_user.id}) accessing pipelines page")
-        return FileResponse("frontend/admin/pipelines.html")
+        return FileResponse("frontend/admin/vehicles.html" if request.url.path == '/admin/vehicles' else "frontend/admin/pipelines.html")
     except FileNotFoundError:
         return JSONResponse(content={"message": "Admin pipelines page not found"})
 

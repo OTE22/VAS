@@ -95,3 +95,5 @@ backups/
 docker/.env*
 !docker/.env.example
 docker/gpu-allocation.generated.yml
+docker/plate-ocr/wheels/
+docker/vehicle-vision/models/

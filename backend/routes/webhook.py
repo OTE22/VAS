@@ -645,13 +645,24 @@ async def webhook_handler(pipeline_id: str, payload: dict, background_tasks: Bac
                 processing_feedback.discard(feedback_key)
 
 
+async def dispatch_webhook(pipeline_id, payload, background_tasks):
+    if settings.VEHICLE_PROCESSING_ENABLED:
+        from backend.vehicles.ingest import vehicle_event, only_vehicles, accept_vehicle_event
+        if vehicle_event(payload):
+            resolved = await _resolve_alias(validate_pipeline_id(pipeline_id))
+            outcome = await accept_vehicle_event(resolved, payload)
+            if only_vehicles(payload):
+                return JSONResponse(status_code=202, content={**outcome, 'pipeline_id': resolved})
+    return await webhook_handler(pipeline_id, payload, background_tasks)
+
+
 # Register webhook endpoint at both /webhook/{pipeline_id} and /api/webhook/{pipeline_id}
 @router.post("/webhook/{pipeline_id}",
              dependencies=[Depends(require_webhook_key)])
 async def webhook(pipeline_id: str, request: Request, background_tasks: BackgroundTasks):
     """Webhook endpoint - /webhook/{pipeline_id}"""
     payload = await parse_webhook_request(request)
-    return await webhook_handler(pipeline_id, payload, background_tasks)
+    return await dispatch_webhook(pipeline_id, payload, background_tasks)
 
 
 @router.post("/api/webhook/{pipeline_id}",
@@ -659,7 +670,7 @@ async def webhook(pipeline_id: str, request: Request, background_tasks: Backgrou
 async def webhook_api(pipeline_id: str, request: Request, background_tasks: BackgroundTasks):
     """Webhook endpoint - /api/webhook/{pipeline_id} (alias for compatibility)"""
     payload = await parse_webhook_request(request)
-    return await webhook_handler(pipeline_id, payload, background_tasks)
+    return await dispatch_webhook(pipeline_id, payload, background_tasks)
 
 
 @router.get("/webhook/status/{token}", dependencies=[Depends(require_webhook_key)])

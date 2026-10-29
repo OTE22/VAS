@@ -1,0 +1,7 @@
+# Incremental rollout from the locally backed-up production image.
+# Fresh installations use the normal Dockerfile.gpu, which copies these sources.
+FROM face_detector_prod-face_recognition:before-vehicles-20261027
+COPY --chown=1000:1000 backend/ /app/backend/
+COPY --chown=1000:1000 frontend/ /app/frontend/
+COPY --chown=1000:1000 alembic/ /app/alembic/
+COPY --chown=1000:1000 db_models.py config.py /app/
