@@ -92,6 +92,18 @@ def test_loading_the_component_twice_cannot_duplicate_the_modal():
         "has the script tag")
 
 
+def test_vehicle_management_is_authorized_in_the_admin_navbar():
+    with open("/app/backend/routes/auth.py", encoding="utf-8") as handle:
+        auth = handle.read()
+    with open(f"{FRONTEND}/components/admin-navbar.html", encoding="utf-8") as handle:
+        navbar = handle.read()
+    with open(f"{FRONTEND}/js/navbar-loader.js", encoding="utf-8") as handle:
+        loader = handle.read()
+    assert 'NavbarLink(page="vehicles", href="/admin/vehicles"' in auth
+    assert 'data-page="vehicles"' in navbar and 'href="/admin/vehicles"' in navbar
+    assert "path.startsWith('/admin/vehicles')" in loader
+
+
 @pytest.mark.parametrize("page", _pages())
 def test_every_navbar_page_pins_the_same_loader_version(page):
     """A stale cached navbar-loader is a page where ADD PERSON is still dead."""
@@ -99,5 +111,5 @@ def test_every_navbar_page_pins_the_same_loader_version(page):
         html = handle.read()
     tags = re.findall(r'navbar-loader\.js\?v=([\w.-]+)', html)
     assert tags, f"{os.path.basename(page)} loads navbar-loader without a version pin"
-    assert set(tags) == {"nav-7"}, (
-        f"{os.path.basename(page)} pins {set(tags)}; the fix ships in nav-7")
+    assert set(tags) == {"nav-8"}, (
+        f"{os.path.basename(page)} pins {set(tags)}; the navbar refresh fix ships in nav-8")

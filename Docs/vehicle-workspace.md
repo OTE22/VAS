@@ -1,6 +1,7 @@
 # Vehicle investigation pilot
 
 Open **Management → Vehicles / Known Cars**, or `/admin/vehicles` as an administrator.
+The admin privileges endpoint explicitly includes this Management link; the navbar uses a versioned script and refreshed session menu cache so a page reload picks up menu updates.
 
 ## Operator workflow
 

@@ -449,6 +449,7 @@ async def get_user_privileges(
                 NavbarLink(page="add-person", href="#", label="ADD PERSON", icon="fas fa-user-plus", visible=True, title="Add a person to track", parent_page="management"),
                 NavbarLink(page="known", href="/admin/known", label="KNOWN FACES", icon="fas fa-address-card", visible=True, title="Manage known people and enrollment photos", parent_page="management"),
                 NavbarLink(page="users", href="/admin/users", label="USERS", icon="fas fa-users", visible=True, parent_page="management"),
+                NavbarLink(page="vehicles", href="/admin/vehicles", label="VEHICLES / KNOWN CARS", icon="fas fa-car", visible=True, title="Review vehicle sightings and manage Known Cars", parent_page="management"),
                 NavbarLink(page="pipelines", href="/admin/pipelines", label="PIPELINES", icon="fas fa-video", visible=True, parent_page="management"),
                 NavbarLink(page="audit", href="/admin/audit", label="AUDIT LOG", icon="fas fa-clipboard-list", visible=True, parent_page="management"),
                 # Gated on can_use_chatbot even for administrators: the page is

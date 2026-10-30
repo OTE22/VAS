@@ -101,6 +101,7 @@
         if (path === '/home' || path === '/') return 'home';
         if (path === '/dashboard') return 'dashboard';
         if (path.startsWith('/admin/users')) return 'users';
+        if (path.startsWith('/admin/vehicles')) return 'vehicles';
         if (path.startsWith('/admin/pipelines')) return 'pipelines';
         if (path.startsWith('/admin/unknown')) return 'unknown';
         // The identity profile page has no navbar entry of its own; keep the
@@ -150,7 +151,7 @@
 
             // Session-cache the navbar HTML so navigation between pages renders the
             // bar instantly instead of waiting on a network fetch each time.
-            const htmlCacheKey = 'navbar_html:' + navbarPath;
+            const htmlCacheKey = 'navbar_html:v2:' + navbarPath;
             let navbarHtml = sessionStorage.getItem(htmlCacheKey);
 
             if (navbarHtml) {
